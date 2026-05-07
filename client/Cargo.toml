@@ -1,0 +1,25 @@
+[package]
+name = "client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+remote_core = { path = "../remote_core" }
+protocol = { path = "../protocol" }
+tokio = { version = "1.52.2", features = ["full"] }
+async-trait = "0.1.89"
+cpal = "0.17.3"
+opus = "0.3.1"
+wgpu = { version = "0.19", features = ["hal"] }
+metal = "0.27"
+objc = "0.2"
+winit = "0.29"
+crossbeam-channel = "0.5.15"
+video-toolbox-sys = "0.2.0"
+core-media-sys = "0.1"
+gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
+yororen_ui = "0.2"
+core-video-sys = "0.1.4"
+core-foundation = "0.10.0"
+core-video = "0.4.3"
+rand = "0.8"

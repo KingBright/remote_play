@@ -1,0 +1,3 @@
+[workspace]
+members = ["remote_core", "host", "client", "protocol"]
+resolver = "2"

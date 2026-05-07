@@ -1,0 +1,12 @@
+[package]
+name = "remote_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+quanta = "0.12"
+protocol = { path = "../protocol" }
+rand = "0.10.1"
+socket2 = "0.6.3"
