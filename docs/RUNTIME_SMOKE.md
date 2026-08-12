@@ -62,3 +62,24 @@ Recent local run with experimental macOS system audio, 2026-05-17:
 - `legacy_video=0`
 - `legacy_audio=0`
 - file transfer completed for `smoke-source.bin`
+
+## Two-Mac Public WebSocket Relay Smoke
+
+The 2026-08-12 packaged-runtime check used the deployed relay endpoint:
+
+```text
+wss://relay.hackerlife.fun:8443/v1/relay
+```
+
+The local Mac ran the packaged unified runtime in headless passive-host mode with data-plane media and file transfer enabled. Mac Studio ran a second packaged unified runtime as the local relay tunnel plus the release `headless_smoke_client`. The real protocol path completed with:
+
+- `data_video=284`
+- `data_audio=558`
+- `data_audio_configs=1`
+- `remote_mic_configs=1`
+- `telemetry=11`
+- `legacy_video=0`
+- `legacy_audio=0`
+- a 65,536-byte file with matching source and receiver SHA-256
+
+Swapping the roles proved that `StartStream` also reaches Mac Studio through the same public relay. Media capture on that direction is currently blocked by macOS Screen Recording TCC for the newly packaged app. Grant Screen Recording permission on Mac Studio, restart RemotePlay, and repeat the reverse smoke before treating two-direction media and GUI video as accepted.
