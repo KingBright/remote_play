@@ -3,8 +3,12 @@ name = "host"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [dependencies]
 remote_core = { path = "../remote_core" }
+remote_platform = { path = "../remote_platform" }
 protocol = { path = "../protocol" }
 tokio = { version = "1.52.2", features = ["full"] }
 async-trait = "0.1.89"

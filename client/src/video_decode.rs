@@ -1,14 +1,15 @@
 use async_trait::async_trait;
-use remote_core::{VideoDecoder, VideoFrame};
+use gpui::*;
+use remote_core::{VideoDecoder, VideoFrame, VideoFrameHandleKind};
 use std::error::Error;
 use std::ffi::c_void;
 use tokio::sync::mpsc;
 
 use core_foundation::base::TCFType;
 use core_foundation::base::{CFRelease, OSStatus};
-use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
+use video_toolbox_sys::cv_types::CVImageBufferRef;
 use video_toolbox_sys::decompression::{
     VTDecodeInfoFlags, VTDecompressionSessionCreate, VTDecompressionSessionDecodeFrame,
     VTDecompressionSessionInvalidate, VTDecompressionSessionRef,
@@ -91,6 +92,24 @@ impl VideoFrame for MacDecodedVideoFrame {
     fn height(&self) -> u32 {
         self.height
     }
+
+    fn handle_kind(&self) -> VideoFrameHandleKind {
+        VideoFrameHandleKind::MacosCvPixelBuffer
+    }
+}
+
+pub fn decoded_video_frame_surface(frame: &MacDecodedVideoFrame) -> AnyElement {
+    unsafe {
+        core_foundation::base::CFRetain(frame.cv_pixel_buffer as *const c_void);
+        let cv_pixel_buffer = core_video::pixel_buffer::CVPixelBuffer::wrap_under_create_rule(
+            frame.cv_pixel_buffer as _,
+        );
+        gpui::surface(cv_pixel_buffer)
+            .object_fit(gpui::ObjectFit::Contain)
+            .w_full()
+            .h_full()
+            .into_any_element()
+    }
 }
 
 pub struct MacVideoDecoder {
@@ -108,7 +127,7 @@ extern "C" fn decompression_callback(
     _source_frame_ref_con: *mut c_void,
     status: OSStatus,
     info_flags: VTDecodeInfoFlags,
-    image_buffer: *mut c_void, // CVImageBufferRef (which is CVPixelBuffer)
+    image_buffer: CVImageBufferRef,
     _presentation_time_stamp: core_media_sys::CMTime,
     _presentation_duration: core_media_sys::CMTime,
 ) {
@@ -133,19 +152,20 @@ extern "C" fn decompression_callback(
     }
 
     unsafe {
-        let width = CVPixelBufferGetWidth(image_buffer) as u32;
-        let height = CVPixelBufferGetHeight(image_buffer) as u32;
-        let io_surface = CVPixelBufferGetIOSurface(image_buffer);
+        let pixel_buffer = image_buffer as *mut c_void;
+        let width = CVPixelBufferGetWidth(pixel_buffer) as u32;
+        let height = CVPixelBufferGetHeight(pixel_buffer) as u32;
+        let io_surface = CVPixelBufferGetIOSurface(pixel_buffer);
 
         if io_surface.is_null() {
             let _ = (*tx).try_send(None);
             return;
         }
 
-        CVPixelBufferRetain(image_buffer); // We need to retain it since we hold it
+        CVPixelBufferRetain(pixel_buffer); // We need to retain it since we hold it
 
         let frame = MacDecodedVideoFrame {
-            cv_pixel_buffer: image_buffer,
+            cv_pixel_buffer: pixel_buffer,
             _io_surface: io_surface,
             timestamp: 0, // Will be overridden by main loop
             recv_time: 0, // Will be overridden
@@ -215,9 +235,7 @@ impl MacVideoDecoder {
             // Set up Output Callback Record
             let callback_record =
                 video_toolbox_sys::decompression::VTDecompressionOutputCallbackRecord {
-                    decompressionOutputCallback: std::mem::transmute(
-                        decompression_callback as *const (),
-                    ),
+                    decompressionOutputCallback: decompression_callback,
                     decompressionOutputRefCon: self._tx_box.as_mut() as *mut _ as *mut c_void,
                 };
 
@@ -301,7 +319,6 @@ impl VideoDecoder for MacVideoDecoder {
                 let nalu = &data[offset..next_offset];
                 if !nalu.is_empty() {
                     let nalu_type = (nalu[0] >> 1) & 0x3F;
-                    println!("Client parsed NALU Type {}", nalu_type);
                     match nalu_type {
                         32 => vps = Some(nalu.to_vec()),
                         33 => sps = Some(nalu.to_vec()),
@@ -323,13 +340,16 @@ impl VideoDecoder for MacVideoDecoder {
             }
         }
 
-        if let (Some(v), Some(s), Some(p)) = (vps, sps, pps) {
-            if self.session.is_none() || v != self.last_vps || s != self.last_sps || p != self.last_pps {
-                self.last_vps = v.clone();
-                self.last_sps = s.clone();
-                self.last_pps = p.clone();
-                self.update_format_desc(&v, &s, &p)?;
-            }
+        if let (Some(v), Some(s), Some(p)) = (vps, sps, pps)
+            && (self.session.is_none()
+                || v != self.last_vps
+                || s != self.last_sps
+                || p != self.last_pps)
+        {
+            self.last_vps = v.clone();
+            self.last_sps = s.clone();
+            self.last_pps = p.clone();
+            self.update_format_desc(&v, &s, &p)?;
         }
 
         if vcl_nalus.is_empty() || self.session.is_none() {

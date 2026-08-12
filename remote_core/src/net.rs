@@ -1,8 +1,11 @@
-use protocol::{ControlMessage, RtpPacket};
+use protocol::{CompactRealtimeError, ControlMessage, DataEnvelope, RtpPacket};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+
+pub const DEFAULT_CONTROL_PORT: u16 = 39271;
 
 pub struct UdpMultiplexer {
     socket: Arc<UdpSocket>,
@@ -44,6 +47,10 @@ impl UdpMultiplexer {
                 fragments: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             },
         )
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.socket.local_addr()
     }
 }
 
@@ -108,27 +115,89 @@ impl UdpSender {
         let bytes = msg.encode()?;
         self.send_multiplexed(0x02, &bytes, target).await
     }
+
+    pub async fn send_data(
+        &self,
+        envelope: &DataEnvelope,
+        target: SocketAddr,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match envelope.encode_compact_realtime() {
+            Ok(bytes) => self.send_multiplexed(0x05, &bytes, target).await,
+            Err(
+                CompactRealtimeError::NonRealtimeLane(_)
+                | CompactRealtimeError::UnsupportedRealtimeMetadata,
+            ) => {
+                let bytes = envelope.encode()?;
+                self.send_multiplexed(0x04, &bytes, target).await
+            }
+            Err(err) => Err(Box::new(err)),
+        }
+    }
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use tokio::sync::Mutex;
+
+const MAX_FRAGMENT_AGE: Duration = Duration::from_secs(2);
+const MAX_FRAGMENT_CACHE_ENTRIES: usize = 10;
+
+type FragmentChunks = Vec<Option<Vec<u8>>>;
+type FragmentMap = HashMap<u32, FragmentEntry>;
+
+#[derive(Debug)]
+struct FragmentEntry {
+    received_chunks: u16,
+    chunks: FragmentChunks,
+    created_at: Instant,
+}
+
+impl FragmentEntry {
+    fn new(total_chunks: u16, now: Instant) -> Self {
+        Self {
+            received_chunks: 0,
+            chunks: vec![None; total_chunks as usize],
+            created_at: now,
+        }
+    }
+}
 
 pub struct UdpReceiver {
     socket: Arc<UdpSocket>,
-    fragments: Arc<Mutex<HashMap<u32, (u16, Vec<Option<Vec<u8>>>)>>>,
+    fragments: Arc<Mutex<FragmentMap>>,
 }
 
+#[derive(Debug)]
 pub enum MultiplexedPacket {
     Rtp(RtpPacket, SocketAddr),
     Control(ControlMessage, SocketAddr),
+    Data(DataEnvelope, SocketAddr),
 }
 
 impl UdpReceiver {
+    fn cleanup_expired_fragments(fragments: &mut FragmentMap, now: Instant) {
+        fragments.retain(|_, entry| now.duration_since(entry.created_at) <= MAX_FRAGMENT_AGE);
+    }
+
+    fn enforce_fragment_cache_limit(fragments: &mut FragmentMap, protected_id: u32) {
+        while fragments.len() > MAX_FRAGMENT_CACHE_ENTRIES {
+            let oldest_unprotected_id = fragments
+                .iter()
+                .filter(|(id, _)| **id != protected_id)
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(id, _)| *id);
+
+            if let Some(id) = oldest_unprotected_id {
+                fragments.remove(&id);
+            } else {
+                break;
+            }
+        }
+    }
+
     pub async fn recv(&self) -> Result<MultiplexedPacket, Box<dyn Error + Send + Sync>> {
         loop {
             let mut buf = vec![0u8; 65536];
             let (len, addr) = self.socket.recv_from(&mut buf).await?;
-            println!("UdpReceiver received {} bytes, type {}", len, buf[0]);
             if len == 0 {
                 continue;
             }
@@ -141,6 +210,14 @@ impl UdpReceiver {
                     let msg = ControlMessage::decode(&buf[1..len])?;
                     return Ok(MultiplexedPacket::Control(msg, addr));
                 }
+                0x04 => {
+                    let envelope = DataEnvelope::decode(&buf[1..len])?;
+                    return Ok(MultiplexedPacket::Data(envelope, addr));
+                }
+                0x05 => {
+                    let envelope = DataEnvelope::decode_compact_realtime(&buf[1..len])?;
+                    return Ok(MultiplexedPacket::Data(envelope, addr));
+                }
                 0x03 => {
                     if len < 10 {
                         continue;
@@ -150,19 +227,36 @@ impl UdpReceiver {
                     let chunk_idx = u16::from_be_bytes(buf[6..8].try_into().unwrap());
                     let total_chunks = u16::from_be_bytes(buf[8..10].try_into().unwrap());
 
-                    let mut fragments = self.fragments.lock().await;
-                    let entry = fragments
-                        .entry(fragment_id)
-                        .or_insert_with(|| (0, vec![None; total_chunks as usize]));
-
-                    if entry.1[chunk_idx as usize].is_none() {
-                        entry.1[chunk_idx as usize] = Some(buf[10..len].to_vec());
-                        entry.0 += 1;
+                    if total_chunks == 0 {
+                        return Err("Invalid UDP fragment total chunk count".into());
                     }
 
-                    if entry.0 == total_chunks {
+                    if chunk_idx >= total_chunks {
+                        return Err("Invalid UDP fragment index".into());
+                    }
+
+                    let mut fragments = self.fragments.lock().await;
+                    let now = Instant::now();
+                    Self::cleanup_expired_fragments(&mut fragments, now);
+
+                    let entry = match fragments.entry(fragment_id) {
+                        Entry::Occupied(entry) => {
+                            if entry.get().chunks.len() != total_chunks as usize {
+                                return Err("Mismatched UDP fragment total chunk count".into());
+                            }
+                            entry.into_mut()
+                        }
+                        Entry::Vacant(entry) => entry.insert(FragmentEntry::new(total_chunks, now)),
+                    };
+
+                    if entry.chunks[chunk_idx as usize].is_none() {
+                        entry.chunks[chunk_idx as usize] = Some(buf[10..len].to_vec());
+                        entry.received_chunks += 1;
+                    }
+
+                    if entry.received_chunks == total_chunks {
                         let mut full_data = Vec::new();
-                        for chunk in entry.1.iter() {
+                        for chunk in entry.chunks.iter() {
                             full_data.extend_from_slice(chunk.as_ref().unwrap());
                         }
                         fragments.remove(&fragment_id);
@@ -177,28 +271,453 @@ impl UdpReceiver {
                                 let msg = ControlMessage::decode(&full_data)?;
                                 return Ok(MultiplexedPacket::Control(msg, addr));
                             }
-                            _ => {
-                                return Err("Unknown UDP multiplexing header inside fragment".into());
+                            0x04 => {
+                                let envelope = DataEnvelope::decode(&full_data)?;
+                                return Ok(MultiplexedPacket::Data(envelope, addr));
                             }
-                        }
-                    } else if fragments.len() > 10 {
-                        // Periodic cleanup of incomplete fragments to prevent memory leak and detect loss
-                        let ids: Vec<u32> = fragments.keys().cloned().collect();
-                        for id in ids {
-                            if id != fragment_id {
-                                let old = fragments.remove(&id).unwrap();
-                                eprintln!(
-                                    "Dropped incomplete packet (id: {}, received {}/{} chunks)",
-                                    id,
-                                    old.0,
-                                    old.1.len()
+                            0x05 => {
+                                let envelope = DataEnvelope::decode_compact_realtime(&full_data)?;
+                                return Ok(MultiplexedPacket::Data(envelope, addr));
+                            }
+                            _ => {
+                                return Err(
+                                    "Unknown UDP multiplexing header inside fragment".into()
                                 );
                             }
                         }
+                    } else {
+                        Self::enforce_fragment_cache_limit(&mut fragments, fragment_id);
                     }
                 }
                 _ => return Err("Unknown UDP multiplexing header".into()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media_plane::{realtime_data_to_rtp, rtp_to_realtime_data};
+    use protocol::{ChunkInfo, ContentKind, DataEnvelope, PayloadType, RtpHeader, RtpPacket};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    fn rtp_packet(payload_len: usize) -> RtpPacket {
+        RtpPacket {
+            header: RtpHeader {
+                version: 2,
+                payload_type: 96,
+                sequence_number: 42,
+                timestamp: 123_456,
+                ssrc: 99,
+            },
+            payload: (0..payload_len).map(|i| (i % 251) as u8).collect(),
+        }
+    }
+
+    fn data_envelope(payload_len: usize) -> DataEnvelope {
+        DataEnvelope::realtime_video(
+            99,
+            42,
+            123_456,
+            123_472,
+            (0..payload_len).map(|i| (i % 251) as u8).collect(),
+        )
+    }
+
+    fn audio_packet(payload_len: usize) -> RtpPacket {
+        RtpPacket {
+            header: RtpHeader {
+                version: 2,
+                payload_type: PayloadType::AudioOpus as u8,
+                sequence_number: 43,
+                timestamp: 960,
+                ssrc: 100,
+            },
+            payload: (0..payload_len).map(|i| (i % 251) as u8).collect(),
+        }
+    }
+
+    fn reliable_envelope(payload_len: usize) -> DataEnvelope {
+        DataEnvelope::reliable_object_chunk(
+            ContentKind::FileChunk,
+            7,
+            44,
+            123_456,
+            ChunkInfo {
+                object_id: 99,
+                chunk_index: 0,
+                total_chunks: 1,
+                offset: 0,
+                total_size: payload_len as u64,
+            },
+            None,
+            (0..payload_len).map(|i| (i % 251) as u8).collect(),
+        )
+    }
+
+    async fn bind_pair() -> (UdpMultiplexer, UdpMultiplexer) {
+        let left = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("left socket should bind");
+        let right = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("right socket should bind");
+        (left, right)
+    }
+
+    async fn recv_with_timeout(receiver: &UdpReceiver) -> MultiplexedPacket {
+        timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("receive should not time out")
+            .expect("packet should decode")
+    }
+
+    async fn send_raw_fragment(
+        target: SocketAddr,
+        fragment_id: u32,
+        chunk_idx: u16,
+        total_chunks: u16,
+        data: &[u8],
+    ) {
+        let raw_sender = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("raw sender should bind");
+        let mut bytes = Vec::with_capacity(10 + data.len());
+        bytes.push(0x03);
+        bytes.push(0x01);
+        bytes.extend_from_slice(&fragment_id.to_be_bytes());
+        bytes.extend_from_slice(&chunk_idx.to_be_bytes());
+        bytes.extend_from_slice(&total_chunks.to_be_bytes());
+        bytes.extend_from_slice(data);
+
+        raw_sender
+            .send_to(&bytes, target)
+            .await
+            .expect("raw fragment send should succeed");
+    }
+
+    async fn recv_error(receiver: &UdpReceiver) -> String {
+        timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("receive should not time out")
+            .expect_err("packet should fail")
+            .to_string()
+    }
+
+    fn fragment_entry(total_chunks: u16, created_at: Instant) -> FragmentEntry {
+        FragmentEntry::new(total_chunks, created_at)
+    }
+
+    #[test]
+    fn cleanup_expired_fragments_removes_old_entries() {
+        let now = Instant::now();
+        let mut fragments = FragmentMap::new();
+        fragments.insert(
+            1,
+            fragment_entry(2, now - MAX_FRAGMENT_AGE - Duration::from_millis(1)),
+        );
+        fragments.insert(2, fragment_entry(2, now));
+
+        UdpReceiver::cleanup_expired_fragments(&mut fragments, now);
+
+        assert!(!fragments.contains_key(&1));
+        assert!(fragments.contains_key(&2));
+    }
+
+    #[test]
+    fn enforce_fragment_cache_limit_removes_oldest_unprotected_entries() {
+        let now = Instant::now();
+        let mut fragments = FragmentMap::new();
+
+        for id in 0..(MAX_FRAGMENT_CACHE_ENTRIES as u32 + 2) {
+            fragments.insert(
+                id,
+                fragment_entry(2, now + Duration::from_millis(id as u64)),
+            );
+        }
+
+        UdpReceiver::enforce_fragment_cache_limit(&mut fragments, 0);
+
+        assert_eq!(fragments.len(), MAX_FRAGMENT_CACHE_ENTRIES);
+        assert!(fragments.contains_key(&0));
+        assert!(!fragments.contains_key(&1));
+        assert!(!fragments.contains_key(&2));
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_control_messages() {
+        let (left, right) = bind_pair().await;
+        let left_addr = left
+            .socket
+            .local_addr()
+            .expect("left should have local addr");
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+
+        sender
+            .send_control(&ControlMessage::Heartbeat, right_addr)
+            .await
+            .expect("control send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Control(ControlMessage::Heartbeat, addr) => {
+                assert_eq!(addr, left_addr);
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_rtp_packets() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let packet = rtp_packet(32);
+
+        sender
+            .send_rtp(&packet, right_addr)
+            .await
+            .expect("rtp send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Rtp(decoded, _) => assert_eq!(decoded, packet),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassembles_fragmented_rtp_packets() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let packet = rtp_packet(5_000);
+
+        sender
+            .send_rtp(&packet, right_addr)
+            .await
+            .expect("fragmented rtp send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Rtp(decoded, _) => assert_eq!(decoded, packet),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_data_envelopes() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let envelope = data_envelope(32);
+
+        sender
+            .send_data(&envelope, right_addr)
+            .await
+            .expect("data send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Data(decoded, _) => assert_eq!(decoded, envelope),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassembles_fragmented_data_envelopes() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let envelope = data_envelope(5_000);
+
+        sender
+            .send_data(&envelope, right_addr)
+            .await
+            .expect("fragmented data send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Data(decoded, _) => assert_eq!(decoded, envelope),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_video_media_data_plane_packets() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let packet = rtp_packet(512);
+        let envelope = rtp_to_realtime_data(&packet).expect("video packet should adapt");
+
+        sender
+            .send_data(&envelope, right_addr)
+            .await
+            .expect("media data send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Data(decoded, _) => {
+                let decoded_packet =
+                    realtime_data_to_rtp(decoded).expect("media data should adapt back");
+                assert_eq!(decoded_packet, packet);
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_audio_media_data_plane_packets_without_deadline() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let packet = audio_packet(96);
+        let envelope = rtp_to_realtime_data(&packet).expect("audio packet should adapt");
+        assert_eq!(envelope.header.deadline_ms, None);
+
+        sender
+            .send_data(&envelope, right_addr)
+            .await
+            .expect("media data send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Data(decoded, _) => {
+                assert_eq!(decoded.header.deadline_ms, None);
+                let decoded_packet =
+                    realtime_data_to_rtp(decoded).expect("media data should adapt back");
+                assert_eq!(decoded_packet, packet);
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_reliable_object_envelopes_on_full_data_path() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let envelope = reliable_envelope(512);
+
+        sender
+            .send_data(&envelope, right_addr)
+            .await
+            .expect("reliable object data send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Data(decoded, _) => assert_eq!(decoded, envelope),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn returns_error_for_unknown_header() {
+        let receiver_mux = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("receiver should bind");
+        let receiver_addr = receiver_mux
+            .socket
+            .local_addr()
+            .expect("receiver should have local addr");
+        let (_, receiver) = receiver_mux.split();
+        let raw_sender = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("raw sender should bind");
+
+        raw_sender
+            .send_to(&[0xff, 0x00], receiver_addr)
+            .await
+            .expect("raw send should succeed");
+
+        let err = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("receive should not time out")
+            .expect_err("unknown header should fail");
+
+        assert_eq!(err.to_string(), "Unknown UDP multiplexing header");
+    }
+
+    #[tokio::test]
+    async fn returns_error_for_zero_fragment_count() {
+        let receiver_mux = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("receiver should bind");
+        let receiver_addr = receiver_mux
+            .socket
+            .local_addr()
+            .expect("receiver should have local addr");
+        let (_, receiver) = receiver_mux.split();
+
+        send_raw_fragment(receiver_addr, 1, 0, 0, b"bad").await;
+
+        assert_eq!(
+            recv_error(&receiver).await,
+            "Invalid UDP fragment total chunk count"
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_error_for_out_of_range_fragment_index() {
+        let receiver_mux = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("receiver should bind");
+        let receiver_addr = receiver_mux
+            .socket
+            .local_addr()
+            .expect("receiver should have local addr");
+        let (_, receiver) = receiver_mux.split();
+
+        send_raw_fragment(receiver_addr, 1, 1, 1, b"bad").await;
+
+        assert_eq!(recv_error(&receiver).await, "Invalid UDP fragment index");
+    }
+
+    #[tokio::test]
+    async fn returns_error_for_mismatched_fragment_count() {
+        let receiver_mux = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("receiver should bind");
+        let receiver_addr = receiver_mux
+            .socket
+            .local_addr()
+            .expect("receiver should have local addr");
+        let (_, receiver) = receiver_mux.split();
+
+        send_raw_fragment(receiver_addr, 7, 0, 2, b"first").await;
+        send_raw_fragment(receiver_addr, 7, 1, 3, b"second").await;
+
+        assert_eq!(
+            recv_error(&receiver).await,
+            "Mismatched UDP fragment total chunk count"
+        );
     }
 }

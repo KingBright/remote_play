@@ -1,3 +1,10 @@
 [workspace]
-members = ["remote_core", "host", "client", "protocol"]
+members = [
+    "remote_core",
+    "host",
+    "client",
+    "protocol",
+    "remote_platform",
+    "app",
+]
 resolver = "2"

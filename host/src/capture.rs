@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use remote_core::{VideoCapturer, VideoFrame};
+use remote_core::{VideoCapturer, VideoFrame, VideoFrameHandleKind};
 use screencapturekit::prelude::*;
 use std::error::Error;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use screencapturekit::cm::CMSampleBuffer;
@@ -19,6 +18,10 @@ impl VideoFrame for MacVideoFrame {
     }
     fn height(&self) -> u32 {
         self.height
+    }
+
+    fn handle_kind(&self) -> VideoFrameHandleKind {
+        VideoFrameHandleKind::MacosCvPixelBuffer
     }
 }
 
@@ -51,7 +54,7 @@ pub struct MacVideoCapturer {
     rx: mpsc::Receiver<MacVideoFrame>,
     stream: Option<SCStream>,
     tx_output: Option<mpsc::Sender<MacVideoFrame>>,
-    target_width: u32,
+    _target_width: u32,
     target_height: u32,
     target_fps: u32,
 }
@@ -63,7 +66,7 @@ impl MacVideoCapturer {
             rx,
             stream: None,
             tx_output: Some(tx),
-            target_width,
+            _target_width: target_width,
             target_height,
             target_fps,
         }
@@ -85,8 +88,8 @@ impl VideoCapturer for MacVideoCapturer {
         let filter = SCContentFilter::create().with_display(&display).build();
 
         let mut config = SCStreamConfiguration::new();
-        let display_width = display.width() as u32;
-        let display_height = display.height() as u32;
+        let display_width = display.width();
+        let display_height = display.height();
 
         let target_height = self.target_height.min(display_height);
         let scale = target_height as f32 / display_height as f32;

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 remote_core = { path = "../remote_core" }
+remote_platform = { path = "../remote_platform" }
 protocol = { path = "../protocol" }
 tokio = { version = "1.52.2", features = ["full"] }
 async-trait = "0.1.89"
@@ -23,3 +24,4 @@ core-video-sys = "0.1.4"
 core-foundation = "0.10.0"
 core-video = "0.4.3"
 rand = "0.8"
+rfd = "0.15"

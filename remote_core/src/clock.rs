@@ -25,3 +25,9 @@ impl TimeBox {
         }
     }
 }
+
+impl Default for TimeBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}

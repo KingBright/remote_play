@@ -1,4 +1,5 @@
 use gpui::*;
+use remote_core::net::DEFAULT_CONTROL_PORT;
 use std::net::SocketAddr;
 
 pub enum HostListEvent {
@@ -12,10 +13,7 @@ pub struct HostListView {
 impl HostListView {
     pub fn new(_cx: &mut gpui::Context<Self>) -> Self {
         Self {
-            hosts: vec![
-                "127.0.0.1:8000".parse().unwrap(),
-                "192.168.1.100:8000".parse().unwrap(),
-            ],
+            hosts: vec![SocketAddr::from(([127, 0, 0, 1], DEFAULT_CONTROL_PORT))],
         }
     }
 }
@@ -33,34 +31,36 @@ impl Render for HostListView {
             .flex_col()
             .w_full()
             .h_full()
-            .bg(rgb(0x1e1e1e))
+            .bg(rgb(0x101114))
             .p_8();
 
         list = list.child(
             div()
                 .text_xl()
-                .text_color(rgb(0xffffff))
+                .text_color(rgb(0xf4f7fb))
                 .mb_6()
-                .child("Select a Host to Connect"),
+                .child("RemotePlay"),
         );
 
         for host in &self.hosts {
-            let host_addr = host.clone();
+            let host_addr = *host;
             list = list.child(
                 div()
                     .flex()
                     .justify_between()
                     .p_4()
                     .mb_2()
-                    .bg(rgb(0x2d2d2d))
+                    .bg(rgb(0x181b20))
+                    .border_1()
+                    .border_color(rgb(0x2a3038))
                     .rounded_md()
-                    .child(div().text_color(rgb(0xffffff)).child(host.to_string()))
+                    .child(div().text_color(rgb(0xf4f7fb)).child(host.to_string()))
                     .child(
                         div()
                             .id(format!("connect-{}", host_addr))
-                            .bg(rgb(0x007acc))
+                            .bg(rgb(0x2563eb))
                             .p_2()
-                            .rounded_md()
+                            .rounded_sm()
                             .text_color(rgb(0xffffff))
                             .cursor_pointer()
                             // FIXME: adjust closure arguments if needed.

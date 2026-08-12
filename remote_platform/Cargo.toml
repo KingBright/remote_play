@@ -1,0 +1,15 @@
+[package]
+name = "remote_platform"
+version = "0.1.0"
+edition = "2024"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+[dependencies]
+async-trait = "0.1.89"
+protocol = { path = "../protocol" }
+remote_core = { path = "../remote_core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"

@@ -1,0 +1,16 @@
+[package]
+name = "remote_play_app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+client = { path = "../client" }
+host = { path = "../host" }
+protocol = { path = "../protocol" }
+remote_core = { path = "../remote_core" }
+tokio = { version = "1.52.2", features = ["full"] }
+gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
+
+[[bin]]
+name = "remote_play"
+path = "src/main.rs"

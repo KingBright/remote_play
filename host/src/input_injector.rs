@@ -2,6 +2,7 @@ use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 use protocol::InputEvent;
+use remote_core::InputInjector;
 use std::error::Error;
 
 pub struct MacInputInjector {
@@ -55,5 +56,12 @@ impl MacInputInjector {
                 println!("Mouse up not implemented");
             }
         }
+    }
+}
+
+impl InputInjector for MacInputInjector {
+    fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.inject(event);
+        Ok(())
     }
 }

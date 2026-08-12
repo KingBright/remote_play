@@ -6,7 +6,7 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use core_media_sys::CMTime;
-use remote_core::{VideoEncoder, VideoFrame};
+use remote_core::VideoEncoder;
 use std::error::Error;
 use std::ffi::c_void;
 use tokio::sync::mpsc;
@@ -66,7 +66,7 @@ unsafe extern "C" {
 
 pub struct MacVideoEncoder {
     session: Option<VTCompressionSessionRef>,
-    tx: mpsc::Sender<Vec<u8>>,
+    _tx: mpsc::Sender<Vec<u8>>,
     rx: mpsc::Receiver<Vec<u8>>,
     _tx_box: Box<mpsc::Sender<Vec<u8>>>,
 }
@@ -126,7 +126,6 @@ extern "C" fn compression_callback(
 
         // Extract VPS, SPS, PPS if keyframe
         if is_keyframe {
-            println!("Detected I-Frame in VTCallback! Generating parameter sets...");
             let format_desc = CMSampleBufferGetFormatDescription(sample_buffer);
             if !format_desc.is_null() {
                 for i in 0..3 {
@@ -180,7 +179,12 @@ extern "C" fn compression_callback(
 }
 
 impl MacVideoEncoder {
-    pub fn new(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> Result<Self, Box<dyn Error + Send + Sync>> {
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel(60);
         let tx_box = Box::new(tx.clone());
         let ref_con = Box::into_raw(tx_box.clone()) as *mut c_void;
@@ -285,7 +289,7 @@ impl MacVideoEncoder {
 
         Ok(Self {
             session: Some(session),
-            tx,
+            _tx: tx,
             rx,
             _tx_box: tx_box,
         })
@@ -368,7 +372,7 @@ impl Drop for MacVideoEncoder {
                     },
                 );
                 VTCompressionSessionInvalidate(session);
-                CFRelease(session as *const c_void);
+                CFRelease(session);
             }
         }
     }
