@@ -1,0 +1,26 @@
+[Unit]
+Description=RemotePlay WebSocket Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nobody
+Environment=REMOTE_PLAY_RELAY_BIND_ADDR=127.0.0.1:39491
+Environment=REMOTE_PLAY_RELAY_WEBSOCKET=1
+Environment=REMOTE_PLAY_RELAY_MAX_CONNECTIONS=128
+Environment=REMOTE_PLAY_RELAY_MAX_PEERS_PER_GROUP=8
+Environment=REMOTE_PLAY_RELAY_WRITER_QUEUE_CAPACITY=16
+Environment=REMOTE_PLAY_RELAY_IDLE_TIMEOUT_SECONDS=30
+ExecStart=/opt/remote-play-relay/remote-play-relay
+Restart=always
+RestartSec=1
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

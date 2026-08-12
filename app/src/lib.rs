@@ -14,7 +14,10 @@ use remote_core::mesh::{
     spawn_easytier_static_health_monitor,
 };
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
-use remote_core::relay::{BoundTcpRelayTunnel, RelayConfigError, TcpRelayTunnelConfig};
+use remote_core::relay::{
+    BoundTcpRelayTunnel, BoundWebSocketRelayTunnel, RelayConfigError, TcpRelayTunnelConfig,
+    WebSocketRelayTunnelConfig, derive_relay_group_id,
+};
 use remote_core::role::{
     RoleChange, RolePeer, RoleSession, RoleState, RoleStateError, RoleStateMachine,
     RoleStateMachineConfig,
@@ -406,8 +409,9 @@ pub struct UnifiedMeshRuntimeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnifiedRelayRuntimeConfig {
-    pub relay_addr: SocketAddr,
-    pub group_id: String,
+    pub endpoint: UnifiedRelayEndpoint,
+    pub control_group_id: String,
+    pub discovery_group_id: String,
     pub peer_id: String,
     pub control_bind_addr: SocketAddr,
     pub discovery_bind_addr: SocketAddr,
@@ -416,15 +420,23 @@ pub struct UnifiedRelayRuntimeConfig {
     pub log_events: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnifiedRelayEndpoint {
+    Tcp(SocketAddr),
+    WebSocket(String),
+}
+
 impl UnifiedRelayRuntimeConfig {
     pub fn new(
         relay_addr: SocketAddr,
         group_id: impl Into<String>,
         peer_id: impl Into<String>,
     ) -> Self {
+        let group_id = group_id.into();
         Self {
-            relay_addr,
-            group_id: group_id.into(),
+            endpoint: UnifiedRelayEndpoint::Tcp(relay_addr),
+            control_group_id: relay_control_group(&group_id),
+            discovery_group_id: relay_discovery_group(&group_id),
             peer_id: peer_id.into(),
             control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -432,6 +444,25 @@ impl UnifiedRelayRuntimeConfig {
             discovery_target_addr: None,
             log_events: false,
         }
+    }
+
+    pub fn from_mesh_secret(
+        endpoint: UnifiedRelayEndpoint,
+        network_name: &str,
+        network_secret: &str,
+        peer_id: impl Into<String>,
+    ) -> Result<Self, RelayConfigError> {
+        Ok(Self {
+            endpoint,
+            control_group_id: derive_relay_group_id(network_name, network_secret, "control")?,
+            discovery_group_id: derive_relay_group_id(network_name, network_secret, "discovery")?,
+            peer_id: peer_id.into(),
+            control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            host_control_target_addr: None,
+            discovery_target_addr: None,
+            log_events: false,
+        })
     }
 }
 
@@ -798,18 +829,22 @@ fn build_unified_relay_config_from_env(
         return Ok(None);
     }
 
-    let relay_addr = env_optional_socket_addr(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?.ok_or_else(|| {
+    let relay_endpoint = env_optional_relay_endpoint(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "{REMOTE_PLAY_RELAY_ENV}=1 requires {REMOTE_PLAY_RELAY_SERVER_ADDR_ENV}=<host:port>"
+                "{REMOTE_PLAY_RELAY_ENV}=1 requires {REMOTE_PLAY_RELAY_SERVER_ADDR_ENV}=<host:port|ws://...|wss://...>"
             ),
         )
     })?;
     let mesh_store = AppPrivateMeshConfigStore::new(&config.mesh_dir);
     let mesh_config = mesh_store.load_or_generate(&config.display_name)?;
-    let mut relay_config =
-        UnifiedRelayRuntimeConfig::new(relay_addr, mesh_config.network_name, mesh_config.node_id);
+    let mut relay_config = UnifiedRelayRuntimeConfig::from_mesh_secret(
+        relay_endpoint,
+        &mesh_config.network_name,
+        mesh_config.network_secret.expose_secret(),
+        mesh_config.node_id,
+    )?;
     relay_config.control_bind_addr = env_socket_addr(
         REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV,
         relay_config.control_bind_addr,
@@ -845,9 +880,9 @@ fn local_udp_target_for_bind(bind_addr: SocketAddr) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, bind_addr.port()))
 }
 
-fn env_optional_socket_addr(
+fn env_optional_relay_endpoint(
     name: &'static str,
-) -> Result<Option<SocketAddr>, Box<dyn Error + Send + Sync>> {
+) -> Result<Option<UnifiedRelayEndpoint>, Box<dyn Error + Send + Sync>> {
     let Some(value) = std::env::var_os(name) else {
         return Ok(None);
     };
@@ -856,13 +891,20 @@ fn env_optional_socket_addr(
     if trimmed.is_empty() {
         return Ok(None);
     }
-    trimmed.parse().map(Some).map_err(|err| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{name}={trimmed:?} is not a valid socket address: {err}"),
-        )
-        .into()
-    })
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        return Ok(Some(UnifiedRelayEndpoint::WebSocket(trimmed.to_string())));
+    }
+    trimmed
+        .parse()
+        .map(UnifiedRelayEndpoint::Tcp)
+        .map(Some)
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{name}={trimmed:?} is not a valid socket address or WebSocket URL: {err}"),
+            )
+            .into()
+        })
 }
 
 fn env_socket_addr(
@@ -1340,26 +1382,26 @@ async fn start_unified_relay_runtime(
     config: UnifiedRelayRuntimeConfig,
 ) -> Result<UnifiedRelayRuntime, UnifiedServiceOwnerError> {
     let (cancel_tx, _) = broadcast::channel(1);
-    let control_tunnel_config = build_tcp_relay_tunnel_config(
+    let control_tunnel = build_unified_relay_tunnel(
         config.control_bind_addr,
-        config.relay_addr,
-        relay_control_group(&config.group_id),
+        &config.endpoint,
+        config.control_group_id,
         &config.peer_id,
         config.host_control_target_addr,
         config.log_events,
-    )?;
-    let control_tunnel = BoundTcpRelayTunnel::bind(control_tunnel_config).await?;
+    )
+    .await?;
     let control_endpoint = control_tunnel.local_addr()?;
 
-    let discovery_tunnel_config = build_tcp_relay_tunnel_config(
+    let discovery_tunnel = build_unified_relay_tunnel(
         config.discovery_bind_addr,
-        config.relay_addr,
-        relay_discovery_group(&config.group_id),
+        &config.endpoint,
+        config.discovery_group_id,
         &config.peer_id,
         config.discovery_target_addr,
         config.log_events,
-    )?;
-    let discovery_tunnel = BoundTcpRelayTunnel::bind(discovery_tunnel_config).await?;
+    )
+    .await?;
     let discovery_endpoint = discovery_tunnel.local_addr()?;
 
     let tasks = vec![
@@ -1389,19 +1431,56 @@ async fn start_unified_relay_runtime(
     })
 }
 
-fn build_tcp_relay_tunnel_config(
+enum UnifiedRelayTunnel {
+    Tcp(BoundTcpRelayTunnel),
+    WebSocket(BoundWebSocketRelayTunnel),
+}
+
+impl UnifiedRelayTunnel {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        match self {
+            Self::Tcp(tunnel) => tunnel.local_addr(),
+            Self::WebSocket(tunnel) => tunnel.local_addr(),
+        }
+    }
+
+    async fn run(self, cancel_rx: broadcast::Receiver<()>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(tunnel) => tunnel.run(cancel_rx).await,
+            Self::WebSocket(tunnel) => tunnel.run(cancel_rx).await,
+        }
+    }
+}
+
+async fn build_unified_relay_tunnel(
     bind_addr: SocketAddr,
-    relay_addr: SocketAddr,
+    endpoint: &UnifiedRelayEndpoint,
     group_id: String,
     peer_id: &str,
     local_target_addr: Option<SocketAddr>,
     log_events: bool,
-) -> Result<TcpRelayTunnelConfig, RelayConfigError> {
-    let mut config = TcpRelayTunnelConfig::new(bind_addr, relay_addr, group_id, peer_id)?;
-    if let Some(local_target_addr) = local_target_addr {
-        config = config.with_local_target_addr(local_target_addr);
+) -> Result<UnifiedRelayTunnel, UnifiedServiceOwnerError> {
+    match endpoint {
+        UnifiedRelayEndpoint::Tcp(relay_addr) => {
+            let mut config = TcpRelayTunnelConfig::new(bind_addr, *relay_addr, group_id, peer_id)?;
+            if let Some(local_target_addr) = local_target_addr {
+                config = config.with_local_target_addr(local_target_addr);
+            }
+            Ok(UnifiedRelayTunnel::Tcp(
+                BoundTcpRelayTunnel::bind(config.with_event_logging(log_events)).await?,
+            ))
+        }
+        UnifiedRelayEndpoint::WebSocket(relay_url) => {
+            let mut config =
+                WebSocketRelayTunnelConfig::new(bind_addr, relay_url.clone(), group_id, peer_id)?;
+            if let Some(local_target_addr) = local_target_addr {
+                config = config.with_local_target_addr(local_target_addr);
+            }
+            Ok(UnifiedRelayTunnel::WebSocket(
+                BoundWebSocketRelayTunnel::bind(config.with_event_logging(log_events)).await?,
+            ))
+        }
     }
-    Ok(config.with_event_logging(log_events))
 }
 
 fn relay_control_group(group_id: &str) -> String {
@@ -2440,8 +2519,9 @@ mod tests {
 
         let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
             relay: Some(UnifiedRelayRuntimeConfig {
-                relay_addr,
-                group_id: "test-net".to_string(),
+                endpoint: UnifiedRelayEndpoint::Tcp(relay_addr),
+                control_group_id: relay_control_group("test-net"),
+                discovery_group_id: relay_discovery_group("test-net"),
                 peer_id: "local-device".to_string(),
                 control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
                 discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2488,6 +2568,39 @@ mod tests {
             }]
         );
         assert_eq!(discovery_runtime.1.scope, DiscoveryScope::Lan);
+
+        drop(owner);
+        let _ = relay_cancel_tx.send(());
+        relay_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_owner_starts_websocket_relay_and_wires_discovery_route_override() {
+        let (relay_cancel_tx, _) = broadcast::channel(1);
+        let relay_server = remote_core::relay::BoundTcpRelayServer::bind(
+            remote_core::relay::TcpRelayServerConfig::new("127.0.0.1:0".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        let relay_addr = relay_server.local_addr().unwrap();
+        let relay_task = tokio::spawn(relay_server.run_websocket(relay_cancel_tx.subscribe()));
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
+            relay: Some(
+                UnifiedRelayRuntimeConfig::from_mesh_secret(
+                    UnifiedRelayEndpoint::WebSocket(format!("ws://{relay_addr}/relay")),
+                    "test-net",
+                    "test-secret",
+                    "local-device",
+                )
+                .unwrap(),
+            ),
+            ..UnifiedServiceOwnerConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(owner.owns_relay());
+        assert_eq!(owner.relay_runtime.as_ref().unwrap().task_count(), 2);
 
         drop(owner);
         let _ = relay_cancel_tx.send(());

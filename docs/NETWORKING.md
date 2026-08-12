@@ -45,7 +45,16 @@ REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR=127.0.0.1:0
 REMOTE_PLAY_RELAY_LOG=1
 ```
 
-The current relay server still needs to be supplied by deployment or a dev command. UDP relay remains available in `remote_core::relay`, but the unified runtime currently wires TCP relay first because it is the reachability-first fallback for restricted networks.
+The current relay server still needs to be supplied by deployment or a dev command. UDP relay remains available in `remote_core::relay`, while the unified runtime supports both raw TCP and WebSocket relay endpoints. A production endpoint can share an existing HTTPS listener:
+
+```text
+REMOTE_PLAY_RELAY=1
+REMOTE_PLAY_RELAY_SERVER_ADDR=wss://relay.example.com:8443/v1/relay
+```
+
+WebSocket mode sends one existing relay packet per binary message, disables compression, bounds frame and writer-buffer sizes, and keeps direct LAN/EasyTier routes preferred. It is a reachability fallback for restricted networks, not a replacement for the lower-latency direct UDP path.
+
+The public relay no longer uses the visible EasyTier network name as its routing identifier. Each app derives separate control and discovery capabilities with HMAC-SHA256 from the paired network name, network secret, and channel. The network secret never leaves the device. The server also binds each connection to one group/device identity, limits connections and peers per group, disconnects slow consumers when their bounded queue fills, rejects oversized frames, and applies handshake/idle timeouts.
 
 ## Initial Runtime Shape
 

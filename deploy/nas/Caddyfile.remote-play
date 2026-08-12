@@ -1,0 +1,11 @@
+relay.hackerlife.fun {
+	import cloudflare_dns
+
+	@health path /healthz
+	respond @health "RemotePlay relay ready" 200
+
+	@relay path /v1/relay
+	reverse_proxy @relay 127.0.0.1:39491
+
+	respond 404
+}

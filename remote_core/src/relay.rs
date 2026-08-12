@@ -1,3 +1,7 @@
+use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -8,14 +12,22 @@ use tokio::net::UdpSocket;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::{WebSocketStream, accept_async_with_config, connect_async_with_config};
 
 const RELAY_MAGIC: &[u8; 4] = b"RPR1";
 const REGISTER_PACKET: u8 = 1;
 const DATA_PACKET: u8 = 2;
 const MAX_ID_LEN: usize = 255;
 const MAX_PACKET_LEN: usize = 65_535;
-const MAX_TCP_FRAME_LEN: usize = 1024 * 1024;
+const MAX_TCP_FRAME_LEN: usize = RELAY_MAGIC.len() + 3 + (2 * MAX_ID_LEN) + MAX_PACKET_LEN;
+const DEFAULT_MAX_TCP_CONNECTIONS: usize = 128;
+const DEFAULT_MAX_PEERS_PER_GROUP: usize = 8;
+const DEFAULT_TCP_WRITER_QUEUE_CAPACITY: usize = 16;
+const DEFAULT_TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpRelayServerConfig {
@@ -53,6 +65,10 @@ pub struct UdpRelayTunnelConfig {
 pub struct TcpRelayServerConfig {
     pub bind_addr: SocketAddr,
     pub log_events: bool,
+    pub max_connections: usize,
+    pub max_peers_per_group: usize,
+    pub writer_queue_capacity: usize,
+    pub idle_timeout: Duration,
 }
 
 impl TcpRelayServerConfig {
@@ -60,11 +76,32 @@ impl TcpRelayServerConfig {
         Self {
             bind_addr,
             log_events: false,
+            max_connections: DEFAULT_MAX_TCP_CONNECTIONS,
+            max_peers_per_group: DEFAULT_MAX_PEERS_PER_GROUP,
+            writer_queue_capacity: DEFAULT_TCP_WRITER_QUEUE_CAPACITY,
+            idle_timeout: DEFAULT_TCP_IDLE_TIMEOUT,
         }
     }
 
     pub fn with_event_logging(mut self, log_events: bool) -> Self {
         self.log_events = log_events;
+        self
+    }
+
+    pub fn with_limits(
+        mut self,
+        max_connections: usize,
+        max_peers_per_group: usize,
+        writer_queue_capacity: usize,
+    ) -> Self {
+        self.max_connections = max_connections.max(1);
+        self.max_peers_per_group = max_peers_per_group.max(1);
+        self.writer_queue_capacity = writer_queue_capacity.max(1);
+        self
+    }
+
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout.max(Duration::from_secs(1));
         self
     }
 }
@@ -73,6 +110,17 @@ impl TcpRelayServerConfig {
 pub struct TcpRelayTunnelConfig {
     pub bind_addr: SocketAddr,
     pub relay_addr: SocketAddr,
+    pub group_id: String,
+    pub peer_id: String,
+    pub local_target_addr: Option<SocketAddr>,
+    pub register_interval: Duration,
+    pub log_events: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebSocketRelayTunnelConfig {
+    pub bind_addr: SocketAddr,
+    pub relay_url: String,
     pub group_id: String,
     pub peer_id: String,
     pub local_target_addr: Option<SocketAddr>,
@@ -92,6 +140,38 @@ impl TcpRelayTunnelConfig {
         Ok(Self {
             bind_addr,
             relay_addr,
+            group_id,
+            peer_id,
+            local_target_addr: None,
+            register_interval: Duration::from_secs(1),
+            log_events: false,
+        })
+    }
+
+    pub fn with_local_target_addr(mut self, local_target_addr: SocketAddr) -> Self {
+        self.local_target_addr = Some(local_target_addr);
+        self
+    }
+
+    pub fn with_event_logging(mut self, log_events: bool) -> Self {
+        self.log_events = log_events;
+        self
+    }
+}
+
+impl WebSocketRelayTunnelConfig {
+    pub fn new(
+        bind_addr: SocketAddr,
+        relay_url: impl Into<String>,
+        group_id: impl Into<String>,
+        peer_id: impl Into<String>,
+    ) -> Result<Self, RelayConfigError> {
+        let relay_url = validate_websocket_relay_url(relay_url.into())?;
+        let group_id = validate_relay_id("group_id", group_id.into())?;
+        let peer_id = validate_relay_id("peer_id", peer_id.into())?;
+        Ok(Self {
+            bind_addr,
+            relay_url,
             group_id,
             peer_id,
             local_target_addr: None,
@@ -140,6 +220,7 @@ impl UdpRelayTunnelConfig {
 pub enum RelayConfigError {
     EmptyId(&'static str),
     IdTooLong { field: &'static str, len: usize },
+    InvalidWebSocketUrl(String),
 }
 
 impl std::fmt::Display for RelayConfigError {
@@ -149,11 +230,41 @@ impl std::fmt::Display for RelayConfigError {
             Self::IdTooLong { field, len } => {
                 write!(f, "{field} is too long: {len} bytes, max {MAX_ID_LEN}")
             }
+            Self::InvalidWebSocketUrl(value) => {
+                write!(f, "invalid relay WebSocket URL {value:?}")
+            }
         }
     }
 }
 
 impl std::error::Error for RelayConfigError {}
+
+pub fn derive_relay_group_id(
+    network_name: &str,
+    network_secret: &str,
+    channel: &str,
+) -> Result<String, RelayConfigError> {
+    let network_name = validate_relay_id("network_name", network_name.to_string())?;
+    let channel = validate_relay_id("channel", channel.to_string())?;
+    let network_secret = network_secret.trim();
+    if network_secret.is_empty() {
+        return Err(RelayConfigError::EmptyId("network_secret"));
+    }
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(network_secret.as_bytes())
+        .expect("HMAC accepts keys of any size");
+    mac.update(b"remote-play-relay-group-v1\0");
+    mac.update(network_name.as_bytes());
+    mac.update(b"\0");
+    mac.update(channel.as_bytes());
+    let bytes = mac.finalize().into_bytes();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(encoded)
+}
 
 pub struct BoundUdpRelayServer {
     socket: UdpSocket,
@@ -239,17 +350,83 @@ impl BoundTcpRelayServer {
 
     pub async fn run(self, mut cancel_rx: broadcast::Receiver<()>) -> io::Result<()> {
         let state = Arc::new(Mutex::new(TcpRelayServerState::default()));
+        let connection_slots = Arc::new(Semaphore::new(self.config.max_connections));
 
         loop {
             tokio::select! {
                 _ = cancel_rx.recv() => return Ok(()),
                 accepted = self.listener.accept() => {
                     let (stream, addr) = accepted?;
+                    let Ok(connection_slot) = connection_slots.clone().try_acquire_owned() else {
+                        if self.config.log_events {
+                            eprintln!("TCP relay rejected connection from {addr}: connection limit reached");
+                        }
+                        drop(stream);
+                        continue;
+                    };
                     let state = state.clone();
-                    let log_events = self.config.log_events;
+                    let config = self.config.clone();
                     tokio::spawn(async move {
-                        if let Err(err) = run_tcp_relay_connection(stream, addr, state, log_events).await {
+                        let _connection_slot = connection_slot;
+                        if let Err(err) = run_tcp_relay_connection(stream, addr, state, &config).await {
                             eprintln!("TCP relay connection ended: {err}");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    pub async fn run_websocket(self, mut cancel_rx: broadcast::Receiver<()>) -> io::Result<()> {
+        let state = Arc::new(Mutex::new(TcpRelayServerState::default()));
+        let connection_slots = Arc::new(Semaphore::new(self.config.max_connections));
+
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => return Ok(()),
+                accepted = self.listener.accept() => {
+                    let (stream, addr) = accepted?;
+                    let Ok(connection_slot) = connection_slots.clone().try_acquire_owned() else {
+                        if self.config.log_events {
+                            eprintln!("WebSocket relay rejected connection from {addr}: connection limit reached");
+                        }
+                        drop(stream);
+                        continue;
+                    };
+                    let state = state.clone();
+                    let config = self.config.clone();
+                    tokio::spawn(async move {
+                        let _connection_slot = connection_slot;
+                        let handshake = tokio::time::timeout(
+                            WEBSOCKET_HANDSHAKE_TIMEOUT,
+                            accept_async_with_config(stream, Some(relay_websocket_config())),
+                        )
+                        .await;
+                        let relay_stream = match handshake {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(err)) => {
+                                if config.log_events {
+                                    eprintln!("WebSocket relay handshake from {addr} failed: {err}");
+                                }
+                                return;
+                            }
+                            Err(_) => {
+                                if config.log_events {
+                                    eprintln!("WebSocket relay handshake from {addr} timed out");
+                                }
+                                return;
+                            }
+                        };
+                        if let Err(err) = run_websocket_relay_connection(
+                            relay_stream,
+                            addr,
+                            state,
+                            &config,
+                        )
+                        .await
+                            && config.log_events
+                        {
+                            eprintln!("WebSocket relay connection ended: {err}");
                         }
                     });
                 }
@@ -261,6 +438,11 @@ impl BoundTcpRelayServer {
 pub struct BoundTcpRelayTunnel {
     socket: UdpSocket,
     config: TcpRelayTunnelConfig,
+}
+
+pub struct BoundWebSocketRelayTunnel {
+    socket: UdpSocket,
+    config: WebSocketRelayTunnelConfig,
 }
 
 impl BoundTcpRelayTunnel {
@@ -361,6 +543,113 @@ impl BoundTcpRelayTunnel {
     }
 }
 
+impl BoundWebSocketRelayTunnel {
+    pub async fn bind(config: WebSocketRelayTunnelConfig) -> io::Result<Self> {
+        let socket = UdpSocket::bind(config.bind_addr).await?;
+        Ok(Self { socket, config })
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    pub async fn run(self, mut cancel_rx: broadcast::Receiver<()>) -> io::Result<()> {
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => return Ok(()),
+                connected = connect_async_with_config(
+                    self.config.relay_url.as_str(),
+                    Some(relay_websocket_config()),
+                    true,
+                ) => {
+                    match connected {
+                        Ok((stream, _response)) => {
+                            if self.config.log_events {
+                                println!("WebSocket relay tunnel connected");
+                            }
+                            match self.run_connected(stream, &mut cancel_rx).await {
+                                Ok(()) => return Ok(()),
+                                Err(err) => {
+                                    if self.config.log_events {
+                                        eprintln!("WebSocket relay tunnel disconnected: {err}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            if self.config.log_events {
+                                eprintln!("WebSocket relay tunnel connect failed: {err}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = cancel_rx.recv() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+
+    async fn run_connected<S>(
+        &self,
+        mut stream: WebSocketStream<S>,
+        cancel_rx: &mut broadcast::Receiver<()>,
+    ) -> io::Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let mut buf = vec![0u8; MAX_PACKET_LEN];
+        let mut local_target_addr = self.config.local_target_addr;
+        let register_packet = RelayPacket::Register {
+            group_id: self.config.group_id.clone(),
+            peer_id: self.config.peer_id.clone(),
+        }
+        .encode();
+        send_websocket_binary(&mut stream, register_packet.clone()).await?;
+        let mut register_interval = tokio::time::interval(self.config.register_interval);
+
+        loop {
+            tokio::select! {
+                _ = cancel_rx.recv() => return Ok(()),
+                _ = register_interval.tick() => {
+                    send_websocket_binary(&mut stream, register_packet.clone()).await?;
+                }
+                message = stream.next() => {
+                    let Some(message) = message else {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "WebSocket relay closed"));
+                    };
+                    match message.map_err(websocket_io_error)? {
+                        Message::Binary(frame) => {
+                            if let Some(RelayPacket::Data { payload, .. }) = RelayPacket::decode(&frame)
+                                && let Some(target) = local_target_addr
+                            {
+                                let _ = self.socket.send_to(&payload, target).await;
+                            }
+                        }
+                        Message::Close(_) => {
+                            return Err(io::Error::new(io::ErrorKind::ConnectionReset, "WebSocket relay closed"));
+                        }
+                        Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                    }
+                }
+                received = self.socket.recv_from(&mut buf) => {
+                    let (len, addr) = received?;
+                    local_target_addr = Some(addr);
+                    let encoded = RelayPacket::Data {
+                        group_id: self.config.group_id.clone(),
+                        peer_id: self.config.peer_id.clone(),
+                        payload: buf[..len].to_vec(),
+                    }
+                    .encode();
+                    send_websocket_binary(&mut stream, encoded).await?;
+                }
+            }
+        }
+    }
+}
+
 impl BoundUdpRelayTunnel {
     pub async fn bind(config: UdpRelayTunnelConfig) -> io::Result<Self> {
         let socket = UdpSocket::bind(config.bind_addr).await?;
@@ -437,12 +726,26 @@ struct RelayPeerTable {
 struct TcpRelayServerState {
     next_connection_id: u64,
     peers: HashMap<RelayPeerKey, TcpRelayPeerState>,
+    connection_identities: HashMap<u64, RelayPeerKey>,
 }
 
 #[derive(Clone)]
 struct TcpRelayPeerState {
     connection_id: u64,
-    writer_tx: mpsc::UnboundedSender<Vec<u8>>,
+    writer_tx: mpsc::Sender<Arc<[u8]>>,
+    disconnect_tx: watch::Sender<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayRegistrationError {
+    ConnectionIdentityChanged,
+    GroupPeerLimitReached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelayForwardResult {
+    forwarded: usize,
+    disconnected_slow_peers: usize,
 }
 
 impl TcpRelayServerState {
@@ -456,32 +759,96 @@ impl TcpRelayServerState {
         group_id: String,
         peer_id: String,
         connection_id: u64,
-        writer_tx: mpsc::UnboundedSender<Vec<u8>>,
-    ) {
+        writer_tx: mpsc::Sender<Arc<[u8]>>,
+        disconnect_tx: watch::Sender<bool>,
+        max_peers_per_group: usize,
+    ) -> Result<(), RelayRegistrationError> {
+        let key = RelayPeerKey { group_id, peer_id };
+        if let Some(existing) = self.connection_identities.get(&connection_id) {
+            return if existing == &key {
+                Ok(())
+            } else {
+                Err(RelayRegistrationError::ConnectionIdentityChanged)
+            };
+        }
+
+        let existing_peer_connection = self.peers.get(&key).map(|peer| peer.connection_id);
+        let group_peer_count = self
+            .peers
+            .keys()
+            .filter(|peer| peer.group_id == key.group_id)
+            .count();
+        if existing_peer_connection.is_none() && group_peer_count >= max_peers_per_group {
+            return Err(RelayRegistrationError::GroupPeerLimitReached);
+        }
+
+        if let Some(existing) = self.peers.remove(&key) {
+            let _ = existing.disconnect_tx.send(true);
+            self.connection_identities.remove(&existing.connection_id);
+        }
+        self.connection_identities
+            .insert(connection_id, key.clone());
         self.peers.insert(
-            RelayPeerKey { group_id, peer_id },
+            key,
             TcpRelayPeerState {
                 connection_id,
                 writer_tx,
+                disconnect_tx,
             },
         );
+        Ok(())
     }
 
-    fn forward_targets(
-        &self,
+    fn identity(&self, connection_id: u64) -> Option<&RelayPeerKey> {
+        self.connection_identities.get(&connection_id)
+    }
+
+    fn forward_frame(
+        &mut self,
         group_id: &str,
         source_connection_id: u64,
-    ) -> Vec<mpsc::UnboundedSender<Vec<u8>>> {
-        self.peers
+        frame: Arc<[u8]>,
+    ) -> RelayForwardResult {
+        let targets = self
+            .peers
             .iter()
             .filter(|(key, peer)| {
                 key.group_id == group_id && peer.connection_id != source_connection_id
             })
-            .map(|(_, peer)| peer.writer_tx.clone())
-            .collect()
+            .map(|(_, peer)| {
+                (
+                    peer.connection_id,
+                    peer.writer_tx.clone(),
+                    peer.disconnect_tx.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut result = RelayForwardResult {
+            forwarded: 0,
+            disconnected_slow_peers: 0,
+        };
+        let mut failed_connections = Vec::new();
+        for (connection_id, writer_tx, disconnect_tx) in targets {
+            match writer_tx.try_send(frame.clone()) {
+                Ok(()) => result.forwarded += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    result.disconnected_slow_peers += 1;
+                    let _ = disconnect_tx.send(true);
+                    failed_connections.push(connection_id);
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    failed_connections.push(connection_id);
+                }
+            }
+        }
+        for connection_id in failed_connections {
+            self.remove_connection(connection_id);
+        }
+        result
     }
 
     fn remove_connection(&mut self, connection_id: u64) {
+        self.connection_identities.remove(&connection_id);
         self.peers
             .retain(|_, peer| peer.connection_id != connection_id);
     }
@@ -491,11 +858,12 @@ async fn run_tcp_relay_connection(
     stream: TcpStream,
     addr: SocketAddr,
     state: Arc<Mutex<TcpRelayServerState>>,
-    log_events: bool,
+    config: &TcpRelayServerConfig,
 ) -> io::Result<()> {
     stream.set_nodelay(true)?;
     let (mut reader, writer) = stream.into_split();
-    let (writer_tx, writer_rx) = mpsc::unbounded_channel();
+    let (writer_tx, writer_rx) = mpsc::channel(config.writer_queue_capacity);
+    let (disconnect_tx, mut disconnect_rx) = watch::channel(false);
     let connection_id = {
         let mut state = state.lock().await;
         state.next_connection_id()
@@ -504,43 +872,74 @@ async fn run_tcp_relay_connection(
 
     let result = async {
         loop {
-            let frame = read_tcp_frame(&mut reader).await?;
+            let frame = tokio::select! {
+                _ = disconnect_rx.changed() => {
+                    return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "relay peer is too slow"));
+                }
+                frame = tokio::time::timeout(config.idle_timeout, read_tcp_frame(&mut reader)) => {
+                    frame.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "relay connection idle timeout"))??
+                }
+            };
             let Some(packet) = RelayPacket::decode(&frame) else {
-                continue;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid relay packet"));
             };
             match packet {
                 RelayPacket::Register { group_id, peer_id } => {
-                    if log_events {
-                        println!("TCP relay register group={group_id} peer={peer_id} addr={addr}");
+                    if config.log_events {
+                        println!("TCP relay peer registered addr={addr}");
                     }
-                    state.lock().await.register(
-                        group_id,
-                        peer_id,
-                        connection_id,
-                        writer_tx.clone(),
-                    );
+                    state
+                        .lock()
+                        .await
+                        .register(
+                            group_id,
+                            peer_id,
+                            connection_id,
+                            writer_tx.clone(),
+                            disconnect_tx.clone(),
+                            config.max_peers_per_group,
+                        )
+                        .map_err(|err| {
+                            io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!("relay registration rejected: {err:?}"),
+                            )
+                        })?;
                 }
                 RelayPacket::Data {
                     group_id,
                     peer_id,
                     payload,
                 } => {
-                    let encoded = RelayPacket::Data {
-                        group_id: group_id.clone(),
-                        peer_id: peer_id.clone(),
-                        payload: payload.clone(),
+                    let mut state = state.lock().await;
+                    let Some(identity) = state.identity(connection_id) else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "relay data received before registration",
+                        ));
+                    };
+                    if identity.group_id != group_id || identity.peer_id != peer_id {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "relay data identity does not match registration",
+                        ));
                     }
-                    .encode();
-                    let targets = state.lock().await.forward_targets(&group_id, connection_id);
-                    if log_events {
+                    let encoded = Arc::<[u8]>::from(
+                        RelayPacket::Data {
+                            group_id: group_id.clone(),
+                            peer_id,
+                            payload,
+                        }
+                        .encode(),
+                    );
+                    let forward = state.forward_frame(&group_id, connection_id, encoded);
+                    drop(state);
+                    if config.log_events {
                         println!(
-                            "TCP relay data group={group_id} peer={peer_id} bytes={} targets={}",
-                            payload.len(),
-                            targets.len()
+                            "TCP relay data forwarded targets={} slow_peers={}",
+                            forward.forwarded,
+                            forward.disconnected_slow_peers,
                         );
-                    }
-                    for target in targets {
-                        let _ = target.send(encoded.clone());
                     }
                 }
             }
@@ -555,12 +954,179 @@ async fn run_tcp_relay_connection(
 
 async fn run_tcp_relay_writer(
     mut writer: OwnedWriteHalf,
-    mut writer_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut writer_rx: mpsc::Receiver<Arc<[u8]>>,
 ) -> io::Result<()> {
     while let Some(frame) = writer_rx.recv().await {
         write_tcp_frame(&mut writer, &frame).await?;
     }
     Ok(())
+}
+
+async fn run_websocket_relay_connection<S>(
+    stream: WebSocketStream<S>,
+    addr: SocketAddr,
+    state: Arc<Mutex<TcpRelayServerState>>,
+    config: &TcpRelayServerConfig,
+) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut writer, mut reader) = stream.split();
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Arc<[u8]>>(config.writer_queue_capacity);
+    let (disconnect_tx, mut disconnect_rx) = watch::channel(false);
+    let connection_id = state.lock().await.next_connection_id();
+
+    let result = async {
+        loop {
+            tokio::select! {
+                _ = disconnect_rx.changed() => {
+                    return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "relay peer is too slow"));
+                }
+                outbound = writer_rx.recv() => {
+                    let Some(frame) = outbound else {
+                        return Ok(());
+                    };
+                    writer
+                        .send(Message::Binary(Bytes::from_owner(frame)))
+                        .await
+                        .map_err(websocket_io_error)?;
+                }
+                inbound = tokio::time::timeout(config.idle_timeout, reader.next()) => {
+                    let inbound = inbound
+                        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "relay connection idle timeout"))?;
+                    let Some(message) = inbound else {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "WebSocket relay closed"));
+                    };
+                    match message.map_err(websocket_io_error)? {
+                        Message::Binary(frame) => {
+                            handle_tcp_relay_packet(
+                                &frame,
+                                addr,
+                                connection_id,
+                                &writer_tx,
+                                &disconnect_tx,
+                                &state,
+                                config,
+                            )
+                            .await?;
+                        }
+                        Message::Close(_) => return Ok(()),
+                        Message::Text(_) => {
+                            return Err(io::Error::new(io::ErrorKind::InvalidData, "relay accepts binary WebSocket messages only"));
+                        }
+                        Message::Ping(payload) => {
+                            writer.send(Message::Pong(payload)).await.map_err(websocket_io_error)?;
+                        }
+                        Message::Pong(_) | Message::Frame(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    .await;
+
+    state.lock().await.remove_connection(connection_id);
+    result
+}
+
+async fn handle_tcp_relay_packet(
+    frame: &[u8],
+    addr: SocketAddr,
+    connection_id: u64,
+    writer_tx: &mpsc::Sender<Arc<[u8]>>,
+    disconnect_tx: &watch::Sender<bool>,
+    state: &Arc<Mutex<TcpRelayServerState>>,
+    config: &TcpRelayServerConfig,
+) -> io::Result<()> {
+    let Some(packet) = RelayPacket::decode(frame) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid relay packet",
+        ));
+    };
+    match packet {
+        RelayPacket::Register { group_id, peer_id } => {
+            if config.log_events {
+                println!("WebSocket relay peer registered addr={addr}");
+            }
+            state
+                .lock()
+                .await
+                .register(
+                    group_id,
+                    peer_id,
+                    connection_id,
+                    writer_tx.clone(),
+                    disconnect_tx.clone(),
+                    config.max_peers_per_group,
+                )
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("relay registration rejected: {err:?}"),
+                    )
+                })
+        }
+        RelayPacket::Data {
+            group_id,
+            peer_id,
+            payload,
+        } => {
+            let mut state = state.lock().await;
+            let Some(identity) = state.identity(connection_id) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "relay data received before registration",
+                ));
+            };
+            if identity.group_id != group_id || identity.peer_id != peer_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "relay data identity does not match registration",
+                ));
+            }
+            let encoded = Arc::<[u8]>::from(
+                RelayPacket::Data {
+                    group_id: group_id.clone(),
+                    peer_id,
+                    payload,
+                }
+                .encode(),
+            );
+            let forward = state.forward_frame(&group_id, connection_id, encoded);
+            drop(state);
+            if config.log_events {
+                println!(
+                    "WebSocket relay data forwarded targets={} slow_peers={}",
+                    forward.forwarded, forward.disconnected_slow_peers,
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn send_websocket_binary<S>(stream: &mut WebSocketStream<S>, frame: Vec<u8>) -> io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    stream
+        .send(Message::Binary(Bytes::from(frame)))
+        .await
+        .map_err(websocket_io_error)
+}
+
+fn relay_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .read_buffer_size(64 * 1024)
+        .write_buffer_size(0)
+        .max_write_buffer_size(2 * MAX_TCP_FRAME_LEN)
+        .max_message_size(Some(MAX_TCP_FRAME_LEN))
+        .max_frame_size(Some(MAX_TCP_FRAME_LEN))
+}
+
+fn websocket_io_error(err: tokio_tungstenite::tungstenite::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, err)
 }
 
 impl RelayPeerTable {
@@ -647,7 +1213,10 @@ impl RelayPacket {
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < RELAY_MAGIC.len() + 3 || &bytes[..RELAY_MAGIC.len()] != RELAY_MAGIC {
+        if bytes.len() < RELAY_MAGIC.len() + 3
+            || bytes.len() > MAX_TCP_FRAME_LEN
+            || &bytes[..RELAY_MAGIC.len()] != RELAY_MAGIC
+        {
             return None;
         }
         let packet_type = bytes[4];
@@ -725,6 +1294,25 @@ fn validate_relay_id(field: &'static str, value: String) -> Result<String, Relay
     Ok(value)
 }
 
+fn validate_websocket_relay_url(value: String) -> Result<String, RelayConfigError> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(RelayConfigError::EmptyId("relay_url"));
+    }
+    let scheme_valid = value.starts_with("ws://") || value.starts_with("wss://");
+    let authority = value
+        .split_once("://")
+        .map(|(_, remainder)| remainder.split('/').next().unwrap_or_default())
+        .unwrap_or_default();
+    if !scheme_valid
+        || authority.is_empty()
+        || authority.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(RelayConfigError::InvalidWebSocketUrl(value));
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +1332,155 @@ mod tests {
 
         assert_eq!(RelayPacket::decode(&encoded), Some(packet));
         assert_eq!(RelayPacket::decode(b"not-relay"), None);
+    }
+
+    #[test]
+    fn relay_group_capability_is_secret_and_channel_scoped() {
+        let control = derive_relay_group_id("network-a", "secret-a", "control").unwrap();
+        let repeated = derive_relay_group_id("network-a", "secret-a", "control").unwrap();
+        let discovery = derive_relay_group_id("network-a", "secret-a", "discovery").unwrap();
+        let other_secret = derive_relay_group_id("network-a", "secret-b", "control").unwrap();
+
+        assert_eq!(control, repeated);
+        assert_eq!(control.len(), 64);
+        assert!(control.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!control.contains("network-a"));
+        assert!(!control.contains("secret-a"));
+        assert_ne!(control, discovery);
+        assert_ne!(control, other_secret);
+    }
+
+    #[test]
+    fn websocket_relay_url_requires_ws_or_wss() {
+        assert!(
+            WebSocketRelayTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "wss://relay.example.test:8443/relay",
+                "group",
+                "peer",
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            WebSocketRelayTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "https://relay.example.test/relay",
+                "group",
+                "peer",
+            ),
+            Err(RelayConfigError::InvalidWebSocketUrl(_))
+        ));
+    }
+
+    #[test]
+    fn tcp_connection_cannot_change_identity_after_registration() {
+        let mut state = TcpRelayServerState::default();
+        let connection_id = state.next_connection_id();
+        let (writer_tx, _writer_rx) = mpsc::channel(4);
+        let (disconnect_tx, _disconnect_rx) = tokio::sync::watch::channel(false);
+
+        state
+            .register(
+                "group-a".to_string(),
+                "peer-a".to_string(),
+                connection_id,
+                writer_tx.clone(),
+                disconnect_tx.clone(),
+                4,
+            )
+            .unwrap();
+        state
+            .register(
+                "group-a".to_string(),
+                "peer-a".to_string(),
+                connection_id,
+                writer_tx.clone(),
+                disconnect_tx.clone(),
+                4,
+            )
+            .unwrap();
+
+        let err = state
+            .register(
+                "group-b".to_string(),
+                "peer-a".to_string(),
+                connection_id,
+                writer_tx,
+                disconnect_tx,
+                4,
+            )
+            .unwrap_err();
+        assert_eq!(err, RelayRegistrationError::ConnectionIdentityChanged);
+    }
+
+    #[test]
+    fn tcp_group_peer_limit_is_enforced() {
+        let mut state = TcpRelayServerState::default();
+        let (writer_a, _reader_a) = mpsc::channel(4);
+        let (disconnect_a, _disconnect_reader_a) = tokio::sync::watch::channel(false);
+        let first_connection = state.next_connection_id();
+        state
+            .register(
+                "group".to_string(),
+                "peer-a".to_string(),
+                first_connection,
+                writer_a,
+                disconnect_a,
+                1,
+            )
+            .unwrap();
+
+        let (writer_b, _reader_b) = mpsc::channel(4);
+        let (disconnect_b, _disconnect_reader_b) = tokio::sync::watch::channel(false);
+        let second_connection = state.next_connection_id();
+        let err = state
+            .register(
+                "group".to_string(),
+                "peer-b".to_string(),
+                second_connection,
+                writer_b,
+                disconnect_b,
+                1,
+            )
+            .unwrap_err();
+
+        assert_eq!(err, RelayRegistrationError::GroupPeerLimitReached);
+    }
+
+    #[test]
+    fn tcp_forwarding_queue_is_bounded() {
+        let mut state = TcpRelayServerState::default();
+        let source_connection = state.next_connection_id();
+        let target_connection = state.next_connection_id();
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let (disconnect_tx, disconnect_rx) = tokio::sync::watch::channel(false);
+        state
+            .register(
+                "group".to_string(),
+                "target".to_string(),
+                target_connection,
+                writer_tx,
+                disconnect_tx,
+                2,
+            )
+            .unwrap();
+
+        let frame = std::sync::Arc::<[u8]>::from([1, 2, 3]);
+        assert_eq!(
+            state.forward_frame("group", source_connection, frame.clone()),
+            RelayForwardResult {
+                forwarded: 1,
+                disconnected_slow_peers: 0,
+            }
+        );
+        assert_eq!(
+            state.forward_frame("group", source_connection, frame),
+            RelayForwardResult {
+                forwarded: 0,
+                disconnected_slow_peers: 1,
+            }
+        );
+        assert!(*disconnect_rx.borrow());
     }
 
     #[tokio::test]
@@ -898,6 +1635,96 @@ mod tests {
             .await
             .expect("host reply should send");
 
+        let received = timeout(Duration::from_secs(2), client_receiver.recv())
+            .await
+            .expect("client should receive through relay")
+            .expect("client packet should decode");
+        let MultiplexedPacket::Control(ControlMessage::StopStream, _) = received else {
+            panic!("client received unexpected packet: {received:?}");
+        };
+
+        let _ = cancel_tx.send(());
+        server_task.await.expect("server task should join").unwrap();
+        host_tunnel_task
+            .await
+            .expect("host tunnel task should join")
+            .unwrap();
+        client_tunnel_task
+            .await
+            .expect("client tunnel task should join")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_relay_tunnels_forward_existing_udp_protocol_both_ways() {
+        let (cancel_tx, _) = broadcast::channel(1);
+        let server =
+            BoundTcpRelayServer::bind(TcpRelayServerConfig::new("127.0.0.1:0".parse().unwrap()))
+                .await
+                .expect("server should bind");
+        let relay_addr = server.local_addr().expect("server addr");
+        let server_task = tokio::spawn(server.run_websocket(cancel_tx.subscribe()));
+        let relay_url = format!("ws://{relay_addr}/relay");
+
+        let host_app = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("host app should bind");
+        let host_app_addr = host_app.local_addr().expect("host app addr");
+        let (host_sender, host_receiver) = host_app.split();
+
+        let client_app = UdpMultiplexer::bind("127.0.0.1:0")
+            .await
+            .expect("client app should bind");
+        let (client_sender, client_receiver) = client_app.split();
+
+        let host_tunnel = BoundWebSocketRelayTunnel::bind(
+            WebSocketRelayTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                relay_url.clone(),
+                "group",
+                "host",
+            )
+            .unwrap()
+            .with_local_target_addr(host_app_addr),
+        )
+        .await
+        .expect("host tunnel should bind");
+        let host_tunnel_addr = host_tunnel.local_addr().expect("host tunnel addr");
+        let host_tunnel_task = tokio::spawn(host_tunnel.run(cancel_tx.subscribe()));
+
+        let client_tunnel = BoundWebSocketRelayTunnel::bind(
+            WebSocketRelayTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                relay_url,
+                "group",
+                "client",
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("client tunnel should bind");
+        let client_tunnel_addr = client_tunnel.local_addr().expect("client tunnel addr");
+        let client_tunnel_task = tokio::spawn(client_tunnel.run(cancel_tx.subscribe()));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client_sender
+            .send_control(&ControlMessage::Heartbeat, client_tunnel_addr)
+            .await
+            .expect("client send should succeed");
+
+        let received = timeout(Duration::from_secs(2), host_receiver.recv())
+            .await
+            .expect("host should receive through relay")
+            .expect("host packet should decode");
+        let MultiplexedPacket::Control(ControlMessage::Heartbeat, host_seen_addr) = received else {
+            panic!("host received unexpected packet: {received:?}");
+        };
+        assert_eq!(host_seen_addr, host_tunnel_addr);
+
+        host_sender
+            .send_control(&ControlMessage::StopStream, host_seen_addr)
+            .await
+            .expect("host reply should send");
         let received = timeout(Duration::from_secs(2), client_receiver.recv())
             .await
             .expect("client should receive through relay")
