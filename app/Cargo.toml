@@ -10,6 +10,7 @@ protocol = { path = "../protocol" }
 remote_core = { path = "../remote_core" }
 tokio = { version = "1.52.2", features = ["full"] }
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
+yororen_ui = "0.2"
 
 [[bin]]
 name = "remote_play"

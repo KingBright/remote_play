@@ -5221,6 +5221,7 @@ dependencies = [
  "protocol",
  "remote_core",
  "tokio",
+ "yororen_ui",
 ]
 
 [[package]]

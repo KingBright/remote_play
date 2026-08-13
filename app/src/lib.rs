@@ -1,3 +1,4 @@
+mod design_system;
 mod mesh_admin;
 mod ui;
 
