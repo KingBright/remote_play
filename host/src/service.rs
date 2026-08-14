@@ -16,6 +16,10 @@ pub struct HostServiceConfig {
     pub stats: Arc<Statistics>,
 }
 
+fn is_active_client(active_client_addr: Option<SocketAddr>, source: SocketAddr) -> bool {
+    active_client_addr == Some(source)
+}
+
 pub async fn run_host_service(
     config: HostServiceConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -43,6 +47,7 @@ pub async fn run_host_service(
             watch::Sender<crate::talkback_player::TalkbackPlaybackSettings>,
         > = None;
         let mut active_session_id: Option<u32> = None;
+        let mut active_client_addr: Option<SocketAddr> = None;
         let mut last_heartbeat = Instant::now();
 
         println!("Listening for ControlMessages on {}...", bind_addr);
@@ -60,6 +65,8 @@ pub async fn run_host_service(
                         active_talkback_tx = None;
                         active_talkback_settings_tx = None;
                         active_session_id = None;
+                        active_client_addr = None;
+                        input_injector.release_all_input();
                     }
                 }
                 recv_res = udp_receiver.recv() => {
@@ -67,12 +74,19 @@ pub async fn run_host_service(
                         Ok(MultiplexedPacket::Control(msg, client_addr)) => {
                             match msg {
                                 ControlMessage::Input(input_event) => {
-                                    input_injector.inject(input_event);
+                                    if is_active_client(active_client_addr, client_addr) {
+                                        input_injector.inject(input_event);
+                                    }
                                 }
                                 ControlMessage::Heartbeat => {
-                                    last_heartbeat = Instant::now();
+                                    if is_active_client(active_client_addr, client_addr) {
+                                        last_heartbeat = Instant::now();
+                                    }
                                 }
                                 ControlMessage::StopStream => {
+                                    if !is_active_client(active_client_addr, client_addr) {
+                                        continue;
+                                    }
                                     println!("Received StopStream from client. Stopping...");
                                     if let Some(tx) = active_cancel_tx.take() {
                                         let _ = tx.send(());
@@ -82,9 +96,12 @@ pub async fn run_host_service(
                                     active_talkback_tx = None;
                                     active_talkback_settings_tx = None;
                                     active_session_id = None;
+                                    active_client_addr = None;
+                                    input_injector.release_all_input();
                                 }
                                 ControlMessage::AudioControl { session_id, target, muted, volume_percent } => {
-                                    if active_session_id == Some(session_id)
+                                    if is_active_client(active_client_addr, client_addr)
+                                        && active_session_id == Some(session_id)
                                         && target == AudioControlTarget::ViewerTalkbackPlayback
                                         && let Some(settings_tx) = &active_talkback_settings_tx
                                     {
@@ -107,6 +124,8 @@ pub async fn run_host_service(
                                     active_talkback_tx = None;
                                     active_talkback_settings_tx = None;
                                     active_session_id = Some(session_id);
+                                    active_client_addr = Some(client_addr);
+                                    input_injector.release_all_input();
 
                                     last_heartbeat = Instant::now();
 
@@ -168,7 +187,10 @@ pub async fn run_host_service(
                                 _ => {}
                             }
                         }
-                        Ok(MultiplexedPacket::Data(envelope, _addr)) => {
+                        Ok(MultiplexedPacket::Data(envelope, addr)) => {
+                            if !is_active_client(active_client_addr, addr) {
+                                continue;
+                            }
                             match envelope.header.kind {
                                 ContentKind::ClipboardBundle => {
                                     if let Some(tx) = &active_clipboard_tx
@@ -204,5 +226,20 @@ pub async fn run_host_service(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_active_client;
+
+    #[test]
+    fn session_packets_are_accepted_only_from_the_active_peer() {
+        let active = "127.0.0.1:41000".parse().unwrap();
+        let other = "127.0.0.1:41001".parse().unwrap();
+
+        assert!(is_active_client(Some(active), active));
+        assert!(!is_active_client(Some(active), other));
+        assert!(!is_active_client(None, active));
     }
 }

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use core_graphics::display::CGDisplay;
 use remote_core::{VideoCapturer, VideoFrame, VideoFrameHandleKind};
 use screencapturekit::prelude::*;
 use std::error::Error;
@@ -79,10 +80,11 @@ impl VideoCapturer for MacVideoCapturer {
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let content = SCShareableContent::get()?;
+        let main_display_id = CGDisplay::main().id;
         let display = content
             .displays()
             .into_iter()
-            .next()
+            .min_by_key(|display| u8::from(display.display_id() != main_display_id))
             .ok_or("No display found")?;
 
         let filter = SCContentFilter::create().with_display(&display).build();

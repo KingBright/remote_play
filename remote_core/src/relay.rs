@@ -28,6 +28,8 @@ const DEFAULT_MAX_PEERS_PER_GROUP: usize = 8;
 const DEFAULT_TCP_WRITER_QUEUE_CAPACITY: usize = 16;
 const DEFAULT_TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const DEFAULT_WEBSOCKET_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpRelayServerConfig {
@@ -125,6 +127,8 @@ pub struct WebSocketRelayTunnelConfig {
     pub peer_id: String,
     pub local_target_addr: Option<SocketAddr>,
     pub register_interval: Duration,
+    pub heartbeat_interval: Duration,
+    pub heartbeat_timeout: Duration,
     pub log_events: bool,
 }
 
@@ -176,6 +180,8 @@ impl WebSocketRelayTunnelConfig {
             peer_id,
             local_target_addr: None,
             register_interval: Duration::from_secs(1),
+            heartbeat_interval: DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL,
+            heartbeat_timeout: DEFAULT_WEBSOCKET_HEARTBEAT_TIMEOUT,
             log_events: false,
         })
     }
@@ -187,6 +193,16 @@ impl WebSocketRelayTunnelConfig {
 
     pub fn with_event_logging(mut self, log_events: bool) -> Self {
         self.log_events = log_events;
+        self
+    }
+
+    pub fn with_heartbeat(
+        mut self,
+        heartbeat_interval: Duration,
+        heartbeat_timeout: Duration,
+    ) -> Self {
+        self.heartbeat_interval = heartbeat_interval.max(Duration::from_millis(10));
+        self.heartbeat_timeout = heartbeat_timeout.max(self.heartbeat_interval);
         self
     }
 }
@@ -609,6 +625,9 @@ impl BoundWebSocketRelayTunnel {
         .encode();
         send_websocket_binary(&mut stream, register_packet.clone()).await?;
         let mut register_interval = tokio::time::interval(self.config.register_interval);
+        let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_interval);
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_server_message = Instant::now();
 
         loop {
             tokio::select! {
@@ -616,11 +635,25 @@ impl BoundWebSocketRelayTunnel {
                 _ = register_interval.tick() => {
                     send_websocket_binary(&mut stream, register_packet.clone()).await?;
                 }
+                _ = heartbeat_interval.tick() => {
+                    if last_server_message.elapsed() > self.config.heartbeat_timeout {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "WebSocket relay heartbeat timed out",
+                        ));
+                    }
+                    stream
+                        .send(Message::Ping(Bytes::new()))
+                        .await
+                        .map_err(websocket_io_error)?;
+                }
                 message = stream.next() => {
                     let Some(message) = message else {
                         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "WebSocket relay closed"));
                     };
-                    match message.map_err(websocket_io_error)? {
+                    let message = message.map_err(websocket_io_error)?;
+                    last_server_message = Instant::now();
+                    match message {
                         Message::Binary(frame) => {
                             if let Some(RelayPacket::Data { payload, .. }) = RelayPacket::decode(&frame)
                                 && let Some(target) = local_target_addr
@@ -1370,6 +1403,62 @@ mod tests {
             ),
             Err(RelayConfigError::InvalidWebSocketUrl(_))
         ));
+    }
+
+    #[test]
+    fn websocket_relay_heartbeat_timeout_never_precedes_the_probe_interval() {
+        let config = WebSocketRelayTunnelConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "wss://relay.example.test/relay",
+            "group",
+            "peer",
+        )
+        .unwrap()
+        .with_heartbeat(Duration::from_secs(5), Duration::from_secs(2));
+
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(5));
+        assert_eq!(config.heartbeat_timeout, Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn websocket_relay_detects_a_silent_half_open_connection() {
+        let config = WebSocketRelayTunnelConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "ws://relay.example.test/relay",
+            "group",
+            "peer",
+        )
+        .unwrap()
+        .with_heartbeat(Duration::from_millis(20), Duration::from_millis(60));
+        let tunnel = BoundWebSocketRelayTunnel::bind(config)
+            .await
+            .expect("tunnel should bind");
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let client_stream = WebSocketStream::from_raw_socket(
+            client_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let _silent_server = WebSocketStream::from_raw_socket(
+            server_io,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let (_cancel_tx, cancel_rx) = broadcast::channel(1);
+        let mut cancel_rx = cancel_rx;
+
+        let err = timeout(
+            Duration::from_secs(1),
+            tunnel.run_connected(client_stream, &mut cancel_rx),
+        )
+        .await
+        .expect("heartbeat timeout should be bounded")
+        .expect_err("silent connection should be rejected");
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "WebSocket relay heartbeat timed out");
     }
 
     #[test]

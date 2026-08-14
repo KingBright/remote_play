@@ -12,6 +12,9 @@ tokio = { version = "1.52.2", features = ["full"] }
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
 yororen_ui = "0.2"
 
+[dev-dependencies]
+gpui-ce = { version = "0.3.3", features = ["runtime_shaders", "test-support"] }
+
 [[bin]]
 name = "remote_play"
 path = "src/main.rs"

@@ -338,6 +338,7 @@ pub struct UnifiedServiceOwnerConfig {
     pub client_receiver: Option<ClientSessionReceiverConfig>,
     pub client_session_event_rx: Option<mpsc::UnboundedReceiver<ClientSessionEvent>>,
     pub session_timeout_monitor: Option<UnifiedSessionTimeoutMonitorConfig>,
+    pub viewing_keepalive: Option<UnifiedViewingKeepaliveConfig>,
     pub client_control_sender: Option<UdpSender>,
     pub side_services: UnifiedSideServiceControls,
     pub runtime_reload: Option<UnifiedRuntimeReloadConfig>,
@@ -353,6 +354,7 @@ pub const REMOTE_PLAY_RELAY_SERVER_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_SERVER_AD
 pub const REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR";
 pub const REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR";
 pub const REMOTE_PLAY_RELAY_LOG_ENV: &str = "REMOTE_PLAY_RELAY_LOG";
+pub const DEFAULT_RELAY_SERVER_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnifiedSessionTimeoutMonitorConfig {
@@ -363,6 +365,19 @@ impl Default for UnifiedSessionTimeoutMonitorConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_millis(250),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnifiedViewingKeepaliveConfig {
+    pub interval: Duration,
+}
+
+impl Default for UnifiedViewingKeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(1),
         }
     }
 }
@@ -486,6 +501,10 @@ pub struct UnifiedRuntimeConfig {
     pub client_bind_addr: SocketAddr,
     pub discovery_port: u16,
     pub enable_mesh: bool,
+    pub relay_endpoint: Option<UnifiedRelayEndpoint>,
+    pub relay_control_bind_addr: SocketAddr,
+    pub relay_discovery_bind_addr: SocketAddr,
+    pub relay_log_events: bool,
     pub enable_discovery: bool,
     pub enable_passive_host: bool,
     pub enable_client_receiver: bool,
@@ -505,6 +524,12 @@ impl UnifiedRuntimeConfig {
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             discovery_port: remote_core::discovery::DEFAULT_DISCOVERY_PORT,
             enable_mesh: false,
+            relay_endpoint: Some(UnifiedRelayEndpoint::WebSocket(
+                DEFAULT_RELAY_SERVER_URL.to_string(),
+            )),
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
             enable_discovery: true,
             enable_passive_host: true,
             enable_client_receiver: true,
@@ -530,6 +555,21 @@ impl UnifiedRuntimeConfig {
             env_socket_addr("REMOTE_PLAY_CLIENT_BIND_ADDR", config.client_bind_addr)?;
         config.discovery_port = discovery_port_from_env()?;
         config.enable_mesh = env_flag_or(REMOTE_PLAY_MESH_ENV, bundled_mesh_available());
+        config.relay_endpoint = if env_flag_or(REMOTE_PLAY_RELAY_ENV, true) {
+            env_optional_relay_endpoint(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?
+                .or(config.relay_endpoint)
+        } else {
+            None
+        };
+        config.relay_control_bind_addr = env_socket_addr(
+            REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV,
+            config.relay_control_bind_addr,
+        )?;
+        config.relay_discovery_bind_addr = env_socket_addr(
+            REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR_ENV,
+            config.relay_discovery_bind_addr,
+        )?;
+        config.relay_log_events = env_flag_or(REMOTE_PLAY_RELAY_LOG_ENV, false);
         config.enable_discovery = env_flag_or(REMOTE_PLAY_DISCOVERY_ENV, true);
         config.enable_passive_host = env_flag_or("REMOTE_PLAY_PASSIVE_HOST", true);
         config.enable_client_receiver = env_flag_or("REMOTE_PLAY_CLIENT_RECEIVER", true);
@@ -637,7 +677,7 @@ pub async fn start_unified_runtime(
         });
     }
 
-    owner_config.relay = build_unified_relay_config_from_env(&config)?;
+    owner_config.relay = build_unified_relay_config(&config)?;
 
     if config.enable_discovery {
         owner_config.discovery = Some(build_unified_discovery_config(&config, None)?);
@@ -670,6 +710,7 @@ pub async fn start_unified_runtime(
         let host_stats_inner = Arc::new(RwLock::new(HostStats::default()));
 
         owner_config.client_control_sender = Some(client_sender.clone());
+        owner_config.viewing_keepalive = Some(UnifiedViewingKeepaliveConfig::default());
         owner_config.client_session_event_rx = Some(session_event_rx);
         owner_config.side_services = build_client_side_services(&config, client_sender.clone());
         owner_config.client_receiver = Some(ClientSessionReceiverConfig {
@@ -823,21 +864,12 @@ fn build_unified_discovery_config(
     ))
 }
 
-fn build_unified_relay_config_from_env(
+fn build_unified_relay_config(
     config: &UnifiedRuntimeConfig,
 ) -> Result<Option<UnifiedRelayRuntimeConfig>, Box<dyn Error + Send + Sync>> {
-    if !env_flag_or(REMOTE_PLAY_RELAY_ENV, false) {
+    let Some(relay_endpoint) = config.relay_endpoint.clone() else {
         return Ok(None);
-    }
-
-    let relay_endpoint = env_optional_relay_endpoint(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "{REMOTE_PLAY_RELAY_ENV}=1 requires {REMOTE_PLAY_RELAY_SERVER_ADDR_ENV}=<host:port|ws://...|wss://...>"
-            ),
-        )
-    })?;
+    };
     let mesh_store = AppPrivateMeshConfigStore::new(&config.mesh_dir);
     let mesh_config = mesh_store.load_or_generate(&config.display_name)?;
     let mut relay_config = UnifiedRelayRuntimeConfig::from_mesh_secret(
@@ -846,14 +878,8 @@ fn build_unified_relay_config_from_env(
         mesh_config.network_secret.expose_secret(),
         mesh_config.node_id,
     )?;
-    relay_config.control_bind_addr = env_socket_addr(
-        REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV,
-        relay_config.control_bind_addr,
-    )?;
-    relay_config.discovery_bind_addr = env_socket_addr(
-        REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR_ENV,
-        relay_config.discovery_bind_addr,
-    )?;
+    relay_config.control_bind_addr = config.relay_control_bind_addr;
+    relay_config.discovery_bind_addr = config.relay_discovery_bind_addr;
     relay_config.host_control_target_addr = config
         .enable_passive_host
         .then_some(config.host_bind_addr)
@@ -862,7 +888,7 @@ fn build_unified_relay_config_from_env(
         .enable_discovery
         .then_some(SocketAddr::from(([0, 0, 0, 0], config.discovery_port)))
         .and_then(local_udp_target_for_bind);
-    relay_config.log_events = env_flag_or(REMOTE_PLAY_RELAY_LOG_ENV, false);
+    relay_config.log_events = config.relay_log_events;
     Ok(Some(relay_config))
 }
 
@@ -1000,6 +1026,7 @@ pub struct UnifiedServiceOwner {
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
     discovery_snapshot_rx: Option<watch::Receiver<DiscoveryPeerSnapshot>>,
     client_control_sender: Option<UdpSender>,
+    client_input_tx: Option<mpsc::UnboundedSender<(SocketAddr, protocol::InputEvent)>>,
     client_active_session_id: Option<Arc<AtomicU32>>,
     side_services: UnifiedSideServiceControls,
     tasks: Vec<AbortOnDropTask>,
@@ -1107,6 +1134,23 @@ impl UnifiedServiceOwner {
             ));
         }
 
+        if let (Some(keepalive_config), Some(sender)) = (
+            config.viewing_keepalive,
+            config.client_control_sender.clone(),
+        ) {
+            tasks.push(spawn_viewing_keepalive(
+                runtime.clone(),
+                sender,
+                keepalive_config,
+            ));
+        }
+
+        let client_input_tx = config.client_control_sender.clone().map(|sender| {
+            let (input_tx, input_rx) = mpsc::unbounded_channel();
+            tasks.push(spawn_client_input_sender(sender, input_rx));
+            input_tx
+        });
+
         if let Some(reload_config) = config.runtime_reload {
             tasks.push(spawn_unified_runtime_reload_task(
                 runtime.clone(),
@@ -1124,6 +1168,7 @@ impl UnifiedServiceOwner {
             discovery_runtime,
             discovery_snapshot_rx,
             client_control_sender: config.client_control_sender,
+            client_input_tx,
             client_active_session_id,
             side_services: config.side_services,
             tasks,
@@ -1243,6 +1288,20 @@ impl UnifiedServiceOwner {
             .lock()
             .expect("unified runtime lock")
             .mark_viewing_connected(session_id, now_ms)
+    }
+
+    pub fn queue_viewing_input(&self, event: protocol::InputEvent) -> bool {
+        let target = {
+            let runtime = self.runtime.lock().expect("unified runtime lock");
+            match runtime.role_state() {
+                RoleState::Viewing(session) => Some(session.peer.endpoint),
+                RoleState::Idle | RoleState::Connecting(_) | RoleState::Serving(_) => None,
+            }
+        };
+        let (Some(target), Some(input_tx)) = (target, &self.client_input_tx) else {
+            return false;
+        };
+        input_tx.send((target, event)).is_ok()
     }
 
     pub fn expire_timed_out(&self, now_ms: u64) -> Option<RoleChange> {
@@ -1738,6 +1797,50 @@ fn spawn_session_timeout_monitor(
     }))
 }
 
+fn spawn_viewing_keepalive(
+    runtime: Arc<Mutex<UnifiedAppRuntime>>,
+    sender: UdpSender,
+    config: UnifiedViewingKeepaliveConfig,
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::spawn(async move {
+        let interval = if config.interval.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            config.interval
+        };
+        loop {
+            tokio::time::sleep(interval).await;
+            let target = {
+                let runtime = runtime.lock().expect("unified runtime lock");
+                match runtime.role_state() {
+                    RoleState::Connecting(session) | RoleState::Viewing(session) => {
+                        Some(session.peer.endpoint)
+                    }
+                    RoleState::Idle | RoleState::Serving(_) => None,
+                }
+            };
+            if let Some(target) = target {
+                let _ = sender
+                    .send_control(&protocol::ControlMessage::Heartbeat, target)
+                    .await;
+            }
+        }
+    }))
+}
+
+fn spawn_client_input_sender(
+    sender: UdpSender,
+    mut input_rx: mpsc::UnboundedReceiver<(SocketAddr, protocol::InputEvent)>,
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::spawn(async move {
+        while let Some((target, event)) = input_rx.recv().await {
+            let _ = sender
+                .send_control(&protocol::ControlMessage::Input(event), target)
+                .await;
+        }
+    }))
+}
+
 fn apply_client_session_event(
     runtime: &mut UnifiedAppRuntime,
     event: ClientSessionEvent,
@@ -1934,6 +2037,62 @@ mod tests {
     }
 
     #[test]
+    fn app_defaults_enable_the_managed_public_relay_fallback() {
+        let config = UnifiedRuntimeConfig::app_defaults();
+
+        assert!(config.relay_endpoint.is_some());
+        assert_eq!(
+            config.relay_endpoint,
+            Some(UnifiedRelayEndpoint::WebSocket(
+                DEFAULT_RELAY_SERVER_URL.to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn relay_runtime_config_uses_persistent_runtime_settings_without_process_env() {
+        let mesh_dir = temp_mesh_dir("default-relay");
+        let config = UnifiedRuntimeConfig {
+            display_name: "Default Relay".to_string(),
+            mesh_dir: mesh_dir.clone(),
+            host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 8123)),
+            client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            discovery_port: 39118,
+            enable_mesh: false,
+            relay_endpoint: Some(UnifiedRelayEndpoint::WebSocket(
+                DEFAULT_RELAY_SERVER_URL.to_string(),
+            )),
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
+            enable_discovery: true,
+            enable_passive_host: true,
+            enable_client_receiver: true,
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+            enable_viewer_media: false,
+            enable_session_timeout_monitor: false,
+        };
+
+        let relay = build_unified_relay_config(&config)
+            .expect("relay config")
+            .expect("relay should be enabled");
+
+        assert_eq!(relay.endpoint, config.relay_endpoint.unwrap());
+        assert_eq!(
+            relay.host_control_target_addr,
+            Some(SocketAddr::from(([127, 0, 0, 1], 8123)))
+        );
+        assert_eq!(
+            relay.discovery_target_addr,
+            Some(SocketAddr::from(([127, 0, 0, 1], 39118)))
+        );
+
+        let _ = std::fs::remove_dir_all(mesh_dir);
+    }
+
+    #[test]
     fn unified_discovery_config_advertises_dual_role_capabilities() {
         let mesh_dir = temp_mesh_dir("dual-role-discovery");
         let config = UnifiedRuntimeConfig {
@@ -1943,6 +2102,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39117,
             enable_mesh: false,
+            relay_endpoint: None,
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
             enable_discovery: true,
             enable_passive_host: true,
             enable_client_receiver: true,
@@ -1983,6 +2146,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 0,
             enable_mesh: false,
+            relay_endpoint: None,
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
             enable_discovery: false,
             enable_passive_host: true,
             enable_client_receiver: true,
@@ -2012,8 +2179,8 @@ mod tests {
                 .display_name,
             "Unified Runtime Test"
         );
-        assert_eq!(runtime.owner.task_count(), 4);
-        assert_eq!(runtime.background_task_count(), 6);
+        assert_eq!(runtime.owner.task_count(), 6);
+        assert_eq!(runtime.background_task_count(), 8);
 
         let _ = std::fs::remove_dir_all(mesh_dir);
     }
@@ -2048,6 +2215,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39119,
             enable_mesh: false,
+            relay_endpoint: None,
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
             enable_discovery: true,
             enable_passive_host: true,
             enable_client_receiver: true,
@@ -2098,6 +2269,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39120,
             enable_mesh: false,
+            relay_endpoint: None,
+            relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_log_events: false,
             enable_discovery: true,
             enable_passive_host: false,
             enable_client_receiver: false,
@@ -2716,6 +2891,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_keeps_an_idle_viewing_session_alive_without_user_input() {
+        let control = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (control_sender, _control_rx) = control.split();
+        let target = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (_target_sender, target_rx) = target.split();
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
+            client_control_sender: Some(control_sender),
+            viewing_keepalive: Some(UnifiedViewingKeepaliveConfig {
+                interval: Duration::from_millis(20),
+            }),
+            ..UnifiedServiceOwnerConfig::default()
+        })
+        .await
+        .unwrap();
+        owner
+            .runtime()
+            .lock()
+            .expect("runtime lock")
+            .apply_discovery_snapshot(&streamable_peer_snapshot(target_addr));
+
+        let request = owner
+            .connect_device("peer-a", StreamStartOptions::default(), 200)
+            .await
+            .unwrap();
+        let _start_stream = tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        match tokio::time::timeout(Duration::from_millis(200), target_rx.recv())
+            .await
+            .expect("connecting heartbeat should be periodic")
+            .expect("target receiver should remain open")
+        {
+            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat, _) => {}
+            other => panic!("expected Heartbeat while connecting, got {other:?}"),
+        }
+
+        owner
+            .mark_viewing_connected(request.session_id, 240)
+            .expect("session should transition to viewing");
+        match tokio::time::timeout(Duration::from_millis(200), target_rx.recv())
+            .await
+            .expect("viewing heartbeat should be periodic")
+            .expect("target receiver should remain open")
+        {
+            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat, _) => {}
+            other => panic!("expected Heartbeat while viewing, got {other:?}"),
+        }
+
+        owner
+            .runtime()
+            .lock()
+            .expect("runtime lock")
+            .stop_session(request.session_id)
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), target_rx.recv())
+                .await
+                .is_err(),
+            "idle owners must stop sending viewing heartbeats"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_routes_input_only_while_actively_viewing() {
+        let control = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (control_sender, _control_rx) = control.split();
+        let target = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (_target_sender, target_rx) = target.split();
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
+            client_control_sender: Some(control_sender),
+            ..UnifiedServiceOwnerConfig::default()
+        })
+        .await
+        .unwrap();
+        owner
+            .runtime()
+            .lock()
+            .expect("runtime lock")
+            .apply_discovery_snapshot(&streamable_peer_snapshot(target_addr));
+
+        assert!(!owner.queue_viewing_input(protocol::InputEvent::MouseDown(0)));
+        let request = owner
+            .connect_device("peer-a", StreamStartOptions::default(), 200)
+            .await
+            .unwrap();
+        let _start_stream = tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!owner.queue_viewing_input(protocol::InputEvent::MouseDown(0)));
+
+        owner
+            .mark_viewing_connected(request.session_id, 240)
+            .expect("session should transition to viewing");
+        assert!(owner.queue_viewing_input(protocol::InputEvent::MouseMove { dx: 12, dy: -4 }));
+        match tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+            .await
+            .expect("viewing input should arrive")
+            .expect("target receiver should remain open")
+        {
+            MultiplexedPacket::Control(
+                protocol::ControlMessage::Input(protocol::InputEvent::MouseMove { dx, dy }),
+                _,
+            ) => {
+                assert_eq!((dx, dy), (12, -4));
+            }
+            other => panic!("expected mouse input while viewing, got {other:?}"),
+        }
+
+        owner.disconnect_active().await.unwrap();
+        let _stop_stream = tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!owner.queue_viewing_input(protocol::InputEvent::MouseUp(0)));
+    }
+
+    #[tokio::test]
     async fn owner_connect_without_control_sender_does_not_change_role() {
         let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig::default())
             .await
@@ -2856,7 +3153,7 @@ mod tests {
             .unwrap();
 
         wait_for_owner_role(&owner, RoleKind::Idle).await;
-        assert_eq!(owner.task_count(), 1);
+        assert_eq!(owner.task_count(), 2);
     }
 
     #[tokio::test]

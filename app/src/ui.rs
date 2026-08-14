@@ -7,7 +7,10 @@ use crate::{
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use remote_core::mesh::{EasyTierHealthIssue, EasyTierHealthSnapshot, EasyTierHealthState};
+use remote_core::{
+    VideoFrame,
+    mesh::{EasyTierHealthIssue, EasyTierHealthSnapshot, EasyTierHealthState},
+};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,11 +49,12 @@ pub async fn run_unified_gui(
 
         let mut runtime = Some(runtime);
         cx.open_window(window_options, move |_, cx| {
-            let view = cx.new(|_| {
+            let view = cx.new(|cx| {
                 UnifiedDashboard::new(
                     runtime
                         .take()
                         .expect("runtime should be moved into window once"),
+                    cx,
                 )
             });
 
@@ -84,11 +88,15 @@ struct UnifiedDashboard {
     viewer_media_status: UnifiedViewerMediaStatus,
     mesh_pairing: Option<MeshPairingControl>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    pointer_input: PointerInputTracker,
+    input_focus: FocusHandle,
+    video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    input_session_id: Option<u32>,
     status: String,
 }
 
 impl UnifiedDashboard {
-    fn new(runtime: UnifiedRuntimeHandle) -> Self {
+    fn new(runtime: UnifiedRuntimeHandle, cx: &mut Context<Self>) -> Self {
         let app_runtime = runtime.owner.runtime();
         let viewer_frame = runtime.viewer_frame.clone();
         let mesh_health = runtime.owner.mesh_health_rx();
@@ -104,6 +112,10 @@ impl UnifiedDashboard {
             viewer_media_status,
             mesh_pairing,
             mesh_pairing_snapshot,
+            pointer_input: PointerInputTracker::default(),
+            input_focus: cx.focus_handle(),
+            video_surface_bounds: Arc::new(Mutex::new(None)),
+            input_session_id: None,
             status: "Ready".to_string(),
         }
     }
@@ -185,6 +197,309 @@ impl UnifiedDashboard {
         })
         .detach();
     }
+
+    fn sync_input_session(&mut self, role: &RoleState) {
+        let input_session_id = match role {
+            RoleState::Viewing(session) => Some(session.session_id),
+            RoleState::Idle | RoleState::Connecting(_) | RoleState::Serving(_) => None,
+        };
+        if self.input_session_id != input_session_id {
+            self.pointer_input = PointerInputTracker::default();
+            self.input_session_id = input_session_id;
+        }
+    }
+
+    fn queue_pointer_move(&mut self, position: Point<Pixels>) {
+        let Some(frame) = self.current_frame.as_ref() else {
+            return;
+        };
+        let Some(bounds) = *self
+            .video_surface_bounds
+            .lock()
+            .expect("video surface bounds lock")
+        else {
+            return;
+        };
+        if let Some(event) = absolute_pointer_event(
+            (f32::from(position.x), f32::from(position.y)),
+            (
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            ),
+            (frame.width(), frame.height()),
+        ) {
+            self.runtime.owner.queue_viewing_input(event);
+        }
+    }
+
+    fn queue_pointer_button(&self, button: MouseButton, pressed: bool) {
+        let Some(button) = protocol_mouse_button(button) else {
+            return;
+        };
+        let event = if pressed {
+            protocol::InputEvent::MouseDown(button)
+        } else {
+            protocol::InputEvent::MouseUp(button)
+        };
+        self.runtime.owner.queue_viewing_input(event);
+    }
+
+    fn queue_pointer_scroll(&mut self, delta: ScrollDelta) {
+        let delta = delta.pixel_delta(px(40.0));
+        if let Some(event) = self
+            .pointer_input
+            .scrolled((f32::from(delta.x), f32::from(delta.y)))
+        {
+            self.runtime.owner.queue_viewing_input(event);
+        }
+    }
+
+    fn queue_key(&self, keystroke: &Keystroke, pressed: bool) {
+        let Some(event) = protocol_key_event(keystroke, pressed) else {
+            return;
+        };
+        self.runtime.owner.queue_viewing_input(event);
+    }
+
+    fn queue_modifiers(&self, event: &ModifiersChangedEvent) {
+        let mut modifiers = protocol_modifiers(event.modifiers);
+        if event.capslock.on {
+            modifiers |= protocol::input_modifiers::CAPS_LOCK;
+        }
+        self.runtime
+            .owner
+            .queue_viewing_input(protocol::InputEvent::ModifiersChanged(modifiers));
+    }
+}
+
+#[derive(Debug, Default)]
+struct PointerInputTracker {
+    scroll_remainder: (f32, f32),
+}
+
+impl PointerInputTracker {
+    fn reset_pointer(&mut self) {
+        self.scroll_remainder = (0.0, 0.0);
+    }
+
+    fn scrolled(&mut self, delta: (f32, f32)) -> Option<protocol::InputEvent> {
+        if !delta.0.is_finite() || !delta.1.is_finite() {
+            return None;
+        }
+        let accumulated = (
+            delta.0 + self.scroll_remainder.0,
+            delta.1 + self.scroll_remainder.1,
+        );
+        let quantized = quantize_delta(accumulated);
+        self.scroll_remainder = (
+            accumulated.0 - quantized.0 as f32,
+            accumulated.1 - quantized.1 as f32,
+        );
+        if quantized == (0, 0) {
+            None
+        } else {
+            Some(protocol::InputEvent::MouseScroll {
+                delta_x: quantized.0,
+                delta_y: quantized.1,
+            })
+        }
+    }
+}
+
+fn quantize_delta(delta: (f32, f32)) -> (i32, i32) {
+    (
+        delta.0.clamp(i32::MIN as f32, i32::MAX as f32).trunc() as i32,
+        delta.1.clamp(i32::MIN as f32, i32::MAX as f32).trunc() as i32,
+    )
+}
+
+fn absolute_pointer_event(
+    position: (f32, f32),
+    surface: (f32, f32, f32, f32),
+    frame: (u32, u32),
+) -> Option<protocol::InputEvent> {
+    let (surface_x, surface_y, surface_width, surface_height) = surface;
+    let (frame_width, frame_height) = (frame.0 as f32, frame.1 as f32);
+    if !position.0.is_finite()
+        || !position.1.is_finite()
+        || surface_width <= 0.0
+        || surface_height <= 0.0
+        || frame_width <= 0.0
+        || frame_height <= 0.0
+    {
+        return None;
+    }
+
+    let scale = (surface_width / frame_width).min(surface_height / frame_height);
+    let displayed_width = frame_width * scale;
+    let displayed_height = frame_height * scale;
+    let displayed_x = surface_x + (surface_width - displayed_width) * 0.5;
+    let displayed_y = surface_y + (surface_height - displayed_height) * 0.5;
+    if position.0 < displayed_x
+        || position.1 < displayed_y
+        || position.0 > displayed_x + displayed_width
+        || position.1 > displayed_y + displayed_height
+    {
+        return None;
+    }
+
+    let normalized_x = ((position.0 - displayed_x) / displayed_width).clamp(0.0, 1.0);
+    let normalized_y = ((position.1 - displayed_y) / displayed_height).clamp(0.0, 1.0);
+    Some(protocol::InputEvent::MouseMoveAbsolute {
+        x: (normalized_x * f32::from(u16::MAX)).round() as u16,
+        y: (normalized_y * f32::from(u16::MAX)).round() as u16,
+    })
+}
+
+fn protocol_mouse_button(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Right => Some(1),
+        MouseButton::Middle => Some(2),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn protocol_modifiers(modifiers: Modifiers) -> u8 {
+    use protocol::input_modifiers;
+    let mut flags = 0;
+    if modifiers.shift {
+        flags |= input_modifiers::SHIFT;
+    }
+    if modifiers.control {
+        flags |= input_modifiers::CONTROL;
+    }
+    if modifiers.alt {
+        flags |= input_modifiers::ALT;
+    }
+    if modifiers.platform {
+        flags |= input_modifiers::META;
+    }
+    if modifiers.function {
+        flags |= input_modifiers::FUNCTION;
+    }
+    flags
+}
+
+fn protocol_key_event(keystroke: &Keystroke, pressed: bool) -> Option<protocol::InputEvent> {
+    let key_code = macos_key_code(keystroke)?;
+    let mut modifiers = protocol_modifiers(keystroke.modifiers);
+    if is_shifted_macos_symbol(&keystroke.key) {
+        modifiers |= protocol::input_modifiers::SHIFT;
+    }
+    Some(protocol::InputEvent::Key {
+        key_code,
+        pressed,
+        modifiers,
+    })
+}
+
+fn macos_key_code(keystroke: &Keystroke) -> Option<u16> {
+    Some(match keystroke.key.as_str() {
+        "a" => 0x00,
+        "s" => 0x01,
+        "d" => 0x02,
+        "f" => 0x03,
+        "h" => 0x04,
+        "g" => 0x05,
+        "z" => 0x06,
+        "x" => 0x07,
+        "c" => 0x08,
+        "v" => 0x09,
+        "b" => 0x0b,
+        "q" => 0x0c,
+        "w" => 0x0d,
+        "e" => 0x0e,
+        "r" => 0x0f,
+        "y" => 0x10,
+        "t" => 0x11,
+        "1" | "!" => 0x12,
+        "2" | "@" => 0x13,
+        "3" | "#" => 0x14,
+        "4" | "$" => 0x15,
+        "6" | "^" => 0x16,
+        "5" | "%" => 0x17,
+        "=" | "+" => 0x18,
+        "9" | "(" => 0x19,
+        "7" | "&" => 0x1a,
+        "-" | "_" => 0x1b,
+        "8" | "*" => 0x1c,
+        "0" | ")" => 0x1d,
+        "]" | "}" => 0x1e,
+        "o" => 0x1f,
+        "u" => 0x20,
+        "[" | "{" => 0x21,
+        "i" => 0x22,
+        "p" => 0x23,
+        "enter" => 0x24,
+        "l" => 0x25,
+        "j" => 0x26,
+        "'" | "\"" => 0x27,
+        "k" => 0x28,
+        ";" | ":" => 0x29,
+        "\\" | "|" => 0x2a,
+        "," | "<" => 0x2b,
+        "/" | "?" => 0x2c,
+        "n" => 0x2d,
+        "m" => 0x2e,
+        "." | ">" => 0x2f,
+        "tab" => 0x30,
+        "space" => 0x31,
+        "`" | "~" => 0x32,
+        "backspace" => 0x33,
+        "escape" => 0x35,
+        "f1" => 0x7a,
+        "f2" => 0x78,
+        "f3" => 0x63,
+        "f4" => 0x76,
+        "f5" => 0x60,
+        "f6" => 0x61,
+        "f7" => 0x62,
+        "f8" => 0x64,
+        "f9" => 0x65,
+        "f10" => 0x6d,
+        "f11" => 0x67,
+        "f12" => 0x6f,
+        "insert" => 0x72,
+        "home" => 0x73,
+        "pageup" => 0x74,
+        "delete" => 0x75,
+        "end" => 0x77,
+        "pagedown" => 0x79,
+        "left" => 0x7b,
+        "right" => 0x7c,
+        "down" => 0x7d,
+        "up" => 0x7e,
+        _ => return None,
+    })
+}
+
+fn is_shifted_macos_symbol(key: &str) -> bool {
+    matches!(
+        key,
+        "!" | "@"
+            | "#"
+            | "$"
+            | "%"
+            | "^"
+            | "&"
+            | "*"
+            | "("
+            | ")"
+            | "_"
+            | "+"
+            | "{"
+            | "}"
+            | "|"
+            | ":"
+            | "\""
+            | "<"
+            | ">"
+            | "?"
+            | "~"
+    )
 }
 
 struct DashboardSnapshot {
@@ -197,6 +512,7 @@ impl Render for UnifiedDashboard {
         self.drain_latest_frame();
         let snapshot = self.snapshot();
         let role = snapshot.role.clone();
+        self.sync_input_session(&role);
         let active_session = role.session().cloned();
         let mesh_snapshot = self.mesh_snapshot();
         let needs_mesh_admin_setup = mesh_needs_admin_setup(mesh_snapshot.as_ref());
@@ -210,6 +526,25 @@ impl Render for UnifiedDashboard {
             .bg(theme.surface.canvas)
             .text_color(theme.content.primary)
             .font_family(".SystemUIFont")
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.input_session_id.is_some() && this.input_focus.is_focused(window) {
+                    this.queue_key(&event.keystroke, true);
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_key_up(cx.listener(|this, event: &KeyUpEvent, window, cx| {
+                if this.input_session_id.is_some() && this.input_focus.is_focused(window) {
+                    this.queue_key(&event.keystroke, false);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &ModifiersChangedEvent, window, _cx| {
+                    if this.input_session_id.is_some() && this.input_focus.is_focused(window) {
+                        this.queue_modifiers(event);
+                    }
+                },
+            ))
             .child(
                 div()
                     .flex()
@@ -244,6 +579,8 @@ impl Render for UnifiedDashboard {
                                 &role,
                                 active_session.as_ref(),
                                 self.current_frame.as_ref(),
+                                self.input_focus.clone(),
+                                self.video_surface_bounds.clone(),
                                 self.runtime.owner.clone(),
                                 &self.viewer_media_status,
                                 &self.status,
@@ -743,10 +1080,13 @@ fn device_row(
         .child(action)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn session_panel(
     role: &RoleState,
     active_session: Option<&crate::RoleSession>,
     current_frame: Option<&MacDecodedVideoFrame>,
+    input_focus: FocusHandle,
+    video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     owner: Arc<crate::UnifiedServiceOwner>,
     viewer_media_status: &UnifiedViewerMediaStatus,
     status: &str,
@@ -774,7 +1114,13 @@ fn session_panel(
             .min_h_0()
             .gap_4()
             .p_5()
-            .child(session_stage(role, current_frame, cx))
+            .child(session_stage(
+                role,
+                current_frame,
+                input_focus.clone(),
+                video_surface_bounds.clone(),
+                cx,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -835,7 +1181,13 @@ fn session_panel(
             .min_h_0()
             .gap_4()
             .p_5()
-            .child(session_stage(role, None, cx))
+            .child(session_stage(
+                role,
+                None,
+                input_focus,
+                video_surface_bounds,
+                cx,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -961,8 +1313,10 @@ fn panel_header(title: &'static str, detail: &str, cx: &mut Context<UnifiedDashb
 fn session_stage(
     role: &RoleState,
     frame: Option<&MacDecodedVideoFrame>,
+    input_focus: FocusHandle,
+    video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     cx: &mut Context<UnifiedDashboard>,
-) -> Div {
+) -> AnyElement {
     match role {
         RoleState::Viewing(_) | RoleState::Connecting(_) => video_view(
             frame,
@@ -971,18 +1325,24 @@ fn session_stage(
             } else {
                 "Waiting for video"
             },
+            input_focus,
+            video_surface_bounds,
             cx,
         ),
-        RoleState::Serving(session) => serving_stage(&session.peer.display_name, cx),
-        RoleState::Idle => idle_stage(cx),
+        RoleState::Serving(session) => {
+            serving_stage(&session.peer.display_name, cx).into_any_element()
+        }
+        RoleState::Idle => idle_stage(cx).into_any_element(),
     }
 }
 
 fn video_view(
     frame: Option<&MacDecodedVideoFrame>,
     fallback: &'static str,
+    input_focus: FocusHandle,
+    video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     cx: &mut Context<UnifiedDashboard>,
-) -> Div {
+) -> AnyElement {
     let theme = cx.theme();
     let content = if let Some(frame) = frame {
         decoded_video_frame_surface(frame)
@@ -1024,7 +1384,24 @@ fn video_view(
             .into_any_element()
     };
 
+    let input_bounds_probe = canvas(
+        move |bounds, _window, _cx| {
+            *video_surface_bounds
+                .lock()
+                .expect("video surface bounds lock") = Some(bounds);
+        },
+        |_bounds, (), _window, _cx| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .w_full()
+    .h_full();
+
     div()
+        .id("unified_video_input_surface")
+        .track_focus(&input_focus)
+        .relative()
         .w_full()
         .flex_1()
         .min_h(px(280.0))
@@ -1034,7 +1411,51 @@ fn video_view(
         .rounded(px(7.0))
         .overflow_hidden()
         .shadow_sm()
+        .on_hover(cx.listener(|this, hovered: &bool, _window, _cx| {
+            if !hovered {
+                this.pointer_input.reset_pointer();
+            }
+        }))
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
+            this.queue_pointer_move(event.position);
+        }))
+        .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            window.focus(&this.input_focus);
+            this.queue_pointer_move(event.position);
+            this.queue_pointer_button(event.button, true);
+            cx.stop_propagation();
+        }))
+        .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+            this.queue_pointer_button(event.button, false);
+        }))
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                this.queue_pointer_button(MouseButton::Left, false);
+                this.pointer_input.reset_pointer();
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Right,
+            cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                this.queue_pointer_button(MouseButton::Right, false);
+                this.pointer_input.reset_pointer();
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Middle,
+            cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                this.queue_pointer_button(MouseButton::Middle, false);
+                this.pointer_input.reset_pointer();
+            }),
+        )
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+            this.queue_pointer_scroll(event.delta);
+            cx.stop_propagation();
+        }))
         .child(content)
+        .child(input_bounds_probe)
+        .into_any_element()
 }
 
 fn idle_stage(cx: &mut Context<UnifiedDashboard>) -> Div {
@@ -1453,5 +1874,185 @@ fn viewer_media_status_tone(status: &UnifiedViewerMediaStatus) -> StatusTone {
         UnifiedViewerMediaStatus::Disabled | UnifiedViewerMediaStatus::Unavailable { .. } => {
             StatusTone::Neutral
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::{
+        PointerInputTracker, absolute_pointer_event, is_shifted_macos_symbol, macos_key_code,
+        protocol_key_event, protocol_modifiers, protocol_mouse_button,
+    };
+    use gpui::{
+        AppContext, Context, FocusHandle, InteractiveElement, IntoElement, Keystroke, Modifiers,
+        MouseButton, NavigationDirection, ParentElement, Render, Styled, TestAppContext, Window,
+        canvas, div, point, px, size,
+    };
+    use protocol::InputEvent;
+
+    #[test]
+    fn absolute_pointer_mapping_uses_the_contained_video_rect() {
+        let event =
+            absolute_pointer_event((500.0, 350.0), (100.0, 50.0, 800.0, 600.0), (1920, 1080));
+        assert!(matches!(
+            event,
+            Some(InputEvent::MouseMoveAbsolute { x, y })
+                if (32_767..=32_768).contains(&x) && (32_767..=32_768).contains(&y)
+        ));
+
+        assert_eq!(
+            absolute_pointer_event((500.0, 75.0), (100.0, 50.0, 800.0, 600.0), (1920, 1080),),
+            None,
+            "letterbox input must not move the remote pointer",
+        );
+    }
+
+    #[gpui::test]
+    fn input_surface_probe_records_window_coordinates(cx: &mut TestAppContext) {
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let recorded_for_probe = recorded.clone();
+        let cx = cx.add_empty_window();
+
+        cx.draw(
+            point(px(120.0), px(80.0)),
+            size(px(640.0), px(480.0)),
+            move |_window, _cx| {
+                div().relative().w(px(320.0)).h(px(180.0)).child(
+                    canvas(
+                        move |bounds, _window, _cx| {
+                            *recorded_for_probe.lock().expect("probe bounds lock") = Some(bounds);
+                        },
+                        |_bounds, (), _window, _cx| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h_full(),
+                )
+            },
+        );
+
+        let bounds = recorded
+            .lock()
+            .expect("recorded bounds lock")
+            .expect("probe should record bounds");
+        assert_eq!(bounds.origin, point(px(120.0), px(80.0)));
+        assert_eq!(bounds.size, size(px(320.0), px(180.0)));
+    }
+
+    #[gpui::test]
+    fn focused_video_descendant_reaches_root_capture_handler(cx: &mut TestAppContext) {
+        struct KeyboardCaptureView {
+            focus: FocusHandle,
+            captured: bool,
+        }
+
+        impl Render for KeyboardCaptureView {
+            fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .capture_key_down(cx.listener(|this, _event, _window, cx| {
+                        this.captured = true;
+                        cx.stop_propagation();
+                    }))
+                    .child(div().track_focus(&self.focus))
+            }
+        }
+
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_window, cx| {
+                cx.new(|cx| KeyboardCaptureView {
+                    focus: cx.focus_handle(),
+                    captured: false,
+                })
+            })
+            .expect("test window")
+        });
+        window
+            .update(cx, |view, window, _cx| window.focus(&view.focus))
+            .expect("focus video descendant");
+
+        cx.dispatch_keystroke(*window, Keystroke::parse("a").expect("A keystroke"));
+
+        window
+            .update(cx, |view, _window, _cx| assert!(view.captured))
+            .expect("read capture result");
+    }
+
+    #[test]
+    fn precise_scroll_accumulates_subpixel_deltas() {
+        let mut tracker = PointerInputTracker::default();
+        assert_eq!(tracker.scrolled((0.4, -0.4)), None);
+        assert_eq!(tracker.scrolled((0.4, -0.4)), None);
+        assert!(matches!(
+            tracker.scrolled((0.4, -0.4)),
+            Some(InputEvent::MouseScroll {
+                delta_x: 1,
+                delta_y: -1
+            })
+        ));
+    }
+
+    #[test]
+    fn gpui_mouse_buttons_use_the_platform_neutral_protocol_ids() {
+        assert_eq!(protocol_mouse_button(MouseButton::Left), Some(0));
+        assert_eq!(protocol_mouse_button(MouseButton::Right), Some(1));
+        assert_eq!(protocol_mouse_button(MouseButton::Middle), Some(2));
+        assert_eq!(
+            protocol_mouse_button(MouseButton::Navigate(NavigationDirection::Back)),
+            None
+        );
+    }
+
+    #[test]
+    fn gpui_keys_map_to_macos_virtual_key_codes() {
+        let key = |name: &str| Keystroke {
+            key: name.to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(macos_key_code(&key("a")), Some(0x00));
+        assert_eq!(macos_key_code(&key("enter")), Some(0x24));
+        assert_eq!(macos_key_code(&key("left")), Some(0x7b));
+        assert_eq!(macos_key_code(&key("f12")), Some(0x6f));
+        assert_eq!(macos_key_code(&key("!")), Some(0x12));
+        assert!(is_shifted_macos_symbol("!"));
+        assert!(!is_shifted_macos_symbol("1"));
+        assert_eq!(macos_key_code(&key("unsupported-key")), None);
+
+        assert_eq!(
+            protocol_key_event(&key("a"), true),
+            Some(InputEvent::Key {
+                key_code: 0x00,
+                pressed: true,
+                modifiers: 0,
+            })
+        );
+        assert_eq!(
+            protocol_key_event(&key("a"), false),
+            Some(InputEvent::Key {
+                key_code: 0x00,
+                pressed: false,
+                modifiers: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn gpui_modifiers_use_protocol_bit_flags() {
+        let modifiers = Modifiers {
+            shift: true,
+            control: true,
+            alt: true,
+            platform: true,
+            function: false,
+        };
+        assert_eq!(
+            protocol_modifiers(modifiers),
+            protocol::input_modifiers::SHIFT
+                | protocol::input_modifiers::CONTROL
+                | protocol::input_modifiers::ALT
+                | protocol::input_modifiers::META,
+        );
     }
 }

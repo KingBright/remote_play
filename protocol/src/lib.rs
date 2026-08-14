@@ -911,13 +911,39 @@ pub enum ControlMessage {
     Heartbeat,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     KeyDown(u32), // Scancode
     KeyUp(u32),
-    MouseMove { dx: i32, dy: i32 },
+    MouseMove {
+        dx: i32,
+        dy: i32,
+    },
+    MouseMoveAbsolute {
+        x: u16,
+        y: u16,
+    },
+    Key {
+        key_code: u16,
+        pressed: bool,
+        modifiers: u8,
+    },
+    ModifiersChanged(u8),
     MouseDown(u8), // Button ID
     MouseUp(u8),
+    MouseScroll {
+        delta_x: i32,
+        delta_y: i32,
+    },
+}
+
+pub mod input_modifiers {
+    pub const SHIFT: u8 = 1 << 0;
+    pub const CONTROL: u8 = 1 << 1;
+    pub const ALT: u8 = 1 << 2;
+    pub const META: u8 = 1 << 3;
+    pub const FUNCTION: u8 = 1 << 4;
+    pub const CAPS_LOCK: u8 = 1 << 5;
 }
 
 impl RtpPacket {
@@ -1427,8 +1453,22 @@ mod tests {
             ControlMessage::Input(InputEvent::KeyDown(12)),
             ControlMessage::Input(InputEvent::KeyUp(12)),
             ControlMessage::Input(InputEvent::MouseMove { dx: -7, dy: 9 }),
+            ControlMessage::Input(InputEvent::MouseMoveAbsolute {
+                x: 12_345,
+                y: 54_321,
+            }),
+            ControlMessage::Input(InputEvent::Key {
+                key_code: 0x7b,
+                pressed: true,
+                modifiers: input_modifiers::SHIFT | input_modifiers::META,
+            }),
+            ControlMessage::Input(InputEvent::ModifiersChanged(input_modifiers::ALT)),
             ControlMessage::Input(InputEvent::MouseDown(1)),
             ControlMessage::Input(InputEvent::MouseUp(1)),
+            ControlMessage::Input(InputEvent::MouseScroll {
+                delta_x: -11,
+                delta_y: 23,
+            }),
         ];
 
         for case in cases {
@@ -1457,6 +1497,32 @@ mod tests {
                     assert_eq!(dy, expected_dy);
                 }
                 (
+                    ControlMessage::Input(InputEvent::MouseMoveAbsolute {
+                        x: expected_x,
+                        y: expected_y,
+                    }),
+                    ControlMessage::Input(InputEvent::MouseMoveAbsolute { x, y }),
+                ) => assert_eq!((x, y), (expected_x, expected_y)),
+                (
+                    ControlMessage::Input(InputEvent::Key {
+                        key_code: expected_code,
+                        pressed: expected_pressed,
+                        modifiers: expected_modifiers,
+                    }),
+                    ControlMessage::Input(InputEvent::Key {
+                        key_code,
+                        pressed,
+                        modifiers,
+                    }),
+                ) => assert_eq!(
+                    (key_code, pressed, modifiers),
+                    (expected_code, expected_pressed, expected_modifiers),
+                ),
+                (
+                    ControlMessage::Input(InputEvent::ModifiersChanged(expected)),
+                    ControlMessage::Input(InputEvent::ModifiersChanged(actual)),
+                ) => assert_eq!(actual, expected),
+                (
                     ControlMessage::Input(InputEvent::MouseDown(expected)),
                     ControlMessage::Input(InputEvent::MouseDown(actual)),
                 ) => {
@@ -1467,6 +1533,16 @@ mod tests {
                     ControlMessage::Input(InputEvent::MouseUp(actual)),
                 ) => {
                     assert_eq!(actual, expected);
+                }
+                (
+                    ControlMessage::Input(InputEvent::MouseScroll {
+                        delta_x: expected_x,
+                        delta_y: expected_y,
+                    }),
+                    ControlMessage::Input(InputEvent::MouseScroll { delta_x, delta_y }),
+                ) => {
+                    assert_eq!(delta_x, expected_x);
+                    assert_eq!(delta_y, expected_y);
                 }
                 (expected, actual) => {
                     panic!("roundtrip mismatch: expected {expected:?}, got {actual:?}")
