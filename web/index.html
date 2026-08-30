@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>RemotePlay - Ultra-Low-Latency Web Console</title>
+  <link rel="stylesheet" href="./src/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- 1. 100% 满屏远程画面渲染层 -->
+  <div id="viewport-container">
+    <canvas id="remote-canvas"></canvas>
+  </div>
+
+  <!-- 2. 左上角管理触发胶囊 -->
+  <div id="drawer-trigger">
+    <button class="glass-btn">
+      <span class="status-dot"></span>
+      <span>Devices & Mesh (4)</span>
+    </button>
+  </div>
+
+  <!-- 3. 顶部微型悬浮 Dynamic Island -->
+  <div id="floating-island">
+    <span class="status-dot"></span>
+    <span class="island-title" id="island-title">Gaming Rig RTX 4090</span>
+    <span class="telemetry-badge" id="telemetry-badge">120 FPS · 3.8ms</span>
+    
+    <div class="island-divider"></div>
+    
+    <button class="glass-btn active" id="btn-touch-mode">TOUCH</button>
+    <button class="glass-btn" id="btn-mic">MIC</button>
+    <button class="glass-btn active" id="btn-clip">CLIP</button>
+    <button class="glass-btn destructive" id="btn-disconnect">DISCONNECT</button>
+  </div>
+
+  <!-- 4. 底部浮动虚拟修饰键条 (Floating Modifier Bar) -->
+  <div id="modifier-bar">
+    <button class="key-pill" data-key="esc">Esc</button>
+    <button class="key-pill" data-key="ctrl">Ctrl</button>
+    <button class="key-pill" data-key="alt">Alt</button>
+    <button class="key-pill" data-key="win">Win</button>
+    <button class="key-pill" data-key="shift">Shift</button>
+    <button class="key-pill" data-key="tab">Tab</button>
+    <button class="key-pill" data-key="f5">F5</button>
+    <button class="key-pill" data-key="f11">F11</button>
+    <button class="key-pill" data-key="up">▲</button>
+    <button class="key-pill" data-key="down">▼</button>
+    <button class="key-pill" data-key="left">◄</button>
+    <button class="key-pill" data-key="right">►</button>
+  </div>
+
+  <!-- 5. 左侧滑出式多功能管理抽屉 (Slide-over Glass Drawer) -->
+  <div id="drawer-overlay">
+    <div class="drawer-header">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="font-weight: 700; font-size: 14px;">RemotePlay Console</span>
+      </div>
+      <button class="glass-btn" id="close-drawer-btn" style="padding: 4px 8px;">✕</button>
+    </div>
+
+    <div class="drawer-content">
+      <!-- 发现的主机 -->
+      <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); font-family: var(--font-mono);">
+        DISCOVERED HOSTS
+      </div>
+
+      <div class="host-card">
+        <div>
+          <div style="font-weight: 600; font-size: 13px;">Gaming Rig RTX 4090</div>
+          <div style="font-size: 10px; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 2px;">
+            LAN P2P · 4K@120Hz Ready · 3.8ms RTT
+          </div>
+        </div>
+        <button class="cyan-btn">Connect</button>
+      </div>
+
+      <div class="host-card">
+        <div>
+          <div style="font-weight: 600; font-size: 13px;">MacBook Pro M3 Max</div>
+          <div style="font-size: 10px; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 2px;">
+            EasyTier Mesh · Standby
+          </div>
+        </div>
+        <button class="cyan-btn">Connect</button>
+      </div>
+
+      <!-- 5 信道遥测 -->
+      <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 8px;">
+        5-LANE MULTIPLEXED NETWORK
+      </div>
+
+      <div style="background: #16181D; border: 1px solid var(--color-border-fine); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: var(--color-text-primary);">Realtime Video</span>
+          <span style="color: var(--color-accent-cyan); font-family: var(--font-mono); font-weight: 700;">42.5 Mbps</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: var(--color-text-primary);">Realtime Audio (Opus)</span>
+          <span style="color: var(--color-accent-emerald); font-family: var(--font-mono); font-weight: 700;">128 kbps</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: var(--color-text-primary);">Interactive Control</span>
+          <span style="color: #FFB300; font-family: var(--font-mono); font-weight: 700;">64 kbps</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+          <span style="color: var(--color-text-primary);">Reliable File Transfer</span>
+          <span style="color: #B388FF; font-family: var(--font-mono); font-weight: 700;">2.4 Mbps</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/ui.js"></script>
+</body>
+</html>

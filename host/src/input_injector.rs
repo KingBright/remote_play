@@ -96,6 +96,29 @@ impl MacInputInjector {
                     cg_event.post(CGEventTapLocation::HID);
                 }
             }
+            InputEvent::Touch {
+                action,
+                pointer_id: _,
+                normalized_x,
+                normalized_y,
+                pressure: _,
+            } => {
+                let bounds = CGDisplay::main().bounds();
+                let x = (normalized_x.clamp(0.0, 1.0) * bounds.size.width as f32) as u16;
+                let y = (normalized_y.clamp(0.0, 1.0) * bounds.size.height as f32) as u16;
+                let pos = normalized_pointer_location(x, y, bounds);
+                self.post_pointer_move(pos);
+
+                match action {
+                    protocol::TouchAction::Down => {
+                        self.post_mouse_button(1, true);
+                    }
+                    protocol::TouchAction::Move => {}
+                    protocol::TouchAction::Up | protocol::TouchAction::Cancel => {
+                        self.post_mouse_button(1, false);
+                    }
+                }
+            }
         }
     }
 

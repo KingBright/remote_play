@@ -5255,6 +5255,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "remote_client_bridge"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "client",
+ "jni",
+ "js-sys",
+ "protocol",
+ "remote_core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "remote_core"
 version = "0.1.0"
 dependencies = [
@@ -5289,8 +5307,12 @@ dependencies = [
  "client",
  "gpui-ce",
  "host",
+ "objc2 0.6.4",
+ "objc2-app-kit",
  "protocol",
  "remote_core",
+ "serde",
+ "serde_json",
  "tokio",
  "yororen_ui",
 ]

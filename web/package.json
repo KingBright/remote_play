@@ -1,0 +1,13 @@
+{
+  "name": "remote-play-web",
+  "version": "1.0.0",
+  "description": "RemotePlay Ultra-Low-Latency Web Client powered by Rust WASM and WebCodecs",
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 3000 --directory .",
+    "build:wasm": "wasm-pack build ../remote_client_bridge --target web --out-dir ./pkg -- --features wasm"
+  },
+  "keywords": ["remote-play", "webcodecs", "webrtc", "wasm", "gpui"],
+  "author": "RemotePlay Team",
+  "license": "MIT"
+}

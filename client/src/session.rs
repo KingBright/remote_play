@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,9 @@ pub enum ClientSessionEvent {
         encode_latency_ms: f32,
         jitter_ms: f32,
         bitrate_kbps: u32,
+        rtt_ms: f32,
+        e2e_latency_ms: f32,
+        decode_latency_ms: f32,
     },
     MediaReceived {
         session_id: u32,
@@ -63,6 +67,7 @@ pub fn spawn_client_session_receiver(
         let mut media_handler = MediaPacketHandler::new(
             stats,
             active_session_id,
+            host_stats.clone(),
             audio_tx,
             decode_tx,
             session_event_tx.clone(),
@@ -75,28 +80,52 @@ pub fn spawn_client_session_receiver(
                     media_handler.handle(packet, packet_size).await;
                 }
                 Ok(MultiplexedPacket::Control(msg, _addr)) => {
-                    if let protocol::ControlMessage::HostTelemetry {
-                        fps,
-                        encode_latency_ms,
-                        jitter_ms,
-                        bitrate_kbps,
-                    } = msg
-                    {
-                        {
-                            let mut hs = host_stats.write().unwrap();
-                            hs.fps = fps;
-                            hs.latency = encode_latency_ms;
-                            hs.jitter = jitter_ms;
-                            hs.bitrate_kbps = bitrate_kbps;
+                    match msg {
+                        protocol::ControlMessage::Pong {
+                            client_send_ts,
+                            host_recv_ts,
+                            host_send_ts,
+                        } => {
+                            let now_ms = (std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                                & 0xFFFFFFFFFFFFFFFF) as u64;
+                            let rtt = (now_ms.saturating_sub(client_send_ts) as f32).clamp(0.1, 1000.0);
+                            let offset = ((host_recv_ts as f64 - client_send_ts as f64)
+                                + (host_send_ts as f64 - now_ms as f64))
+                                / 2.0;
+
+                            media_handler.update_clock_sync(rtt, offset);
                         }
-                        if let Some(tx) = &session_event_tx {
-                            let _ = tx.send(ClientSessionEvent::HostTelemetry {
-                                fps,
-                                encode_latency_ms,
-                                jitter_ms,
-                                bitrate_kbps,
-                            });
+                        protocol::ControlMessage::HostTelemetry {
+                            fps,
+                            encode_latency_ms,
+                            jitter_ms,
+                            bitrate_kbps,
+                        } => {
+                            let (current_rtt, current_e2e, current_dec) = {
+                                let mut hs = host_stats.write().unwrap();
+                                hs.fps = fps;
+                                hs.latency = encode_latency_ms;
+                                hs.jitter = jitter_ms;
+                                hs.bitrate_kbps = bitrate_kbps;
+                                hs.updated_at = Some(std::time::Instant::now());
+                                (hs.rtt_ms, hs.e2e_latency_ms, hs.decode_latency_ms)
+                            };
+                            if let Some(tx) = &session_event_tx {
+                                let _ = tx.send(ClientSessionEvent::HostTelemetry {
+                                    fps,
+                                    encode_latency_ms,
+                                    jitter_ms,
+                                    bitrate_kbps,
+                                    rtt_ms: current_rtt,
+                                    e2e_latency_ms: current_e2e,
+                                    decode_latency_ms: current_dec,
+                                });
+                            }
                         }
+                        _ => {}
                     }
                 }
                 Ok(MultiplexedPacket::Data(envelope, _addr)) => {
@@ -151,20 +180,30 @@ pub fn spawn_client_session_receiver(
 struct MediaPacketHandler {
     stats_net: Arc<Statistics>,
     receiver_session_id: Arc<AtomicU32>,
+    host_stats: Arc<RwLock<HostStats>>,
     audio_tx: mpsc::Sender<AudioPlayerEvent>,
     decode_tx: mpsc::Sender<(RtpPacket, u32)>,
     session_event_tx: Option<mpsc::UnboundedSender<ClientSessionEvent>>,
     video_jitter_buffer: JitterBuffer,
     video_expected_seq_init: bool,
     last_video_ssrc: u32,
+    last_seq: u16,
+    packets_expected: u64,
+    packets_lost: u64,
+    loss_rate_pct: f32,
+    last_loss_calc: Instant,
     audio_stream_session_id: u32,
     audio_stream_ids: HashSet<u32>,
+    clock_offset_ms: f64,
+    rtt_ms: f32,
+    smooth_e2e_ms: f32,
 }
 
 impl MediaPacketHandler {
     fn new(
         stats_net: Arc<Statistics>,
         receiver_session_id: Arc<AtomicU32>,
+        host_stats: Arc<RwLock<HostStats>>,
         audio_tx: mpsc::Sender<AudioPlayerEvent>,
         decode_tx: mpsc::Sender<(RtpPacket, u32)>,
         session_event_tx: Option<mpsc::UnboundedSender<ClientSessionEvent>>,
@@ -172,14 +211,36 @@ impl MediaPacketHandler {
         Self {
             stats_net,
             receiver_session_id,
+            host_stats,
             audio_tx,
             decode_tx,
             session_event_tx,
             video_jitter_buffer: JitterBuffer::new(0),
             video_expected_seq_init: false,
             last_video_ssrc: 0,
+            last_seq: 0,
+            packets_expected: 0,
+            packets_lost: 0,
+            loss_rate_pct: 0.0,
+            last_loss_calc: Instant::now(),
             audio_stream_session_id: 0,
             audio_stream_ids: HashSet::new(),
+            clock_offset_ms: 0.0,
+            rtt_ms: 0.0,
+            smooth_e2e_ms: 0.0,
+        }
+    }
+
+    pub fn update_clock_sync(&mut self, rtt: f32, offset: f64) {
+        if self.rtt_ms <= 0.01 {
+            self.rtt_ms = rtt;
+            self.clock_offset_ms = offset;
+        } else {
+            self.rtt_ms = self.rtt_ms * 0.8 + rtt * 0.2;
+            self.clock_offset_ms = self.clock_offset_ms * 0.8 + offset * 0.2;
+        }
+        if let Ok(mut hs) = self.host_stats.write() {
+            hs.rtt_ms = self.rtt_ms;
         }
     }
 
@@ -263,6 +324,28 @@ impl MediaPacketHandler {
     }
 
     fn handle_video(&mut self, packet: RtpPacket) {
+        let seq = packet.header.sequence_number;
+        if self.last_seq > 0 {
+            let diff = seq.wrapping_sub(self.last_seq);
+            if diff > 1 && diff < 1000 {
+                self.packets_lost += (diff - 1) as u64;
+            }
+            self.packets_expected += (diff as u64).max(1);
+        }
+        self.last_seq = seq;
+
+        if self.last_loss_calc.elapsed() >= Duration::from_secs(1) {
+            if self.packets_expected > 0 {
+                let rate = (self.packets_lost as f32 / self.packets_expected as f32 * 100.0).clamp(0.0, 100.0);
+                self.loss_rate_pct = self.loss_rate_pct * 0.7 + rate * 0.3;
+            } else {
+                self.loss_rate_pct = 0.0;
+            }
+            self.packets_expected = 0;
+            self.packets_lost = 0;
+            self.last_loss_calc = Instant::now();
+        }
+
         if packet.header.ssrc != self.last_video_ssrc {
             self.last_video_ssrc = packet.header.ssrc;
             self.video_expected_seq_init = false;
@@ -278,10 +361,39 @@ impl MediaPacketHandler {
             .fetch_add(1, Relaxed);
 
         while let Some(ordered_pkt) = self.video_jitter_buffer.pop() {
-            let recv_time = std::time::SystemTime::now()
+            let recv_time = (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u32;
+                .unwrap_or_default()
+                .as_millis()
+                & 0xFFFFFFFF) as u32;
+
+            if self.rtt_ms > 0.0 && ordered_pkt.header.timestamp > 0 {
+                let capture_in_client_time = (ordered_pkt.header.timestamp as f64 - self.clock_offset_ms) as f32;
+                let sample_e2e = (recv_time as f32 - capture_in_client_time + (self.rtt_ms / 2.0)).clamp(0.5, 300.0);
+                if self.smooth_e2e_ms <= 0.01 {
+                    self.smooth_e2e_ms = sample_e2e;
+                } else {
+                    self.smooth_e2e_ms = self.smooth_e2e_ms * 0.9 + sample_e2e * 0.1;
+                }
+            }
+
+            if let Ok(mut hs) = self.host_stats.write() {
+                hs.e2e_latency_ms = self.smooth_e2e_ms;
+                hs.rtt_ms = self.rtt_ms;
+                hs.packet_loss_rate = self.loss_rate_pct;
+                hs.jitter_buffer_depth = self.video_jitter_buffer.len();
+                if self.loss_rate_pct > 3.0 {
+                    hs.link_status = "🟡 网络丢包波动";
+                    hs.last_anomaly_reason = Some(format!("丢包率 {:.1}%", self.loss_rate_pct));
+                } else if self.rtt_ms > 80.0 {
+                    hs.link_status = "🟡 传输延迟偏高";
+                    hs.last_anomaly_reason = Some(format!("网络 RTT {:.1}ms", self.rtt_ms));
+                } else {
+                    hs.link_status = "🟢 流畅极佳";
+                    hs.last_anomaly_reason = None;
+                }
+            }
+
             self.stats_net.video_jitter_buffer_pop.fetch_add(1, Relaxed);
             let _ = self.decode_tx.try_send((ordered_pkt, recv_time));
         }
@@ -314,9 +426,11 @@ mod tests {
     ) -> MediaPacketHandler {
         let (audio_tx, _audio_rx) = mpsc::channel(4);
         let (decode_tx, _decode_rx) = mpsc::channel(4);
+        let host_stats = Arc::new(RwLock::new(HostStats::default()));
         MediaPacketHandler::new(
             Statistics::new(),
             active_session_id,
+            host_stats,
             audio_tx,
             decode_tx,
             Some(session_event_tx),
@@ -367,7 +481,7 @@ mod tests {
             udp_receiver,
             stats: Statistics::new(),
             active_session_id: Arc::new(AtomicU32::new(0)),
-            host_stats,
+            host_stats: host_stats.clone(),
             audio_tx,
             decode_tx,
             clipboard_control: None,
@@ -398,7 +512,14 @@ mod tests {
                 encode_latency_ms: 4.0,
                 jitter_ms: 1.0,
                 bitrate_kbps: 8_000,
+                rtt_ms: 0.0,
+                e2e_latency_ms: 0.0,
+                decode_latency_ms: 0.0,
             }
+        );
+        assert!(
+            host_stats.read().unwrap().updated_at.is_some(),
+            "receiving telemetry must record its local arrival time",
         );
         receiver.abort();
     }

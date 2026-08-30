@@ -64,33 +64,60 @@ unsafe extern "C" {
     static kCMSampleAttachmentKey_NotSync: *const c_void;
 }
 
+#[derive(Clone, Debug)]
+pub struct EncodedChunk {
+    pub nalu: Vec<u8>,
+    pub capture_time_ms: u32,
+    pub encode_cost_ms: f32,
+    pub is_keyframe: bool,
+}
+
+struct FrameContext {
+    capture_time_ms: u32,
+    submit_instant: std::time::Instant,
+}
+
 pub struct MacVideoEncoder {
     session: Option<VTCompressionSessionRef>,
-    _tx: mpsc::Sender<Vec<u8>>,
-    rx: mpsc::Receiver<Vec<u8>>,
-    _tx_box: Box<mpsc::Sender<Vec<u8>>>,
+    _tx: mpsc::Sender<EncodedChunk>,
+    rx: mpsc::Receiver<EncodedChunk>,
+    _tx_box: Box<mpsc::Sender<EncodedChunk>>,
+    force_keyframe: bool,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
 }
 
 extern "C" fn compression_callback(
     output_callback_ref_con: *mut c_void,
-    _source_frame_ref_con: *mut c_void,
+    source_frame_ref_con: *mut c_void,
     status: OSStatus,
     _info_flags: u32,
     sample_buffer: *mut c_void,
 ) {
+    let (capture_time_ms, encode_cost_ms) = if !source_frame_ref_con.is_null() {
+        let ctx = unsafe { Box::from_raw(source_frame_ref_con as *mut FrameContext) };
+        let cost = ctx.submit_instant.elapsed().as_secs_f32() * 1000.0;
+        (ctx.capture_time_ms, cost)
+    } else {
+        (
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                & 0xFFFFFFFF) as u32,
+            2.0,
+        )
+    };
+
     if status != 0 || sample_buffer.is_null() {
-        unsafe {
-            let tx = output_callback_ref_con as *mut mpsc::Sender<Vec<u8>>;
-            let _ = (*tx).try_send(vec![]);
-        }
         return;
     }
 
     unsafe {
         let block_buffer = CMSampleBufferGetDataBuffer(sample_buffer);
         if block_buffer.is_null() {
-            let tx = output_callback_ref_con as *mut mpsc::Sender<Vec<u8>>;
-            let _ = (*tx).try_send(vec![]);
             return;
         }
 
@@ -106,8 +133,6 @@ extern "C" fn compression_callback(
             &mut data_ptr,
         ) != 0
         {
-            let tx = output_callback_ref_con as *mut mpsc::Sender<Vec<u8>>;
-            let _ = (*tx).try_send(vec![]);
             return;
         }
 
@@ -172,34 +197,52 @@ extern "C" fn compression_callback(
         }
 
         if !out_buffer.is_empty() {
-            let tx = output_callback_ref_con as *mut mpsc::Sender<Vec<u8>>;
-            let _ = (*tx).try_send(out_buffer);
+            let tx = output_callback_ref_con as *mut mpsc::Sender<EncodedChunk>;
+            let _ = (*tx).try_send(EncodedChunk {
+                nalu: out_buffer,
+                capture_time_ms,
+                encode_cost_ms,
+                is_keyframe,
+            });
         }
     }
 }
 
 impl MacVideoEncoder {
-    pub fn new(
+    unsafe fn create_session(
         width: u32,
         height: u32,
         fps: u32,
         bitrate_kbps: u32,
-    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = mpsc::channel(60);
-        let tx_box = Box::new(tx.clone());
-        let ref_con = Box::into_raw(tx_box.clone()) as *mut c_void;
-
+        ref_con: *mut c_void,
+    ) -> Result<VTCompressionSessionRef, Box<dyn Error + Send + Sync>> {
         let mut session: VTCompressionSessionRef = std::ptr::null_mut();
-
         let hevc_codec_type = 0x68766331; // 'hvc1'
+
+        let hw_key = CFString::from_static_string("RequireHardwareAcceleratedVideoEncoder");
+        let encoder_spec = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
+            hw_key.as_CFType(),
+            CFBoolean::true_value().as_CFType(),
+        )]);
+
+        // Zero-copy IOSurface and Metal memory buffer specification
+        let io_surface_dict: core_foundation::dictionary::CFDictionary<CFString, CFBoolean> =
+            core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[]);
+        let io_surface_key = CFString::from_static_string("IOSurfaceProperties");
+        let metal_key = CFString::from_static_string("MetalCompatibility");
+        let source_attributes = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[
+            (io_surface_key.as_CFType(), io_surface_dict.as_CFType()),
+            (metal_key.as_CFType(), CFBoolean::true_value().as_CFType()),
+        ]);
+
         let status = unsafe {
             VTCompressionSessionCreate(
                 std::ptr::null_mut(),
                 width as i32,
                 height as i32,
                 hevc_codec_type,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                encoder_spec.as_concrete_TypeRef() as _,
+                source_attributes.as_concrete_TypeRef() as _,
                 std::ptr::null_mut(),
                 compression_callback,
                 ref_con,
@@ -216,7 +259,7 @@ impl MacVideoEncoder {
                 CFString::wrap_under_get_rule(kVTCompressionPropertyKey_ProfileLevel as _);
             let profile_value =
                 CFString::wrap_under_get_rule(kVTProfileLevel_HEVC_Main_AutoLevel as _);
-            VTSessionSetProperty(
+            let _ = VTSessionSetProperty(
                 session,
                 profile_key.as_concrete_TypeRef() as _,
                 profile_value.as_concrete_TypeRef() as _,
@@ -224,7 +267,7 @@ impl MacVideoEncoder {
 
             let realtime_key =
                 CFString::wrap_under_get_rule(kVTCompressionPropertyKey_RealTime as _);
-            VTSessionSetProperty(
+            let _ = VTSessionSetProperty(
                 session,
                 realtime_key.as_concrete_TypeRef() as _,
                 CFBoolean::true_value().as_concrete_TypeRef() as _,
@@ -232,9 +275,40 @@ impl MacVideoEncoder {
 
             let reordering_key =
                 CFString::wrap_under_get_rule(kVTCompressionPropertyKey_AllowFrameReordering as _);
-            VTSessionSetProperty(
+            let _ = VTSessionSetProperty(
                 session,
                 reordering_key.as_concrete_TypeRef() as _,
+                CFBoolean::false_value().as_concrete_TypeRef() as _,
+            );
+
+            // Zero internal frame delay count: force immediate emission of compressed frame
+            let max_delay_key = CFString::from_static_string("MaxFrameDelayCount");
+            let max_delay_val = CFNumber::from(0_i32);
+            let _ = VTSessionSetProperty(
+                session,
+                max_delay_key.as_concrete_TypeRef() as _,
+                max_delay_val.as_concrete_TypeRef() as _,
+            );
+
+            let temp_comp_key = CFString::from_static_string("AllowTemporalCompression");
+            let _ = VTSessionSetProperty(
+                session,
+                temp_comp_key.as_concrete_TypeRef() as _,
+                CFBoolean::true_value().as_concrete_TypeRef() as _,
+            );
+
+            // Prioritize encoding speed over quality for ultra-low latency gaming
+            let speed_key = CFString::from_static_string("PrioritizeEncodingSpeedOverQuality");
+            let _ = VTSessionSetProperty(
+                session,
+                speed_key.as_concrete_TypeRef() as _,
+                CFBoolean::true_value().as_concrete_TypeRef() as _,
+            );
+
+            let power_key = CFString::from_static_string("MaximizePowerEfficiency");
+            let _ = VTSessionSetProperty(
+                session,
+                power_key.as_concrete_TypeRef() as _,
                 CFBoolean::false_value().as_concrete_TypeRef() as _,
             );
 
@@ -243,56 +317,158 @@ impl MacVideoEncoder {
             let bitrate_key =
                 CFString::wrap_under_get_rule(kVTCompressionPropertyKey_AverageBitRate as _);
             let bitrate_value = CFNumber::from(final_bitrate);
-            VTSessionSetProperty(
+            let _ = VTSessionSetProperty(
                 session,
                 bitrate_key.as_concrete_TypeRef() as _,
                 bitrate_value.as_concrete_TypeRef() as _,
             );
 
-            let keyframe_key =
-                CFString::wrap_under_get_rule(kVTCompressionPropertyKey_MaxKeyFrameInterval as _);
-            let keyframe_value = CFNumber::from(fps as i32);
-            VTSessionSetProperty(
+            // Fast single-pass CBR rate limit (eliminates multi-pass RDO lag)
+            let bytes_per_sec = (final_bitrate / 8) as i32;
+            let one_sec = 1_i32;
+            let num_bytes = CFNumber::from(bytes_per_sec);
+            let num_sec = CFNumber::from(one_sec);
+            let limit_array = core_foundation::array::CFArray::from_CFTypes(&[
+                num_bytes.as_CFType(),
+                num_sec.as_CFType(),
+            ]);
+            let data_rate_limits_key = CFString::from_static_string("DataRateLimits");
+            let _ = VTSessionSetProperty(
                 session,
-                keyframe_key.as_concrete_TypeRef() as _,
-                keyframe_value.as_concrete_TypeRef() as _,
-            );
-
-            let keyframe_dur_key = CFString::wrap_under_get_rule(
-                kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as _,
-            );
-            let keyframe_dur_value = CFNumber::from(1.0f64);
-            VTSessionSetProperty(
-                session,
-                keyframe_dur_key.as_concrete_TypeRef() as _,
-                keyframe_dur_value.as_concrete_TypeRef() as _,
+                data_rate_limits_key.as_concrete_TypeRef() as _,
+                limit_array.as_concrete_TypeRef() as _,
             );
 
             let fps_key =
                 CFString::wrap_under_get_rule(kVTCompressionPropertyKey_ExpectedFrameRate as _);
-            let fps_value = CFNumber::from(fps as f64);
-            VTSessionSetProperty(
+            let fps_value = CFNumber::from(fps as i32);
+            let _ = VTSessionSetProperty(
                 session,
                 fps_key.as_concrete_TypeRef() as _,
                 fps_value.as_concrete_TypeRef() as _,
             );
 
-            let hw_key = CFString::wrap_under_get_rule(
-                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as _,
+            // Steady keyframe interval (10s) to eliminate periodic network bursts
+            let keyframe_interval_key = CFString::wrap_under_get_rule(
+                kVTCompressionPropertyKey_MaxKeyFrameInterval as _,
             );
-            VTSessionSetProperty(
+            let keyframe_interval_value = CFNumber::from((fps * 10) as i32);
+            let _ = VTSessionSetProperty(
                 session,
-                hw_key.as_concrete_TypeRef() as _,
-                CFBoolean::true_value().as_concrete_TypeRef() as _,
+                keyframe_interval_key.as_concrete_TypeRef() as _,
+                keyframe_interval_value.as_concrete_TypeRef() as _,
+            );
+
+            let keyframe_duration_key = CFString::wrap_under_get_rule(
+                kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as _,
+            );
+            let keyframe_duration_value = CFNumber::from(10 as i32);
+            let _ = VTSessionSetProperty(
+                session,
+                keyframe_duration_key.as_concrete_TypeRef() as _,
+                keyframe_duration_value.as_concrete_TypeRef() as _,
             );
         }
+
+        Ok(session)
+    }
+
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = mpsc::channel(60);
+        let tx_box = Box::new(tx.clone());
+        let ref_con = Box::into_raw(tx_box.clone()) as *mut c_void;
+
+        let session = unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con)? };
 
         Ok(Self {
             session: Some(session),
             _tx: tx,
             rx,
             _tx_box: tx_box,
+            force_keyframe: true,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
         })
+    }
+
+    pub fn request_keyframe(&mut self) {
+        self.force_keyframe = true;
+    }
+
+    pub fn update_settings(&mut self, width: u32, height: u32, fps: u32, bitrate_kbps: u32) {
+        if self.width == width && self.height == height {
+            self.fps = fps;
+            self.bitrate_kbps = bitrate_kbps;
+            if let Some(session) = self.session {
+                unsafe {
+                    let final_bitrate = (bitrate_kbps as i64) * 1000;
+                    let bitrate_key =
+                        CFString::wrap_under_get_rule(kVTCompressionPropertyKey_AverageBitRate as _);
+                    let bitrate_value = CFNumber::from(final_bitrate);
+                    let _ = VTSessionSetProperty(
+                        session,
+                        bitrate_key.as_concrete_TypeRef() as _,
+                        bitrate_value.as_concrete_TypeRef() as _,
+                    );
+
+                    let bytes_per_sec = (final_bitrate / 8) as i32;
+                    let one_sec = 1_i32;
+                    let num_bytes = CFNumber::from(bytes_per_sec);
+                    let num_sec = CFNumber::from(one_sec);
+                    let limit_array = core_foundation::array::CFArray::from_CFTypes(&[
+                        num_bytes.as_CFType(),
+                        num_sec.as_CFType(),
+                    ]);
+                    let data_rate_limits_key = CFString::from_static_string("DataRateLimits");
+                    let _ = VTSessionSetProperty(
+                        session,
+                        data_rate_limits_key.as_concrete_TypeRef() as _,
+                        limit_array.as_concrete_TypeRef() as _,
+                    );
+
+                    let fps_key =
+                        CFString::wrap_under_get_rule(kVTCompressionPropertyKey_ExpectedFrameRate as _);
+                    let fps_value = CFNumber::from(fps as i32);
+                    let _ = VTSessionSetProperty(
+                        session,
+                        fps_key.as_concrete_TypeRef() as _,
+                        fps_value.as_concrete_TypeRef() as _,
+                    );
+                }
+            }
+        } else {
+            // Recreate session for new resolution and trigger mandatory IDR KeyFrame
+            if let Some(old_session) = self.session.take() {
+                unsafe {
+                    VTCompressionSessionInvalidate(old_session);
+                    CFRelease(old_session as _);
+                }
+            }
+            let ref_con = self._tx_box.as_mut() as *mut _ as *mut c_void;
+            if let Ok(new_session) = unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con) } {
+                self.session = Some(new_session);
+                self.width = width;
+                self.height = height;
+                self.fps = fps;
+                self.bitrate_kbps = bitrate_kbps;
+                self.force_keyframe = true;
+            }
+        }
+    }
+
+    pub async fn pull_encoded_chunk(&mut self) -> Result<EncodedChunk, Box<dyn Error + Send + Sync>> {
+        if let Some(chunk) = self.rx.recv().await {
+            Ok(chunk)
+        } else {
+            Err("Encoder channel closed".into())
+        }
     }
 }
 
@@ -316,6 +492,28 @@ impl VideoEncoder for MacVideoEncoder {
 
         let session = self.session.unwrap();
 
+        let ctx = Box::new(FrameContext {
+            capture_time_ms: frame.capture_time_ms,
+            submit_instant: std::time::Instant::now(),
+        });
+        let source_frame_ref_con = Box::into_raw(ctx) as *mut c_void;
+
+        let frame_props_dict = if self.force_keyframe {
+            self.force_keyframe = false;
+            let force_key = CFString::from_static_string("ForceKeyFrame");
+            let dict = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
+                force_key.as_CFType(),
+                CFBoolean::true_value().as_CFType(),
+            )]);
+            Some(dict)
+        } else {
+            None
+        };
+        let frame_props = frame_props_dict
+            .as_ref()
+            .map(|d| d.as_concrete_TypeRef() as _)
+            .unwrap_or(std::ptr::null());
+
         unsafe {
             let pts_sys = core_media_sys::CMTime {
                 value: pts.value,
@@ -336,12 +534,14 @@ impl VideoEncoder for MacVideoEncoder {
                 cv_pixel_buffer.as_ptr() as _,
                 pts_sys,
                 dur_sys,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                frame_props,
+                source_frame_ref_con,
                 &mut info_flags_out,
             );
 
             if status != 0 {
+                // If encode failed, reclaim ctx to prevent memory leak
+                let _ = Box::from_raw(source_frame_ref_con as *mut FrameContext);
                 return Err(format!("Encode failed: {}", status).into());
             }
         }
@@ -350,11 +550,8 @@ impl VideoEncoder for MacVideoEncoder {
     }
 
     async fn pull_encoded(&mut self) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
-        if let Some(encoded_data) = self.rx.recv().await {
-            Ok(encoded_data)
-        } else {
-            Err("Encoder channel closed".into())
-        }
+        let chunk = self.pull_encoded_chunk().await?;
+        Ok(chunk.nalu)
     }
 }
 
@@ -375,5 +572,32 @@ impl Drop for MacVideoEncoder {
                 CFRelease(session);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dynamic_encoder_resolution_and_bitrate_switch() {
+        let mut encoder = MacVideoEncoder::new(1920, 1080, 60, 20_000).expect("create encoder");
+        assert_eq!(encoder.width, 1920);
+        assert_eq!(encoder.height, 1080);
+        assert_eq!(encoder.fps, 60);
+        assert_eq!(encoder.bitrate_kbps, 20_000);
+
+        // Dynamic bitrate and fps switch
+        encoder.update_settings(1920, 1080, 30, 5_000);
+        assert_eq!(encoder.fps, 30);
+        assert_eq!(encoder.bitrate_kbps, 5_000);
+
+        // Dynamic resolution switch (720p)
+        encoder.update_settings(1280, 720, 60, 10_000);
+        assert_eq!(encoder.width, 1280);
+        assert_eq!(encoder.height, 720);
+        assert_eq!(encoder.fps, 60);
+        assert_eq!(encoder.bitrate_kbps, 10_000);
+        assert!(encoder.force_keyframe);
     }
 }

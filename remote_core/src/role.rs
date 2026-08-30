@@ -3,7 +3,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 pub const DEFAULT_CONNECTING_TIMEOUT_MS: u64 = 10_000;
-pub const DEFAULT_SESSION_TIMEOUT_MS: u64 = 3_000;
+pub const DEFAULT_SESSION_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolePeer {

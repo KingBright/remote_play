@@ -6,5 +6,6 @@ members = [
     "protocol",
     "remote_platform",
     "app",
+    "remote_client_bridge",
 ]
 resolver = "2"

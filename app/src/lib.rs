@@ -1,5 +1,6 @@
 mod design_system;
 mod mesh_admin;
+pub mod preferences;
 mod ui;
 
 use remote_core::discovery::{
@@ -31,7 +32,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, RwLock,
-    atomic::{AtomicU32, Ordering::Relaxed},
+    atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -41,7 +42,8 @@ pub use client::{
     ClientMediaRuntime, ClientMediaRuntimeStatus, ClientSessionEvent, ClientSessionReceiverConfig,
     ClipboardRuntimeControl, FileTransferRuntimeControl, HostStats, MacDecodedVideoFrame,
     MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot, TalkbackRuntimeControl,
-    decoded_video_frame_surface, spawn_client_session_receiver, start_clipboard_runtime_control,
+    decoded_video_frame_surface, decoded_video_frame_surface_with_fit,
+    spawn_client_session_receiver, start_clipboard_runtime_control,
     start_file_transfer_runtime_control, start_talkback_runtime_control,
 };
 pub use host::{HostServiceConfig, run_host_service};
@@ -105,11 +107,12 @@ pub struct StreamStartOptions {
 
 impl Default for StreamStartOptions {
     fn default() -> Self {
+        let prefs = crate::preferences::UserPreferences::load_or_default();
         Self {
-            width: 1920,
-            height: 1080,
-            fps: 60,
-            bitrate_kbps: 8_000,
+            width: prefs.stream.width,
+            height: prefs.stream.height,
+            fps: prefs.stream.fps,
+            bitrate_kbps: prefs.stream.bitrate_kbps,
         }
     }
 }
@@ -377,29 +380,145 @@ pub struct UnifiedViewingKeepaliveConfig {
 impl Default for UnifiedViewingKeepaliveConfig {
     fn default() -> Self {
         Self {
-            interval: Duration::from_secs(1),
+            interval: Duration::from_millis(500),
         }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
+struct UnifiedSideServicePreferences {
+    clipboard_sync: AtomicBool,
+    file_transfer: AtomicBool,
+    talkback: AtomicBool,
+}
+
+#[derive(Clone)]
 pub struct UnifiedSideServiceControls {
     pub clipboard: Option<ClipboardRuntimeControl>,
     pub file_transfer: Option<FileTransferRuntimeControl>,
     pub talkback: Option<TalkbackRuntimeControl>,
+    preferences: Arc<UnifiedSideServicePreferences>,
+}
+
+impl Default for UnifiedSideServiceControls {
+    fn default() -> Self {
+        Self::new(None, None, None)
+    }
 }
 
 impl UnifiedSideServiceControls {
+    fn new(
+        clipboard: Option<ClipboardRuntimeControl>,
+        file_transfer: Option<FileTransferRuntimeControl>,
+        talkback: Option<TalkbackRuntimeControl>,
+    ) -> Self {
+        let preferences = UnifiedSideServicePreferences {
+            clipboard_sync: AtomicBool::new(clipboard.is_some()),
+            file_transfer: AtomicBool::new(file_transfer.is_some()),
+            talkback: AtomicBool::new(talkback.is_some()),
+        };
+        Self {
+            clipboard,
+            file_transfer,
+            talkback,
+            preferences: Arc::new(preferences),
+        }
+    }
+
+    fn supports_clipboard_sync(&self) -> bool {
+        self.clipboard.is_some()
+    }
+
+    fn supports_file_transfer(&self) -> bool {
+        self.file_transfer.is_some()
+    }
+
+    fn supports_talkback(&self) -> bool {
+        self.talkback.is_some()
+    }
+
+    fn clipboard_sync_enabled(&self) -> bool {
+        self.supports_clipboard_sync() && self.preferences.clipboard_sync.load(Relaxed)
+    }
+
+    fn file_transfer_enabled(&self) -> bool {
+        self.supports_file_transfer() && self.preferences.file_transfer.load(Relaxed)
+    }
+
+    fn talkback_enabled(&self) -> bool {
+        self.supports_talkback() && self.preferences.talkback.load(Relaxed)
+    }
+
     fn start_for_viewing(&self, target: SocketAddr, session_id: u32) {
-        if let Some(control) = &self.clipboard {
+        if self.clipboard_sync_enabled()
+            && let Some(control) = &self.clipboard
+        {
             control.start(target);
         }
-        if let Some(control) = &self.file_transfer {
+        if self.file_transfer_enabled()
+            && let Some(control) = &self.file_transfer
+        {
             control.start(target);
         }
-        if let Some(control) = &self.talkback {
+        if self.talkback_enabled()
+            && let Some(control) = &self.talkback
+        {
             control.start(target, session_id);
         }
+    }
+
+    fn set_clipboard_sync_enabled(&self, enabled: bool, target: Option<SocketAddr>) -> bool {
+        let Some(control) = &self.clipboard else {
+            return false;
+        };
+        self.preferences.clipboard_sync.store(enabled, Relaxed);
+        let mut prefs = crate::preferences::UserPreferences::load_or_default();
+        prefs.side_services.clipboard_sync = enabled;
+        let _ = prefs.save();
+        if enabled {
+            if let Some(target) = target {
+                control.start(target);
+            }
+        } else {
+            control.stop();
+        }
+        true
+    }
+
+    fn set_file_transfer_enabled(&self, enabled: bool, target: Option<SocketAddr>) -> bool {
+        let Some(control) = &self.file_transfer else {
+            return false;
+        };
+        self.preferences.file_transfer.store(enabled, Relaxed);
+        let mut prefs = crate::preferences::UserPreferences::load_or_default();
+        prefs.side_services.file_transfer = enabled;
+        let _ = prefs.save();
+        if enabled {
+            if let Some(target) = target {
+                control.start(target);
+            }
+        } else {
+            control.stop();
+        }
+        true
+    }
+
+    fn set_talkback_enabled(&self, enabled: bool, session: Option<(SocketAddr, u32)>) -> bool {
+        let Some(control) = &self.talkback else {
+            return false;
+        };
+        self.preferences.talkback.store(enabled, Relaxed);
+        let mut prefs = crate::preferences::UserPreferences::load_or_default();
+        prefs.side_services.talkback = enabled;
+        let _ = prefs.save();
+        if enabled {
+            if let Some((target, session_id)) = session {
+                control.start(target, session_id);
+            }
+        } else {
+            control.stop();
+        }
+        true
     }
 
     fn stop_all(&self) {
@@ -813,17 +932,17 @@ fn build_client_side_services(
     config: &UnifiedRuntimeConfig,
     client_sender: UdpSender,
 ) -> UnifiedSideServiceControls {
-    UnifiedSideServiceControls {
-        clipboard: config
+    UnifiedSideServiceControls::new(
+        config
             .enable_clipboard_sync
             .then(|| start_clipboard_runtime_control(client_sender.clone())),
-        file_transfer: config
+        config
             .enable_file_transfer
             .then(|| start_file_transfer_runtime_control(client_sender.clone())),
-        talkback: config
+        config
             .enable_talkback
             .then(|| start_talkback_runtime_control(client_sender)),
-    }
+    )
 }
 
 fn build_unified_discovery_config(
@@ -1279,6 +1398,39 @@ impl UnifiedServiceOwner {
         Ok(request)
     }
 
+    pub async fn update_stream_settings(
+        &self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> Result<(), UnifiedAppError> {
+        let (target, session_id) = {
+            let runtime = self.runtime.lock().expect("unified runtime lock");
+            match runtime.role_state() {
+                RoleState::Viewing(session) | RoleState::Connecting(session) => {
+                    (session.peer.endpoint, session.session_id)
+                }
+                _ => return Err(UnifiedAppError::Role(RoleStateError::NoActiveSession)),
+            }
+        };
+        let Some(sender) = &self.client_control_sender else {
+            return Err(UnifiedAppError::NoClientControlSender);
+        };
+        let msg = protocol::ControlMessage::UpdateStreamSettings {
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+            session_id,
+        };
+        sender
+            .send_control(&msg, target)
+            .await
+            .map_err(|err| UnifiedAppError::ControlSend(err.to_string()))?;
+        Ok(())
+    }
+
     pub fn mark_viewing_connected(
         &self,
         session_id: u32,
@@ -1302,6 +1454,58 @@ impl UnifiedServiceOwner {
             return false;
         };
         input_tx.send((target, event)).is_ok()
+    }
+
+    pub fn supports_clipboard_sync(&self) -> bool {
+        self.side_services.supports_clipboard_sync()
+    }
+
+    pub fn supports_file_transfer(&self) -> bool {
+        self.side_services.supports_file_transfer()
+    }
+
+    pub fn supports_talkback(&self) -> bool {
+        self.side_services.supports_talkback()
+    }
+
+    pub fn clipboard_sync_enabled(&self) -> bool {
+        self.side_services.clipboard_sync_enabled()
+    }
+
+    pub fn file_transfer_enabled(&self) -> bool {
+        self.side_services.file_transfer_enabled()
+    }
+
+    pub fn talkback_enabled(&self) -> bool {
+        self.side_services.talkback_enabled()
+    }
+
+    pub fn set_clipboard_sync_enabled(&self, enabled: bool) -> bool {
+        self.side_services.set_clipboard_sync_enabled(
+            enabled,
+            self.client_side_session().map(|s| s.peer.endpoint),
+        )
+    }
+
+    pub fn set_file_transfer_enabled(&self, enabled: bool) -> bool {
+        self.side_services
+            .set_file_transfer_enabled(enabled, self.client_side_session().map(|s| s.peer.endpoint))
+    }
+
+    pub fn set_talkback_enabled(&self, enabled: bool) -> bool {
+        self.side_services.set_talkback_enabled(
+            enabled,
+            self.client_side_session()
+                .map(|s| (s.peer.endpoint, s.session_id)),
+        )
+    }
+
+    fn client_side_session(&self) -> Option<RoleSession> {
+        let runtime = self.runtime.lock().expect("unified runtime lock");
+        match runtime.role_state() {
+            RoleState::Connecting(session) | RoleState::Viewing(session) => Some(session.clone()),
+            RoleState::Idle | RoleState::Serving(_) => None,
+        }
     }
 
     pub fn expire_timed_out(&self, now_ms: u64) -> Option<RoleChange> {
@@ -1822,6 +2026,14 @@ fn spawn_viewing_keepalive(
             if let Some(target) = target {
                 let _ = sender
                     .send_control(&protocol::ControlMessage::Heartbeat, target)
+                    .await;
+                let now_ms = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    & 0xFFFFFFFFFFFFFFFF) as u64;
+                let _ = sender
+                    .send_control(&protocol::ControlMessage::Ping { client_send_ts: now_ms }, target)
                     .await;
             }
         }
@@ -2926,8 +3138,8 @@ mod tests {
             .expect("connecting heartbeat should be periodic")
             .expect("target receiver should remain open")
         {
-            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat, _) => {}
-            other => panic!("expected Heartbeat while connecting, got {other:?}"),
+            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. }, _) => {}
+            other => panic!("expected Heartbeat or Ping while connecting, got {other:?}"),
         }
 
         owner
@@ -2938,8 +3150,8 @@ mod tests {
             .expect("viewing heartbeat should be periodic")
             .expect("target receiver should remain open")
         {
-            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat, _) => {}
-            other => panic!("expected Heartbeat while viewing, got {other:?}"),
+            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. }, _) => {}
+            other => panic!("expected Heartbeat or Ping while viewing, got {other:?}"),
         }
 
         owner
@@ -3010,6 +3222,48 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!owner.queue_viewing_input(protocol::InputEvent::MouseUp(0)));
+    }
+
+    #[tokio::test]
+    async fn owner_exposes_and_persists_side_service_preferences() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let mut runtime_config = UnifiedRuntimeConfig::app_defaults();
+        runtime_config.enable_clipboard_sync = true;
+        runtime_config.enable_file_transfer = true;
+        runtime_config.enable_talkback = true;
+        let side_services = build_client_side_services(&runtime_config, sender);
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
+            side_services,
+            ..UnifiedServiceOwnerConfig::default()
+        })
+        .await
+        .unwrap();
+
+        assert!(owner.supports_clipboard_sync());
+        assert!(owner.supports_file_transfer());
+        assert!(owner.supports_talkback());
+        assert!(owner.clipboard_sync_enabled());
+        assert!(owner.file_transfer_enabled());
+        assert!(owner.talkback_enabled());
+
+        assert!(owner.set_clipboard_sync_enabled(false));
+        assert!(owner.set_file_transfer_enabled(false));
+        assert!(owner.set_talkback_enabled(false));
+        assert!(!owner.clipboard_sync_enabled());
+        assert!(!owner.file_transfer_enabled());
+        assert!(!owner.talkback_enabled());
+    }
+
+    #[tokio::test]
+    async fn unavailable_side_services_cannot_be_enabled() {
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig::default())
+            .await
+            .unwrap();
+
+        assert!(!owner.supports_clipboard_sync());
+        assert!(!owner.set_clipboard_sync_enabled(true));
+        assert!(!owner.clipboard_sync_enabled());
     }
 
     #[tokio::test]
@@ -3227,6 +3481,9 @@ mod tests {
                 encode_latency_ms: 4.0,
                 jitter_ms: 1.0,
                 bitrate_kbps: 8_000,
+                rtt_ms: 0.0,
+                e2e_latency_ms: 0.0,
+                decode_latency_ms: 0.0,
             })
             .unwrap();
 

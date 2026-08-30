@@ -5,6 +5,8 @@ mod audio_encode;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "macos")]
+mod display_power;
+#[cfg(target_os = "macos")]
 mod input_injector;
 #[allow(dead_code)]
 mod sender;
@@ -18,7 +20,6 @@ use protocol::{
     AudioSource, AudioStreamConfig, DataEnvelope, RtpPacket, remote_microphone_audio_stream_id,
     remote_system_audio_stream_id,
 };
-use remote_core::clipboard_file_runtime::{ClipboardFileSyncConfig, run_clipboard_file_sync};
 use remote_core::clipboard_runtime::{ClipboardSyncRunnerConfig, run_clipboard_sync};
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
@@ -388,6 +389,14 @@ fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamSettings {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
 #[cfg(target_os = "macos")]
 struct StreamingRunConfig {
     session_id: u32,
@@ -403,6 +412,7 @@ struct StreamingRunConfig {
     file_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
     talkback_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
     talkback_settings_rx: Option<watch::Receiver<crate::talkback_player::TalkbackPlaybackSettings>>,
+    stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     host_send_file: Option<PathBuf>,
 }
 
@@ -755,8 +765,11 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         file_inbound_rx,
         talkback_inbound_rx,
         talkback_settings_rx,
+        mut stream_settings_rx,
         host_send_file,
     } = config;
+
+    let _display_power = display_power::DisplayPowerGuard::activate();
 
     // 2. Setup A/V Pipeline
     let mut video_capturer = MacVideoCapturer::new(width, height, fps);
@@ -847,50 +860,47 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                 )
                 .await
                 {
-                    eprintln!("File transfer runtime error: {}", err);
+                    eprintln!("File transfer task error: {}", err);
                 }
             });
-            let event_logger = if file_clipboard_enabled {
-                let (log_event_tx, mut log_event_rx) = mpsc::unbounded_channel();
-                let bridge_command_tx = command_tx.clone();
-                let bridge_cancel_rx = cancel_rx.resubscribe();
+            let logger_cancel_rx = cancel_rx.resubscribe();
+            let event_logger = tokio::spawn(async move {
+                let mut cancel_rx = logger_cancel_rx;
+                loop {
+                    tokio::select! {
+                        _ = cancel_rx.recv() => break,
+                        event = event_rx.recv() => {
+                            let Some(event) = event else { break };
+                            log_file_transfer_event("Host", event);
+                        }
+                    }
+                }
+            });
+            let command_tx_guard = if let Some(send_file) = host_send_file {
+                let auto_send_tx = command_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = run_clipboard_file_sync(
-                        MacClipboardProvider::new(),
-                        bridge_command_tx,
-                        event_rx,
-                        Some(log_event_tx),
-                        bridge_cancel_rx,
-                        ClipboardFileSyncConfig::default(),
-                    )
-                    .await
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    println!(
+                        "Host auto-enqueueing send file on session startup: {}",
+                        send_file.display()
+                    );
+                    if let Err(err) = auto_send_tx
+                        .send(FileTransferCommand::SendFile {
+                            path: send_file,
+                            mime_type: None,
+                        })
+                        .await
                     {
-                        eprintln!("File clipboard sync error: {}", err);
+                        eprintln!("Failed to enqueue initial host send file: {}", err);
                     }
                 });
-                tokio::spawn(async move {
-                    while let Some(event) = log_event_rx.recv().await {
-                        log_file_transfer_event("Host", event);
-                    }
-                })
+                Some(command_tx)
+            } else if file_clipboard_enabled {
+                Some(command_tx)
             } else {
-                tokio::spawn(async move {
-                    while let Some(event) = event_rx.recv().await {
-                        log_file_transfer_event("Host", event);
-                    }
-                })
+                Some(command_tx)
             };
-
-            if let Some(path) = host_send_file {
-                let _ = command_tx
-                    .send(FileTransferCommand::SendFile {
-                        path,
-                        mime_type: None,
-                    })
-                    .await;
-            }
-
-            (Some(command_tx), Some(runtime_task), Some(event_logger))
+            (command_tx_guard, Some(runtime_task), Some(event_logger))
         } else {
             (None, None, None)
         };
@@ -950,7 +960,6 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
 
     let mut seq_num: u16 = 0;
     let stats_video = stats.clone();
-    let mut capture_timestamps = std::collections::VecDeque::new();
 
     let mut last_fps_update = std::time::Instant::now();
     let mut frames_since_update = 0;
@@ -965,39 +974,46 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             _ = cancel_rx.recv() => {
                 break;
             }
+            settings_changed = async {
+                if let Some(rx) = &mut stream_settings_rx {
+                    rx.changed().await.map(|_| rx.borrow().clone())
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Ok(new_settings) = settings_changed {
+                    println!("Applying updated stream settings: {}x{}@{}fps ({} kbps)", new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
+                    let _ = video_capturer.update_resolution_and_fps(new_settings.height, new_settings.fps);
+                    video_encoder.update_settings(new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
+                }
+            }
             frame_res = video_capturer.capture_frame() => {
                 let frame = frame_res?;
-                let capture_time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
-                capture_timestamps.push_back(capture_time);
-
                 stats_video.video_frames_captured.fetch_add(1, Relaxed);
                 video_encoder.submit_frame(frame).await?;
             }
-            nalu_res = video_encoder.pull_encoded() => {
-                let nalu_bytes = nalu_res?;
-                if nalu_bytes.is_empty() {
+            chunk_res = video_encoder.pull_encoded_chunk() => {
+                let chunk = chunk_res?;
+                if chunk.nalu.is_empty() {
                     continue;
                 }
                 stats_video.video_frames_encoded.fetch_add(1, Relaxed);
-                stats_video.video_bytes_encoded.fetch_add(nalu_bytes.len() as u64, Relaxed);
-                bytes_since_update += nalu_bytes.len() as u64;
+                stats_video.video_bytes_encoded.fetch_add(chunk.nalu.len() as u64, Relaxed);
+                bytes_since_update += chunk.nalu.len() as u64;
 
-                if nalu_bytes.len() > 4 {
-                    let nalu_type = (nalu_bytes[4] >> 1) & 0x3F;
-                    if (16..=21).contains(&nalu_type) || nalu_type == 32 {
-                        stats_video.video_keyframes_encoded.fetch_add(1, Relaxed);
-                    }
+                if chunk.is_keyframe {
+                    stats_video.video_keyframes_encoded.fetch_add(1, Relaxed);
                 }
 
-                let capture_time = capture_timestamps.pop_front().unwrap_or_else(|| {
-                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32
-                });
-
-                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u32;
-                let latency = now_ms.wrapping_sub(capture_time) as f32;
-                let d = (latency - current_latency_ms).abs();
-                current_jitter_ms = current_jitter_ms + (d - current_jitter_ms) / 16.0;
-                current_latency_ms = latency;
+                // 真实的单帧平滑耗时（EMA指数平滑，初始值为首帧耗时）
+                let cost = chunk.encode_cost_ms.clamp(0.1, 100.0);
+                if current_latency_ms <= 0.01 {
+                    current_latency_ms = cost;
+                } else {
+                    current_latency_ms = current_latency_ms * 0.9 + cost * 0.1;
+                }
+                let d = (cost - current_latency_ms).abs();
+                current_jitter_ms = current_jitter_ms * 0.9 + d * 0.1;
                 frames_since_update += 1;
 
                 let now_instant = std::time::Instant::now();
@@ -1023,10 +1039,10 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                         version: 2,
                         payload_type: 96,
                         sequence_number: seq_num,
-                        timestamp: capture_time,
+                        timestamp: chunk.capture_time_ms,
                         ssrc: session_id,
                     },
-                    payload: nalu_bytes,
+                    payload: chunk.nalu,
                 };
                 seq_num = seq_num.wrapping_add(1);
 

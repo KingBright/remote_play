@@ -43,6 +43,14 @@ impl JitterBuffer {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+
     pub fn push(&mut self, packet: RtpPacket) {
         if let Some(expected) = self.expected_seq {
             let diff = packet.header.sequence_number.wrapping_sub(expected) as i16;

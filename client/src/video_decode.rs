@@ -67,6 +67,7 @@ pub struct MacDecodedVideoFrame {
     pub _io_surface: *mut c_void,
     pub timestamp: u32,
     pub recv_time: u32,
+    pub decode_cost_ms: f32,
     width: u32,
     height: u32,
 }
@@ -99,13 +100,20 @@ impl VideoFrame for MacDecodedVideoFrame {
 }
 
 pub fn decoded_video_frame_surface(frame: &MacDecodedVideoFrame) -> AnyElement {
+    decoded_video_frame_surface_with_fit(frame, gpui::ObjectFit::Contain)
+}
+
+pub fn decoded_video_frame_surface_with_fit(
+    frame: &MacDecodedVideoFrame,
+    object_fit: gpui::ObjectFit,
+) -> AnyElement {
     unsafe {
         core_foundation::base::CFRetain(frame.cv_pixel_buffer as *const c_void);
         let cv_pixel_buffer = core_video::pixel_buffer::CVPixelBuffer::wrap_under_create_rule(
             frame.cv_pixel_buffer as _,
         );
         gpui::surface(cv_pixel_buffer)
-            .object_fit(gpui::ObjectFit::Contain)
+            .object_fit(object_fit)
             .w_full()
             .h_full()
             .into_any_element()
@@ -169,6 +177,7 @@ extern "C" fn decompression_callback(
             _io_surface: io_surface,
             timestamp: 0, // Will be overridden by main loop
             recv_time: 0, // Will be overridden
+            decode_cost_ms: 0.0,
             width,
             height,
         };
@@ -414,9 +423,13 @@ impl VideoDecoder for MacVideoDecoder {
             }
         }
 
+        let start_time = std::time::Instant::now();
         // Add a timeout to prevent deadlocks if the callback is never called
         match tokio::time::timeout(std::time::Duration::from_millis(200), self.rx.recv()).await {
-            Ok(Some(Some(frame))) => Ok(frame),
+            Ok(Some(Some(mut frame))) => {
+                frame.decode_cost_ms = start_time.elapsed().as_secs_f32() * 1000.0;
+                Ok(frame)
+            }
             Ok(Some(None)) => Err("Decoder callback reported error or dropped frame.".into()),
             Ok(None) => Err("Decoder channel closed".into()),
             Err(_) => Err("Decoder callback timeout (frame dropped by VT or buffered).".into()),

@@ -24,8 +24,12 @@ impl UdpMultiplexer {
             None,
         )?;
 
-        let _ = socket2_sock.set_recv_buffer_size(2 * 1024 * 1024);
-        let _ = socket2_sock.set_send_buffer_size(2 * 1024 * 1024);
+        let _ = socket2_sock.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = socket2_sock.set_send_buffer_size(4 * 1024 * 1024);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = socket2_sock.set_tos_v4(0xB8);
+        }
         socket2_sock.set_nonblocking(true)?;
         socket2_sock.bind(&std_addr.into())?;
 
@@ -87,12 +91,6 @@ impl UdpSender {
                 buf.extend_from_slice(&total_chunks.to_be_bytes());
                 buf.extend_from_slice(chunk);
                 self.socket.send_to(&buf, target).await?;
-
-                // Pace the burst: sleep every 10 packets (~14KB) to avoid OS buffer overflow.
-                // 100us usually takes ~1ms on macOS. 10 sleeps = ~10ms for a 150KB I-frame.
-                if i % 10 == 9 {
-                    tokio::time::sleep(std::time::Duration::from_micros(100)).await;
-                }
             }
         }
         Ok(())

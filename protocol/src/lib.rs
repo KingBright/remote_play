@@ -909,9 +909,39 @@ pub enum ControlMessage {
     },
     /// Keep-alive ping from client to host
     Heartbeat,
+    /// Update streaming parameters on the fly
+    UpdateStreamSettings {
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+        session_id: u32,
+    },
+    /// Precise timestamp ping for RTT & Clock offset estimation
+    Ping {
+        client_send_ts: u64,
+    },
+    /// Precise timestamp pong response
+    Pong {
+        client_send_ts: u64,
+        host_recv_ts: u64,
+        host_send_ts: u64,
+    },
+    /// Request an immediate IDR keyframe from the host for fast auto-recovery (PLI/FIR)
+    RequestKeyframe {
+        session_id: u32,
+    },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchAction {
+    Down,
+    Move,
+    Up,
+    Cancel,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum InputEvent {
     KeyDown(u32), // Scancode
     KeyUp(u32),
@@ -934,6 +964,13 @@ pub enum InputEvent {
     MouseScroll {
         delta_x: i32,
         delta_y: i32,
+    },
+    Touch {
+        action: TouchAction,
+        pointer_id: u32,
+        normalized_x: f32,
+        normalized_y: f32,
+        pressure: f32,
     },
 }
 
@@ -1423,6 +1460,17 @@ mod tests {
     }
 
     #[test]
+    fn request_keyframe_control_message_roundtrips() {
+        let decoded = roundtrip_control(ControlMessage::RequestKeyframe { session_id: 12345 });
+        match decoded {
+            ControlMessage::RequestKeyframe { session_id } => {
+                assert_eq!(session_id, 12345);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
     fn audio_control_message_roundtrips() {
         let decoded = roundtrip_control(ControlMessage::AudioControl {
             session_id: 77,
@@ -1568,6 +1616,24 @@ mod tests {
         assert!(matches!(
             roundtrip_control(ControlMessage::Heartbeat),
             ControlMessage::Heartbeat
+        ));
+        assert!(matches!(
+            roundtrip_control(ControlMessage::UpdateStreamSettings {
+                width: 3840,
+                height: 2160,
+                fps: 120,
+                bitrate_kbps: 60000,
+                session_id: 123
+            }),
+            ControlMessage::UpdateStreamSettings { width: 3840, height: 2160, fps: 120, bitrate_kbps: 60000, session_id: 123 }
+        ));
+        assert!(matches!(
+            roundtrip_control(ControlMessage::Ping { client_send_ts: 12345 }),
+            ControlMessage::Ping { client_send_ts: 12345 }
+        ));
+        assert!(matches!(
+            roundtrip_control(ControlMessage::Pong { client_send_ts: 12345, host_recv_ts: 12348, host_send_ts: 12349 }),
+            ControlMessage::Pong { client_send_ts: 12345, host_recv_ts: 12348, host_send_ts: 12349 }
         ));
     }
 }

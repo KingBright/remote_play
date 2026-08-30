@@ -37,7 +37,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::spawn;
 use tokio::sync::{broadcast, mpsc, watch};
 use transfer_center::{TransferCenterState, TransferEntrySnapshot};
@@ -47,12 +47,21 @@ use remote_platform::MacClipboardProvider;
 
 pub use mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct HostStats {
     pub fps: f32,
     pub latency: f32,
     pub jitter: f32,
     pub bitrate_kbps: u32,
+    pub rtt_ms: f32,
+    pub e2e_latency_ms: f32,
+    pub decode_latency_ms: f32,
+    pub packet_loss_rate: f32,
+    pub jitter_buffer_depth: usize,
+    pub decode_errors: u64,
+    pub link_status: &'static str,
+    pub last_anomaly_reason: Option<String>,
+    pub updated_at: Option<Instant>,
 }
 
 pub struct DiscoveryRuntimeHandle {
@@ -294,7 +303,9 @@ impl TalkbackRuntimeControl {
 }
 
 pub use session::{ClientSessionEvent, ClientSessionReceiverConfig, spawn_client_session_receiver};
-pub use video_decode::{MacDecodedVideoFrame, decoded_video_frame_surface};
+pub use video_decode::{
+    MacDecodedVideoFrame, decoded_video_frame_surface, decoded_video_frame_surface_with_fit,
+};
 
 pub struct ClientMediaRuntime {
     pub audio_playback: AudioPlaybackControl,

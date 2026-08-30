@@ -48,6 +48,7 @@ pub async fn run_host_service(
         > = None;
         let mut active_session_id: Option<u32> = None;
         let mut active_client_addr: Option<SocketAddr> = None;
+        let mut active_settings_tx: Option<watch::Sender<crate::StreamSettings>> = None;
         let mut last_heartbeat = Instant::now();
 
         println!("Listening for ControlMessages on {}...", bind_addr);
@@ -55,8 +56,8 @@ pub async fn run_host_service(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                    if active_cancel_tx.is_some() && last_heartbeat.elapsed() > Duration::from_secs(3) {
-                        println!("Heartbeat timeout! Stopping stream...");
+                    if active_cancel_tx.is_some() && last_heartbeat.elapsed() > Duration::from_secs(15) {
+                        println!("Heartbeat timeout (>15s)! Stopping stream...");
                         if let Some(tx) = active_cancel_tx.take() {
                             let _ = tx.send(());
                         }
@@ -64,6 +65,7 @@ pub async fn run_host_service(
                         active_file_tx = None;
                         active_talkback_tx = None;
                         active_talkback_settings_tx = None;
+                        active_settings_tx = None;
                         active_session_id = None;
                         active_client_addr = None;
                         input_injector.release_all_input();
@@ -72,6 +74,9 @@ pub async fn run_host_service(
                 recv_res = udp_receiver.recv() => {
                     match recv_res {
                         Ok(MultiplexedPacket::Control(msg, client_addr)) => {
+                            if is_active_client(active_client_addr, client_addr) {
+                                last_heartbeat = Instant::now();
+                            }
                             match msg {
                                 ControlMessage::Input(input_event) => {
                                     if is_active_client(active_client_addr, client_addr) {
@@ -79,9 +84,37 @@ pub async fn run_host_service(
                                     }
                                 }
                                 ControlMessage::Heartbeat => {
+                                    // already refreshed last_heartbeat
+                                }
+                                ControlMessage::Ping { client_send_ts } => {
                                     if is_active_client(active_client_addr, client_addr) {
-                                        last_heartbeat = Instant::now();
+                                        let now_ms = (std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            & 0xFFFFFFFFFFFFFFFF) as u64;
+                                        let pong = ControlMessage::Pong {
+                                            client_send_ts,
+                                            host_recv_ts: now_ms,
+                                            host_send_ts: now_ms,
+                                        };
+                                        let _ = udp_sender.send_control(&pong, client_addr).await;
                                     }
+                                }
+                                ControlMessage::UpdateStreamSettings { width, height, fps, bitrate_kbps, session_id } => {
+                                    if is_active_client(active_client_addr, client_addr) && active_session_id == Some(session_id) {
+                                        if let Some(tx) = &active_settings_tx {
+                                            let _ = tx.send(crate::StreamSettings {
+                                                width,
+                                                height,
+                                                fps,
+                                                bitrate_kbps,
+                                            });
+                                        }
+                                    }
+                                }
+                                ControlMessage::RequestKeyframe { session_id: _ } => {
+                                    // Keyframe requests ignored per policy to prevent traffic burst spikes
                                 }
                                 ControlMessage::StopStream => {
                                     if !is_active_client(active_client_addr, client_addr) {
@@ -95,6 +128,7 @@ pub async fn run_host_service(
                                     active_file_tx = None;
                                     active_talkback_tx = None;
                                     active_talkback_settings_tx = None;
+                                    active_settings_tx = None;
                                     active_session_id = None;
                                     active_client_addr = None;
                                     input_injector.release_all_input();
@@ -131,6 +165,13 @@ pub async fn run_host_service(
 
                                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
                                     active_cancel_tx = Some(cancel_tx);
+                                    let (settings_tx, settings_rx) = watch::channel(crate::StreamSettings {
+                                        width,
+                                        height,
+                                        fps,
+                                        bitrate_kbps,
+                                    });
+                                    active_settings_tx = Some(settings_tx);
                                     let clipboard_inbound_rx = if env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC") {
                                         let (tx, rx) = mpsc::channel(1024);
                                         active_clipboard_tx = Some(tx);
@@ -177,6 +218,7 @@ pub async fn run_host_service(
                                             file_inbound_rx,
                                             talkback_inbound_rx,
                                             talkback_settings_rx,
+                                            stream_settings_rx: Some(settings_rx),
                                             host_send_file,
                                         }).await {
                                             eprintln!("Streaming task error: {}", e);

@@ -1,38 +1,84 @@
-use gpui::rgb;
-#[cfg(test)]
-use gpui::{Hsla, Rgba};
+use gpui::{Hsla, Rgba, rgb, rgba};
 use yororen_ui::theme::{Theme, ThemeSet};
 
 pub fn remote_play_themes() -> ThemeSet {
     ThemeSet::new(light_theme()).dark(dark_theme())
 }
 
+#[allow(dead_code)]
+#[inline]
+pub fn color_accent_cyan() -> Rgba {
+    rgb(0x00d1ff)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_accent_emerald() -> Rgba {
+    rgb(0x10b981)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_accent_purple() -> Rgba {
+    rgb(0xa855f7)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_accent_amber() -> Rgba {
+    rgb(0xf59e0b)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_accent_rose() -> Rgba {
+    rgb(0xf43f5e)
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_glass_bg() -> Hsla {
+    rgba(0x121316e6).into()
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_glass_card() -> Hsla {
+    rgba(0x1c1e22d9).into()
+}
+
+#[allow(dead_code)]
+#[inline]
+pub fn color_border_fine() -> Rgba {
+    rgb(0x2d2f34)
+}
+
 fn dark_theme() -> Theme {
     let mut theme = Theme::default_dark();
 
-    theme.surface.canvas = rgb(0x0b0d0e).into();
-    theme.surface.base = rgb(0x111416).into();
-    theme.surface.raised = rgb(0x181c1e).into();
-    theme.surface.sunken = rgb(0x070909).into();
-    theme.surface.hover = rgb(0x202527).into();
+    theme.surface.canvas = rgb(0x121316).into();
+    theme.surface.base = rgb(0x1a1c20).into();
+    theme.surface.raised = rgb(0x22252b).into();
+    theme.surface.sunken = rgb(0x0d0e11).into();
+    theme.surface.hover = rgb(0x282b32).into();
 
-    theme.content.primary = rgb(0xf4f7f5).into();
-    theme.content.secondary = rgb(0xb6bfba).into();
-    theme.content.tertiary = rgb(0x7d8983).into();
-    theme.content.disabled = rgb(0x59625d).into();
-    theme.content.on_primary = rgb(0x08110d).into();
-    theme.content.on_status = rgb(0x08110d).into();
+    theme.content.primary = rgb(0xf8fafc).into();
+    theme.content.secondary = rgb(0xc5c6cc).into();
+    theme.content.tertiary = rgb(0x859399).into();
+    theme.content.disabled = rgb(0x47494e).into();
+    theme.content.on_primary = rgb(0x02080a).into();
+    theme.content.on_status = rgb(0x02080a).into();
 
-    theme.border.default = rgb(0x2a302d).into();
-    theme.border.muted = rgb(0x1d2220).into();
-    theme.border.focus = rgb(0x71e6b2).into();
-    theme.border.divider = rgb(0x202522).into();
+    theme.border.default = rgb(0x2d2f34).into();
+    theme.border.muted = rgb(0x23252a).into();
+    theme.border.focus = rgb(0x00d1ff).into();
+    theme.border.divider = rgb(0x202227).into();
 
-    theme.action.neutral.bg = rgb(0x202522).into();
-    theme.action.neutral.hover_bg = rgb(0x2a302d).into();
-    theme.action.neutral.active_bg = rgb(0x353d39).into();
+    theme.action.neutral.bg = rgb(0x22252b).into();
+    theme.action.neutral.hover_bg = rgb(0x2d3139).into();
+    theme.action.neutral.active_bg = rgb(0x383d47).into();
     theme.action.neutral.fg = theme.content.primary;
-    theme.action.neutral.disabled_bg = rgb(0x171a18).into();
+    theme.action.neutral.disabled_bg = rgb(0x17191d).into();
     theme.action.neutral.disabled_fg = theme.content.disabled;
 
     theme.action.primary.bg = rgb(0x8af0c3).into();
