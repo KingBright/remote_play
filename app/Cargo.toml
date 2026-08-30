@@ -9,16 +9,17 @@ host = { path = "../host" }
 protocol = { path = "../protocol" }
 remote_core = { path = "../remote_core" }
 tokio = { version = "1.52.2", features = ["full"] }
-gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
-yororen_ui = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+rustls = { version = "0.23", features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
+yororen_ui = "0.2"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAppearance"] }
 
-[dev-dependencies]
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders", "test-support"] }
 
 [[bin]]

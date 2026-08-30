@@ -1,4 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(target_os = "macos")]
 use opus::Decoder;
 use protocol::{AudioCodec, AudioDirection, AudioSource, AudioStreamConfig, RtpPacket};
 use remote_core::jitter_buffer::JitterBuffer;
@@ -7,7 +8,7 @@ use std::error::Error;
 use tokio::sync::mpsc;
 
 pub struct AudioPlayer {
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
 }
 
 #[derive(Debug)]
@@ -48,14 +49,24 @@ impl AudioPlayer {
     pub fn new(
         mut rx: mpsc::Receiver<AudioPlayerEvent>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("No output device available")?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            tokio::spawn(async move {
+                while let Some(_) = rx.recv().await {}
+            });
+            return Ok(Self { _stream: None });
+        }
 
-        let default_config = device.default_output_config()?;
-        let output_config: cpal::StreamConfig = default_config.clone().into();
-        let output_channels = usize::from(output_config.channels.max(1));
+        #[cfg(target_os = "macos")]
+        {
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or("No output device available")?;
+
+            let default_config = device.default_output_config()?;
+            let output_config: cpal::StreamConfig = default_config.clone().into();
+            let output_channels = usize::from(output_config.channels.max(1));
 
         let (sample_tx, sample_rx) = crossbeam_channel::unbounded::<f32>();
 
@@ -136,10 +147,12 @@ impl AudioPlayer {
             }
         });
 
-        Ok(Self { _stream: stream })
+        Ok(Self { _stream: Some(stream) })
+        }
     }
 }
 
+#[cfg(target_os = "macos")]
 struct AudioDecodeStream {
     config: AudioStreamConfig,
     decoder: Decoder,
@@ -147,6 +160,7 @@ struct AudioDecodeStream {
     expected_seq_init: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl AudioDecodeStream {
     fn new(config: AudioStreamConfig) -> Result<Self, Box<dyn Error + Send + Sync>> {
         if config.codec != AudioCodec::Opus {
@@ -203,10 +217,12 @@ impl AudioDecodeStream {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn legacy_audio_stream_config(stream_id: u32) -> AudioStreamConfig {
     AudioStreamConfig::remote_microphone(stream_id, 48_000, 2, 20)
 }
 
+#[cfg(target_os = "macos")]
 fn opus_channels(channels: u16) -> Result<opus::Channels, Box<dyn Error + Send + Sync>> {
     match channels {
         1 => Ok(opus::Channels::Mono),

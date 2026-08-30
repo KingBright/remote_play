@@ -15,6 +15,8 @@ const MESH_DAEMON_LOG_FILE_NAME: &str = "remoteplay-mesh-daemon.log";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if handle_maintenance_command().await? {
         return Ok(());
     }
@@ -24,6 +26,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if headless {
         config.enable_viewer_media = false;
     }
+    #[cfg(target_os = "macos")]
     if !headless {
         return remote_play_app::run_unified_gui(config).await;
     }

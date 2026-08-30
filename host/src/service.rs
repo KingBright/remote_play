@@ -27,25 +27,36 @@ pub async fn run_host_service(
     let multiplexer = UdpMultiplexer::bind(&bind_addr.to_string()).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        println!("Host implementation is currently macOS only.");
+        println!("Host implementation is currently macOS and Linux only.");
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        use crate::input_injector::MacInputInjector;
         use remote_core::net::MultiplexedPacket;
+        use remote_core::InputInjector;
 
-        let input_injector = Arc::new(MacInputInjector::new()?);
+        #[cfg(target_os = "macos")]
+        let input_injector: Arc<dyn InputInjector + Send + Sync> =
+            Arc::new(crate::input_injector::MacInputInjector::new()?);
+
+        #[cfg(target_os = "linux")]
+        let input_injector: Arc<dyn InputInjector + Send + Sync> =
+            Arc::new(crate::linux_input::LinuxUinputInjector::new()?);
+
         let mut active_cancel_tx: Option<broadcast::Sender<()>> = None;
         let mut active_clipboard_tx: Option<mpsc::Sender<DataEnvelope>> = None;
         let mut active_file_tx: Option<mpsc::Sender<DataEnvelope>> = None;
         let mut active_talkback_tx: Option<mpsc::Sender<DataEnvelope>> = None;
+        #[cfg(target_os = "macos")]
         let mut active_talkback_settings_tx: Option<
             watch::Sender<crate::talkback_player::TalkbackPlaybackSettings>,
         > = None;
+        #[cfg(not(target_os = "macos"))]
+        let mut active_talkback_settings_tx: Option<watch::Sender<()>> = None;
+
         let mut active_session_id: Option<u32> = None;
         let mut active_client_addr: Option<SocketAddr> = None;
         let mut active_settings_tx: Option<watch::Sender<crate::StreamSettings>> = None;
@@ -80,7 +91,7 @@ pub async fn run_host_service(
                             match msg {
                                 ControlMessage::Input(input_event) => {
                                     if is_active_client(active_client_addr, client_addr) {
-                                        input_injector.inject(input_event);
+                                        let _ = input_injector.inject_input(input_event);
                                     }
                                 }
                                 ControlMessage::Heartbeat => {
@@ -135,16 +146,18 @@ pub async fn run_host_service(
                                 }
                                 ControlMessage::AudioControl { session_id, target, muted, volume_percent } => {
                                     if is_active_client(active_client_addr, client_addr)
-                                        && active_session_id == Some(session_id)
-                                        && target == AudioControlTarget::ViewerTalkbackPlayback
-                                        && let Some(settings_tx) = &active_talkback_settings_tx
-                                    {
-                                        let _ = settings_tx.send(
-                                            crate::talkback_player::TalkbackPlaybackSettings {
-                                                muted,
-                                                volume_percent,
-                                            },
-                                        );
+                                        && active_session_id == Some(session_id) {
+                                        #[cfg(target_os = "macos")]
+                                        if target == AudioControlTarget::ViewerTalkbackPlayback
+                                            && let Some(settings_tx) = &active_talkback_settings_tx
+                                        {
+                                            let _ = settings_tx.send(
+                                                crate::talkback_player::TalkbackPlaybackSettings {
+                                                    muted,
+                                                    volume_percent,
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                                 ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
@@ -189,6 +202,7 @@ pub async fn run_host_service(
                                     } else {
                                         None
                                     };
+                                    #[cfg(target_os = "macos")]
                                     let (talkback_inbound_rx, talkback_settings_rx) = if env_flag_enabled("REMOTE_PLAY_TALKBACK") {
                                         let (tx, rx) = mpsc::channel(1024);
                                         let (settings_tx, settings_rx) = watch::channel(crate::talkback_player::TalkbackPlaybackSettings::default());
@@ -198,6 +212,8 @@ pub async fn run_host_service(
                                     } else {
                                         (None, None)
                                     };
+                                    #[cfg(not(target_os = "macos"))]
+                                    let (talkback_inbound_rx, talkback_settings_rx) = (None, None);
                                     let host_send_file = std::env::var_os("REMOTE_PLAY_HOST_SEND_FILE").map(PathBuf::from);
 
                                     let sender_clone = udp_sender.clone();

@@ -22,3 +22,7 @@ pub mod traits;
 // Re-export traits for convenience
 pub use stats::Statistics;
 pub use traits::*;
+
+pub fn init_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}

@@ -1,12 +1,24 @@
 pub mod audio_player;
 mod host_config;
+#[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod host_list;
 mod mesh_pairing;
+#[cfg(target_os = "macos")]
 mod render;
 pub mod session;
+#[cfg(target_os = "macos")]
 mod talkback;
+#[cfg(not(target_os = "macos"))]
+pub mod talkback {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct TalkbackCaptureSettings {
+        pub muted: bool,
+        pub volume_percent: u8,
+    }
+}
 mod transfer_center;
+#[cfg(target_os = "macos")]
 mod video_decode;
 
 use crate::audio_player::{AudioPlayerEvent, AudioPlayerSettings};
@@ -44,6 +56,8 @@ use transfer_center::{TransferCenterState, TransferEntrySnapshot};
 
 #[cfg(target_os = "macos")]
 use remote_platform::MacClipboardProvider;
+#[cfg(target_os = "linux")]
+use remote_platform::LinuxClipboardProvider;
 
 pub use mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
 
@@ -303,9 +317,21 @@ impl TalkbackRuntimeControl {
 }
 
 pub use session::{ClientSessionEvent, ClientSessionReceiverConfig, spawn_client_session_receiver};
+
+#[cfg(target_os = "macos")]
 pub use video_decode::{
     MacDecodedVideoFrame, decoded_video_frame_surface, decoded_video_frame_surface_with_fit,
 };
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Debug)]
+pub struct MacDecodedVideoFrame;
+
+#[cfg(not(target_os = "macos"))]
+pub fn decoded_video_frame_surface(_frame: &MacDecodedVideoFrame) {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn decoded_video_frame_surface_with_fit(_frame: &MacDecodedVideoFrame, _mode: u8) {}
 
 pub struct ClientMediaRuntime {
     pub audio_playback: AudioPlaybackControl,
@@ -332,35 +358,43 @@ impl ClientMediaRuntime {
             }
         };
         let shared_frame = Arc::new(Mutex::new(None));
-        let decode_shared_frame = shared_frame.clone();
         let (decode_tx, mut decode_rx) = mpsc::channel::<(protocol::RtpPacket, u32)>(200);
-        let stats_decode = stats.clone();
 
-        let decode_task = spawn(async move {
-            let mut video_decoder = match video_decode::MacVideoDecoder::new() {
-                Ok(decoder) => decoder,
-                Err(err) => {
-                    eprintln!("Failed to initialize video decoder: {}", err);
-                    return;
-                }
-            };
-
-            while let Some((ordered_pkt, recv_time)) = decode_rx.recv().await {
-                use remote_core::VideoDecoder;
-                match video_decoder.decode(&ordered_pkt.payload).await {
-                    Ok(mut frame) => {
-                        frame.timestamp = ordered_pkt.header.timestamp;
-                        frame.recv_time = recv_time;
-                        stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
-                        *decode_shared_frame.lock().unwrap() = Some(frame);
-                    }
+        #[cfg(target_os = "macos")]
+        let decode_task = {
+            let decode_shared_frame = shared_frame.clone();
+            let stats_decode = stats.clone();
+            spawn(async move {
+                let mut video_decoder = match video_decode::MacVideoDecoder::new() {
+                    Ok(decoder) => decoder,
                     Err(err) => {
-                        if err.to_string() != "No frame data or session not ready" {
-                            eprintln!("Decode error: {}", err);
+                        eprintln!("Failed to initialize video decoder: {}", err);
+                        return;
+                    }
+                };
+
+                while let Some((ordered_pkt, recv_time)) = decode_rx.recv().await {
+                    use remote_core::VideoDecoder;
+                    match video_decoder.decode(&ordered_pkt.payload).await {
+                        Ok(mut frame) => {
+                            frame.timestamp = ordered_pkt.header.timestamp;
+                            frame.recv_time = recv_time;
+                            stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
+                            *decode_shared_frame.lock().unwrap() = Some(frame);
+                        }
+                        Err(err) => {
+                            if err.to_string() != "No frame data or session not ready" {
+                                eprintln!("Decode error: {}", err);
+                            }
                         }
                     }
                 }
-            }
+            })
+        };
+
+        #[cfg(not(target_os = "macos"))]
+        let decode_task = spawn(async move {
+            let _ = &mut decode_rx;
         });
 
         Ok(Self {
@@ -397,6 +431,13 @@ pub fn start_talkback_runtime_control(
     start_talkback_runtime_controller(udp_sender)
 }
 
+#[cfg(not(target_os = "macos"))]
+pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("Client GUI is currently supported on macOS only.");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Client starting...");
     let _mesh_runtime = maybe_start_mesh_sidecar("RemotePlay Viewer").await;
@@ -935,9 +976,8 @@ fn start_talkback_runtime_controller(
                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
                     active_cancel_tx = Some(cancel_tx);
                     let (settings_tx, settings_rx) = tokio::sync::watch::channel(current_settings);
-                    active_settings_tx = Some(settings_tx);
                     let udp_sender = udp_sender.clone();
-
+                    #[cfg(target_os = "macos")]
                     spawn(async move {
                         if let Err(err) =
                             talkback::run_talkback_capture(talkback::TalkbackRuntimeConfig {
@@ -952,6 +992,8 @@ fn start_talkback_runtime_controller(
                             eprintln!("Talkback runtime stopped with error: {}", err);
                         }
                     });
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = (udp_sender, target, session_id, cancel_rx, settings_rx, settings_tx);
                 }
                 TalkbackRuntimeCommand::SetSettings(settings) => {
                     current_settings = settings;
@@ -972,7 +1014,7 @@ fn start_talkback_runtime_controller(
     TalkbackRuntimeControl { command_tx }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn start_clipboard_runtime_controller(
     udp_sender: remote_core::net::UdpSender,
 ) -> ClipboardRuntimeControl {
@@ -1011,8 +1053,13 @@ fn start_clipboard_runtime_controller(
                     );
 
                     spawn(async move {
+                        #[cfg(target_os = "macos")]
+                        let provider = MacClipboardProvider::new();
+                        #[cfg(target_os = "linux")]
+                        let provider = LinuxClipboardProvider::new();
+
                         if let Err(err) = run_clipboard_sync(
-                            MacClipboardProvider::new(),
+                            provider,
                             scheduled_sender,
                             inbound_rx,
                             cancel_rx,
@@ -1110,8 +1157,13 @@ fn start_file_transfer_runtime_controller(
                             .expect("file cancel tx should be active")
                             .subscribe();
                         spawn(async move {
+                            #[cfg(target_os = "macos")]
+                            let provider = MacClipboardProvider::new();
+                            #[cfg(target_os = "linux")]
+                            let provider = LinuxClipboardProvider::new();
+
                             if let Err(err) = run_clipboard_file_sync(
-                                MacClipboardProvider::new(),
+                                provider,
                                 bridge_command_tx,
                                 event_rx,
                                 Some(log_event_tx),
@@ -1244,16 +1296,5 @@ mod tests {
             PathBuf::from("/tmp/remote-play-receive")
         );
         assert!(config.receive_policy.allow_overwrite);
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn start_clipboard_runtime_controller(
-    _udp_sender: remote_core::net::UdpSender,
-) -> ClipboardRuntimeControl {
-    let (command_tx, _command_rx) = mpsc::unbounded_channel();
-    ClipboardRuntimeControl {
-        command_tx,
-        inbound_tx: Arc::new(Mutex::new(None)),
     }
 }

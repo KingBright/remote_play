@@ -235,6 +235,7 @@ pub trait ClipboardFileStore {
 
 pub trait InputInjector {
     fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>>;
+    fn release_all_input(&self) {}
 }
 
 #[cfg(test)]

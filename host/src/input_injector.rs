@@ -326,6 +326,10 @@ impl InputInjector for MacInputInjector {
         self.inject(event);
         Ok(())
     }
+
+    fn release_all_input(&self) {
+        self.release_all_input();
+    }
 }
 
 #[cfg(test)]

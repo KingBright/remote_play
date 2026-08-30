@@ -1,6 +1,8 @@
+#[cfg(target_os = "macos")]
 mod design_system;
 mod mesh_admin;
 pub mod preferences;
+#[cfg(target_os = "macos")]
 mod ui;
 
 use remote_core::discovery::{
@@ -47,7 +49,14 @@ pub use client::{
     start_file_transfer_runtime_control, start_talkback_runtime_control,
 };
 pub use host::{HostServiceConfig, run_host_service};
+#[cfg(target_os = "macos")]
 pub use ui::run_unified_gui;
+
+#[cfg(not(target_os = "macos"))]
+pub async fn run_unified_gui(_config: UnifiedRuntimeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+    eprintln!("GUI is only available on macOS. Running in daemon/host headless mode.");
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnifiedAppConfig {
@@ -760,6 +769,7 @@ struct ViewerMediaChannels {
 pub async fn start_unified_runtime(
     config: UnifiedRuntimeConfig,
 ) -> Result<UnifiedRuntimeHandle, Box<dyn Error + Send + Sync>> {
+    remote_core::init_crypto_provider();
     let stats = Statistics::new();
     let mut media_sink_tasks = Vec::new();
     let mut owner_config = UnifiedServiceOwnerConfig::default();

@@ -15,4 +15,5 @@ hmac = "0.12.1"
 sha2 = "0.10.9"
 bytes = "1.11.1"
 futures-util = { version = "0.3.32", features = ["sink"] }
+rustls = { version = "0.23", features = ["ring"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }

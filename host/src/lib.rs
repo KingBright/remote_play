@@ -16,6 +16,15 @@ mod talkback_player;
 #[cfg(target_os = "macos")]
 mod video_encode;
 
+#[cfg(target_os = "linux")]
+pub mod linux_audio;
+#[cfg(target_os = "linux")]
+pub mod linux_capture;
+#[cfg(target_os = "linux")]
+pub mod linux_input;
+#[cfg(target_os = "linux")]
+pub mod linux_video_encode;
+
 use protocol::{
     AudioSource, AudioStreamConfig, DataEnvelope, RtpPacket, remote_microphone_audio_stream_id,
     remote_system_audio_stream_id,
@@ -57,6 +66,13 @@ use remote_core::net::UdpSender;
 use remote_platform::MacClipboardProvider;
 #[cfg(target_os = "macos")]
 use video_encode::MacVideoEncoder;
+
+#[cfg(target_os = "linux")]
+use linux_capture::LinuxVideoCapturer;
+#[cfg(target_os = "linux")]
+use linux_video_encode::LinuxVideoEncoder;
+#[cfg(target_os = "linux")]
+use remote_platform::LinuxClipboardProvider;
 
 pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Host starting in Standby Mode...");
@@ -397,7 +413,7 @@ pub struct StreamSettings {
     pub bitrate_kbps: u32,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct StreamingRunConfig {
     session_id: u32,
     client_addr: SocketAddr,
@@ -411,12 +427,15 @@ struct StreamingRunConfig {
     clipboard_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
     file_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
     talkback_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
+    #[cfg(target_os = "macos")]
     talkback_settings_rx: Option<watch::Receiver<crate::talkback_player::TalkbackPlaybackSettings>>,
+    #[cfg(not(target_os = "macos"))]
+    talkback_settings_rx: Option<watch::Receiver<()>>,
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     host_send_file: Option<PathBuf>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn send_media_packet(
     udp_sender: &UdpSender,
     scheduled_sender: Option<&ScheduledDataSender>,
@@ -445,7 +464,7 @@ async fn send_media_packet(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn send_audio_stream_config(
     udp_sender: &UdpSender,
     scheduled_sender: Option<&ScheduledDataSender>,
@@ -467,7 +486,7 @@ async fn send_audio_stream_config(
     Ok(packet_size)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn host_audio_stream_config(
     stream_id: u32,
     source: AudioSource,
@@ -695,19 +714,19 @@ impl AudioSendContext<'_> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct ScheduledStatsReporterGuard {
     handle: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl Drop for ScheduledStatsReporterGuard {
     fn drop(&mut self) {
         self.handle.abort();
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn start_scheduled_sender_reporter(
     scheduled_sender: ScheduledDataSender,
     mut cancel_rx: broadcast::Receiver<()>,
@@ -749,7 +768,7 @@ fn start_scheduled_sender_reporter(
     ScheduledStatsReporterGuard { handle }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let StreamingRunConfig {
         session_id,
@@ -769,11 +788,19 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         host_send_file,
     } = config;
 
+    #[cfg(target_os = "macos")]
     let _display_power = display_power::DisplayPowerGuard::activate();
 
     // 2. Setup A/V Pipeline
+    #[cfg(target_os = "macos")]
     let mut video_capturer = MacVideoCapturer::new(width, height, fps);
+    #[cfg(target_os = "macos")]
     let mut video_encoder = MacVideoEncoder::new(width, height, fps, bitrate_kbps)?;
+
+    #[cfg(target_os = "linux")]
+    let mut video_capturer = LinuxVideoCapturer::new(width, height, fps)?;
+    #[cfg(target_os = "linux")]
+    let mut video_encoder = LinuxVideoEncoder::new(width, height, fps, bitrate_kbps)?;
 
     video_capturer.start().await?;
     println!(
@@ -820,8 +847,13 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     {
         let clipboard_cancel_rx = cancel_rx.resubscribe();
         Some(tokio::spawn(async move {
+            #[cfg(target_os = "macos")]
+            let provider = MacClipboardProvider::new();
+            #[cfg(target_os = "linux")]
+            let provider = LinuxClipboardProvider::new();
+
             if let Err(err) = run_clipboard_sync(
-                MacClipboardProvider::new(),
+                provider,
                 sender,
                 inbound_rx,
                 clipboard_cancel_rx,
@@ -905,6 +937,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             (None, None, None)
         };
 
+    #[cfg(target_os = "macos")]
     let _talkback_player = if let (Some(inbound_rx), Some(settings_rx)) =
         (talkback_inbound_rx, talkback_settings_rx)
     {
@@ -919,6 +952,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         None
     };
 
+    #[cfg(target_os = "macos")]
     let _microphone_audio_task = spawn_audio_capture_task(
         "Remote microphone",
         crate::audio_capture::MacAudioCapturer::microphone(),
@@ -933,6 +967,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         },
     );
 
+    #[cfg(target_os = "macos")]
     let _system_audio_task = if env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") {
         if use_data_plane_media {
             Some(spawn_audio_capture_task(
