@@ -33,7 +33,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex, RwLock,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,7 +43,8 @@ use tokio::task::JoinHandle;
 pub use client::{
     ClientMediaRuntime, ClientMediaRuntimeStatus, ClientSessionEvent, ClientSessionReceiverConfig,
     ClipboardRuntimeControl, FileTransferRuntimeControl, HostStats, MacDecodedVideoFrame,
-    MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot, TalkbackRuntimeControl,
+    MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot, SharedHostStats,
+    TalkbackRuntimeControl, TransferEntrySnapshot, audio_ingress_bridge,
     decoded_video_frame_surface, decoded_video_frame_surface_with_fit,
     spawn_client_session_receiver, start_clipboard_runtime_control,
     start_file_transfer_runtime_control, start_talkback_runtime_control,
@@ -53,7 +54,9 @@ pub use host::{HostServiceConfig, run_host_service};
 pub use ui::run_unified_gui;
 
 #[cfg(not(target_os = "macos"))]
-pub async fn run_unified_gui(_config: UnifiedRuntimeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn run_unified_gui(
+    _config: UnifiedRuntimeConfig,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     eprintln!("GUI is only available on macOS. Running in daemon/host headless mode.");
     Ok(())
 }
@@ -371,12 +374,16 @@ pub const DEFAULT_RELAY_SERVER_URL: &str = "wss://relay.hackerlife.fun:8443/v1/r
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnifiedSessionTimeoutMonitorConfig {
     pub poll_interval: Duration,
+    pub auto_reconnect: bool,
+    pub max_reconnect_attempts: u8,
 }
 
 impl Default for UnifiedSessionTimeoutMonitorConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_millis(250),
+            auto_reconnect: true,
+            max_reconnect_attempts: 8,
         }
     }
 }
@@ -661,9 +668,9 @@ impl UnifiedRuntimeConfig {
             enable_discovery: true,
             enable_passive_host: true,
             enable_client_receiver: true,
-            enable_clipboard_sync: false,
-            enable_file_transfer: false,
-            enable_talkback: false,
+            enable_clipboard_sync: true,
+            enable_file_transfer: true,
+            enable_talkback: true,
             enable_viewer_media: true,
             enable_session_timeout_monitor: true,
         }
@@ -701,11 +708,15 @@ impl UnifiedRuntimeConfig {
         config.enable_discovery = env_flag_or(REMOTE_PLAY_DISCOVERY_ENV, true);
         config.enable_passive_host = env_flag_or("REMOTE_PLAY_PASSIVE_HOST", true);
         config.enable_client_receiver = env_flag_or("REMOTE_PLAY_CLIENT_RECEIVER", true);
-        config.enable_clipboard_sync = env_flag_or("REMOTE_PLAY_CLIPBOARD_SYNC", false);
-        config.enable_file_transfer = env_flag_or("REMOTE_PLAY_FILE_TRANSFER", false)
-            || env_flag_or("REMOTE_PLAY_FILE_CLIPBOARD", false)
+        let prefs = crate::preferences::UserPreferences::load_or_default();
+        config.enable_clipboard_sync =
+            env_flag_or("REMOTE_PLAY_CLIPBOARD_SYNC", prefs.side_services.clipboard_sync);
+        config.enable_file_transfer = env_flag_or(
+            "REMOTE_PLAY_FILE_TRANSFER",
+            prefs.side_services.file_transfer,
+        ) || env_flag_or("REMOTE_PLAY_FILE_CLIPBOARD", false)
             || std::env::var_os("REMOTE_PLAY_SEND_FILE").is_some();
-        config.enable_talkback = env_flag_or("REMOTE_PLAY_TALKBACK", false);
+        config.enable_talkback = env_flag_or("REMOTE_PLAY_TALKBACK", prefs.side_services.talkback);
         config.enable_viewer_media = env_flag_or("REMOTE_PLAY_VIEWER_MEDIA", true);
         config.enable_session_timeout_monitor =
             env_flag_or("REMOTE_PLAY_SESSION_TIMEOUT_MONITOR", true);
@@ -722,7 +733,7 @@ impl Default for UnifiedRuntimeConfig {
 pub struct UnifiedRuntimeHandle {
     pub owner: Arc<UnifiedServiceOwner>,
     pub stats: Arc<Statistics>,
-    pub host_stats: Option<Arc<RwLock<HostStats>>>,
+    pub host_stats: Option<Arc<SharedHostStats>>,
     pub viewer_frame: Option<Arc<Mutex<Option<MacDecodedVideoFrame>>>>,
     pub viewer_media_status: UnifiedViewerMediaStatus,
     pub mesh_pairing: Option<MeshPairingControl>,
@@ -756,7 +767,7 @@ impl From<ClientMediaRuntimeStatus> for UnifiedViewerMediaStatus {
 }
 
 type ViewerAudioTx = mpsc::Sender<client::audio_player::AudioPlayerEvent>;
-type ViewerDecodeTx = mpsc::Sender<(protocol::RtpPacket, u32)>;
+type ViewerDecodeTx = mpsc::Sender<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>;
 
 struct ViewerMediaChannels {
     audio_tx: ViewerAudioTx,
@@ -836,7 +847,7 @@ pub async fn start_unified_runtime(
         viewer_media_status = media_channels.status;
 
         let (session_event_tx, session_event_rx) = mpsc::unbounded_channel();
-        let host_stats_inner = Arc::new(RwLock::new(HostStats::default()));
+        let host_stats_inner = Arc::new(SharedHostStats::default());
 
         owner_config.client_control_sender = Some(client_sender.clone());
         owner_config.viewing_keepalive = Some(UnifiedViewingKeepaliveConfig::default());
@@ -848,10 +859,18 @@ pub async fn start_unified_runtime(
             stats: stats.clone(),
             active_session_id: Arc::new(AtomicU32::new(0)),
             host_stats: host_stats_inner.clone(),
-            audio_tx,
+            audio_tx: audio_ingress_bridge(audio_tx),
             decode_tx,
-            clipboard_control: owner_config.side_services.clipboard.clone(),
-            file_transfer_control: owner_config.side_services.file_transfer.clone(),
+            clipboard_control: owner_config
+                .side_services
+                .clipboard
+                .clone()
+                .map(|control| Arc::new(control) as Arc<dyn remote_core::EnvelopeIngress>),
+            file_transfer_control: owner_config
+                .side_services
+                .file_transfer
+                .clone()
+                .map(|control| Arc::new(control) as Arc<dyn remote_core::EnvelopeIngress>),
             session_event_tx: Some(session_event_tx),
         });
         host_stats = Some(host_stats_inner);
@@ -1259,6 +1278,7 @@ impl UnifiedServiceOwner {
                 runtime.clone(),
                 config.side_services.clone(),
                 client_active_session_id.clone(),
+                config.client_control_sender.clone(),
                 timeout_config,
             ));
         }
@@ -1508,6 +1528,33 @@ impl UnifiedServiceOwner {
             self.client_side_session()
                 .map(|s| (s.peer.endpoint, s.session_id)),
         )
+    }
+
+    pub fn file_transfer_snapshot(&self) -> Vec<TransferEntrySnapshot> {
+        self.side_services
+            .file_transfer
+            .as_ref()
+            .map(FileTransferRuntimeControl::transfer_snapshot)
+            .unwrap_or_default()
+    }
+
+    pub fn send_files(&self, paths: Vec<std::path::PathBuf>) {
+        let Some(control) = &self.side_services.file_transfer else {
+            return;
+        };
+        if paths.len() == 1 {
+            if let Some(path) = paths.into_iter().next() {
+                control.send_file(path, None);
+            }
+        } else if !paths.is_empty() {
+            control.send_file_group(paths);
+        }
+    }
+
+    pub fn set_file_receive_dir(&self, path: std::path::PathBuf) {
+        if let Some(control) = &self.side_services.file_transfer {
+            control.set_receive_dir(path);
+        }
     }
 
     fn client_side_session(&self) -> Option<RoleSession> {
@@ -1985,6 +2032,7 @@ fn spawn_session_timeout_monitor(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
     side_services: UnifiedSideServiceControls,
     client_active_session_id: Option<Arc<AtomicU32>>,
+    sender: Option<UdpSender>,
     config: UnifiedSessionTimeoutMonitorConfig,
 ) -> AbortOnDropTask {
     AbortOnDropTask(tokio::spawn(async move {
@@ -1993,6 +2041,7 @@ fn spawn_session_timeout_monitor(
         } else {
             config.poll_interval
         };
+        let mut reconnect_attempts: u8 = 0;
         loop {
             tokio::time::sleep(poll_interval).await;
             let change = {
@@ -2001,12 +2050,68 @@ fn spawn_session_timeout_monitor(
                     .expect("unified runtime lock")
                     .expire_timed_out(unix_now_ms())
             };
-            if change.is_some() {
-                side_services.stop_all();
-                if let Some(active_session_id) = &client_active_session_id {
-                    active_session_id.store(0, Relaxed);
-                }
+            let Some(change) = change else {
+                continue;
+            };
+            side_services.stop_all();
+            if let Some(active_session_id) = &client_active_session_id {
+                active_session_id.store(0, Relaxed);
             }
+
+            let should_reconnect = config.auto_reconnect
+                && reconnect_attempts < config.max_reconnect_attempts
+                && matches!(
+                    change.previous,
+                    RoleState::Connecting(_) | RoleState::Viewing(_)
+                );
+            if !should_reconnect {
+                reconnect_attempts = 0;
+                continue;
+            }
+
+            let Some(session) = change.previous.session().cloned() else {
+                continue;
+            };
+            let Some(sender) = sender.clone() else {
+                continue;
+            };
+            reconnect_attempts = reconnect_attempts.saturating_add(1);
+            let backoff = poll_interval.saturating_mul(reconnect_attempts as u32);
+            tokio::time::sleep(backoff).await;
+
+            let request = {
+                let mut runtime = runtime.lock().expect("unified runtime lock");
+                match runtime.connect_device(&session.peer.device_id, unix_now_ms()) {
+                    Ok(request) => Some(request),
+                    Err(err) => {
+                        eprintln!(
+                            "Auto-reconnect attempt {reconnect_attempts} failed: {err}"
+                        );
+                        None
+                    }
+                }
+            };
+            let Some(request) = request else {
+                continue;
+            };
+            if let Some(active_session_id) = &client_active_session_id {
+                active_session_id.store(request.session_id, Relaxed);
+            }
+            let options = StreamStartOptions::default();
+            let start = options.start_message(request.session_id);
+            if let Err(err) = sender.send_control(&start, request.target).await {
+                eprintln!("Auto-reconnect StartStream failed: {err}");
+                continue;
+            }
+            let _ = sender
+                .send_control(
+                    &protocol::ControlMessage::RequestKeyframe {
+                        session_id: request.session_id,
+                    },
+                    request.target,
+                )
+                .await;
+            side_services.start_for_viewing(request.target, request.session_id);
         }
     }))
 }
@@ -2043,7 +2148,12 @@ fn spawn_viewing_keepalive(
                     .as_millis()
                     & 0xFFFFFFFFFFFFFFFF) as u64;
                 let _ = sender
-                    .send_control(&protocol::ControlMessage::Ping { client_send_ts: now_ms }, target)
+                    .send_control(
+                        &protocol::ControlMessage::Ping {
+                            client_send_ts: now_ms,
+                        },
+                        target,
+                    )
                     .await;
             }
         }
@@ -2869,6 +2979,7 @@ mod tests {
             },
             announce_interval: Duration::from_millis(50),
             prune_interval: Duration::from_millis(50),
+            accept_any_network: false,
         };
 
         let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
@@ -2913,6 +3024,7 @@ mod tests {
             },
             announce_interval: Duration::from_millis(50),
             prune_interval: Duration::from_millis(50),
+            accept_any_network: false,
         };
 
         let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
@@ -3148,7 +3260,10 @@ mod tests {
             .expect("connecting heartbeat should be periodic")
             .expect("target receiver should remain open")
         {
-            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. }, _) => {}
+            MultiplexedPacket::Control(
+                protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. },
+                _,
+            ) => {}
             other => panic!("expected Heartbeat or Ping while connecting, got {other:?}"),
         }
 
@@ -3160,7 +3275,10 @@ mod tests {
             .expect("viewing heartbeat should be periodic")
             .expect("target receiver should remain open")
         {
-            MultiplexedPacket::Control(protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. }, _) => {}
+            MultiplexedPacket::Control(
+                protocol::ControlMessage::Heartbeat | protocol::ControlMessage::Ping { .. },
+                _,
+            ) => {}
             other => panic!("expected Heartbeat or Ping while viewing, got {other:?}"),
         }
 
@@ -3396,6 +3514,8 @@ mod tests {
             client_control_sender: Some(control_sender),
             session_timeout_monitor: Some(UnifiedSessionTimeoutMonitorConfig {
                 poll_interval: Duration::from_millis(5),
+                auto_reconnect: false,
+                ..UnifiedSessionTimeoutMonitorConfig::default()
             }),
             ..UnifiedServiceOwnerConfig::default()
         })
@@ -3418,6 +3538,63 @@ mod tests {
 
         wait_for_owner_role(&owner, RoleKind::Idle).await;
         assert_eq!(owner.task_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn timeout_monitor_auto_reconnects_viewing_session() {
+        let control = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (control_sender, _control_rx) = control.split();
+        let target = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (_target_sender, target_rx) = target.split();
+        let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
+            app: UnifiedAppConfig {
+                role_config: RoleStateMachineConfig {
+                    connecting_timeout_ms: 1,
+                    session_timeout_ms: 1,
+                    ..RoleStateMachineConfig::default()
+                },
+                first_session_id: 1,
+            },
+            client_control_sender: Some(control_sender),
+            session_timeout_monitor: Some(UnifiedSessionTimeoutMonitorConfig {
+                poll_interval: Duration::from_millis(5),
+                auto_reconnect: true,
+                max_reconnect_attempts: 2,
+            }),
+            ..UnifiedServiceOwnerConfig::default()
+        })
+        .await
+        .unwrap();
+        owner
+            .runtime()
+            .lock()
+            .expect("runtime lock")
+            .apply_discovery_snapshot(&streamable_peer_snapshot(target_addr));
+
+        owner
+            .connect_device("peer-a", StreamStartOptions::default(), unix_now_ms())
+            .await
+            .unwrap();
+
+        let mut saw_second_start = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(200), target_rx.recv()).await {
+                Ok(Ok(MultiplexedPacket::Control(
+                    protocol::ControlMessage::StartStream { session_id, .. },
+                    _,
+                ))) if session_id > 1 => {
+                    saw_second_start = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_second_start,
+            "auto-reconnect should send a new StartStream"
+        );
     }
 
     #[tokio::test]

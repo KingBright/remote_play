@@ -1,10 +1,16 @@
 use crate::{StreamingRunConfig, env_flag_enabled, run_streaming};
 use protocol::{AudioControlTarget, ContentKind, ControlMessage, DataEnvelope};
 use remote_core::net::UdpMultiplexer;
+use remote_core::session_crypto::{
+    SessionCrypto, load_session_psk, mac_session_accept, mac_session_hello, now_unix_ms,
+    random_bytes_16, require_session_auth, verify_session_mac,
+};
 use remote_core::stats::Statistics;
+use std::collections::HashSet;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -27,16 +33,16 @@ pub async fn run_host_service(
     let multiplexer = UdpMultiplexer::bind(&bind_addr.to_string()).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        println!("Host implementation is currently macOS and Linux only.");
+        println!("Host implementation is currently macOS, Linux, and Windows only.");
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        use remote_core::net::MultiplexedPacket;
         use remote_core::InputInjector;
+        use remote_core::net::MultiplexedPacket;
 
         #[cfg(target_os = "macos")]
         let input_injector: Arc<dyn InputInjector + Send + Sync> =
@@ -45,6 +51,10 @@ pub async fn run_host_service(
         #[cfg(target_os = "linux")]
         let input_injector: Arc<dyn InputInjector + Send + Sync> =
             Arc::new(crate::linux_input::LinuxUinputInjector::new()?);
+
+        #[cfg(target_os = "windows")]
+        let input_injector: Arc<dyn InputInjector + Send + Sync> =
+            Arc::new(crate::windows_input::WindowsInputInjector::new()?);
 
         let mut active_cancel_tx: Option<broadcast::Sender<()>> = None;
         let mut active_clipboard_tx: Option<mpsc::Sender<DataEnvelope>> = None;
@@ -60,6 +70,10 @@ pub async fn run_host_service(
         let mut active_session_id: Option<u32> = None;
         let mut active_client_addr: Option<SocketAddr> = None;
         let mut active_settings_tx: Option<watch::Sender<crate::StreamSettings>> = None;
+        let mut active_keyframe_requested: Option<Arc<AtomicBool>> = None;
+        let mut authenticated_peers: HashSet<SocketAddr> = HashSet::new();
+        let session_psk = load_session_psk();
+        let require_auth = require_session_auth();
         let mut last_heartbeat = Instant::now();
 
         println!("Listening for ControlMessages on {}...", bind_addr);
@@ -113,19 +127,73 @@ pub async fn run_host_service(
                                     }
                                 }
                                 ControlMessage::UpdateStreamSettings { width, height, fps, bitrate_kbps, session_id } => {
-                                    if is_active_client(active_client_addr, client_addr) && active_session_id == Some(session_id) {
-                                        if let Some(tx) = &active_settings_tx {
-                                            let _ = tx.send(crate::StreamSettings {
-                                                width,
-                                                height,
-                                                fps,
-                                                bitrate_kbps,
-                                            });
-                                        }
+                                    if is_active_client(active_client_addr, client_addr)
+                                        && active_session_id == Some(session_id)
+                                        && let Some(tx) = &active_settings_tx
+                                    {
+                                        let _ = tx.send(crate::StreamSettings {
+                                            width,
+                                            height,
+                                            fps,
+                                            bitrate_kbps,
+                                        });
                                     }
                                 }
-                                ControlMessage::RequestKeyframe { session_id: _ } => {
-                                    // Keyframe requests ignored per policy to prevent traffic burst spikes
+                                ControlMessage::RequestKeyframe { session_id } => {
+                                    if is_active_client(active_client_addr, client_addr)
+                                        && active_session_id == Some(session_id)
+                                        && let Some(flag) = &active_keyframe_requested
+                                    {
+                                        flag.store(true, Relaxed);
+                                    }
+                                }
+                                ControlMessage::SessionHello {
+                                    nonce,
+                                    timestamp_ms,
+                                    mac,
+                                } => {
+                                    let Some(psk) = session_psk.as_ref() else {
+                                        let reject = ControlMessage::SessionReject {
+                                            reason: "host has no session PSK configured".into(),
+                                        };
+                                        let _ = udp_sender.send_control(&reject, client_addr).await;
+                                        continue;
+                                    };
+                                    let expected = mac_session_hello(psk, &nonce, timestamp_ms);
+                                    if let Err(err) =
+                                        verify_session_mac(&expected, &mac, timestamp_ms, now_unix_ms())
+                                    {
+                                        let reject = ControlMessage::SessionReject {
+                                            reason: err.to_string(),
+                                        };
+                                        let _ = udp_sender.send_control(&reject, client_addr).await;
+                                        continue;
+                                    }
+                                    let salt = random_bytes_16();
+                                    let ts = now_unix_ms();
+                                    let accept_mac = mac_session_accept(psk, &salt, ts);
+                                    match (
+                                        SessionCrypto::from_psk(psk, &salt),
+                                        SessionCrypto::from_psk(psk, &salt),
+                                    ) {
+                                        (Ok(send_crypto), Ok(recv_crypto)) => {
+                                            let _ = udp_sender.install_crypto(send_crypto);
+                                            let _ = udp_receiver.install_crypto(recv_crypto);
+                                            authenticated_peers.insert(client_addr);
+                                            let accept = ControlMessage::SessionAccept {
+                                                salt,
+                                                timestamp_ms: ts,
+                                                mac: accept_mac,
+                                            };
+                                            let _ = udp_sender.send_control(&accept, client_addr).await;
+                                        }
+                                        (Err(err), _) | (_, Err(err)) => {
+                                            let reject = ControlMessage::SessionReject {
+                                                reason: err.to_string(),
+                                            };
+                                            let _ = udp_sender.send_control(&reject, client_addr).await;
+                                        }
+                                    }
                                 }
                                 ControlMessage::StopStream => {
                                     if !is_active_client(active_client_addr, client_addr) {
@@ -161,6 +229,13 @@ pub async fn run_host_service(
                                     }
                                 }
                                 ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
+                                    if require_auth && !authenticated_peers.contains(&client_addr) {
+                                        let reject = ControlMessage::SessionReject {
+                                            reason: "StartStream requires SessionHello".into(),
+                                        };
+                                        let _ = udp_sender.send_control(&reject, client_addr).await;
+                                        continue;
+                                    }
                                     println!("Received StartStream from {} with {}x{}@{}fps ({} kbps)", client_addr, width, height, fps, bitrate_kbps);
 
                                     if let Some(tx) = active_cancel_tx.take() {
@@ -215,6 +290,8 @@ pub async fn run_host_service(
                                     #[cfg(not(target_os = "macos"))]
                                     let (talkback_inbound_rx, talkback_settings_rx) = (None, None);
                                     let host_send_file = std::env::var_os("REMOTE_PLAY_HOST_SEND_FILE").map(PathBuf::from);
+                                    let keyframe_requested = Arc::new(AtomicBool::new(true));
+                                    active_keyframe_requested = Some(keyframe_requested.clone());
 
                                     let sender_clone = udp_sender.clone();
                                     let stats_clone = stats.clone();
@@ -236,6 +313,7 @@ pub async fn run_host_service(
                                             talkback_settings_rx,
                                             stream_settings_rx: Some(settings_rx),
                                             host_send_file,
+                                            keyframe_requested,
                                         }).await {
                                             eprintln!("Streaming task error: {}", e);
                                         }
@@ -245,7 +323,10 @@ pub async fn run_host_service(
                                 _ => {}
                             }
                         }
-                        Ok(MultiplexedPacket::Data(envelope, addr)) => {
+                        Ok(
+                            MultiplexedPacket::Data(envelope, addr)
+                            | MultiplexedPacket::DataWithTiming(envelope, _, addr),
+                        ) => {
                             if !is_active_client(active_client_addr, addr) {
                                 continue;
                             }

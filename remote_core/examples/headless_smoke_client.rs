@@ -175,7 +175,8 @@ async fn handle_packet(
             stats.telemetry += 1;
         }
         MultiplexedPacket::Control(_, _) => {}
-        MultiplexedPacket::Data(envelope, _) => match envelope.header.kind {
+        MultiplexedPacket::Data(envelope, _)
+        | MultiplexedPacket::DataWithTiming(envelope, _, _) => match envelope.header.kind {
             ContentKind::VideoH265 => {
                 let _ = realtime_data_to_rtp(envelope)?;
                 stats.data_video += 1;

@@ -89,10 +89,16 @@ unsafe impl Sync for LinuxUinputInjector {}
 
 impl LinuxUinputInjector {
     pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let file = match OpenOptions::new().read(true).write(true).open("/dev/uinput") {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/uinput")
+        {
             Ok(f) => f,
             Err(err) => {
-                eprintln!("[LinuxInput] Failed to open /dev/uinput: {err}. Checking /dev/input/uinput...");
+                eprintln!(
+                    "[LinuxInput] Failed to open /dev/uinput: {err}. Checking /dev/input/uinput..."
+                );
                 OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -230,7 +236,8 @@ impl InputInjector for LinuxUinputInjector {
                     4 => BTN_EXTRA,
                     _ => BTN_LEFT,
                 };
-                self.pressed_buttons.fetch_or(1 << (button.min(7)), Ordering::Relaxed);
+                self.pressed_buttons
+                    .fetch_or(1 << (button.min(7)), Ordering::Relaxed);
                 self.write_event(EV_KEY, btn_code, 1);
                 self.syn_report();
             }
@@ -243,7 +250,8 @@ impl InputInjector for LinuxUinputInjector {
                     4 => BTN_EXTRA,
                     _ => BTN_LEFT,
                 };
-                self.pressed_buttons.fetch_and(!(1 << (button.min(7))), Ordering::Relaxed);
+                self.pressed_buttons
+                    .fetch_and(!(1 << (button.min(7))), Ordering::Relaxed);
                 self.write_event(EV_KEY, btn_code, 0);
                 self.syn_report();
             }
@@ -270,7 +278,11 @@ impl InputInjector for LinuxUinputInjector {
                 self.write_event(EV_KEY, linux_key, 0);
                 self.syn_report();
             }
-            InputEvent::Key { key_code, pressed, modifiers } => {
+            InputEvent::Key {
+                key_code,
+                pressed,
+                modifiers,
+            } => {
                 self.active_modifiers.store(modifiers, Ordering::Relaxed);
                 let linux_key = map_gpui_or_mac_to_linux_key(key_code);
                 if pressed {

@@ -1,7 +1,8 @@
+use crate::session_crypto::{SessionCrypto, MULTIPLEX_ENCRYPTED};
 use protocol::{CompactRealtimeError, ControlMessage, DataEnvelope, RtpPacket};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
@@ -42,13 +43,16 @@ impl UdpMultiplexer {
     }
 
     pub fn split(&self) -> (UdpSender, UdpReceiver) {
+        let crypto = Arc::new(OnceLock::new());
         (
             UdpSender {
                 socket: self.socket.clone(),
+                crypto: crypto.clone(),
             },
             UdpReceiver {
                 socket: self.socket.clone(),
                 fragments: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                crypto,
             },
         )
     }
@@ -61,9 +65,32 @@ impl UdpMultiplexer {
 #[derive(Clone)]
 pub struct UdpSender {
     socket: Arc<UdpSocket>,
+    crypto: Arc<OnceLock<SessionCrypto>>,
 }
 impl UdpSender {
+    pub fn install_crypto(&self, crypto: SessionCrypto) -> bool {
+        self.crypto.set(crypto).is_ok()
+    }
+
     async fn send_multiplexed(
+        &self,
+        header: u8,
+        bytes: &[u8],
+        target: SocketAddr,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(crypto) = self.crypto.get() {
+            let mut inner = Vec::with_capacity(1 + bytes.len());
+            inner.push(header);
+            inner.extend_from_slice(bytes);
+            let sealed = crypto.seal(&inner)?;
+            return self
+                .send_raw(MULTIPLEX_ENCRYPTED, &sealed, target)
+                .await;
+        }
+        self.send_raw(header, bytes, target).await
+    }
+
+    async fn send_raw(
         &self,
         header: u8,
         bytes: &[u8],
@@ -71,10 +98,10 @@ impl UdpSender {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let max_payload = 1400;
         if bytes.len() <= max_payload {
-            let mut buf = Vec::with_capacity(bytes.len() + 1);
-            buf.push(header);
-            buf.extend_from_slice(bytes);
-            self.socket.send_to(&buf, target).await?;
+            let mut buf = [0u8; 1401];
+            buf[0] = header;
+            buf[1..1 + bytes.len()].copy_from_slice(bytes);
+            self.socket.send_to(&buf[..1 + bytes.len()], target).await?;
         } else {
             // Fragment the packet
             // Format: 0x03, original_header(1), fragment_id(4), chunk_idx(2), total_chunks(2), data...
@@ -82,15 +109,18 @@ impl UdpSender {
             let chunks = bytes.chunks(max_payload);
             let total_chunks = chunks.len() as u16;
 
+            let mut buf = [0u8; 1410];
+            buf[0] = 0x03; // Fragment multiplex header
+            buf[1] = header;
+            buf[2..6].copy_from_slice(&fragment_id.to_be_bytes());
+            buf[8..10].copy_from_slice(&total_chunks.to_be_bytes());
+
             for (i, chunk) in chunks.enumerate() {
-                let mut buf = Vec::with_capacity(chunk.len() + 10);
-                buf.push(0x03); // Fragment multiplex header
-                buf.push(header);
-                buf.extend_from_slice(&fragment_id.to_be_bytes());
-                buf.extend_from_slice(&(i as u16).to_be_bytes());
-                buf.extend_from_slice(&total_chunks.to_be_bytes());
-                buf.extend_from_slice(chunk);
-                self.socket.send_to(&buf, target).await?;
+                buf[6..8].copy_from_slice(&(i as u16).to_be_bytes());
+                buf[10..10 + chunk.len()].copy_from_slice(chunk);
+                self.socket
+                    .send_to(&buf[..10 + chunk.len()], target)
+                    .await?;
             }
         }
         Ok(())
@@ -111,6 +141,15 @@ impl UdpSender {
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let bytes = msg.encode()?;
+        // Session handshake must remain plaintext so peers can derive the AEAD key.
+        if matches!(
+            msg,
+            ControlMessage::SessionHello { .. }
+                | ControlMessage::SessionAccept { .. }
+                | ControlMessage::SessionReject { .. }
+        ) {
+            return self.send_raw(0x02, &bytes, target).await;
+        }
         self.send_multiplexed(0x02, &bytes, target).await
     }
 
@@ -119,7 +158,16 @@ impl UdpSender {
         envelope: &DataEnvelope,
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        match envelope.encode_compact_realtime() {
+        self.send_data_with_timing(envelope, None, target).await
+    }
+
+    pub async fn send_data_with_timing(
+        &self,
+        envelope: &DataEnvelope,
+        timing: Option<protocol::FrameTimingCheckpoints>,
+        target: SocketAddr,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        match envelope.encode_compact_realtime_with_timing(timing) {
             Ok(bytes) => self.send_multiplexed(0x05, &bytes, target).await,
             Err(
                 CompactRealtimeError::NonRealtimeLane(_)
@@ -162,6 +210,7 @@ impl FragmentEntry {
 pub struct UdpReceiver {
     socket: Arc<UdpSocket>,
     fragments: Arc<Mutex<FragmentMap>>,
+    crypto: Arc<OnceLock<SessionCrypto>>,
 }
 
 #[derive(Debug)]
@@ -169,9 +218,62 @@ pub enum MultiplexedPacket {
     Rtp(RtpPacket, SocketAddr),
     Control(ControlMessage, SocketAddr),
     Data(DataEnvelope, SocketAddr),
+    DataWithTiming(
+        DataEnvelope,
+        Option<protocol::FrameTimingCheckpoints>,
+        SocketAddr,
+    ),
 }
 
 impl UdpReceiver {
+    pub fn install_crypto(&self, crypto: SessionCrypto) -> bool {
+        self.crypto.set(crypto).is_ok()
+    }
+
+    fn decode_payload(
+        &self,
+        buf: &[u8],
+        len: usize,
+        addr: SocketAddr,
+    ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
+        if len == 0 {
+            return Ok(None);
+        }
+        match buf[0] {
+            MULTIPLEX_ENCRYPTED => {
+                let Some(crypto) = self.crypto.get() else {
+                    return Err("encrypted packet received without session crypto".into());
+                };
+                let opened = crypto.open(&buf[1..len])?;
+                return self.decode_payload(&opened, opened.len(), addr);
+            }
+            0x01 => {
+                let rtp = RtpPacket::decode(&buf[1..len])?;
+                Ok(Some(MultiplexedPacket::Rtp(rtp, addr)))
+            }
+            0x02 => {
+                let msg = ControlMessage::decode(&buf[1..len])?;
+                Ok(Some(MultiplexedPacket::Control(msg, addr)))
+            }
+            0x04 => {
+                let envelope = DataEnvelope::decode(&buf[1..len])?;
+                Ok(Some(MultiplexedPacket::Data(envelope, addr)))
+            }
+            0x05 => {
+                let (envelope, timing) =
+                    DataEnvelope::decode_compact_realtime_with_timing(&buf[1..len])?;
+                if timing.is_some() {
+                    Ok(Some(MultiplexedPacket::DataWithTiming(
+                        envelope, timing, addr,
+                    )))
+                } else {
+                    Ok(Some(MultiplexedPacket::Data(envelope, addr)))
+                }
+            }
+            _ => Err("Unknown UDP multiplexing header".into()),
+        }
+    }
+
     fn cleanup_expired_fragments(fragments: &mut FragmentMap, now: Instant) {
         fragments.retain(|_, entry| now.duration_since(entry.created_at) <= MAX_FRAGMENT_AGE);
     }
@@ -193,29 +295,13 @@ impl UdpReceiver {
     }
 
     pub async fn recv(&self) -> Result<MultiplexedPacket, Box<dyn Error + Send + Sync>> {
+        let mut buf = [0u8; 65536];
         loop {
-            let mut buf = vec![0u8; 65536];
             let (len, addr) = self.socket.recv_from(&mut buf).await?;
             if len == 0 {
                 continue;
             }
             match buf[0] {
-                0x01 => {
-                    let rtp = RtpPacket::decode(&buf[1..len])?;
-                    return Ok(MultiplexedPacket::Rtp(rtp, addr));
-                }
-                0x02 => {
-                    let msg = ControlMessage::decode(&buf[1..len])?;
-                    return Ok(MultiplexedPacket::Control(msg, addr));
-                }
-                0x04 => {
-                    let envelope = DataEnvelope::decode(&buf[1..len])?;
-                    return Ok(MultiplexedPacket::Data(envelope, addr));
-                }
-                0x05 => {
-                    let envelope = DataEnvelope::decode_compact_realtime(&buf[1..len])?;
-                    return Ok(MultiplexedPacket::Data(envelope, addr));
-                }
                 0x03 => {
                     if len < 10 {
                         continue;
@@ -259,35 +345,23 @@ impl UdpReceiver {
                         }
                         fragments.remove(&fragment_id);
 
-                        // Parse full_data
-                        match header {
-                            0x01 => {
-                                let rtp = RtpPacket::decode(&full_data)?;
-                                return Ok(MultiplexedPacket::Rtp(rtp, addr));
-                            }
-                            0x02 => {
-                                let msg = ControlMessage::decode(&full_data)?;
-                                return Ok(MultiplexedPacket::Control(msg, addr));
-                            }
-                            0x04 => {
-                                let envelope = DataEnvelope::decode(&full_data)?;
-                                return Ok(MultiplexedPacket::Data(envelope, addr));
-                            }
-                            0x05 => {
-                                let envelope = DataEnvelope::decode_compact_realtime(&full_data)?;
-                                return Ok(MultiplexedPacket::Data(envelope, addr));
-                            }
-                            _ => {
-                                return Err(
-                                    "Unknown UDP multiplexing header inside fragment".into()
-                                );
-                            }
+                        let mut assembled = Vec::with_capacity(1 + full_data.len());
+                        assembled.push(header);
+                        assembled.extend_from_slice(&full_data);
+                        if let Some(packet) =
+                            self.decode_payload(&assembled, assembled.len(), addr)?
+                        {
+                            return Ok(packet);
                         }
                     } else {
                         Self::enforce_fragment_cache_limit(&mut fragments, fragment_id);
                     }
                 }
-                _ => return Err("Unknown UDP multiplexing header".into()),
+                _ => {
+                    if let Some(packet) = self.decode_payload(&buf[..len], len, addr)? {
+                        return Ok(packet);
+                    }
+                }
             }
         }
     }
@@ -467,6 +541,31 @@ mod tests {
             MultiplexedPacket::Control(ControlMessage::Heartbeat, addr) => {
                 assert_eq!(addr, left_addr);
             }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypted_control_roundtrips_after_crypto_install() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let psk = b"test-psk";
+        let salt = b"salt-16-bytes!!!!";
+        sender.install_crypto(crate::SessionCrypto::from_psk(psk, salt).unwrap());
+        receiver.install_crypto(crate::SessionCrypto::from_psk(psk, salt).unwrap());
+
+        sender
+            .send_control(&ControlMessage::Heartbeat, right_addr)
+            .await
+            .expect("encrypted control send should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Control(ControlMessage::Heartbeat, _) => {}
             other => panic!("unexpected packet: {other:?}"),
         }
     }
@@ -717,5 +816,65 @@ mod tests {
             recv_error(&receiver).await,
             "Mismatched UDP fragment total chunk count"
         );
+    }
+
+    #[tokio::test]
+    async fn sends_and_receives_data_envelopes_with_timing() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let envelope = data_envelope(32);
+        let mut timing = protocol::FrameTimingCheckpoints::new(123_456_000);
+        timing.encode_queue_ts_us = 100;
+        timing.encode_done_ts_us = 200;
+        timing.packetize_ts_us = 300;
+        timing.send_ts_us = 400;
+
+        sender
+            .send_data_with_timing(&envelope, Some(timing), right_addr)
+            .await
+            .expect("data send with timing should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::DataWithTiming(decoded, decoded_timing, _) => {
+                assert_eq!(decoded, envelope);
+                assert_eq!(decoded_timing, Some(timing));
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reassembles_fragmented_data_envelopes_with_timing() {
+        let (left, right) = bind_pair().await;
+        let right_addr = right
+            .socket
+            .local_addr()
+            .expect("right should have local addr");
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        let envelope = data_envelope(5_000);
+        let mut timing = protocol::FrameTimingCheckpoints::new(999_888_000);
+        timing.encode_queue_ts_us = 150;
+        timing.encode_done_ts_us = 250;
+        timing.packetize_ts_us = 350;
+        timing.send_ts_us = 450;
+
+        sender
+            .send_data_with_timing(&envelope, Some(timing), right_addr)
+            .await
+            .expect("fragmented data send with timing should succeed");
+
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::DataWithTiming(decoded, decoded_timing, _) => {
+                assert_eq!(decoded, envelope);
+                assert_eq!(decoded_timing, Some(timing));
+            }
+            other => panic!("unexpected packet: {other:?}"),
+        }
     }
 }

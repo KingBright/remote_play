@@ -278,6 +278,7 @@ impl DiscoveryPeerSnapshot {
 pub struct DiscoveryPeerCache {
     local_network_name: String,
     local_device_id: String,
+    accept_any_network: bool,
     peers: Vec<DiscoveredPeer>,
 }
 
@@ -286,8 +287,14 @@ impl DiscoveryPeerCache {
         Self {
             local_network_name: local_network_name.into(),
             local_device_id: local_device_id.into(),
+            accept_any_network: false,
             peers: Vec::new(),
         }
+    }
+
+    pub fn accept_any_network(mut self, accept: bool) -> Self {
+        self.accept_any_network = accept;
+        self
     }
 
     pub fn apply_announcement(
@@ -322,7 +329,7 @@ impl DiscoveryPeerCache {
         now_ms: u64,
         route_override: Option<DiscoveryRouteOverride>,
     ) -> Option<DiscoveredPeer> {
-        if announcement.network_name != self.local_network_name {
+        if !self.accept_any_network && announcement.network_name != self.local_network_name {
             return None;
         }
         if announcement.device_id == self.local_device_id {
@@ -379,6 +386,7 @@ pub struct DiscoveryRuntimeConfig {
     pub announcement: DiscoveryAnnouncement,
     pub announce_interval: Duration,
     pub prune_interval: Duration,
+    pub accept_any_network: bool,
 }
 
 impl DiscoveryRuntimeConfig {
@@ -394,6 +402,7 @@ impl DiscoveryRuntimeConfig {
             announcement,
             announce_interval: DEFAULT_ANNOUNCE_INTERVAL,
             prune_interval: Duration::from_secs(1),
+            accept_any_network: false,
         }
     }
 }
@@ -425,10 +434,13 @@ pub async fn run_discovery_runtime(
             .map_err(|source| DiscoveryError::Io("set_broadcast", source.to_string()))?;
     }
 
-    let cache = Arc::new(Mutex::new(DiscoveryPeerCache::new(
-        config.announcement.network_name.clone(),
-        config.announcement.device_id.clone(),
-    )));
+    let cache = Arc::new(Mutex::new(
+        DiscoveryPeerCache::new(
+            config.announcement.network_name.clone(),
+            config.announcement.device_id.clone(),
+        )
+        .accept_any_network(config.accept_any_network),
+    ));
     let route_overrides = config.route_overrides.clone();
 
     let send_socket = socket.clone();
@@ -735,6 +747,16 @@ mod tests {
     }
 
     #[test]
+    fn cache_can_accept_foreign_networks_for_mobile_viewers() {
+        let mut cache = DiscoveryPeerCache::new("local-net", "android-1").accept_any_network(true);
+        let mut foreign = sample_announcement();
+        foreign.network_name = "other-network".to_string();
+        assert!(cache
+            .apply_announcement(foreign, "192.168.1.20:38117".parse().unwrap(), 1)
+            .is_some());
+    }
+
+    #[test]
     fn discovery_announcement_roundtrips() {
         let announcement = sample_announcement();
         let encoded = announcement.encode().expect("encode announcement");
@@ -1036,6 +1058,7 @@ mod tests {
                 announcement: local,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),
+                accept_any_network: false,
             },
             local_events_tx,
             local_snapshot_tx,
@@ -1049,6 +1072,7 @@ mod tests {
                 announcement: peer,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),
+                accept_any_network: false,
             },
             peer_events_tx,
             peer_snapshot_tx,

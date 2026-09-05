@@ -16,6 +16,7 @@ rustls = { version = "0.23", features = ["ring"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
 yororen_ui = "0.2"
+rfd = "0.15"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAppearance"] }
 

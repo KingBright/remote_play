@@ -9,3 +9,9 @@ mod linux_clipboard;
 
 #[cfg(target_os = "linux")]
 pub use linux_clipboard::LinuxClipboardProvider;
+
+#[cfg(target_os = "windows")]
+mod windows_clipboard;
+
+#[cfg(target_os = "windows")]
+pub use windows_clipboard::WindowsClipboardProvider;

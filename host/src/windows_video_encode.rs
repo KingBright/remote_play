@@ -1,5 +1,5 @@
 use crate::ffmpeg_hevc::FfmpegHevcSource;
-use crate::linux_capture::LinuxVideoFrame;
+use crate::windows_capture::WindowsVideoFrame;
 use async_trait::async_trait;
 use remote_core::VideoEncoder;
 use std::error::Error;
@@ -13,17 +13,12 @@ pub struct EncodedChunk {
     pub timing: protocol::FrameTimingCheckpoints,
 }
 
-pub struct LinuxVideoEncoder {
-    width: u32,
-    height: u32,
-    fps: u32,
-    bitrate_kbps: u32,
+pub struct WindowsVideoEncoder {
     source: Option<FfmpegHevcSource>,
-    placeholder: bool,
     force_keyframe: bool,
 }
 
-impl LinuxVideoEncoder {
+impl WindowsVideoEncoder {
     pub fn new(
         width: u32,
         height: u32,
@@ -32,23 +27,13 @@ impl LinuxVideoEncoder {
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         match FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
             Ok(source) => Ok(Self {
-                width,
-                height,
-                fps,
-                bitrate_kbps,
                 source: Some(source),
-                placeholder: false,
                 force_keyframe: false,
             }),
             Err(err) => {
-                eprintln!("[LinuxEncoder] ffmpeg HEVC unavailable ({err}); using non-decodable placeholder.");
+                eprintln!("[WindowsEncoder] ffmpeg HEVC unavailable ({err})");
                 Ok(Self {
-                    width,
-                    height,
-                    fps,
-                    bitrate_kbps,
                     source: None,
-                    placeholder: true,
                     force_keyframe: true,
                 })
             }
@@ -60,15 +45,8 @@ impl LinuxVideoEncoder {
     }
 
     pub fn update_settings(&mut self, width: u32, height: u32, fps: u32, bitrate_kbps: u32) {
-        self.width = width;
-        self.height = height;
-        self.fps = fps;
-        self.bitrate_kbps = bitrate_kbps;
-        if !self.placeholder {
-            match FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
-                Ok(source) => self.source = Some(source),
-                Err(err) => eprintln!("[LinuxEncoder] failed to restart ffmpeg: {err}"),
-            }
+        if let Ok(source) = FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
+            self.source = Some(source);
         }
     }
 
@@ -90,18 +68,12 @@ impl LinuxVideoEncoder {
                 timing,
             });
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(
-            (1000 / self.fps.max(1)) as u64,
-        ))
-        .await;
+        let _ = self.force_keyframe;
         let capture_ts_us = remote_core::timing::quanta_now_us();
-        let is_key = self.force_keyframe;
-        self.force_keyframe = false;
         Ok(EncodedChunk {
             nalu: Vec::new(),
             capture_time_ms: (capture_ts_us / 1000) as u32,
-            is_keyframe: is_key,
+            is_keyframe: false,
             encode_cost_ms: 0.0,
             timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
         })
@@ -109,14 +81,13 @@ impl LinuxVideoEncoder {
 }
 
 #[async_trait]
-impl VideoEncoder for LinuxVideoEncoder {
-    type Frame = LinuxVideoFrame;
+impl VideoEncoder for WindowsVideoEncoder {
+    type Frame = WindowsVideoFrame;
 
     async fn submit_frame(
         &mut self,
-        frame: Self::Frame,
+        _frame: Self::Frame,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let _ = frame;
         Ok(())
     }
 

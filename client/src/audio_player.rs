@@ -51,9 +51,7 @@ impl AudioPlayer {
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         #[cfg(not(target_os = "macos"))]
         {
-            tokio::spawn(async move {
-                while let Some(_) = rx.recv().await {}
-            });
+            tokio::spawn(async move { while let Some(_) = rx.recv().await {} });
             return Ok(Self { _stream: None });
         }
 
@@ -68,86 +66,90 @@ impl AudioPlayer {
             let output_config: cpal::StreamConfig = default_config.clone().into();
             let output_channels = usize::from(output_config.channels.max(1));
 
-        let (sample_tx, sample_rx) = crossbeam_channel::unbounded::<f32>();
+            let (sample_tx, sample_rx) = crossbeam_channel::bounded::<Vec<f32>>(8);
+            let leftover = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
+            let leftover_f32 = leftover.clone();
+            let leftover_i16 = leftover.clone();
 
-        let err_fn = |err| eprintln!("an error occurred on audio output stream: {}", err);
+            let err_fn = |err| eprintln!("an error occurred on audio output stream: {}", err);
 
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                &output_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        *sample = sample_rx.try_recv().unwrap_or(0.0);
-                    }
-                },
-                err_fn,
-                None,
-            )?,
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &output_config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        let f = sample_rx.try_recv().unwrap_or(0.0);
-                        let i = (f * i16::MAX as f32) as i16;
-                        *sample = i;
-                    }
-                },
-                err_fn,
-                None,
-            )?,
-            _ => return Err("Unsupported sample format".into()),
-        };
+            let stream = match default_config.sample_format() {
+                cpal::SampleFormat::F32 => device.build_output_stream(
+                    &output_config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        fill_audio_buffer(data, &sample_rx, &leftover_f32, |s| s);
+                    },
+                    err_fn,
+                    None,
+                )?,
+                cpal::SampleFormat::I16 => device.build_output_stream(
+                    &output_config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        fill_audio_buffer(data, &sample_rx, &leftover_i16, |s| {
+                            (s * i16::MAX as f32) as i16
+                        });
+                    },
+                    err_fn,
+                    None,
+                )?,
+                _ => return Err("Unsupported sample format".into()),
+            };
 
-        stream.play()?;
+            stream.play()?;
 
-        tokio::spawn(async move {
-            let mut streams = HashMap::<u32, AudioDecodeStream>::new();
-            let mut settings = AudioPlayerSettings::default();
+            tokio::spawn(async move {
+                let mut streams = HashMap::<u32, AudioDecodeStream>::new();
+                let mut settings = AudioPlayerSettings::default();
 
-            while let Some(event) = rx.recv().await {
-                match event {
-                    AudioPlayerEvent::Settings(new_settings) => {
-                        settings = new_settings;
-                    }
-                    AudioPlayerEvent::StreamConfig(config) => {
-                        if config.direction != AudioDirection::HostToClient {
-                            continue;
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        AudioPlayerEvent::Settings(new_settings) => {
+                            settings = new_settings;
                         }
-                        match AudioDecodeStream::new(config.clone()) {
-                            Ok(stream) => {
-                                streams.insert(config.stream_id, stream);
+                        AudioPlayerEvent::StreamConfig(config) => {
+                            if config.direction != AudioDirection::HostToClient {
+                                continue;
                             }
-                            Err(err) => {
-                                eprintln!("Ignoring unsupported audio stream config: {}", err);
-                            }
-                        }
-                    }
-                    AudioPlayerEvent::Packet(packet) => {
-                        let stream_id = packet.header.ssrc;
-                        if let std::collections::hash_map::Entry::Vacant(entry) =
-                            streams.entry(stream_id)
-                        {
-                            let config = legacy_audio_stream_config(stream_id);
-                            match AudioDecodeStream::new(config) {
+                            match AudioDecodeStream::new(config.clone()) {
                                 Ok(stream) => {
-                                    entry.insert(stream);
+                                    streams.insert(config.stream_id, stream);
                                 }
                                 Err(err) => {
-                                    eprintln!("Failed to initialize legacy audio decoder: {}", err);
-                                    continue;
+                                    eprintln!("Ignoring unsupported audio stream config: {}", err);
                                 }
                             }
                         }
+                        AudioPlayerEvent::Packet(packet) => {
+                            let stream_id = packet.header.ssrc;
+                            if let std::collections::hash_map::Entry::Vacant(entry) =
+                                streams.entry(stream_id)
+                            {
+                                let config = legacy_audio_stream_config(stream_id);
+                                match AudioDecodeStream::new(config) {
+                                    Ok(stream) => {
+                                        entry.insert(stream);
+                                    }
+                                    Err(err) => {
+                                        eprintln!(
+                                            "Failed to initialize legacy audio decoder: {}",
+                                            err
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
 
-                        if let Some(stream) = streams.get_mut(&stream_id) {
-                            stream.push_packet(packet, output_channels, &sample_tx, settings);
+                            if let Some(stream) = streams.get_mut(&stream_id) {
+                                stream.push_packet(packet, output_channels, &sample_tx, settings);
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
 
-        Ok(Self { _stream: Some(stream) })
+            Ok(Self {
+                _stream: Some(stream),
+            })
         }
     }
 }
@@ -180,7 +182,7 @@ impl AudioDecodeStream {
         &mut self,
         packet: RtpPacket,
         output_channels: usize,
-        sample_tx: &crossbeam_channel::Sender<f32>,
+        sample_tx: &crossbeam_channel::Sender<Vec<f32>>,
         settings: AudioPlayerSettings,
     ) {
         if !self.expected_seq_init {
@@ -201,15 +203,15 @@ impl AudioDecodeStream {
                     if gain == 0.0 {
                         continue;
                     }
+                    let mut chunk = Vec::with_capacity(samples_per_channel * output_channels);
                     for_each_output_sample(
                         &decoded,
                         samples_per_channel,
                         source_channels,
                         output_channels,
-                        |sample| {
-                            let _ = sample_tx.send(sample * gain);
-                        },
+                        |sample| chunk.push(sample * gain),
                     );
+                    let _ = sample_tx.try_send(chunk);
                 }
                 Err(e) => eprintln!("Opus decode error: {}", e),
             }
@@ -228,6 +230,32 @@ fn opus_channels(channels: u16) -> Result<opus::Channels, Box<dyn Error + Send +
         1 => Ok(opus::Channels::Mono),
         2 => Ok(opus::Channels::Stereo),
         other => Err(format!("unsupported Opus channel count {other}").into()),
+    }
+}
+
+fn fill_audio_buffer<T>(
+    data: &mut [T],
+    sample_rx: &crossbeam_channel::Receiver<Vec<f32>>,
+    leftover: &std::sync::Mutex<Vec<f32>>,
+    map: impl Fn(f32) -> T,
+) {
+    let mut pending = leftover.lock().unwrap_or_else(|err| err.into_inner());
+    let mut offset = 0;
+    while offset < data.len() {
+        if pending.is_empty() {
+            match sample_rx.try_recv() {
+                Ok(chunk) => *pending = chunk,
+                Err(_) => break,
+            }
+        }
+        let take = (data.len() - offset).min(pending.len());
+        for sample in pending.drain(..take) {
+            data[offset] = map(sample);
+            offset += 1;
+        }
+    }
+    for sample in data.iter_mut().skip(offset) {
+        *sample = map(0.0);
     }
 }
 

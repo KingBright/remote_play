@@ -16,7 +16,7 @@ use remote_core::net::{DEFAULT_CONTROL_PORT, UdpSender};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 #[derive(PartialEq)]
 pub enum ViewState {
@@ -46,7 +46,7 @@ pub async fn run_client(
     udp_sender: UdpSender,
     shared_frame: Arc<Mutex<Option<MacDecodedVideoFrame>>>,
     active_session_id: Arc<std::sync::atomic::AtomicU32>,
-    host_stats: Arc<RwLock<crate::HostStats>>,
+    host_stats: Arc<crate::SharedHostStats>,
     controls: ClientRuntimeControls,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let app = gpui::Application::new();
@@ -164,7 +164,7 @@ pub struct RemotePlayView {
     _udp_sender: UdpSender,
     _host_addr: SocketAddr,
     active_session_id: Arc<std::sync::atomic::AtomicU32>,
-    host_stats: Arc<RwLock<crate::HostStats>>,
+    host_stats: Arc<crate::SharedHostStats>,
     controls: ClientRuntimeControls,
     current_frame: Option<MacDecodedVideoFrame>,
     show_stats: bool,
@@ -197,13 +197,14 @@ pub struct RemotePlayView {
     talkback_push_active: bool,
     talkback_remote_muted: bool,
     talkback_remote_volume_percent: u8,
+    telemetry_engine: remote_core::PipelineTelemetryEngine,
 }
 
 impl RemotePlayView {
     pub fn new(
         udp_sender: UdpSender,
         active_session_id: Arc<std::sync::atomic::AtomicU32>,
-        host_stats: Arc<RwLock<crate::HostStats>>,
+        host_stats: Arc<crate::SharedHostStats>,
         controls: ClientRuntimeControls,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
@@ -218,6 +219,8 @@ impl RemotePlayView {
         let mesh_health = controls.mesh_health.clone();
         let mesh_pairing = controls.mesh_pairing.clone();
         let mesh_pairing_snapshot = mesh_pairing.as_ref().map(MeshPairingControl::snapshot);
+        let current_session_id = active_session_id.load(std::sync::atomic::Ordering::Relaxed);
+        let telemetry_engine = remote_core::PipelineTelemetryEngine::new(current_session_id, 300);
 
         Self {
             _udp_sender: udp_sender,
@@ -255,6 +258,7 @@ impl RemotePlayView {
             talkback_push_active: false,
             talkback_remote_muted: false,
             talkback_remote_volume_percent: 100,
+            telemetry_engine,
         }
     }
 
@@ -289,10 +293,22 @@ impl RemotePlayView {
         self.mesh_pairing_snapshot = Some(control.join_from_invite_code(&invite_code));
     }
 
-    pub fn process_frame(&mut self, frame: MacDecodedVideoFrame, cx: &mut gpui::Context<Self>) {
+    pub fn process_frame(&mut self, mut frame: MacDecodedVideoFrame, cx: &mut gpui::Context<Self>) {
         if self.state != ViewState::Streaming {
             return;
         }
+        if frame.timing.capture_ts_us > 0 {
+            let floor = frame
+                .timing
+                .decode_done_ts_us
+                .max(frame.timing.jitter_exit_ts_us)
+                .max(frame.timing.recv_ts_us);
+            let elapsed_us = frame.decoded_at.elapsed().as_micros() as u32;
+            frame.timing.render_submit_ts_us =
+                remote_core::timing::advance_client_stage(floor, elapsed_us);
+            frame.timing.render_done_ts_us = frame.timing.render_submit_ts_us;
+        }
+
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -318,6 +334,9 @@ impl RemotePlayView {
                 self.global_latency_ms + (g_latency - self.global_latency_ms) / 16.0;
         }
 
+        let timing = frame.timing;
+        self.telemetry_engine.record_frame(&timing, 0);
+
         self.current_frame = Some(frame);
         self.frames_since_update += 1;
 
@@ -328,6 +347,11 @@ impl RemotePlayView {
             self.frames_since_update = 0;
             self.last_fps_update = now;
         }
+
+        self.host_stats.set_latest_timing(timing);
+        self.host_stats
+            .set_pipeline_report(self.telemetry_engine.generate_report());
+
         cx.notify();
     }
 
@@ -934,7 +958,7 @@ impl Render for RemotePlayView {
                 }
 
                 if self.show_panel {
-                    let hs = self.host_stats.read().unwrap().clone();
+                    let hs = self.host_stats.snapshot();
                     let sender_4k = self._udp_sender.clone();
                     let sender_2k = self._udp_sender.clone();
                     let sender_1080 = self._udp_sender.clone();
@@ -2045,7 +2069,7 @@ impl Render for RemotePlayView {
                 }
 
                 if self.show_stats {
-                    let hs = self.host_stats.read().unwrap().clone();
+                    let hs = self.host_stats.snapshot();
                     layout = layout.child(
                         div()
                             .absolute()

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
+name = "remote_play_android"
 crate-type = ["rlib", "cdylib"]
 
 [features]
@@ -14,11 +15,10 @@ wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 [dependencies]
 protocol = { path = "../protocol" }
 remote_core = { path = "../remote_core" }
-client = { path = "../client" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bincode = "1.3.3"
-tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 async-trait = "0.1"
 
 # Android JNI dependencies

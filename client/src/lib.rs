@@ -23,6 +23,7 @@ mod video_decode;
 
 use crate::audio_player::{AudioPlayerEvent, AudioPlayerSettings};
 use protocol::DataEnvelope;
+use remote_core::client_session::{AudioIngressEvent, EnvelopeIngress};
 use remote_core::clipboard_file_runtime::{ClipboardFileSyncConfig, run_clipboard_file_sync};
 use remote_core::clipboard_runtime::{ClipboardSyncRunnerConfig, run_clipboard_sync};
 use remote_core::discovery::{
@@ -49,34 +50,21 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::spawn;
 use tokio::sync::{broadcast, mpsc, watch};
-use transfer_center::{TransferCenterState, TransferEntrySnapshot};
+use transfer_center::TransferCenterState;
 
-#[cfg(target_os = "macos")]
-use remote_platform::MacClipboardProvider;
 #[cfg(target_os = "linux")]
 use remote_platform::LinuxClipboardProvider;
+#[cfg(target_os = "macos")]
+use remote_platform::MacClipboardProvider;
+#[cfg(target_os = "windows")]
+use remote_platform::WindowsClipboardProvider;
 
 pub use mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
-
-#[derive(Default, Clone, Debug)]
-pub struct HostStats {
-    pub fps: f32,
-    pub latency: f32,
-    pub jitter: f32,
-    pub bitrate_kbps: u32,
-    pub rtt_ms: f32,
-    pub e2e_latency_ms: f32,
-    pub decode_latency_ms: f32,
-    pub packet_loss_rate: f32,
-    pub jitter_buffer_depth: usize,
-    pub decode_errors: u64,
-    pub link_status: &'static str,
-    pub last_anomaly_reason: Option<String>,
-    pub updated_at: Option<Instant>,
-}
+pub use remote_core::client_session::{HostStats, SharedHostStats};
+pub use transfer_center::TransferEntrySnapshot;
 
 pub struct DiscoveryRuntimeHandle {
     cancel_tx: broadcast::Sender<()>,
@@ -134,7 +122,7 @@ impl ClipboardRuntimeControl {
         let _ = self.command_tx.send(ClipboardRuntimeCommand::Stop);
     }
 
-    fn route_inbound(&self, envelope: DataEnvelope) {
+    pub fn route_inbound(&self, envelope: DataEnvelope) {
         let Some(tx) = self.inbound_tx.lock().unwrap().clone() else {
             return;
         };
@@ -142,6 +130,12 @@ impl ClipboardRuntimeControl {
         if let Err(err) = tx.try_send(envelope) {
             eprintln!("Clipboard inbound queue rejected packet: {}", err);
         }
+    }
+}
+
+impl EnvelopeIngress for ClipboardRuntimeControl {
+    fn route_inbound(&self, envelope: DataEnvelope) {
+        ClipboardRuntimeControl::route_inbound(self, envelope);
     }
 }
 
@@ -275,7 +269,7 @@ impl FileTransferRuntimeControl {
         self.transfer_state.lock().unwrap().snapshots()
     }
 
-    fn route_inbound(&self, envelope: DataEnvelope) {
+    pub fn route_inbound(&self, envelope: DataEnvelope) {
         let Some(tx) = self.inbound_tx.lock().unwrap().clone() else {
             return;
         };
@@ -283,6 +277,12 @@ impl FileTransferRuntimeControl {
         if let Err(err) = tx.try_send(envelope) {
             eprintln!("File transfer inbound queue rejected packet: {}", err);
         }
+    }
+}
+
+impl EnvelopeIngress for FileTransferRuntimeControl {
+    fn route_inbound(&self, envelope: DataEnvelope) {
+        FileTransferRuntimeControl::route_inbound(self, envelope);
     }
 }
 
@@ -336,7 +336,7 @@ pub fn decoded_video_frame_surface_with_fit(_frame: &MacDecodedVideoFrame, _mode
 pub struct ClientMediaRuntime {
     pub audio_playback: AudioPlaybackControl,
     pub audio_tx: mpsc::Sender<AudioPlayerEvent>,
-    pub decode_tx: mpsc::Sender<(protocol::RtpPacket, u32)>,
+    pub decode_tx: mpsc::Sender<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>,
     pub status: ClientMediaRuntimeStatus,
     shared_frame: Arc<Mutex<Option<MacDecodedVideoFrame>>>,
     _audio_player: Option<audio_player::AudioPlayer>,
@@ -358,7 +358,8 @@ impl ClientMediaRuntime {
             }
         };
         let shared_frame = Arc::new(Mutex::new(None));
-        let (decode_tx, mut decode_rx) = mpsc::channel::<(protocol::RtpPacket, u32)>(200);
+        let (decode_tx, mut decode_rx) =
+            mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(200);
 
         #[cfg(target_os = "macos")]
         let decode_task = {
@@ -373,12 +374,27 @@ impl ClientMediaRuntime {
                     }
                 };
 
-                while let Some((ordered_pkt, recv_time)) = decode_rx.recv().await {
+                while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
                     use remote_core::VideoDecoder;
+                    let decode_start = std::time::Instant::now();
+                    if timing.capture_ts_us > 0 {
+                        timing.decode_enter_ts_us =
+                            timing.jitter_exit_ts_us.max(timing.recv_ts_us);
+                    }
                     match video_decoder.decode(&ordered_pkt.payload).await {
                         Ok(mut frame) => {
+                            if timing.capture_ts_us > 0 {
+                                timing.decode_done_ts_us =
+                                    remote_core::timing::advance_client_stage(
+                                        timing.decode_enter_ts_us.max(timing.recv_ts_us),
+                                        decode_start.elapsed().as_micros() as u32,
+                                    );
+                            }
                             frame.timestamp = ordered_pkt.header.timestamp;
-                            frame.recv_time = recv_time;
+                            frame.recv_time = timing.recv_ts_us / 1000;
+                            frame.decode_cost_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
+                            frame.decoded_at = std::time::Instant::now();
+                            frame.timing = timing;
                             stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
                             *decode_shared_frame.lock().unwrap() = Some(frame);
                         }
@@ -416,7 +432,44 @@ impl ClientMediaRuntime {
 pub fn start_clipboard_runtime_control(
     udp_sender: remote_core::net::UdpSender,
 ) -> ClipboardRuntimeControl {
-    start_clipboard_runtime_controller(udp_sender)
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        start_clipboard_runtime_controller(udp_sender)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = udp_sender;
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        spawn(async move {
+            while command_rx.recv().await.is_some() {}
+        });
+        ClipboardRuntimeControl {
+            command_tx,
+            inbound_tx: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+pub fn audio_ingress_bridge(
+    player_tx: mpsc::Sender<AudioPlayerEvent>,
+) -> mpsc::Sender<AudioIngressEvent> {
+    let (tx, mut rx) = mpsc::channel(100);
+    spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let mapped = match event {
+                AudioIngressEvent::Packet(packet) => AudioPlayerEvent::Packet(packet),
+                AudioIngressEvent::StreamConfig(config) => AudioPlayerEvent::StreamConfig(config),
+            };
+            if player_tx.send(mapped).await.is_err() {
+                break;
+            }
+        }
+    });
+    tx
+}
+
+fn as_envelope_ingress<T: EnvelopeIngress + 'static>(control: T) -> Arc<dyn EnvelopeIngress> {
+    Arc::new(control)
 }
 
 pub fn start_file_transfer_runtime_control(
@@ -476,7 +529,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     let stats = Statistics::new();
     Statistics::start_reporter(stats.clone(), "Client", 1);
 
-    let host_stats = Arc::new(std::sync::RwLock::new(HostStats::default()));
+    let host_stats = Arc::new(SharedHostStats::default());
     let host_stats_udp = host_stats.clone();
 
     // 1. Setup Network (Multiplexer & Receiver)
@@ -520,7 +573,8 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     let render_shared_frame = shared_frame.clone();
 
     // Decouple decoding from receiving
-    let (decode_tx, mut decode_rx) = tokio::sync::mpsc::channel::<(protocol::RtpPacket, u32)>(200);
+    let (decode_tx, mut decode_rx) =
+        tokio::sync::mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(200);
 
     // Decode Task
     spawn(async move {
@@ -532,12 +586,25 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         };
 
-        while let Some((ordered_pkt, recv_time)) = decode_rx.recv().await {
+        while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
             use remote_core::VideoDecoder;
+            let decode_start = std::time::Instant::now();
+            if timing.capture_ts_us > 0 {
+                timing.decode_enter_ts_us = timing.jitter_exit_ts_us.max(timing.recv_ts_us);
+            }
             match video_decoder.decode(&ordered_pkt.payload).await {
                 Ok(mut frame) => {
+                    if timing.capture_ts_us > 0 {
+                        timing.decode_done_ts_us = remote_core::timing::advance_client_stage(
+                            timing.decode_enter_ts_us.max(timing.recv_ts_us),
+                            decode_start.elapsed().as_micros() as u32,
+                        );
+                    }
                     frame.timestamp = ordered_pkt.header.timestamp;
-                    frame.recv_time = recv_time;
+                    frame.recv_time = timing.recv_ts_us / 1000;
+                    frame.decode_cost_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
+                    frame.decoded_at = std::time::Instant::now();
+                    frame.timing = timing;
                     stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
                     *shared_frame.lock().unwrap() = Some(frame);
                 }
@@ -558,10 +625,14 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
             stats: stats.clone(),
             active_session_id: active_session_id.clone(),
             host_stats: host_stats_udp,
-            audio_tx,
+            audio_tx: audio_ingress_bridge(audio_tx),
             decode_tx,
-            clipboard_control: clipboard_control.clone(),
-            file_transfer_control: file_transfer_control.clone(),
+            clipboard_control: clipboard_control
+                .clone()
+                .map(as_envelope_ingress),
+            file_transfer_control: file_transfer_control
+                .clone()
+                .map(as_envelope_ingress),
             session_event_tx: None,
         });
 
@@ -590,25 +661,32 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     });
 
-    // 3. Start Render Loop (Blocks Main Thread)
-    render::run_client(
-        udp_sender,
-        render_shared_frame,
-        active_session_id,
-        host_stats,
-        render::ClientRuntimeControls {
-            audio_playback: audio_playback_control,
-            clipboard: clipboard_control,
-            file_transfer: file_transfer_control,
-            talkback: talkback_control,
-            discovery: discovery.as_ref().map(|handle| handle.snapshot_rx.clone()),
-            mesh_health: _mesh_runtime
-                .as_ref()
-                .map(|runtime| runtime.health_rx.clone()),
-            mesh_pairing,
-        },
-    )
-    .await?;
+    if env_flag_enabled("REMOTE_PLAY_LEGACY_VIEWER") {
+        render::run_client(
+            udp_sender,
+            render_shared_frame,
+            active_session_id,
+            host_stats,
+            render::ClientRuntimeControls {
+                audio_playback: audio_playback_control,
+                clipboard: clipboard_control,
+                file_transfer: file_transfer_control,
+                talkback: talkback_control,
+                discovery: discovery.as_ref().map(|handle| handle.snapshot_rx.clone()),
+                mesh_health: _mesh_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.health_rx.clone()),
+                mesh_pairing,
+            },
+        )
+        .await?;
+    } else {
+        println!(
+            "Product GUI is the unified `remote_play` app. This process is a headless viewer."
+        );
+        println!("Set REMOTE_PLAY_LEGACY_VIEWER=1 to open the standalone GPUI viewer.");
+        tokio::signal::ctrl_c().await?;
+    }
 
     Ok(())
 }
@@ -975,7 +1053,9 @@ fn start_talkback_runtime_controller(
 
                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
                     active_cancel_tx = Some(cancel_tx);
-                    let (settings_tx, settings_rx) = tokio::sync::watch::channel(current_settings);
+                    let (settings_tx, settings_rx) =
+                        tokio::sync::watch::channel(current_settings);
+                    active_settings_tx = Some(settings_tx);
                     let udp_sender = udp_sender.clone();
                     #[cfg(target_os = "macos")]
                     spawn(async move {
@@ -993,7 +1073,7 @@ fn start_talkback_runtime_controller(
                         }
                     });
                     #[cfg(not(target_os = "macos"))]
-                    let _ = (udp_sender, target, session_id, cancel_rx, settings_rx, settings_tx);
+                    let _ = (udp_sender, target, session_id, cancel_rx, settings_rx);
                 }
                 TalkbackRuntimeCommand::SetSettings(settings) => {
                     current_settings = settings;
@@ -1014,7 +1094,7 @@ fn start_talkback_runtime_controller(
     TalkbackRuntimeControl { command_tx }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn start_clipboard_runtime_controller(
     udp_sender: remote_core::net::UdpSender,
 ) -> ClipboardRuntimeControl {
@@ -1057,6 +1137,8 @@ fn start_clipboard_runtime_controller(
                         let provider = MacClipboardProvider::new();
                         #[cfg(target_os = "linux")]
                         let provider = LinuxClipboardProvider::new();
+                        #[cfg(target_os = "windows")]
+                        let provider = WindowsClipboardProvider::new();
 
                         if let Err(err) = run_clipboard_sync(
                             provider,
@@ -1157,22 +1239,33 @@ fn start_file_transfer_runtime_controller(
                             .expect("file cancel tx should be active")
                             .subscribe();
                         spawn(async move {
-                            #[cfg(target_os = "macos")]
-                            let provider = MacClipboardProvider::new();
-                            #[cfg(target_os = "linux")]
-                            let provider = LinuxClipboardProvider::new();
-
-                            if let Err(err) = run_clipboard_file_sync(
-                                provider,
-                                bridge_command_tx,
-                                event_rx,
-                                Some(log_event_tx),
-                                bridge_cancel_rx,
-                                ClipboardFileSyncConfig::default(),
-                            )
-                            .await
+                            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
                             {
-                                eprintln!("File clipboard sync error: {}", err);
+                                #[cfg(target_os = "macos")]
+                                let provider = MacClipboardProvider::new();
+                                #[cfg(target_os = "linux")]
+                                let provider = LinuxClipboardProvider::new();
+                                if let Err(err) = run_clipboard_file_sync(
+                                    provider,
+                                    bridge_command_tx,
+                                    event_rx,
+                                    Some(log_event_tx),
+                                    bridge_cancel_rx,
+                                    ClipboardFileSyncConfig::default(),
+                                )
+                                .await
+                                {
+                                    eprintln!("File clipboard sync error: {}", err);
+                                }
+                            }
+                            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+                            {
+                                let _ = (
+                                    bridge_command_tx,
+                                    event_rx,
+                                    log_event_tx,
+                                    bridge_cancel_rx,
+                                );
                             }
                         });
                         let log_transfer_state = controller_transfer_state.clone();

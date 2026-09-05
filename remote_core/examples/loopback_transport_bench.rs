@@ -97,7 +97,7 @@ async fn bench_compact_data(payload_size: usize, iters: usize) -> Duration {
             .expect("data receive should not time out")
             .expect("data receive should succeed")
         {
-            MultiplexedPacket::Data(_, _) => {}
+            MultiplexedPacket::Data(_, _) | MultiplexedPacket::DataWithTiming(_, _, _) => {}
             other => panic!("unexpected packet: {other:?}"),
         }
     }

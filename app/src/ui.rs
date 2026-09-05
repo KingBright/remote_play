@@ -5,8 +5,8 @@ use crate::design_system::{
 use crate::mesh_admin::{mesh_setup_was_cancelled, run_mesh_admin_setup};
 use crate::{
     AppDevice, HostStats, MacDecodedVideoFrame, MeshPairingControl, MeshPairingMessageKind,
-    MeshPairingSnapshot, RoleState, StreamStartOptions, UnifiedRuntimeConfig, UnifiedRuntimeHandle,
-    UnifiedViewerMediaStatus, decoded_video_frame_surface_with_fit,
+    MeshPairingSnapshot, RoleState, SharedHostStats, StreamStartOptions, UnifiedRuntimeConfig,
+    UnifiedRuntimeHandle, UnifiedViewerMediaStatus, decoded_video_frame_surface_with_fit,
     start_unified_runtime,
 };
 use gpui::prelude::FluentBuilder;
@@ -14,11 +14,13 @@ use gpui::*;
 use remote_core::{
     VideoFrame,
     mesh::{EasyTierHealthIssue, EasyTierHealthSnapshot, EasyTierHealthState},
+    net::DEFAULT_CONTROL_PORT,
+    pairing_qr::{encode_pairing_qr, qr_matrix_from_payload},
     role::RoleKind,
 };
 use std::collections::BTreeSet;
 use std::error::Error;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use yororen_ui::{
@@ -154,7 +156,7 @@ struct UnifiedDashboard {
     viewer_frame: Option<Arc<Mutex<Option<MacDecodedVideoFrame>>>>,
     current_frame: Option<Arc<MacDecodedVideoFrame>>,
     presentation_frame: Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>,
-    host_stats: Option<Arc<RwLock<HostStats>>>,
+    host_stats: Option<Arc<SharedHostStats>>,
     mesh_health: Option<watch::Receiver<EasyTierHealthSnapshot>>,
     viewer_media_status: UnifiedViewerMediaStatus,
     mesh_pairing: Option<MeshPairingControl>,
@@ -174,6 +176,7 @@ struct UnifiedDashboard {
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
+    telemetry_engine: remote_core::PipelineTelemetryEngine,
 }
 
 impl UnifiedDashboard {
@@ -188,13 +191,19 @@ impl UnifiedDashboard {
 
         let prefs = crate::preferences::UserPreferences::load_or_default();
         if runtime.owner.supports_clipboard_sync() {
-            runtime.owner.set_clipboard_sync_enabled(prefs.side_services.clipboard_sync);
+            runtime
+                .owner
+                .set_clipboard_sync_enabled(prefs.side_services.clipboard_sync);
         }
         if runtime.owner.supports_file_transfer() {
-            runtime.owner.set_file_transfer_enabled(prefs.side_services.file_transfer);
+            runtime
+                .owner
+                .set_file_transfer_enabled(prefs.side_services.file_transfer);
         }
         if runtime.owner.supports_talkback() {
-            runtime.owner.set_talkback_enabled(prefs.side_services.talkback);
+            runtime
+                .owner
+                .set_talkback_enabled(prefs.side_services.talkback);
         }
         let scale_mode = match prefs.ui.scale_mode.as_str() {
             "fill" => ViewportScaleMode::Fill,
@@ -231,6 +240,7 @@ impl UnifiedDashboard {
             selected_resolution,
             selected_fps,
             selected_bitrate_kbps,
+            telemetry_engine: remote_core::PipelineTelemetryEngine::new(0, 300),
         }
     }
 
@@ -269,17 +279,31 @@ impl UnifiedDashboard {
         let Some(viewer_frame) = &self.viewer_frame else {
             return;
         };
-        if let Some(frame) = viewer_frame.lock().expect("viewer frame lock").take() {
-            if let Some(stats) = &self.host_stats
-                && let Ok(mut stats) = stats.write()
-                && frame.decode_cost_ms > 0.0
-            {
-                if stats.decode_latency_ms <= 0.01 {
-                    stats.decode_latency_ms = frame.decode_cost_ms;
-                } else {
-                    stats.decode_latency_ms =
-                        stats.decode_latency_ms * 0.9 + frame.decode_cost_ms * 0.1;
+        if let Some(mut frame) = viewer_frame.lock().expect("viewer frame lock").take() {
+            if frame.timing.capture_ts_us > 0 {
+                let floor = frame
+                    .timing
+                    .decode_done_ts_us
+                    .max(frame.timing.jitter_exit_ts_us)
+                    .max(frame.timing.recv_ts_us);
+                let elapsed_us = frame.decoded_at.elapsed().as_micros() as u32;
+                frame.timing.render_submit_ts_us =
+                    remote_core::timing::advance_client_stage(floor, elapsed_us);
+                frame.timing.render_done_ts_us = frame.timing.render_submit_ts_us;
+            }
+            self.telemetry_engine.record_frame(&frame.timing, 0);
+            if let Some(stats) = &self.host_stats {
+                if frame.decode_cost_ms > 0.0 {
+                    let previous = stats.snapshot().decode_latency_ms;
+                    let smoothed = if previous <= 0.01 {
+                        frame.decode_cost_ms
+                    } else {
+                        previous * 0.9 + frame.decode_cost_ms * 0.1
+                    };
+                    stats.set_decode_latency(smoothed);
                 }
+                stats.set_latest_timing(frame.timing);
+                stats.set_pipeline_report(self.telemetry_engine.generate_report());
             }
             let frame = Arc::new(frame);
             *self
@@ -296,15 +320,13 @@ impl UnifiedDashboard {
         }
         self.host_stats
             .as_ref()
-            .and_then(|stats| stats.read().ok().map(|stats| stats.clone()))
+            .map(|stats| stats.snapshot())
             .filter(host_stats_available)
     }
 
     fn reset_host_stats(&self) {
-        if let Some(stats) = &self.host_stats
-            && let Ok(mut stats) = stats.write()
-        {
-            *stats = HostStats::default();
+        if let Some(stats) = &self.host_stats {
+            stats.reset();
         }
     }
 
@@ -675,12 +697,7 @@ fn stream_status_capsule_card(
                         .child(title),
                 ),
         )
-        .child(
-            div()
-                .w(px(1.0))
-                .h(px(16.0))
-                .bg(theme.border.divider),
-        )
+        .child(div().w(px(1.0)).h(px(16.0)).bg(theme.border.divider))
         .child(
             div()
                 .text_size(px(10.0))
@@ -694,7 +711,7 @@ fn stream_status_capsule_card(
 
 struct PopoutStreamView {
     presentation_frame: Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>,
-    host_stats: Option<Arc<RwLock<HostStats>>>,
+    host_stats: Option<Arc<SharedHostStats>>,
     scale_mode: ViewportScaleMode,
     telemetry_hud_collapsed: bool,
 }
@@ -711,7 +728,7 @@ impl Render for PopoutStreamView {
         let stats = self
             .host_stats
             .as_ref()
-            .and_then(|stats| stats.read().ok().map(|stats| stats.clone()))
+            .map(|stats| stats.snapshot())
             .filter(host_stats_available);
 
         let content = stream_video_canvas_surface(
@@ -727,10 +744,13 @@ impl Render for PopoutStreamView {
             .h(px(24.0))
             .px_2()
             .text_size(px(10.0))
-            .tooltip(tooltip(match scale_mode {
-                ViewportScaleMode::AspectFit => "Scale mode: Aspect Fit (click for Fill)",
-                ViewportScaleMode::Fill => "Scale mode: Fill (click for Fit)",
-            }).build())
+            .tooltip(
+                tooltip(match scale_mode {
+                    ViewportScaleMode::AspectFit => "Scale mode: Aspect Fit (click for Fill)",
+                    ViewportScaleMode::Fill => "Scale mode: Fill (click for Fit)",
+                })
+                .build(),
+            )
             .on_click({
                 let view = view.clone();
                 move |_event, _window, cx| {
@@ -1239,14 +1259,14 @@ fn control_island_visibility(role: RoleKind) -> ControlIslandVisibility {
 fn floating_control_island(
     role: &RoleState,
     session: Option<&crate::RoleSession>,
-    viewer_media_status: &UnifiedViewerMediaStatus,
+    _viewer_media_status: &UnifiedViewerMediaStatus,
     status: &str,
     input_locked: bool,
     side_services: SideServiceUiState,
     scale_mode: ViewportScaleMode,
     is_fullscreen: bool,
     compact: bool,
-    host_stats: Option<&HostStats>,
+    _host_stats: Option<&HostStats>,
     owner: Arc<crate::UnifiedServiceOwner>,
     cx: &mut Context<UnifiedDashboard>,
 ) -> Div {
@@ -1761,18 +1781,16 @@ fn slide_over_management_drawer(
                         drawer_security_tab(input_locked, side_services, owner, cx)
                             .into_any_element()
                     }
-                    DrawerTab::Network => {
-                        drawer_network_telemetry_tab(
-                            selected_resolution,
-                            selected_fps,
-                            selected_bitrate_kbps,
-                            mesh_snapshot,
-                            host_stats,
-                            owner,
-                            cx,
-                        )
-                        .into_any_element()
-                    }
+                    DrawerTab::Network => drawer_network_telemetry_tab(
+                        selected_resolution,
+                        selected_fps,
+                        selected_bitrate_kbps,
+                        mesh_snapshot,
+                        host_stats,
+                        owner,
+                        cx,
+                    )
+                    .into_any_element(),
                 }),
         )
 }
@@ -2169,6 +2187,92 @@ fn drawer_security_tab(
             },
             cx,
         ))
+        .when(file_transfer_enabled && side_services.file_transfer.available, |this| {
+            this.child(file_transfer_panel(owner, cx))
+        })
+}
+
+fn file_transfer_panel(owner: Arc<crate::UnifiedServiceOwner>, cx: &mut Context<UnifiedDashboard>) -> Div {
+    let theme = cx.theme().clone();
+    let transfers = owner.file_transfer_snapshot();
+    let send_owner = owner.clone();
+    let folder_owner = owner.clone();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .bg(theme.surface.raised)
+        .border_1()
+        .border_color(color_border_fine())
+        .rounded(px(8.0))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.content.primary)
+                .child("File Transfer"),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_2()
+                .child(
+                    command_button("send_files", ActionVariantKind::Primary, cx)
+                        .h(px(28.0))
+                        .px(px(10.0))
+                        .on_click(move |_event, _window, _cx| {
+                            let owner = send_owner.clone();
+                            std::thread::spawn(move || {
+                                if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                                    owner.send_files(paths);
+                                }
+                            });
+                        })
+                        .child("Send Files"),
+                )
+                .child(
+                    command_button("receive_folder", ActionVariantKind::Neutral, cx)
+                        .h(px(28.0))
+                        .px(px(10.0))
+                        .on_click(move |_event, _window, _cx| {
+                            let owner = folder_owner.clone();
+                            std::thread::spawn(move || {
+                                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                    owner.set_file_receive_dir(path);
+                                }
+                            });
+                        })
+                        .child("Receive Folder"),
+                ),
+        )
+        .children(transfers.into_iter().take(6).map(|entry| {
+            let label = entry.label.clone();
+            let detail = format!(
+                "{} · {}%",
+                entry.detail,
+                (entry.progress() * 100.0).round() as i32
+            );
+            div()
+                .flex()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme.content.primary)
+                        .truncate()
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_family("monospace")
+                        .text_color(theme.content.secondary)
+                        .child(detail),
+                )
+        }))
 }
 
 fn security_toggle_row(
@@ -2297,6 +2401,7 @@ fn compact_telemetry_label(stats: Option<&HostStats>) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn viewer_media_status_label(status: &UnifiedViewerMediaStatus) -> &'static str {
     match status {
         UnifiedViewerMediaStatus::Disabled => "Viewer media disabled",
@@ -2386,15 +2491,42 @@ fn drawer_network_telemetry_tab(
             .child(telemetry_metric_row(
                 "Packet loss rate",
                 format!("{:.1}%", stats.packet_loss_rate),
-                if stats.packet_loss_rate > 2.0 { color_accent_amber() } else { color_accent_emerald() },
+                if stats.packet_loss_rate > 2.0 {
+                    color_accent_amber()
+                } else {
+                    color_accent_emerald()
+                },
                 cx,
             ))
             .child(telemetry_metric_row(
                 "Link status",
-                if stats.link_status.is_empty() { "🟢 流畅极佳".to_string() } else { stats.link_status.to_string() },
+                if stats.link_status.is_empty() {
+                    "🟢 流畅极佳".to_string()
+                } else {
+                    stats.link_status.to_string()
+                },
                 color_accent_emerald(),
                 cx,
             ));
+
+        if let Some(report) = &stats.pipeline_report {
+            for stage in protocol::StageId::ALL {
+                let st = &report.stage_stats[stage as usize];
+                if st.sample_count > 0 {
+                    content = content.child(telemetry_metric_row(
+                        format!("{}. {}", stage.wire_id() + 1, stage.display_name()),
+                        format!(
+                            "{:.1}ms (p50: {:.1}ms, p99: {:.1}ms)",
+                            st.avg_us as f32 / 1000.0,
+                            st.p50_us as f32 / 1000.0,
+                            st.p99_us as f32 / 1000.0
+                        ),
+                        color_accent_purple(),
+                        cx,
+                    ));
+                }
+            }
+        }
     } else {
         content = content.child(empty_state(
             "Waiting for telemetry",
@@ -2613,7 +2745,7 @@ fn drawer_network_telemetry_tab(
 }
 
 fn telemetry_metric_row(
-    label: &'static str,
+    label: impl Into<SharedString>,
     value: String,
     color: gpui::Rgba,
     cx: &Context<UnifiedDashboard>,
@@ -2638,7 +2770,7 @@ fn telemetry_metric_row(
                 .text_color(theme.content.primary)
                 .whitespace_nowrap()
                 .truncate()
-                .child(label),
+                .child(label.into()),
         )
         .child(
             div()
@@ -2743,11 +2875,7 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     .gap_6()
                     .text_size(px(10.0))
                     .font_family("monospace")
-                    .child(
-                        div()
-                            .text_color(theme.content.tertiary)
-                            .child("Frame Rate"),
-                    )
+                    .child(div().text_color(theme.content.tertiary).child("Frame Rate"))
                     .child(
                         div()
                             .text_color(color_accent_cyan())
@@ -2762,11 +2890,7 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     .gap_6()
                     .text_size(px(10.0))
                     .font_family("monospace")
-                    .child(
-                        div()
-                            .text_color(theme.content.tertiary)
-                            .child("Bitrate"),
-                    )
+                    .child(div().text_color(theme.content.tertiary).child("Bitrate"))
                     .child(
                         div()
                             .text_color(theme.content.secondary)
@@ -2781,11 +2905,7 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     .gap_6()
                     .text_size(px(10.0))
                     .font_family("monospace")
-                    .child(
-                        div()
-                            .text_color(theme.content.tertiary)
-                            .child("End-to-End"),
-                    )
+                    .child(div().text_color(theme.content.tertiary).child("End-to-End"))
                     .child(
                         div()
                             .text_color(color_accent_emerald())
@@ -2864,7 +2984,11 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     )
                     .child(
                         div()
-                            .text_color(if stats.packet_loss_rate > 2.0 { color_accent_amber().into() } else { theme.content.secondary })
+                            .text_color(if stats.packet_loss_rate > 2.0 {
+                                color_accent_amber().into()
+                            } else {
+                                theme.content.secondary
+                            })
                             .child(format!("{:.1}%", stats.packet_loss_rate)),
                     ),
             )
@@ -2883,8 +3007,16 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     )
                     .child(
                         div()
-                            .text_color(if stats.link_status.is_empty() { color_accent_emerald().into() } else { theme.content.primary })
-                            .child(if stats.link_status.is_empty() { "🟢 流畅极佳" } else { stats.link_status }),
+                            .text_color(if stats.link_status.is_empty() {
+                                color_accent_emerald().into()
+                            } else {
+                                theme.content.primary
+                            })
+                            .child(if stats.link_status.is_empty() {
+                                "🟢 流畅极佳"
+                            } else {
+                                stats.link_status
+                            }),
                     ),
             )
     } else {
@@ -2977,7 +3109,21 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
                 .text_color(theme.content.primary)
                 .font_family("monospace")
                 .truncate()
-                .child(snapshot.invite_code),
+                .child(snapshot.invite_code.clone()),
+        )
+        .when_some(
+            encode_pairing_qr(&snapshot.invite_code, DEFAULT_CONTROL_PORT)
+                .ok()
+                .and_then(|payload| qr_matrix_from_payload(&payload).ok()),
+            |card, matrix| {
+                card.child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .p_2()
+                        .child(qr_matrix_view(&matrix)),
+                )
+            },
         )
         .child(
             div()
@@ -3101,6 +3247,31 @@ fn product_mark(cx: &mut Context<UnifiedDashboard>) -> Div {
                         .bg(rgb(0x001f28)),
                 ),
         )
+}
+
+fn qr_matrix_view(matrix: &remote_core::QrMatrix) -> Div {
+    let cell = px(3.0);
+    let width = matrix.width;
+    div()
+        .flex()
+        .flex_col()
+        .p_2()
+        .bg(rgb(0xffffff))
+        .rounded(px(6.0))
+        .children((0..width).map(|y| {
+            div()
+                .flex()
+                .flex_row()
+                .children((0..width).map(move |x| {
+                    div()
+                        .size(cell)
+                        .bg(if matrix.is_dark(x, y) {
+                            rgb(0x0d0f12)
+                        } else {
+                            rgb(0xffffff)
+                        })
+                }))
+        }))
 }
 
 fn command_button<T: 'static>(

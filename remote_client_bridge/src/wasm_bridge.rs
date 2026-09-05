@@ -49,7 +49,8 @@ impl RemotePlayWasmClient {
             _ => TouchAction::Cancel,
         };
 
-        self.inner.handle_touch_input(action, pointer_id, norm_x, norm_y, pressure);
+        self.inner
+            .handle_touch_input(action, pointer_id, norm_x, norm_y, pressure);
     }
 
     #[wasm_bindgen(js_name = sendVirtualKey)]

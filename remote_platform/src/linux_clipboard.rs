@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use protocol::{ClipboardBundle, ClipboardItem, ClipboardText};
-use remote_core::clipboard_plane::{validate_clipboard_bundle, ClipboardSyncPolicy};
+use remote_core::clipboard_plane::{ClipboardSyncPolicy, validate_clipboard_bundle};
 use remote_core::{
     ClipboardBackendCapabilities, ClipboardFileReference, ClipboardFileReferenceProvider,
     ClipboardProvider, PlatformKind,

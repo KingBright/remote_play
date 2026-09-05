@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
+pub mod timing;
+
+pub use timing::{
+    FRAME_TIMING_CHECKPOINTS_WIRE_LEN, FrameTimingCheckpoints, HOST_TIMING_WIRE_LEN,
+    PipelineTelemetryReport, StageId, StageLatencyStats, TimingCodecError, TraceSpan,
+};
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadType {
     VideoH265 = 96,
@@ -584,8 +591,23 @@ impl DataEnvelope {
         header.encode_with_payload(&self.payload)
     }
 
+    pub fn encode_compact_realtime_with_timing(
+        &self,
+        timing: Option<FrameTimingCheckpoints>,
+    ) -> Result<Vec<u8>, CompactRealtimeError> {
+        let mut header = CompactRealtimeHeader::from_data_header(&self.header)?;
+        header.host_timing = timing;
+        header.encode_with_payload(&self.payload)
+    }
+
     pub fn decode_compact_realtime(data: &[u8]) -> Result<Self, CompactRealtimeError> {
         CompactRealtimeHeader::decode_envelope(data)
+    }
+
+    pub fn decode_compact_realtime_with_timing(
+        data: &[u8],
+    ) -> Result<(Self, Option<FrameTimingCheckpoints>), CompactRealtimeError> {
+        CompactRealtimeHeader::decode_envelope_with_timing(data)
     }
 }
 
@@ -593,7 +615,9 @@ pub const COMPACT_REALTIME_WIRE_VERSION: u8 = 1;
 pub const COMPACT_REALTIME_HEADER_LEN: usize = 26;
 
 const COMPACT_REALTIME_DEADLINE_FLAG: u8 = 0x01;
-const COMPACT_REALTIME_KNOWN_FLAGS: u8 = COMPACT_REALTIME_DEADLINE_FLAG;
+pub const COMPACT_REALTIME_TIMING_FLAG: u8 = 0x02;
+const COMPACT_REALTIME_KNOWN_FLAGS: u8 =
+    COMPACT_REALTIME_DEADLINE_FLAG | COMPACT_REALTIME_TIMING_FLAG;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactRealtimeHeader {
@@ -605,6 +629,7 @@ pub struct CompactRealtimeHeader {
     pub sequence_number: u64,
     pub timestamp_ms: u64,
     pub deadline_delta_ms: Option<u16>,
+    pub host_timing: Option<FrameTimingCheckpoints>,
 }
 
 impl CompactRealtimeHeader {
@@ -649,6 +674,7 @@ impl CompactRealtimeHeader {
             sequence_number: header.sequence_number,
             timestamp_ms: header.timestamp_ms,
             deadline_delta_ms,
+            host_timing: None,
         })
     }
 
@@ -699,7 +725,16 @@ impl CompactRealtimeHeader {
             0
         };
 
-        let mut out = Vec::with_capacity(COMPACT_REALTIME_HEADER_LEN + payload.len());
+        if self.host_timing.is_some() {
+            flags |= COMPACT_REALTIME_TIMING_FLAG;
+        }
+
+        let timing_len = if self.host_timing.is_some() {
+            HOST_TIMING_WIRE_LEN
+        } else {
+            0
+        };
+        let mut out = Vec::with_capacity(COMPACT_REALTIME_HEADER_LEN + timing_len + payload.len());
         out.push((self.version << 4) | flags);
         out.push(self.lane.wire_id());
         out.push(self.kind.wire_id());
@@ -708,6 +743,9 @@ impl CompactRealtimeHeader {
         out.extend_from_slice(&self.sequence_number.to_be_bytes());
         out.extend_from_slice(&self.timestamp_ms.to_be_bytes());
         out.extend_from_slice(&deadline_delta_ms.to_be_bytes());
+        if let Some(timing) = self.host_timing {
+            out.extend_from_slice(&timing.to_host_wire_bytes());
+        }
         out.extend_from_slice(payload);
         Ok(out)
     }
@@ -727,6 +765,20 @@ impl CompactRealtimeHeader {
         }
         if flags & !COMPACT_REALTIME_KNOWN_FLAGS != 0 {
             return Err(CompactRealtimeError::UnknownFlags(flags));
+        }
+
+        let has_timing = flags & COMPACT_REALTIME_TIMING_FLAG != 0;
+        let min_required_len = if has_timing {
+            COMPACT_REALTIME_HEADER_LEN + HOST_TIMING_WIRE_LEN
+        } else {
+            COMPACT_REALTIME_HEADER_LEN
+        };
+
+        if data.len() < min_required_len {
+            return Err(CompactRealtimeError::InvalidLength {
+                expected_at_least: min_required_len,
+                actual: data.len(),
+            });
         }
 
         let lane = DataLane::from_wire_id(data[1])?;
@@ -751,6 +803,22 @@ impl CompactRealtimeHeader {
             None
         };
 
+        let host_timing = if has_timing {
+            let timing_bytes = &data
+                [COMPACT_REALTIME_HEADER_LEN..COMPACT_REALTIME_HEADER_LEN + HOST_TIMING_WIRE_LEN];
+            let timing = FrameTimingCheckpoints::from_host_wire_bytes(timing_bytes)
+                .map_err(CompactRealtimeError::TimingError)?;
+            Some(timing)
+        } else {
+            None
+        };
+
+        let payload_offset = if has_timing {
+            COMPACT_REALTIME_HEADER_LEN + HOST_TIMING_WIRE_LEN
+        } else {
+            COMPACT_REALTIME_HEADER_LEN
+        };
+
         Ok((
             Self {
                 version,
@@ -761,8 +829,9 @@ impl CompactRealtimeHeader {
                 sequence_number,
                 timestamp_ms,
                 deadline_delta_ms,
+                host_timing,
             },
-            &data[COMPACT_REALTIME_HEADER_LEN..],
+            &data[payload_offset..],
         ))
     }
 
@@ -772,6 +841,18 @@ impl CompactRealtimeHeader {
             header: header.to_data_header()?,
             payload: payload.to_vec(),
         })
+    }
+
+    pub fn decode_envelope_with_timing(
+        data: &[u8],
+    ) -> Result<(DataEnvelope, Option<FrameTimingCheckpoints>), CompactRealtimeError> {
+        let (header, payload) = Self::decode(data)?;
+        let timing = header.host_timing;
+        let envelope = DataEnvelope {
+            header: header.to_data_header()?,
+            payload: payload.to_vec(),
+        };
+        Ok((envelope, timing))
     }
 }
 
@@ -798,6 +879,13 @@ pub enum CompactRealtimeError {
         timestamp_ms: u64,
         deadline_delta_ms: u16,
     },
+    TimingError(TimingCodecError),
+}
+
+impl From<TimingCodecError> for CompactRealtimeError {
+    fn from(err: TimingCodecError) -> Self {
+        CompactRealtimeError::TimingError(err)
+    }
 }
 
 impl fmt::Display for CompactRealtimeError {
@@ -854,6 +942,9 @@ impl fmt::Display for CompactRealtimeError {
                 f,
                 "compact realtime deadline overflows timestamp {timestamp_ms} plus delta {deadline_delta_ms}"
             ),
+            CompactRealtimeError::TimingError(err) => {
+                write!(f, "compact realtime timing decode error: {err}")
+            }
         }
     }
 }
@@ -931,6 +1022,24 @@ pub enum ControlMessage {
     RequestKeyframe {
         session_id: u32,
     },
+    /// Authenticated session hello. `mac` is HMAC-SHA256(psk, "hello" || nonce || timestamp).
+    SessionHello {
+        nonce: [u8; 16],
+        timestamp_ms: u64,
+        mac: [u8; 32],
+    },
+    /// Host accepts a hello and provides the AEAD salt.
+    SessionAccept {
+        salt: [u8; 16],
+        timestamp_ms: u64,
+        mac: [u8; 32],
+    },
+    /// Host rejected authentication or an unauthenticated StartStream.
+    SessionReject {
+        reason: String,
+    },
+    /// Full 8-stage pipeline telemetry (M2). Distinct from the coarse HostTelemetry snapshot.
+    PipelineTelemetry(PipelineTelemetryReport),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1625,15 +1734,83 @@ mod tests {
                 bitrate_kbps: 60000,
                 session_id: 123
             }),
-            ControlMessage::UpdateStreamSettings { width: 3840, height: 2160, fps: 120, bitrate_kbps: 60000, session_id: 123 }
+            ControlMessage::UpdateStreamSettings {
+                width: 3840,
+                height: 2160,
+                fps: 120,
+                bitrate_kbps: 60000,
+                session_id: 123
+            }
         ));
         assert!(matches!(
-            roundtrip_control(ControlMessage::Ping { client_send_ts: 12345 }),
-            ControlMessage::Ping { client_send_ts: 12345 }
+            roundtrip_control(ControlMessage::Ping {
+                client_send_ts: 12345
+            }),
+            ControlMessage::Ping {
+                client_send_ts: 12345
+            }
         ));
         assert!(matches!(
-            roundtrip_control(ControlMessage::Pong { client_send_ts: 12345, host_recv_ts: 12348, host_send_ts: 12349 }),
-            ControlMessage::Pong { client_send_ts: 12345, host_recv_ts: 12348, host_send_ts: 12349 }
+            roundtrip_control(ControlMessage::Pong {
+                client_send_ts: 12345,
+                host_recv_ts: 12348,
+                host_send_ts: 12349
+            }),
+            ControlMessage::Pong {
+                client_send_ts: 12345,
+                host_recv_ts: 12348,
+                host_send_ts: 12349
+            }
         ));
+    }
+
+    #[test]
+    fn compact_realtime_header_with_timing_roundtrips() {
+        let mut timing = FrameTimingCheckpoints::new(1_700_000_000_123_456);
+        timing.encode_queue_ts_us = 1_000;
+        timing.encode_done_ts_us = 3_500;
+        timing.packetize_ts_us = 3_800;
+        timing.send_ts_us = 4_000;
+
+        let header = CompactRealtimeHeader {
+            version: COMPACT_REALTIME_WIRE_VERSION,
+            lane: DataLane::RealtimeVideo,
+            kind: ContentKind::VideoH265,
+            priority: DataPriority::Realtime,
+            stream_id: 42,
+            sequence_number: 100,
+            timestamp_ms: 50_000,
+            deadline_delta_ms: Some(16),
+            host_timing: Some(timing),
+        };
+
+        let payload = b"h265_video_test_frame_data";
+        let encoded = header.encode_with_payload(payload).unwrap();
+        assert_eq!(
+            encoded.len(),
+            COMPACT_REALTIME_HEADER_LEN + HOST_TIMING_WIRE_LEN + payload.len()
+        );
+
+        let (decoded_header, decoded_payload) = CompactRealtimeHeader::decode(&encoded).unwrap();
+        assert_eq!(decoded_header.version, header.version);
+        assert_eq!(decoded_header.lane, header.lane);
+        assert_eq!(decoded_header.stream_id, header.stream_id);
+        assert_eq!(decoded_header.sequence_number, header.sequence_number);
+        assert_eq!(decoded_header.timestamp_ms, header.timestamp_ms);
+        assert_eq!(decoded_header.deadline_delta_ms, header.deadline_delta_ms);
+        assert_eq!(decoded_payload, payload);
+
+        let recovered_timing = decoded_header
+            .host_timing
+            .expect("host_timing should exist");
+        assert_eq!(recovered_timing.capture_ts_us, timing.capture_ts_us);
+        assert_eq!(
+            recovered_timing.encode_queue_ts_us,
+            timing.encode_queue_ts_us
+        );
+        assert_eq!(recovered_timing.encode_done_ts_us, timing.encode_done_ts_us);
+        assert_eq!(recovered_timing.packetize_ts_us, timing.packetize_ts_us);
+        assert_eq!(recovered_timing.send_ts_us, timing.send_ts_us);
+        assert_eq!(recovered_timing.recv_ts_us, 0);
     }
 }

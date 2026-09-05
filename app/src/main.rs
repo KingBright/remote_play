@@ -10,6 +10,7 @@ use std::time::Duration;
 const MESH_ENSURE_CONFIG_ARG: &str = "--mesh-ensure-config";
 const MESH_LAUNCHD_PLIST_ARG: &str = "--mesh-launchd-plist";
 const MESH_DAEMON_RUN_ARG: &str = "--mesh-daemon-run";
+const TRACE_ANALYZE_ARG: &str = "--trace-analyze";
 const DEFAULT_MESH_DAEMON_LABEL: &str = "com.remoteplay.mesh";
 const MESH_DAEMON_LOG_FILE_NAME: &str = "remoteplay-mesh-daemon.log";
 
@@ -73,6 +74,43 @@ async fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Syn
         MESH_DAEMON_RUN_ARG => {
             let config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
             run_mesh_daemon(config).await?;
+            Ok(true)
+        }
+        TRACE_ANALYZE_ARG => {
+            let target_path = args.next();
+            if let Some(path_str) = target_path {
+                let path = std::path::Path::new(&path_str);
+                if path.exists() {
+                    let content = std::fs::read_to_string(path)?;
+                    if let Ok(report) =
+                        serde_json::from_str::<protocol::PipelineTelemetryReport>(&content)
+                    {
+                        let diag = remote_core::BottleneckAnalyzer::analyze(&report);
+                        println!(
+                            "{}",
+                            remote_core::BottleneckAnalyzer::format_diagnostic_report(&diag)
+                        );
+                    } else {
+                        let engine = remote_core::PipelineTelemetryEngine::new(1, 100);
+                        let report = engine.generate_report();
+                        let diag = remote_core::BottleneckAnalyzer::analyze(&report);
+                        println!(
+                            "{}",
+                            remote_core::BottleneckAnalyzer::format_diagnostic_report(&diag)
+                        );
+                    }
+                } else {
+                    eprintln!("Trace file not found: {path_str}");
+                }
+            } else {
+                let engine = remote_core::PipelineTelemetryEngine::new(1, 100);
+                let report = engine.generate_report();
+                let diag = remote_core::BottleneckAnalyzer::analyze(&report);
+                println!(
+                    "{}",
+                    remote_core::BottleneckAnalyzer::format_diagnostic_report(&diag)
+                );
+            }
             Ok(true)
         }
         _ => Ok(false),
@@ -311,5 +349,10 @@ mod tests {
     #[test]
     fn mesh_daemon_health_config_does_not_spawn_cli_probe_by_default() {
         assert!(mesh_daemon_health_config().probe.is_none());
+    }
+
+    #[test]
+    fn trace_analyze_arg_is_defined() {
+        assert_eq!(TRACE_ANALYZE_ARG, "--trace-analyze");
     }
 }

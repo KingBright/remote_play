@@ -20,10 +20,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.remoteplay.client.AudioOpusPlayer
 import com.remoteplay.client.MediaCodecPlayer
 import com.remoteplay.client.RemotePlayClient
 import com.remoteplay.client.TelemetrySnapshot
 import com.remoteplay.client.TouchMode
+import kotlinx.coroutines.delay
 
 @Composable
 fun MobileViewportScreen(
@@ -34,6 +36,14 @@ fun MobileViewportScreen(
     var micEnabled by remember { mutableStateOf(false) }
     var clipboardSync by remember { mutableStateOf(true) }
     var isModifierBarVisible by remember { mutableStateOf(true) }
+    var liveTelemetry by remember { mutableStateOf(telemetry) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            liveTelemetry = RemotePlayClient.pollTelemetry()
+            delay(500)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -70,15 +80,46 @@ fun MobileViewportScreen(
                 SurfaceView(context).apply {
                     holder.addCallback(object : android.view.SurfaceHolder.Callback {
                         var player: MediaCodecPlayer? = null
+                        var audio: AudioOpusPlayer? = null
+                        var feeder: Thread? = null
+                        @Volatile var running = false
                         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                            player = MediaCodecPlayer(holder.surface).apply {
+                            val codec = MediaCodecPlayer(holder.surface).apply {
                                 start(1920, 1080)
                             }
+                            val audioPlayer = AudioOpusPlayer()
+                            player = codec
+                            audio = audioPlayer
+                            running = true
+                            feeder = Thread {
+                                var pts = 0L
+                                while (running) {
+                                    val nalu = RemotePlayClient.pollVideoNalu()
+                                    if (nalu != null) {
+                                        codec.feedNalu(nalu, nalu.size > 4, pts)
+                                        pts += 16_000
+                                    }
+                                    val audioPacket = RemotePlayClient.pollAudioPacket()
+                                    if (audioPacket != null) {
+                                        audioPlayer.feed(audioPacket)
+                                    }
+                                    if (nalu == null && audioPacket == null) {
+                                        try { Thread.sleep(4) } catch (_: InterruptedException) { break }
+                                    }
+                                }
+                            }.also { it.start() }
                         }
-                        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
+                        override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
+                            RemotePlayClient.setScreenBounds(width, height)
+                        }
                         override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
+                            running = false
+                            feeder?.interrupt()
+                            feeder = null
                             player?.stop()
                             player = null
+                            audio?.stop()
+                            audio = null
                         }
                     })
                 }
@@ -117,7 +158,7 @@ fun MobileViewportScreen(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "${telemetry.fps.toInt()} FPS · ${telemetry.latencyMs}ms",
+                        text = "${liveTelemetry.fps.toInt()} FPS · ${liveTelemetry.latencyMs}ms",
                         color = ColorAccentCyan,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,

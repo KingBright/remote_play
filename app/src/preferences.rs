@@ -184,7 +184,8 @@ mod tests {
 
     #[test]
     fn preferences_atomic_disk_save_and_load() {
-        let temp_dir = std::env::temp_dir().join(format!("remote-play-prefs-test-{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("remote-play-prefs-test-{}", std::process::id()));
         let file_path = temp_dir.join("test_prefs.json");
 
         let mut prefs = UserPreferences::default();

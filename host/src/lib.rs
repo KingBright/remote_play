@@ -1,6 +1,5 @@
 #[cfg(target_os = "macos")]
 mod audio_capture;
-#[cfg(target_os = "macos")]
 mod audio_encode;
 #[cfg(target_os = "macos")]
 mod capture;
@@ -16,14 +15,22 @@ mod talkback_player;
 #[cfg(target_os = "macos")]
 mod video_encode;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod linux_audio;
 #[cfg(target_os = "linux")]
 pub mod linux_capture;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod ffmpeg_hevc;
 #[cfg(target_os = "linux")]
 pub mod linux_video_encode;
+#[cfg(target_os = "windows")]
+mod windows_capture;
+#[cfg(target_os = "windows")]
+mod windows_input;
+#[cfg(target_os = "windows")]
+mod windows_video_encode;
 
 use protocol::{
     AudioSource, AudioStreamConfig, DataEnvelope, RtpPacket, remote_microphone_audio_stream_id,
@@ -46,7 +53,7 @@ use remote_core::mesh::{
 };
 use remote_core::net::DEFAULT_CONTROL_PORT;
 use remote_core::scheduled_sender::{
-    ScheduledDataSendError, ScheduledDataSender, ScheduledDataSenderConfig,
+    ScheduledDataSender, ScheduledDataSenderConfig,
 };
 use remote_core::stats::Statistics;
 use remote_core::{AudioCapturer, VideoCapturer, VideoEncoder};
@@ -73,6 +80,8 @@ use linux_capture::LinuxVideoCapturer;
 use linux_video_encode::LinuxVideoEncoder;
 #[cfg(target_os = "linux")]
 use remote_platform::LinuxClipboardProvider;
+#[cfg(target_os = "windows")]
+use remote_platform::WindowsClipboardProvider;
 
 pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Host starting in Standby Mode...");
@@ -107,8 +116,14 @@ pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 }
 
 fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    env_flag_or(name, false)
+}
+
+fn env_flag_or(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"),
+        Err(_) => default,
+    }
 }
 
 fn env_path_or_temp(name: &str, fallback_dir_name: &str) -> PathBuf {
@@ -413,7 +428,7 @@ pub struct StreamSettings {
     pub bitrate_kbps: u32,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 struct StreamingRunConfig {
     session_id: u32,
     client_addr: SocketAddr,
@@ -433,29 +448,33 @@ struct StreamingRunConfig {
     talkback_settings_rx: Option<watch::Receiver<()>>,
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     host_send_file: Option<PathBuf>,
+    keyframe_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn send_media_packet(
     udp_sender: &UdpSender,
     scheduled_sender: Option<&ScheduledDataSender>,
     packet: &RtpPacket,
+    timing: Option<protocol::FrameTimingCheckpoints>,
     client_addr: SocketAddr,
     use_data_plane_media: bool,
 ) -> Result<u64, Box<dyn Error + Send + Sync>> {
-    if use_data_plane_media {
+    if use_data_plane_media || timing.is_some() {
         let envelope = rtp_to_realtime_data(packet)?;
-        let packet_size =
-            envelope.payload.len() as u64 + protocol::COMPACT_REALTIME_HEADER_LEN as u64;
-        if let Some(scheduled_sender) = scheduled_sender {
-            match scheduled_sender.try_send(envelope) {
-                Ok(()) => {}
-                Err(ScheduledDataSendError::Full) => return Ok(0),
-                Err(err @ ScheduledDataSendError::Closed) => return Err(Box::new(err)),
-            }
+        let extra_len = if timing.is_some() {
+            protocol::HOST_TIMING_WIRE_LEN
         } else {
-            udp_sender.send_data(&envelope, client_addr).await?;
-        }
+            0
+        };
+        let packet_size = envelope.payload.len() as u64
+            + protocol::COMPACT_REALTIME_HEADER_LEN as u64
+            + extra_len as u64;
+        // Realtime media bypasses the 1ms scheduler so host timing stays on the wire.
+        let _ = scheduled_sender;
+        udp_sender
+            .send_data_with_timing(&envelope, timing, client_addr)
+            .await?;
         Ok(packet_size)
     } else {
         let packet_size = packet.payload.len() as u64 + 12;
@@ -464,7 +483,7 @@ async fn send_media_packet(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn send_audio_stream_config(
     udp_sender: &UdpSender,
     scheduled_sender: Option<&ScheduledDataSender>,
@@ -486,7 +505,7 @@ async fn send_audio_stream_config(
     Ok(packet_size)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn host_audio_stream_config(
     stream_id: u32,
     source: AudioSource,
@@ -516,7 +535,6 @@ fn host_audio_stream_config(
     }
 }
 
-#[cfg(target_os = "macos")]
 struct AudioCaptureTaskRuntime {
     stream_id: u32,
     udp_sender: UdpSender,
@@ -527,14 +545,14 @@ struct AudioCaptureTaskRuntime {
     scheduled_sender: Option<ScheduledDataSender>,
 }
 
-#[cfg(target_os = "macos")]
 fn spawn_audio_capture_task<C>(
     label: &'static str,
     mut audio_capturer: C,
     runtime: AudioCaptureTaskRuntime,
 ) -> tokio::task::JoinHandle<()>
 where
-    C: AudioCapturer<Frame = crate::audio_capture::MacAudioFrame> + Send + 'static,
+    C: AudioCapturer + Send + 'static,
+    C::Frame: remote_core::AudioFrame + Send,
 {
     tokio::spawn(async move {
         use crate::audio_encode::OpusAudioEncoder;
@@ -701,6 +719,7 @@ impl AudioSendContext<'_> {
             self.udp_sender,
             self.scheduled_sender,
             &packet,
+            None,
             self.client_addr,
             self.use_data_plane_media,
         )
@@ -714,19 +733,19 @@ impl AudioSendContext<'_> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 struct ScheduledStatsReporterGuard {
     handle: tokio::task::JoinHandle<()>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 impl Drop for ScheduledStatsReporterGuard {
     fn drop(&mut self) {
         self.handle.abort();
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn start_scheduled_sender_reporter(
     scheduled_sender: ScheduledDataSender,
     mut cancel_rx: broadcast::Receiver<()>,
@@ -768,7 +787,7 @@ fn start_scheduled_sender_reporter(
     ScheduledStatsReporterGuard { handle }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let StreamingRunConfig {
         session_id,
@@ -786,6 +805,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         talkback_settings_rx,
         mut stream_settings_rx,
         host_send_file,
+        keyframe_requested,
     } = config;
 
     #[cfg(target_os = "macos")]
@@ -802,13 +822,19 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     #[cfg(target_os = "linux")]
     let mut video_encoder = LinuxVideoEncoder::new(width, height, fps, bitrate_kbps)?;
 
+    #[cfg(target_os = "windows")]
+    let mut video_capturer = crate::windows_capture::WindowsVideoCapturer::new(width, height, fps)?;
+    #[cfg(target_os = "windows")]
+    let mut video_encoder =
+        crate::windows_video_encode::WindowsVideoEncoder::new(width, height, fps, bitrate_kbps)?;
+
     video_capturer.start().await?;
     println!(
         "Video Capture and Encoding started. Streaming to {}...",
         client_addr
     );
 
-    let use_data_plane_media = env_flag_enabled("REMOTE_PLAY_DATA_PLANE_MEDIA");
+    let use_data_plane_media = env_flag_or("REMOTE_PLAY_DATA_PLANE_MEDIA", true);
     if use_data_plane_media {
         println!("Media data-plane adapter enabled.");
     }
@@ -851,6 +877,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             let provider = MacClipboardProvider::new();
             #[cfg(target_os = "linux")]
             let provider = LinuxClipboardProvider::new();
+            #[cfg(target_os = "windows")]
+            let provider = WindowsClipboardProvider::new();
 
             if let Err(err) = run_clipboard_sync(
                 provider,
@@ -872,7 +900,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         {
             let (command_tx, command_rx) = mpsc::channel(16);
             let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-            let file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
+            let _file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
             let receive_dir = env_path_or_temp(
                 "REMOTE_PLAY_FILE_RECEIVE_DIR",
                 "remote-play-host-received-files",
@@ -908,7 +936,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                     }
                 }
             });
-            let command_tx_guard = if let Some(send_file) = host_send_file {
+            if let Some(send_file) = host_send_file {
                 let auto_send_tx = command_tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -926,12 +954,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                         eprintln!("Failed to enqueue initial host send file: {}", err);
                     }
                 });
-                Some(command_tx)
-            } else if file_clipboard_enabled {
-                Some(command_tx)
-            } else {
-                Some(command_tx)
-            };
+            }
+            let command_tx_guard = Some(command_tx);
             (command_tx_guard, Some(runtime_task), Some(event_logger))
         } else {
             (None, None, None)
@@ -956,6 +980,21 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     let _microphone_audio_task = spawn_audio_capture_task(
         "Remote microphone",
         crate::audio_capture::MacAudioCapturer::microphone(),
+        AudioCaptureTaskRuntime {
+            stream_id: remote_microphone_audio_stream_id(session_id),
+            udp_sender: udp_sender.clone(),
+            stats: stats.clone(),
+            cancel_rx: cancel_rx.resubscribe(),
+            client_addr,
+            use_data_plane_media,
+            scheduled_sender: scheduled_media_sender.clone(),
+        },
+    );
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let _microphone_audio_task = spawn_audio_capture_task(
+        "Remote microphone",
+        crate::linux_audio::LinuxAudioCapturer::microphone(),
         AudioCaptureTaskRuntime {
             stream_id: remote_microphone_audio_stream_id(session_id),
             udp_sender: udp_sender.clone(),
@@ -1025,6 +1064,9 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             frame_res = video_capturer.capture_frame() => {
                 let frame = frame_res?;
                 stats_video.video_frames_captured.fetch_add(1, Relaxed);
+                if keyframe_requested.swap(false, Relaxed) {
+                    video_encoder.request_keyframe();
+                }
                 video_encoder.submit_frame(frame).await?;
             }
             chunk_res = video_encoder.pull_encoded_chunk() => {
@@ -1069,6 +1111,14 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                     let _ = telemetry_udp_sender.send_control(&msg, client_addr).await;
                 }
 
+                let mut timing = chunk.timing;
+                if timing.capture_ts_us == 0 {
+                    timing.capture_ts_us = (chunk.capture_time_ms as u64) * 1000;
+                }
+                let now_us = remote_core::timing::quanta_now_us();
+                timing.packetize_ts_us = (now_us.saturating_sub(timing.capture_ts_us)) as u32;
+                timing.send_ts_us = timing.packetize_ts_us;
+
                 let packet = RtpPacket {
                     header: protocol::RtpHeader {
                         version: 2,
@@ -1086,6 +1136,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                         &udp_sender,
                         scheduled_media_sender.as_ref(),
                         &packet,
+                        Some(timing),
                         client_addr,
                         use_data_plane_media,
                     )

@@ -20,22 +20,22 @@ enum class TouchMode(val code: Int) {
 }
 
 data class TelemetrySnapshot(
-    val fps: Float = 120.0f,
-    val latencyMs: Float = 3.8f,
-    val jitterMs: Float = 0.3f,
+    val fps: Float = 0.0f,
+    val latencyMs: Float = 0.0f,
+    val jitterMs: Float = 0.0f,
     val packetLossPercent: Float = 0.0f,
-    val videoBitrateKbps: Int = 42500,
-    val audioBitrateKbps: Int = 128,
-    val controlBitrateKbps: Int = 64,
-    val fileBitrateKbps: Int = 2400,
-    val transportHealthScore: Float = 99.9f
+    val videoBitrateKbps: Int = 0,
+    val audioBitrateKbps: Int = 0,
+    val controlBitrateKbps: Int = 0,
+    val fileBitrateKbps: Int = 0,
+    val transportHealthScore: Float = 0.0f
 )
 
 data class HostDevice(
     val id: String,
     val name: String,
     val endpoint: String,
-    val scope: String, // "LAN", "Mesh", "Relay"
+    val scope: String,
     val canStream: Boolean,
     val online: Boolean
 )
@@ -58,18 +58,26 @@ object RemotePlayClient {
             nativeInit()
             isNativeLoaded = true
         } catch (e: UnsatisfiedLinkError) {
-            // 在测试或开发环境下提供优雅的 Fallback 模拟
             isNativeLoaded = false
         }
     }
+
+    val nativeAvailable: Boolean
+        get() = isNativeLoaded
 
     fun connect(deviceId: String, endpoint: String) {
         _sessionState.value = SessionState.CONNECTING
         if (isNativeLoaded) {
             nativeConnect(deviceId, endpoint)
+            _sessionState.value = when (nativeGetSessionState()) {
+                2 -> SessionState.STREAMING
+                4 -> SessionState.ERROR
+                1 -> SessionState.CONNECTING
+                else -> SessionState.ERROR
+            }
+        } else {
+            _sessionState.value = SessionState.ERROR
         }
-        // 模拟/异步连接完成
-        _sessionState.value = SessionState.STREAMING
     }
 
     fun disconnect() {
@@ -97,6 +105,52 @@ object RemotePlayClient {
         }
     }
 
+    fun setScreenBounds(width: Int, height: Int) {
+        if (isNativeLoaded) {
+            nativeSetScreenBounds(width, height)
+        }
+    }
+
+    fun pollVideoNalu(): ByteArray? {
+        if (!isNativeLoaded) return null
+        return nativePollVideoNalu()
+    }
+
+    fun pollAudioPacket(): ByteArray? {
+        if (!isNativeLoaded) return null
+        return nativePollAudioPacket()
+    }
+
+    fun joinPairingPayload(raw: String): String {
+        if (!isNativeLoaded) return "error:native library not loaded"
+        return nativeJoinPairingPayload(raw) ?: "error:empty"
+    }
+
+    fun refreshDevices() {
+        if (!isNativeLoaded) return
+        val jsonStr = nativeGetDevicesJson() ?: return
+        try {
+            val array = org.json.JSONArray(jsonStr)
+            val hosts = buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    add(
+                        HostDevice(
+                            id = obj.optString("device_id"),
+                            name = obj.optString("display_name"),
+                            endpoint = obj.optString("endpoint"),
+                            scope = obj.optString("scope", "LAN"),
+                            canStream = obj.optBoolean("can_stream", true),
+                            online = obj.optBoolean("online", true)
+                        )
+                    )
+                }
+            }
+            _devices.value = hosts
+        } catch (_: Exception) {
+        }
+    }
+
     fun pollTelemetry(): TelemetrySnapshot {
         if (isNativeLoaded) {
             val jsonStr = nativeGetTelemetryJson()
@@ -104,15 +158,15 @@ object RemotePlayClient {
                 try {
                     val obj = JSONObject(jsonStr)
                     val snap = TelemetrySnapshot(
-                        fps = obj.optDouble("fps", 120.0).toFloat(),
-                        latencyMs = obj.optDouble("latency_ms", 3.8).toFloat(),
-                        jitterMs = obj.optDouble("jitter_ms", 0.3).toFloat(),
+                        fps = obj.optDouble("fps", 0.0).toFloat(),
+                        latencyMs = obj.optDouble("latency_ms", 0.0).toFloat(),
+                        jitterMs = obj.optDouble("jitter_ms", 0.0).toFloat(),
                         packetLossPercent = obj.optDouble("packet_loss_percent", 0.0).toFloat(),
-                        videoBitrateKbps = obj.optInt("video_bitrate_kbps", 42500),
-                        audioBitrateKbps = obj.optInt("audio_bitrate_kbps", 128),
-                        controlBitrateKbps = obj.optInt("control_bitrate_kbps", 64),
-                        fileBitrateKbps = obj.optInt("file_bitrate_kbps", 2400),
-                        transportHealthScore = obj.optDouble("transport_health_score", 99.9).toFloat()
+                        videoBitrateKbps = obj.optInt("video_bitrate_kbps", 0),
+                        audioBitrateKbps = obj.optInt("audio_bitrate_kbps", 0),
+                        controlBitrateKbps = obj.optInt("control_bitrate_kbps", 0),
+                        fileBitrateKbps = obj.optInt("file_bitrate_kbps", 0),
+                        transportHealthScore = obj.optDouble("transport_health_score", 0.0).toFloat()
                     )
                     _telemetry.value = snap
                     return snap
@@ -122,12 +176,17 @@ object RemotePlayClient {
         return _telemetry.value
     }
 
-    // JNI 原生方法声明
     private external fun nativeInit(): Boolean
     private external fun nativeConnect(deviceId: String, endpoint: String)
     private external fun nativeDisconnect()
     private external fun nativeSendTouch(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float)
     private external fun nativeSendVirtualKey(keyName: String, pressed: Boolean)
     private external fun nativeSetTouchMode(modeCode: Int)
+    private external fun nativeSetScreenBounds(width: Int, height: Int)
     private external fun nativeGetTelemetryJson(): String?
+    private external fun nativePollVideoNalu(): ByteArray?
+    private external fun nativePollAudioPacket(): ByteArray?
+    private external fun nativeGetDevicesJson(): String?
+    private external fun nativeJoinPairingPayload(payload: String): String?
+    private external fun nativeGetSessionState(): Int
 }

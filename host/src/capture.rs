@@ -12,6 +12,7 @@ pub struct MacVideoFrame {
     pub height: u32,
     pub sample_buffer: CMSampleBuffer,
     pub capture_time_ms: u32,
+    pub timing: protocol::FrameTimingCheckpoints,
 }
 
 impl VideoFrame for MacVideoFrame {
@@ -28,8 +29,7 @@ impl VideoFrame for MacVideoFrame {
 }
 
 struct StreamOutput {
-    slot: Arc<std::sync::Mutex<Option<MacVideoFrame>>>,
-    notify: Arc<tokio::sync::Notify>,
+    slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
     width: u32,
     height: u32,
 }
@@ -40,27 +40,26 @@ impl SCStreamOutputTrait for StreamOutput {
         sample: screencapturekit::cm::CMSampleBuffer,
         _of_type: SCStreamOutputType,
     ) {
+        let capture_ts_us = remote_core::timing::quanta_now_us();
         let now_ms = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() & 0xFFFFFFFF) as u32;
+            .as_millis()
+            & 0xFFFFFFFF) as u32;
         let frame = MacVideoFrame {
             width: self.width,
             height: self.height,
             sample_buffer: sample,
             capture_time_ms: now_ms,
+            timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
         };
 
-        if let Ok(mut lock) = self.slot.lock() {
-            *lock = Some(frame);
-        }
-        self.notify.notify_one();
+        self.slot.push(frame);
     }
 }
 
 pub struct MacVideoCapturer {
-    slot: Arc<std::sync::Mutex<Option<MacVideoFrame>>>,
-    notify: Arc<tokio::sync::Notify>,
+    slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
     stream: Option<SCStream>,
     _target_width: u32,
     target_height: u32,
@@ -70,8 +69,7 @@ pub struct MacVideoCapturer {
 impl MacVideoCapturer {
     pub fn new(target_width: u32, target_height: u32, target_fps: u32) -> Self {
         Self {
-            slot: Arc::new(std::sync::Mutex::new(None)),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            slot: Arc::new(remote_core::LatestFrameSlot::new()),
             stream: None,
             _target_width: target_width,
             target_height,
@@ -107,9 +105,8 @@ impl MacVideoCapturer {
             config.set_height(target_height);
             config.set_minimum_frame_interval(&CMTime::new(1, self.target_fps as i32));
             config.set_queue_depth(5);
-            config.set_pixel_format(
-                screencapturekit::stream::configuration::PixelFormat::YCbCr_420v,
-            );
+            config
+                .set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
             config.set_shows_cursor(false);
 
             stream.update_configuration(&config)?;
@@ -150,7 +147,6 @@ impl VideoCapturer for MacVideoCapturer {
 
         let output = StreamOutput {
             slot: self.slot.clone(),
-            notify: self.notify.clone(),
             width: target_width,
             height: target_height,
         };
@@ -172,22 +168,13 @@ impl VideoCapturer for MacVideoCapturer {
 
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
         loop {
-            if let Ok(mut lock) = self.slot.lock() {
-                let frame_opt: Option<MacVideoFrame> = lock.take();
-                if let Some(frame) = frame_opt {
-                    return Ok(frame);
-                }
-            }
-
-            match tokio::time::timeout(std::time::Duration::from_millis(500), self.notify.notified()).await {
-                Ok(_) => {
-                    if let Ok(mut lock) = self.slot.lock() {
-                        let frame_opt: Option<MacVideoFrame> = lock.take();
-                        if let Some(frame) = frame_opt {
-                            return Ok(frame);
-                        }
-                    }
-                }
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                self.slot.take_async(),
+            )
+            .await
+            {
+                Ok(frame) => return Ok(frame),
                 Err(_) => {
                     // Check if stream is still active
                     if self.stream.is_none() {

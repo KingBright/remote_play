@@ -68,6 +68,8 @@ pub struct MacDecodedVideoFrame {
     pub timestamp: u32,
     pub recv_time: u32,
     pub decode_cost_ms: f32,
+    pub timing: protocol::FrameTimingCheckpoints,
+    pub decoded_at: std::time::Instant,
     width: u32,
     height: u32,
 }
@@ -178,6 +180,8 @@ extern "C" fn decompression_callback(
             timestamp: 0, // Will be overridden by main loop
             recv_time: 0, // Will be overridden
             decode_cost_ms: 0.0,
+            timing: protocol::FrameTimingCheckpoints::default(),
+            decoded_at: std::time::Instant::now(),
             width,
             height,
         };

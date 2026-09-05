@@ -18,6 +18,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.remoteplay.client.HostDevice
 import com.remoteplay.client.TelemetrySnapshot
 
 // Obsidian Stream 统一设计系统色彩定义
@@ -32,9 +37,13 @@ val ColorTextSecondary = Color(0xFF8B949E)
 @Composable
 fun MobileConsoleScreen(
     telemetry: TelemetrySnapshot,
-    onConnectHost: (String) -> Unit,
+    devices: List<HostDevice> = emptyList(),
+    nativeAvailable: Boolean = false,
+    pairingMessage: String? = null,
+    onConnectHost: (String, String) -> Unit,
     onScanQr: () -> Unit
 ) {
+    var activeTab by remember { mutableStateOf("Devices") }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -103,8 +112,40 @@ fun MobileConsoleScreen(
                 )
             }
 
+            if (!pairingMessage.isNullOrBlank()) {
+                Text(
+                    text = pairingMessage,
+                    color = ColorAccentEmerald,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+            }
+
             Spacer(modifier = Modifier.height(20.dp))
 
+            if (activeTab == "Settings") {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "SETTINGS",
+                        color = ColorTextSecondary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        letterSpacing = 1.sp
+                    )
+                    Text(
+                        text = if (nativeAvailable) "Native session: loaded" else "Native session: missing .so",
+                        color = ColorTextPrimary,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "Discovery: LAN accept-any-network\nControl port: 39271\nSet REMOTE_PLAY_SESSION_PSK for encrypted sessions.",
+                        color = ColorTextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+            } else {
             // 3. 设备发现卡片流
             LazyColumn(
                 modifier = Modifier
@@ -123,22 +164,25 @@ fun MobileConsoleScreen(
                     )
                 }
 
-                item {
-                    HostCard(
-                        name = "Gaming Rig RTX 4090",
-                        tag = "LAN P2P",
-                        subtext = "Direct UDP · 4K@120Hz Ready · 3.8ms RTT",
-                        onConnect = { onConnectHost("gaming-rig-4090") }
-                    )
-                }
-
-                item {
-                    HostCard(
-                        name = "MacBook Pro M3 Max",
-                        tag = "EasyTier Mesh",
-                        subtext = "Virtual P2P · Standby · Encrypted",
-                        onConnect = { onConnectHost("macbook-m3-max") }
-                    )
+                if (devices.isEmpty()) {
+                    item {
+                        HostCard(
+                            name = "Loopback",
+                            tag = "Local",
+                            subtext = "127.0.0.1:39271",
+                            onConnect = { onConnectHost("loopback", "127.0.0.1:39271") }
+                        )
+                    }
+                } else {
+                    items(devices.size) { index ->
+                        val device = devices[index]
+                        HostCard(
+                            name = device.name.ifBlank { device.id },
+                            tag = device.scope,
+                            subtext = device.endpoint,
+                            onConnect = { onConnectHost(device.id, device.endpoint) }
+                        )
+                    }
                 }
 
                 item {
@@ -171,6 +215,7 @@ fun MobileConsoleScreen(
                     }
                 }
             }
+            }
 
             // 4. 底部悬浮磨砂导航栏
             Row(
@@ -184,10 +229,10 @@ fun MobileConsoleScreen(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertreg()
             ) {
-                NavTab("Devices", active = true)
-                NavTab("Mesh P2P", active = false)
-                NavTab("Security", active = false)
-                NavTab("Settings", active = false)
+                NavTab("Devices", active = activeTab == "Devices") { activeTab = "Devices" }
+                NavTab("Mesh P2P", active = activeTab == "Mesh P2P") { activeTab = "Mesh P2P" }
+                NavTab("Security", active = activeTab == "Security") { activeTab = "Security" }
+                NavTab("Settings", active = activeTab == "Settings") { activeTab = "Settings" }
             }
         }
     }
@@ -297,12 +342,13 @@ fun TelemetryLaneRow(name: String, value: String, color: Color) {
 }
 
 @Composable
-fun NavTab(text: String, active: Boolean) {
+fun NavTab(text: String, active: Boolean, onClick: () -> Unit = {}) {
     Text(
         text = text,
         color = if (active) ColorAccentCyan else ColorTextSecondary,
         fontSize = 12.sp,
-        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier.clickable(onClick = onClick)
     )
 }
 

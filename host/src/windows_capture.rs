@@ -3,19 +3,16 @@ use remote_core::{VideoCapturer, VideoFrame, VideoFrameHandleKind, VideoPixelFor
 use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 
-pub struct LinuxVideoFrame {
+pub struct WindowsVideoFrame {
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
-    pub capture_time_ms: u32,
-    pub is_keyframe: bool,
     pub timing: protocol::FrameTimingCheckpoints,
 }
 
-impl VideoFrame for LinuxVideoFrame {
+impl VideoFrame for WindowsVideoFrame {
     fn width(&self) -> u32 {
         self.width
     }
@@ -26,20 +23,20 @@ impl VideoFrame for LinuxVideoFrame {
         VideoFrameHandleKind::CpuMemory
     }
     fn pixel_format(&self) -> VideoPixelFormat {
-        VideoPixelFormat::Rgba8
+        VideoPixelFormat::Bgra8
     }
 }
 
-pub struct LinuxVideoCapturer {
+pub struct WindowsVideoCapturer {
     target_width: u32,
     target_height: u32,
     target_fps: u32,
     running: Arc<AtomicBool>,
-    frame_rx: Mutex<mpsc::Receiver<LinuxVideoFrame>>,
-    frame_tx: mpsc::Sender<LinuxVideoFrame>,
+    frame_rx: Mutex<mpsc::Receiver<WindowsVideoFrame>>,
+    frame_tx: mpsc::Sender<WindowsVideoFrame>,
 }
 
-impl LinuxVideoCapturer {
+impl WindowsVideoCapturer {
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (frame_tx, frame_rx) = mpsc::channel(4);
         Ok(Self {
@@ -64,8 +61,8 @@ impl LinuxVideoCapturer {
 }
 
 #[async_trait]
-impl VideoCapturer for LinuxVideoCapturer {
-    type Frame = LinuxVideoFrame;
+impl VideoCapturer for WindowsVideoCapturer {
+    type Frame = WindowsVideoFrame;
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.running.store(true, Ordering::SeqCst);
@@ -74,52 +71,18 @@ impl VideoCapturer for LinuxVideoCapturer {
         let width = self.target_width;
         let height = self.target_height;
         let fps = self.target_fps;
-
-        // Background capture loop
         tokio::task::spawn_blocking(move || {
             let interval = Duration::from_micros((1_000_000 / fps.max(1)) as u64);
-            let mut last_capture = std::time::Instant::now();
-            let mut frame_count: u64 = 0;
-
-            println!("[LinuxCapture] Capture loop started: {width}x{height} @ {fps}fps");
-
             while running.load(Ordering::Relaxed) {
-                let elapsed = last_capture.elapsed();
-                if elapsed < interval {
-                    std::thread::sleep(interval - elapsed);
-                }
-                last_capture = std::time::Instant::now();
-
-                let now_ms = (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    & 0xFFFFFFFF) as u32;
-
-                if frame_count == 0 {
-                    eprintln!(
-                        "[LinuxCapture] PLACEHOLDER: not capturing PipeWire/X11 pixels; emitting empty frames."
-                    );
-                }
-                let data = Vec::new();
-                let is_key = frame_count % (fps as u64 * 2) == 0;
-                frame_count += 1;
-
                 let capture_ts_us = remote_core::timing::quanta_now_us();
-                let frame = LinuxVideoFrame {
+                let _ = tx.blocking_send(WindowsVideoFrame {
                     width,
                     height,
-                    data,
-                    capture_time_ms: now_ms,
-                    is_keyframe: is_key,
                     timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
-                };
-
-                let _ = tx.blocking_send(frame);
+                });
+                std::thread::sleep(interval);
             }
-            println!("[LinuxCapture] Capture loop stopped.");
         });
-
         Ok(())
     }
 
@@ -132,6 +95,6 @@ impl VideoCapturer for LinuxVideoCapturer {
         let mut rx = self.frame_rx.lock().await;
         rx.recv()
             .await
-            .ok_or_else(|| "Linux capture channel closed".into())
+            .ok_or_else(|| "Windows capture channel closed".into())
     }
 }

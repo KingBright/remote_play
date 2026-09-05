@@ -100,7 +100,9 @@ impl TouchStateTracker {
                             let dx_px = (clamped_x - lx) * (self.bounds.width as f32);
                             let dy_px = (clamped_y - ly) * (self.bounds.height as f32);
 
-                            if dx_px.abs() > self.drag_threshold_px || dy_px.abs() > self.drag_threshold_px {
+                            if dx_px.abs() > self.drag_threshold_px
+                                || dy_px.abs() > self.drag_threshold_px
+                            {
                                 self.has_dragged = true;
                             }
 
@@ -120,7 +122,9 @@ impl TouchStateTracker {
                     TouchAction::Up | TouchAction::Cancel => {
                         if self.active_pointers_count == 1 {
                             if let Some(down_t) = self.touch_down_time {
-                                if !self.has_dragged && now.duration_since(down_t) >= self.long_press_threshold {
+                                if !self.has_dragged
+                                    && now.duration_since(down_t) >= self.long_press_threshold
+                                {
                                     // 长按触发鼠标右键模拟
                                     events.push(InputEvent::MouseUp(1));
                                     events.push(InputEvent::MouseDown(2));
@@ -159,7 +163,9 @@ impl TouchStateTracker {
                             let raw_dx = (clamped_x - lx) * (self.bounds.width as f32) * 1.5;
                             let raw_dy = (clamped_y - ly) * (self.bounds.height as f32) * 1.5;
 
-                            if raw_dx.abs() > self.drag_threshold_px || raw_dy.abs() > self.drag_threshold_px {
+                            if raw_dx.abs() > self.drag_threshold_px
+                                || raw_dy.abs() > self.drag_threshold_px
+                            {
                                 self.has_dragged = true;
                             }
 
@@ -220,20 +226,76 @@ impl TouchStateTracker {
 /// 移动端虚拟修饰键辅助转换
 pub fn create_virtual_key_event(key_name: &str, pressed: bool) -> Option<InputEvent> {
     match key_name.to_lowercase().as_str() {
-        "esc" => Some(InputEvent::Key { key_code: 53, pressed, modifiers: 0 }),
-        "tab" => Some(InputEvent::Key { key_code: 48, pressed, modifiers: 0 }),
-        "ctrl" | "control" => Some(InputEvent::Key { key_code: 59, pressed, modifiers: input_modifiers::CONTROL }),
-        "alt" | "opt" | "option" => Some(InputEvent::Key { key_code: 58, pressed, modifiers: input_modifiers::ALT }),
-        "win" | "cmd" | "meta" => Some(InputEvent::Key { key_code: 55, pressed, modifiers: input_modifiers::META }),
-        "shift" => Some(InputEvent::Key { key_code: 56, pressed, modifiers: input_modifiers::SHIFT }),
-        "f5" => Some(InputEvent::Key { key_code: 96, pressed, modifiers: 0 }),
-        "f11" => Some(InputEvent::Key { key_code: 103, pressed, modifiers: 0 }),
-        "up" | "arrowup" => Some(InputEvent::Key { key_code: 126, pressed, modifiers: 0 }),
-        "down" | "arrowdown" => Some(InputEvent::Key { key_code: 125, pressed, modifiers: 0 }),
-        "left" | "arrowleft" => Some(InputEvent::Key { key_code: 123, pressed, modifiers: 0 }),
-        "right" | "arrowright" => Some(InputEvent::Key { key_code: 124, pressed, modifiers: 0 }),
-        "enter" | "return" => Some(InputEvent::Key { key_code: 36, pressed, modifiers: 0 }),
-        "backspace" | "delete" => Some(InputEvent::Key { key_code: 51, pressed, modifiers: 0 }),
+        "esc" => Some(InputEvent::Key {
+            key_code: 53,
+            pressed,
+            modifiers: 0,
+        }),
+        "tab" => Some(InputEvent::Key {
+            key_code: 48,
+            pressed,
+            modifiers: 0,
+        }),
+        "ctrl" | "control" => Some(InputEvent::Key {
+            key_code: 59,
+            pressed,
+            modifiers: input_modifiers::CONTROL,
+        }),
+        "alt" | "opt" | "option" => Some(InputEvent::Key {
+            key_code: 58,
+            pressed,
+            modifiers: input_modifiers::ALT,
+        }),
+        "win" | "cmd" | "meta" => Some(InputEvent::Key {
+            key_code: 55,
+            pressed,
+            modifiers: input_modifiers::META,
+        }),
+        "shift" => Some(InputEvent::Key {
+            key_code: 56,
+            pressed,
+            modifiers: input_modifiers::SHIFT,
+        }),
+        "f5" => Some(InputEvent::Key {
+            key_code: 96,
+            pressed,
+            modifiers: 0,
+        }),
+        "f11" => Some(InputEvent::Key {
+            key_code: 103,
+            pressed,
+            modifiers: 0,
+        }),
+        "up" | "arrowup" | "▲" => Some(InputEvent::Key {
+            key_code: 126,
+            pressed,
+            modifiers: 0,
+        }),
+        "down" | "arrowdown" | "▼" => Some(InputEvent::Key {
+            key_code: 125,
+            pressed,
+            modifiers: 0,
+        }),
+        "left" | "arrowleft" | "◄" => Some(InputEvent::Key {
+            key_code: 123,
+            pressed,
+            modifiers: 0,
+        }),
+        "right" | "arrowright" | "►" => Some(InputEvent::Key {
+            key_code: 124,
+            pressed,
+            modifiers: 0,
+        }),
+        "enter" | "return" => Some(InputEvent::Key {
+            key_code: 36,
+            pressed,
+            modifiers: 0,
+        }),
+        "backspace" | "delete" => Some(InputEvent::Key {
+            key_code: 51,
+            pressed,
+            modifiers: 0,
+        }),
         _ => None,
     }
 }
@@ -246,18 +308,31 @@ mod tests {
     fn direct_touch_maps_to_absolute_mouse_and_click() {
         let mut tracker = TouchStateTracker::new(
             TouchMode::DirectTouch,
-            RemoteScreenBounds { width: 1920, height: 1080 },
+            RemoteScreenBounds {
+                width: 1920,
+                height: 1080,
+            },
         );
         let now = Instant::now();
 
         // Touch Down at center (0.5, 0.5)
         let events_down = tracker.process_touch(TouchAction::Down, 0, 0.5, 0.5, 1.0, now);
         assert_eq!(events_down.len(), 2);
-        assert_eq!(events_down[0], InputEvent::MouseMoveAbsolute { x: 960, y: 540 });
+        assert_eq!(
+            events_down[0],
+            InputEvent::MouseMoveAbsolute { x: 960, y: 540 }
+        );
         assert_eq!(events_down[1], InputEvent::MouseDown(1));
 
         // Touch Up
-        let events_up = tracker.process_touch(TouchAction::Up, 0, 0.5, 0.5, 0.0, now + Duration::from_millis(50));
+        let events_up = tracker.process_touch(
+            TouchAction::Up,
+            0,
+            0.5,
+            0.5,
+            0.0,
+            now + Duration::from_millis(50),
+        );
         assert_eq!(events_up.len(), 1);
         assert_eq!(events_up[0], InputEvent::MouseUp(1));
     }
@@ -266,12 +341,22 @@ mod tests {
     fn virtual_trackpad_moves_and_taps() {
         let mut tracker = TouchStateTracker::new(
             TouchMode::VirtualTrackpad,
-            RemoteScreenBounds { width: 1920, height: 1080 },
+            RemoteScreenBounds {
+                width: 1920,
+                height: 1080,
+            },
         );
         let now = Instant::now();
 
         let _ = tracker.process_touch(TouchAction::Down, 0, 0.1, 0.1, 1.0, now);
-        let move_events = tracker.process_touch(TouchAction::Move, 0, 0.12, 0.13, 1.0, now + Duration::from_millis(16));
+        let move_events = tracker.process_touch(
+            TouchAction::Move,
+            0,
+            0.12,
+            0.13,
+            1.0,
+            now + Duration::from_millis(16),
+        );
         assert!(!move_events.is_empty());
         match move_events[0] {
             InputEvent::MouseMove { dx, dy } => {
@@ -286,7 +371,11 @@ mod tests {
     fn virtual_key_events_support_modifiers() {
         let ctrl = create_virtual_key_event("ctrl", true).unwrap();
         match ctrl {
-            InputEvent::Key { key_code, pressed, modifiers } => {
+            InputEvent::Key {
+                key_code,
+                pressed,
+                modifiers,
+            } => {
                 assert_eq!(key_code, 59);
                 assert!(pressed);
                 assert_eq!(modifiers, input_modifiers::CONTROL);

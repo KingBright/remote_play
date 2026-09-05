@@ -13,3 +13,10 @@ remote_core = { path = "../remote_core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }

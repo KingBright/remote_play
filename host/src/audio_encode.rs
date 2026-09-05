@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use crate::audio_capture::MacAudioFrame;
 use async_trait::async_trait;
 use opus::{Application, Channels, Encoder};
@@ -70,6 +71,7 @@ impl OpusAudioEncoder {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[async_trait]
 impl AudioEncoder for OpusAudioEncoder {
     type Frame = MacAudioFrame;
@@ -93,9 +95,10 @@ impl AudioEncoder for OpusAudioEncoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use crate::audio_capture::MacAudioFrame;
 
     fn frame(samples: usize) -> MacAudioFrame {
         MacAudioFrame {

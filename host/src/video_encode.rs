@@ -19,7 +19,6 @@ use video_toolbox_sys::compression::{
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kVTCompressionPropertyKey_ProfileLevel,
     kVTCompressionPropertyKey_RealTime, kVTProfileLevel_HEVC_Main_AutoLevel,
-    kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
 };
 use video_toolbox_sys::session::VTSessionSetProperty;
 
@@ -70,11 +69,13 @@ pub struct EncodedChunk {
     pub capture_time_ms: u32,
     pub encode_cost_ms: f32,
     pub is_keyframe: bool,
+    pub timing: protocol::FrameTimingCheckpoints,
 }
 
 struct FrameContext {
     capture_time_ms: u32,
     submit_instant: std::time::Instant,
+    timing: protocol::FrameTimingCheckpoints,
 }
 
 pub struct MacVideoEncoder {
@@ -96,19 +97,23 @@ extern "C" fn compression_callback(
     _info_flags: u32,
     sample_buffer: *mut c_void,
 ) {
-    let (capture_time_ms, encode_cost_ms) = if !source_frame_ref_con.is_null() {
+    let (capture_time_ms, encode_cost_ms, timing) = if !source_frame_ref_con.is_null() {
         let ctx = unsafe { Box::from_raw(source_frame_ref_con as *mut FrameContext) };
         let cost = ctx.submit_instant.elapsed().as_secs_f32() * 1000.0;
-        (ctx.capture_time_ms, cost)
+        let mut t = ctx.timing;
+        let now_us = remote_core::timing::quanta_now_us();
+        t.encode_done_ts_us = (now_us.saturating_sub(t.capture_ts_us)) as u32;
+        (ctx.capture_time_ms, cost, t)
     } else {
-        (
-            (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                & 0xFFFFFFFF) as u32,
-            2.0,
-        )
+        let capture_ts_us = remote_core::timing::quanta_now_us();
+        let now_ms = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            & 0xFFFFFFFF) as u32;
+        let mut t = protocol::FrameTimingCheckpoints::new(capture_ts_us);
+        t.encode_done_ts_us = 2_000;
+        (now_ms, 2.0, t)
     };
 
     if status != 0 || sample_buffer.is_null() {
@@ -203,6 +208,7 @@ extern "C" fn compression_callback(
                 capture_time_ms,
                 encode_cost_ms,
                 is_keyframe,
+                timing,
             });
         }
     }
@@ -349,9 +355,8 @@ impl MacVideoEncoder {
             );
 
             // Steady keyframe interval (10s) to eliminate periodic network bursts
-            let keyframe_interval_key = CFString::wrap_under_get_rule(
-                kVTCompressionPropertyKey_MaxKeyFrameInterval as _,
-            );
+            let keyframe_interval_key =
+                CFString::wrap_under_get_rule(kVTCompressionPropertyKey_MaxKeyFrameInterval as _);
             let keyframe_interval_value = CFNumber::from((fps * 10) as i32);
             let _ = VTSessionSetProperty(
                 session,
@@ -362,7 +367,7 @@ impl MacVideoEncoder {
             let keyframe_duration_key = CFString::wrap_under_get_rule(
                 kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as _,
             );
-            let keyframe_duration_value = CFNumber::from(10 as i32);
+            let keyframe_duration_value = CFNumber::from(10_i32);
             let _ = VTSessionSetProperty(
                 session,
                 keyframe_duration_key.as_concrete_TypeRef() as _,
@@ -409,8 +414,9 @@ impl MacVideoEncoder {
             if let Some(session) = self.session {
                 unsafe {
                     let final_bitrate = (bitrate_kbps as i64) * 1000;
-                    let bitrate_key =
-                        CFString::wrap_under_get_rule(kVTCompressionPropertyKey_AverageBitRate as _);
+                    let bitrate_key = CFString::wrap_under_get_rule(
+                        kVTCompressionPropertyKey_AverageBitRate as _,
+                    );
                     let bitrate_value = CFNumber::from(final_bitrate);
                     let _ = VTSessionSetProperty(
                         session,
@@ -433,8 +439,9 @@ impl MacVideoEncoder {
                         limit_array.as_concrete_TypeRef() as _,
                     );
 
-                    let fps_key =
-                        CFString::wrap_under_get_rule(kVTCompressionPropertyKey_ExpectedFrameRate as _);
+                    let fps_key = CFString::wrap_under_get_rule(
+                        kVTCompressionPropertyKey_ExpectedFrameRate as _,
+                    );
                     let fps_value = CFNumber::from(fps as i32);
                     let _ = VTSessionSetProperty(
                         session,
@@ -452,7 +459,9 @@ impl MacVideoEncoder {
                 }
             }
             let ref_con = self._tx_box.as_mut() as *mut _ as *mut c_void;
-            if let Ok(new_session) = unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con) } {
+            if let Ok(new_session) =
+                unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con) }
+            {
                 self.session = Some(new_session);
                 self.width = width;
                 self.height = height;
@@ -463,7 +472,9 @@ impl MacVideoEncoder {
         }
     }
 
-    pub async fn pull_encoded_chunk(&mut self) -> Result<EncodedChunk, Box<dyn Error + Send + Sync>> {
+    pub async fn pull_encoded_chunk(
+        &mut self,
+    ) -> Result<EncodedChunk, Box<dyn Error + Send + Sync>> {
         if let Some(chunk) = self.rx.recv().await {
             Ok(chunk)
         } else {
@@ -490,11 +501,21 @@ impl VideoEncoder for MacVideoEncoder {
         let pts = frame.sample_buffer.presentation_timestamp();
         let duration = frame.sample_buffer.duration();
 
-        let session = self.session.unwrap();
+        let session = self
+            .session
+            .ok_or("VideoToolbox compression session is not available")?;
+
+        let mut timing = frame.timing;
+        if timing.capture_ts_us == 0 {
+            timing.capture_ts_us = remote_core::timing::quanta_now_us();
+        }
+        let now_us = remote_core::timing::quanta_now_us();
+        timing.encode_queue_ts_us = (now_us.saturating_sub(timing.capture_ts_us)) as u32;
 
         let ctx = Box::new(FrameContext {
             capture_time_ms: frame.capture_time_ms,
             submit_instant: std::time::Instant::now(),
+            timing,
         });
         let source_frame_ref_con = Box::into_raw(ctx) as *mut c_void;
 
