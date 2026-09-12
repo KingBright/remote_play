@@ -1,0 +1,494 @@
+   Compiling remote_core v0.1.0 (/Users/jinliang/remote_play/remote_core)
+   Compiling remote_platform v0.1.0 (/Users/jinliang/remote_play/remote_platform)
+   Compiling client v0.1.0 (/Users/jinliang/remote_play/client)
+   Compiling host v0.1.0 (/Users/jinliang/remote_play/host)
+   Compiling remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+   Compiling remote_play_app v0.1.0 (/Users/jinliang/remote_play/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.58s
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/client-2298bf3e9fd20a81)
+
+running 20 tests
+test audio_player::tests::playback_settings_gate_sources_and_volume ... ok
+test audio_player::tests::stereo_audio_downmixes_to_mono_output ... ok
+test audio_player::tests::matching_channel_counts_pass_through ... ok
+test audio_player::tests::mono_audio_duplicates_to_stereo_output ... ok
+test talkback::tests::signed_pcm_uses_full_scale ... ok
+test host_config::tests::parses_configured_hosts_without_invalid_or_duplicate_entries ... ok
+test audio_player::tests::unsupported_opus_channel_counts_are_rejected ... ok
+test talkback::tests::talkback_rejects_unsupported_channel_counts ... ok
+test talkback::tests::talkback_settings_gate_transmission ... ok
+test talkback::tests::unsigned_pcm_is_centered_around_zero ... ok
+test transfer_center::tests::exposes_running_cancel_targets ... ok
+test tests::file_transfer_runtime_settings_build_receive_config ... ok
+test transfer_center::tests::aggregates_group_progress_and_cancellation ... ok
+test talkback::tests::talkback_encoder_waits_for_complete_opus_frame ... ok
+test transfer_center::tests::tracks_single_file_progress_and_completion ... ok
+test mesh_pairing::tests::explicit_runtime_reload_updates_status_and_uses_reload_channel ... ok
+test mesh_pairing::tests::invalid_invite_code_updates_status_without_replacing_group ... ok
+test mesh_pairing::tests::load_or_create_persists_invite_code ... ok
+test mesh_pairing::tests::successful_join_requests_mesh_reload_when_available ... ok
+test mesh_pairing::tests::join_from_invite_code_replaces_group_but_keeps_local_display_name ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/host-cf2f858fc2184fdd)
+
+running 18 tests
+test audio_capture::tests::mac_audio_frame_reports_capture_source ... ok
+test audio_capture::tests::decodes_big_endian_i16_pcm_samples ... ok
+test audio_capture::tests::interleaves_planar_audio_channels ... ok
+test audio_capture::tests::decodes_little_endian_f32_pcm_samples ... ok
+test talkback_player::tests::output_sample_conversions_are_clamped ... ok
+test input_injector::tests::normalized_pointer_coordinates_cover_the_display_bounds ... ok
+test service::tests::session_packets_are_accepted_only_from_the_active_peer ... ok
+test audio_encode::tests::rejects_channel_counts_that_opus_encoder_cannot_signal ... ok
+test talkback_player::tests::recognizes_only_viewer_talkback_for_session ... ok
+test input_injector::tests::drag_event_type_follows_the_pressed_button ... ok
+test audio_capture::tests::microphone_capturer_declares_remote_microphone_source ... ok
+test input_injector::tests::protocol_buttons_map_to_core_graphics_buttons_and_event_types ... ok
+test talkback_player::tests::talkback_mono_duplicates_to_stereo_output ... ok
+test talkback_player::tests::talkback_playback_settings_gate_volume ... ok
+test talkback_player::tests::talkback_stereo_downmixes_to_mono_output ... ok
+test audio_encode::tests::packetizer_encodes_only_complete_opus_frames ... ok
+test talkback_player::tests::talkback_decoder_outputs_samples_from_realtime_opus_packet ... ok
+test video_encode::tests::test_dynamic_encoder_resolution_and_bitrate_switch ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/protocol-b6d1ef61fca11fcf)
+
+running 29 tests
+test tests::compact_realtime_header_with_timing_roundtrips ... ok
+test tests::compact_realtime_rejects_reliable_object_metadata ... ok
+test tests::content_kind_defaults_to_expected_lane ... ok
+test tests::compact_realtime_envelope_roundtrips ... ok
+test tests::compact_realtime_rejects_deadlines_before_timestamps ... ok
+test tests::compact_realtime_size_overhead_is_close_to_current_rtp_path ... ok
+test tests::data_lane_classification_matches_latency_requirements ... ok
+test tests::derived_audio_stream_ids_use_documented_offsets ... ok
+test tests::compact_audio_stream_config_envelope_roundtrips ... ok
+test tests::audio_stream_config_envelope_uses_interactive_control_lane ... ok
+test tests::audio_control_message_roundtrips ... ok
+test tests::boxed_telemetry_preserves_legacy_wire_bytes_and_compact_control_messages ... ok
+test tests::audio_stream_config_roundtrips ... ok
+test tests::file_transfer_control_roundtrips ... ok
+test tests::clipboard_bundle_roundtrips_text_image_and_file_items ... ok
+test tests::file_transfer_manifest_roundtrips ... ok
+test tests::host_telemetry_control_message_roundtrips ... ok
+test tests::input_control_messages_roundtrip ... ok
+test tests::realtime_video_envelope_roundtrips ... ok
+test tests::reliable_file_chunk_envelope_roundtrips ... ok
+test tests::request_keyframe_control_message_roundtrips ... ok
+test tests::rtp_packet_roundtrips ... ok
+test tests::simple_control_messages_roundtrip_to_expected_variants ... ok
+test tests::start_stream_control_message_roundtrips ... ok
+test tests::realtime_envelope_size_overhead_stays_small ... ok
+test timing::tests::test_checkpoints_wire_roundtrip ... ok
+test timing::tests::test_stage_duration_calculation ... ok
+test timing::tests::test_stage_id_wire_roundtrip ... ok
+test timing::tests::test_trace_spans_generation ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/timing_adversarial_tests.rs (/tmp/remote-play-review-target/debug/deps/timing_adversarial_tests-bd0ee5598985e82b)
+
+running 10 tests
+test test_duration_calculations_with_clock_anomalies_and_out_of_order ... ok
+test test_stage_id_exhaustive_wire_id_mapping ... ok
+test test_wire_lengths_constant_invariants ... ok
+test test_extreme_boundary_values ... ok
+test test_wire_decode_buffer_bounds_and_truncation_robustness ... ok
+test test_wire_bytes_exact_field_layout_and_endianness ... ok
+test test_trace_spans_invariants ... ok
+test test_serde_json_and_bincode_roundtrips ... ok
+test test_compact_realtime_envelope_timing_integration ... ok
+test test_fuzz_malformed_bytes_never_panic ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/transport_bench.rs (/tmp/remote-play-review-target/debug/examples/transport_bench-b3d76919472291ef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/remote_play_android-d2743d8b1988b468)
+
+running 5 tests
+test tests::telemetry_defaults_are_zero_not_marketing_numbers ... ok
+test touch_mapper::tests::virtual_trackpad_moves_and_taps ... ok
+test touch_mapper::tests::virtual_key_events_support_modifiers ... ok
+test touch_mapper::tests::direct_touch_maps_to_absolute_mouse_and_click ... ok
+test tests::bridge_client_starts_disconnected ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/remote_core-d3a3ba2c968fb307)
+
+running 212 tests
+test audio::tests::rejects_invalid_audio_layouts ... ok
+test client_session::tests::legacy_capture_timestamp_expands_across_wraparound ... ok
+test client_session::tests::shared_host_stats_snapshot_is_lock_free_for_numerics ... ok
+test audio::tests::chunks_variable_input_into_fixed_interleaved_frames ... ok
+test clipboard_plane::tests::clipboard_assembler_rejects_non_clipboard_envelope ... ok
+test clipboard_plane::tests::clipboard_bundle_rejects_empty_bundle ... ok
+test clipboard_plane::tests::clipboard_bundle_rejects_invalid_image ... ok
+test client_session::tests::receiver_emits_host_telemetry_event ... ok
+test clipboard_plane::tests::clipboard_bundle_roundtrips_over_udp_data_path ... ok
+test clipboard_plane::tests::clipboard_bundle_splits_to_reliable_envelopes_and_reassembles ... ok
+test clipboard_plane::tests::clipboard_policy_allows_file_items_when_enabled ... ok
+test clipboard_plane::tests::clipboard_policy_blocks_file_items_until_enabled ... ok
+test clipboard_plane::tests::clipboard_policy_limits_image_payload_size ... ok
+test clipboard_plane::tests::clipboard_text_bundle_can_use_default_chunk_size ... ok
+test clipboard_provider::tests::filesystem_clipboard_file_store_rejects_path_components ... ok
+test clipboard_provider::tests::memory_clipboard_file_reference_provider_roundtrips_paths ... ok
+test clipboard_provider::tests::memory_clipboard_provider_applies_file_policy ... ok
+test clipboard_provider::tests::memory_clipboard_provider_roundtrips_image ... ok
+test clipboard_provider::tests::memory_clipboard_provider_roundtrips_text ... ok
+test clipboard_file_runtime::tests::clipboard_file_sync_writes_received_file_references_and_forwards_events ... ok
+test clipboard_sync::tests::content_crc_ignores_bundle_id ... ok
+test clipboard_sync::tests::endpoint_applies_received_transfer_and_suppresses_echo ... ok
+test clipboard_sync::tests::endpoint_polls_provider_into_reliable_clipboard_envelopes ... ok
+test clipboard_sync::tests::endpoint_rejects_non_clipboard_envelope ... ok
+test clipboard_sync::tests::endpoint_roundtrips_image_clipboard ... ok
+test clipboard_sync::tests::endpoint_sends_new_local_change_after_remote_apply ... ok
+test data_plane::tests::assembles_complete_object_transfer ... ok
+test data_plane::tests::builds_video_realtime_envelope ... ok
+test data_plane::tests::cancel_rejects_more_chunks_and_finish ... ok
+test data_plane::tests::checksum_failure_is_reported ... ok
+test data_plane::tests::duplicate_chunks_do_not_advance_progress_twice ... ok
+test data_plane::tests::missing_chunk_prevents_finish ... ok
+test data_plane::tests::realtime_order_prefers_priority_then_deadline_then_sequence ... ok
+test data_plane::tests::realtime_packets_preempt_bulk_packets ... ok
+test data_plane::tests::scheduler_drops_lowest_urgency_realtime_when_realtime_queue_is_full ... ok
+test data_plane::tests::scheduler_drops_realtime_that_expires_while_queued ... ok
+test data_plane::tests::scheduler_drops_stale_realtime_without_blocking_reliable_objects ... ok
+test data_plane::tests::scheduler_orders_realtime_by_priority_deadline_then_sequence ... ok
+test data_plane::tests::scheduler_rejects_reliable_objects_when_bulk_queue_is_full ... ok
+test data_plane::tests::scheduler_sends_realtime_before_reliable_objects ... ok
+test data_plane::tests::stale_detection_only_applies_to_realtime_drop_lanes ... ok
+test clipboard_provider::tests::filesystem_clipboard_file_store_roundtrips_small_file ... ok
+test discovery::tests::cache_can_accept_foreign_networks_for_mobile_viewers ... ok
+test discovery::tests::discovered_peer_expiry_uses_announcement_ttl ... ok
+test discovery::tests::discovery_endpoint_prefers_virtual_ip_when_present ... ok
+test discovery::tests::discovery_announcement_roundtrips ... ok
+test discovery::tests::discovery_packet_rejects_wrong_network_or_bad_shape ... ok
+test discovery::tests::discovery_port_parsing_uses_default_and_rejects_invalid_values ... ok
+test discovery::tests::discovery_socket_allows_shared_port_for_dual_process_dev ... ok
+test discovery::tests::discovery_validation_rejects_empty_identity_and_zero_port ... ok
+test discovery::tests::peer_cache_filters_other_networks_and_self_then_updates_existing_peer ... ok
+test discovery::tests::peer_cache_keeps_direct_and_relay_routes_for_same_device ... ok
+test discovery::tests::relay_scoped_discovery_announcement_roundtrips ... ok
+test file_transfer::tests::file_control_roundtrips_over_udp_data_path ... ok
+test discovery::tests::discovery_runtime_finds_peer_over_loopback_unicast ... ok
+test clipboard_runtime::tests::runner_sends_polled_clipboard_bundle_through_scheduled_sender ... ok
+test file_transfer::tests::reader_rejects_unsafe_file_names_and_size_limit ... ok
+test file_transfer::tests::file_transfer_roundtrips_over_udp_data_path ... ok
+test file_transfer_runtime::tests::inbound_receive_config_applies_immediately_when_idle ... ok
+test file_transfer_runtime::tests::inbound_receive_config_waits_for_active_group_boundary ... ok
+test file_transfer::tests::incoming_file_transfer_writes_chunks_out_of_order_and_verifies_checksum ... ok
+test file_transfer::tests::reader_streams_manifest_then_raw_file_chunks_without_loading_whole_file ... ok
+test file_transfer_runtime::tests::outgoing_cancel_transfer_sends_remote_control_and_stops_reader ... ok
+test file_transfer_runtime::tests::runtime_cleans_partial_file_on_remote_cancel_transfer ... ok
+test file_transfer_runtime::tests::runtime_completes_zero_byte_file_after_manifest ... ok
+test file_transfer_runtime::tests::runtime_publishes_group_completion_after_all_files_materialize ... ok
+test file_transfer_runtime::tests::runtime_expands_directory_groups_and_publishes_top_level_path ... ok
+test clipboard_file_runtime::tests::clipboard_file_sync_turns_local_file_references_into_send_commands ... ok
+test file_transfer_runtime::tests::runtime_sends_file_over_scheduled_udp_path_and_receiver_materializes_it ... ok
+test file_transfer_runtime::tests::runtime_cancel_group_removes_completed_and_partial_files_without_publish ... ok
+test clipboard_file_runtime::tests::clipboard_file_sync_publishes_group_paths_atomically ... ok
+test jitter_buffer::tests::jitter_enter_keeps_recv_domain_when_client_clock_is_behind ... ok
+test jitter_buffer::tests::handles_sequence_number_wraparound ... ok
+test jitter_buffer::tests::drops_stale_packets_and_continues_with_expected_sequence ... ok
+test client_session::tests::media_handler_emits_media_received_after_session_filtering ... ok
+test client_session::tests::media_handler_preserves_host_timing_checkpoints ... ok
+test client_session::tests::media_handler_does_not_emit_filtered_old_session_media ... ok
+test client_session::tests::audio_configuration_is_deferred_without_blocking_or_reordering_its_packets ... ok
+test client_session::tests::audio_backpressure_does_not_block_media_ingress ... ok
+test client_session::tests::reordered_packets_and_sequence_zero_do_not_inflate_loss ... ok
+test jitter_buffer::tests::missing_packet_has_a_deadline_without_further_arrivals ... ok
+test jitter_buffer::tests::pops_in_order_packets_immediately ... ok
+test jitter_buffer::tests::resets_when_sequence_jumps_far_from_expected ... ok
+test jitter_buffer::tests::skips_missing_packet_after_buffer_depth_limit ... ok
+test jitter_buffer::tests::tracks_timing_and_drop_reasons ... ok
+test jitter_buffer::tests::very_old_packet_does_not_rewind_the_stream ... ok
+test jitter_buffer::tests::waits_for_missing_packet_before_releasing_future_packet ... ok
+test latest_frame::tests::latest_wins_and_never_queues ... ok
+test latest_frame::tests::replaced_frame_is_released_outside_the_lock ... ok
+test media_plane::tests::audio_rtp_roundtrips_through_realtime_data_envelope ... ok
+test latest_frame::tests::notification_survives_push_before_wait_registration ... ok
+test media_plane::tests::audio_stream_config_rejects_stream_id_mismatch ... ok
+test media_plane::tests::audio_stream_config_rejects_wrong_envelope_kind ... ok
+test media_plane::tests::audio_stream_configs_roundtrip_through_interactive_envelopes ... ok
+test media_plane::tests::rejects_data_envelopes_that_do_not_carry_media ... ok
+test media_plane::tests::rejects_non_media_rtp_payload_types ... ok
+test media_plane::tests::video_rtp_roundtrips_through_realtime_data_envelope ... ok
+test media_plane::tests::video_timestamp_unwraps_near_current_time_across_u32_wrap ... ok
+test jitter_buffer::tests::duplicates_and_slow_consumers_cannot_grow_the_queue ... ok
+test mesh::tests::app_private_mesh_store_reports_missing_secret ... ok
+test mesh::tests::binary_locator_reports_not_executable_bundle_binary ... ok
+test mesh::tests::copy_code_rejects_checksum_changes ... ok
+test mesh::tests::copy_code_roundtrips_non_default_peers_and_utf8_secret ... ok
+test mesh::tests::binary_locator_prefers_env_override_and_requires_it_to_exist ... ok
+test mesh::tests::copy_code_tolerates_case_whitespace_and_grouping ... ok
+test mesh::tests::app_private_mesh_store_uses_restrictive_fallback_permissions ... ok
+test mesh::tests::generated_mesh_config_is_valid_and_redacts_secret ... ok
+test mesh::tests::binary_locator_reports_missing_locations_without_secrets ... ok
+test mesh::tests::health_snapshot_classifies_tun_permission_failures ... ok
+test mesh::tests::health_snapshot_tracks_running_ready_and_exited_states ... ok
+test mesh::tests::app_private_mesh_store_rejects_invalid_metadata ... ok
+test mesh::tests::app_private_mesh_store_can_load_or_generate_first_run_config ... ok
+test mesh::tests::invite_code_rejects_invalid_payloads ... ok
+test mesh::tests::invite_code_roundtrips_network_credentials_without_node_identity ... ok
+test mesh::tests::mesh_config_metadata_roundtrips_without_serializing_secret ... ok
+test mesh::tests::restart_backoff_grows_and_caps_until_reset ... ok
+test mesh::tests::legacy_invite_code_still_decodes_for_compatibility ... ok
+test mesh::tests::sidecar_command_args_are_safe_to_log_without_debugging_the_secret ... ok
+test mesh::tests::binary_locator_searches_bundled_resources_before_path ... ok
+test mesh::tests::app_private_mesh_store_roundtrips_config_and_secret ... ok
+test mesh::tests::static_health_monitor_publishes_snapshot_without_probe_process ... ok
+test mesh::tests::virtual_ip_parser_accepts_common_easytier_node_output_shapes ... ok
+test mesh::tests::virtual_ip_parser_ignores_unusable_addresses_and_unrelated_peers ... ok
+test mesh::tests::virtual_ipv4_derivation_is_stable_and_private ... ok
+test mesh::tests::app_private_mesh_store_migrates_legacy_default_public_peer ... ok
+test net::tests::cleanup_expired_fragments_removes_old_entries ... ok
+test net::tests::enforce_fragment_cache_limit_removes_oldest_unprotected_entries ... ok
+test mesh::tests::sidecar_manager_plans_command_from_located_binary_without_leaking_secret ... ok
+test net::tests::encrypted_control_roundtrips_after_crypto_install ... ok
+test mesh::tests::sidecar_manager_can_start_and_stop_a_short_lived_sidecar ... ok
+test net::tests::invalid_fragment_sizes_are_rejected_before_allocating ... ok
+test net::tests::reassembles_fragmented_data_envelopes ... ok
+test net::tests::reassembles_fragmented_data_envelopes_with_timing ... ok
+test net::tests::returns_error_for_mismatched_fragment_count ... ok
+test net::tests::returns_error_for_out_of_range_fragment_index ... ok
+test net::tests::returns_error_for_unknown_header ... ok
+test net::tests::returns_error_for_zero_fragment_count ... ok
+test net::tests::sender_rejects_unrepresentable_message_sizes ... ok
+test net::tests::reassembles_fragmented_rtp_packets ... ok
+test net::tests::same_fragment_id_from_different_peers_is_isolated ... ok
+test net::tests::sends_and_receives_audio_media_data_plane_packets_without_deadline ... ok
+test net::tests::sends_and_receives_control_messages ... ok
+test net::tests::sends_and_receives_data_envelopes ... ok
+test net::tests::sends_and_receives_data_envelopes_with_timing ... ok
+test net::tests::sends_and_receives_reliable_object_envelopes_on_full_data_path ... ok
+test net::tests::sends_and_receives_rtp_packets ... ok
+test pairing_qr::tests::bare_invite_still_parses ... ok
+test net::tests::sends_and_receives_video_media_data_plane_packets ... ok
+test pairing_qr::tests::pairing_qr_roundtrips_invite_and_port ... ok
+test pairing_qr::tests::pairing_qr_roundtrips_generated_mesh_invite ... ok
+test relay::tests::relay_packet_roundtrips ... ok
+test relay::tests::relay_group_capability_is_secret_and_channel_scoped ... ok
+test relay::tests::tcp_connection_cannot_change_identity_after_registration ... ok
+test relay::tests::tcp_forwarding_queue_is_bounded ... ok
+test relay::tests::tcp_group_peer_limit_is_enforced ... ok
+test pairing_qr::tests::qr_matrix_is_square_and_nonempty ... ok
+test net::tests::receive_remains_usable_after_cancellation ... ok
+test relay::tests::websocket_relay_heartbeat_timeout_never_precedes_the_probe_interval ... ok
+test client_session::tests::receiver_releases_a_gap_without_another_datagram ... ok
+test relay::tests::websocket_relay_url_requires_ws_or_wss ... ok
+test role::tests::activity_extends_serving_timeout ... ok
+test role::tests::connecting_timeout_returns_to_idle ... ok
+test role::tests::empty_peer_fields_fall_back_to_endpoint_identity ... ok
+test role::tests::explicit_policy_can_stop_active_viewing_and_serve ... ok
+test role::tests::idle_start_viewing_enters_connecting ... ok
+test role::tests::mark_viewing_connected_requires_matching_session ... ok
+test role::tests::same_peer_can_replace_connecting_or_viewing_session ... ok
+test role::tests::serving_different_peer_is_busy ... ok
+test role::tests::serving_rejects_start_viewing_until_stopped ... ok
+test role::tests::serving_same_peer_can_refresh_or_replace_session ... ok
+test role::tests::stop_session_is_idempotent_for_idle_and_strict_for_active_session ... ok
+test role::tests::viewing_rejects_inbound_serving_by_default ... ok
+test relay::tests::relay_tunnels_forward_existing_udp_protocol_both_ways ... ok
+test relay::tests::tcp_relay_tunnels_forward_existing_udp_protocol_both_ways ... ok
+test scheduled_sender::tests::scheduled_sender_reports_entrance_backpressure ... ok
+test relay::tests::websocket_relay_detects_a_silent_half_open_connection ... ok
+test scheduled_sender::tests::zero_configuration_still_sends_and_shuts_down ... ok
+test session_crypto::tests::hello_mac_rejects_tamper_and_skew ... ok
+test session_crypto::tests::roundtrip_seal_open ... ok
+test session_crypto::tests::wrong_key_fails_open ... ok
+test telemetry::tests::fps_expires_when_frames_stop_arriving ... ok
+test telemetry::tests::tail_percentiles_use_nearest_rank_for_small_windows ... ok
+test telemetry::tests::test_pipeline_telemetry_engine_full_workflow ... ok
+test telemetry::tests::test_rolling_quantile_accuracy ... ok
+test telemetry::tests::test_rolling_quantile_empty ... ok
+test telemetry::tests::test_rolling_quantile_single_sample ... ok
+test telemetry::tests::test_rolling_quantile_window_wrap ... ok
+test timing::tests::advance_client_stage_keeps_host_aligned_domain ... ok
+test timing::tests::client_stage_offset_does_not_inflate_when_client_clock_is_ahead ... ok
+test timing::tests::client_stage_offset_survives_client_clock_behind_host ... ok
+test timing::tests::stamp_client_stage_stays_monotonic_with_recv ... ok
+test timing::tests::test_client_frame_tracker_workflow ... ok
+test timing::tests::test_clock_synchronizer_update_and_outliers ... ok
+test timing::tests::test_high_precision_clock_monotonicity ... ok
+test timing::tests::test_host_frame_tracker_workflow ... ok
+test trace::tests::test_bottleneck_analyzer_diagnosis ... ok
+test trace::tests::test_chrome_trace_export_format ... ok
+test trace::tests::test_trace_spike_trigger ... ok
+test traits::tests::clipboard_capabilities_default_to_none ... ok
+test traits::tests::media_trait_defaults_are_platform_neutral ... ok
+test traits::tests::platform_kind_current_matches_compile_target ... ok
+test scheduled_sender::tests::scheduled_sender_sends_realtime_before_queued_bulk ... ok
+test relay::tests::websocket_relay_tunnels_forward_existing_udp_protocol_both_ways ... ok
+test scheduled_sender::tests::scheduled_sender_loopback_prioritizes_media_over_bulk ... ok
+test scheduled_sender::tests::scheduled_sender_keeps_realtime_first_under_reliable_pressure ... ok
+test mesh::tests::cli_probe_parses_virtual_ip_from_command_output ... ok
+test mesh::tests::health_monitor_restarts_exited_sidecar_with_backoff ... ok
+test mesh::tests::sidecar_manager_reports_exited_process_state ... ok
+test file_transfer_runtime::tests::shared_sender_prioritizes_media_while_file_transfer_completes ... ok
+test mesh::tests::probe_health_monitor_publishes_external_daemon_snapshot ... ok
+test mesh::tests::sidecar_manager_reads_exit_diagnostics_from_log_file ... ok
+test mesh::tests::health_monitor_polls_virtual_ip_and_publishes_ready_snapshot ... ok
+
+test result: ok. 212 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+     Running tests/e2e_telemetry_pipeline_tests.rs (/tmp/remote-play-review-target/debug/deps/e2e_telemetry_pipeline_tests-02795a28601382fa)
+
+running 12 tests
+test test_tier1_stream_health_vitals_tracking ... ok
+test test_tier2_fps_and_bitrate_calculators_idle_and_burst ... ok
+test test_tier1_bottleneck_analyzer_rules ... ok
+test test_tier2_extreme_window_and_overflow_boundaries ... ok
+test test_tier1_rolling_quantile_statistical_accuracy ... ok
+test test_tier2_spike_trigger_threshold_edge_cases ... ok
+test test_tier4_scenario_latency_spike_and_automated_diagnosis ... ok
+test test_tier1_chrome_trace_json_schema_compliance ... ok
+test test_tier4_scenario_4k60_streaming_lifecycle ... ok
+test test_tier3_multithreaded_concurrent_telemetry_updates ... ok
+test test_tier3_clock_sync_tracker_and_telemetry_pairwise ... ok
+test test_tier4_benchmark_instrumentation_overhead ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running unittests examples/headless_smoke_client.rs (/tmp/remote-play-review-target/debug/examples/headless_smoke_client-28ddb61a4e95b767)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/loopback_transport_bench.rs (/tmp/remote-play-review-target/debug/examples/loopback_transport_bench-fc08d28bc75fc59b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/media_adapter_bench.rs (/tmp/remote-play-review-target/debug/examples/media_adapter_bench-aa23270dbc4e4173)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/scheduler_mixed_traffic_bench.rs (/tmp/remote-play-review-target/debug/examples/scheduler_mixed_traffic_bench-6187eeeceaec5706)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tcp_relay_server.rs (/tmp/remote-play-review-target/debug/examples/tcp_relay_server-30d16fcfe921aa89)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/tcp_relay_tunnel.rs (/tmp/remote-play-review-target/debug/examples/tcp_relay_tunnel-7315c2492e643ffd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/timing_stress_bench.rs (/tmp/remote-play-review-target/debug/examples/timing_stress_bench-a6af10bd2cb17b40)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/udp_relay_server.rs (/tmp/remote-play-review-target/debug/examples/udp_relay_server-ddeb1c6ef2067d53)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/udp_relay_tunnel.rs (/tmp/remote-play-review-target/debug/examples/udp_relay_tunnel-34f9c66525f82173)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/remote_platform-fa747d6559a01525)
+
+running 2 tests
+test macos_clipboard::tests::maps_supported_image_mime_types_to_pasteboard_types ... ok
+test macos_clipboard::tests::reports_macos_clipboard_capabilities ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/remote_play_app-7ace2c9e6e11cdd6)
+
+running 56 tests
+test mesh_admin::tests::cancellation_detection_accepts_american_and_british_spellings ... ok
+test mesh_admin::tests::bundled_installer_path_is_derived_from_app_executable ... ok
+test preferences::tests::preferences_default_values_are_valid ... ok
+test design_system::tests::themes_keep_text_and_actions_readable ... ok
+test tests::app_defaults_enable_the_managed_public_relay_fallback ... ok
+test mesh_admin::tests::mesh_installer_applescript_quotes_shell_path ... ok
+test preferences::tests::preferences_backward_forward_compatibility ... ok
+test preferences::tests::preferences_round_trip_serialization ... ok
+test tests::connect_device_rejects_missing_or_non_streamable_devices ... ok
+test tests::discovery_snapshot_uses_relay_route_when_it_is_the_only_candidate ... ok
+test tests::discovery_snapshot_marks_missing_devices_offline ... ok
+test tests::connect_device_starts_viewing_with_allocated_session ... ok
+test tests::discovery_snapshot_prefers_direct_route_over_relay_for_same_device ... ok
+test tests::discovery_snapshot_updates_streamable_devices ... ok
+test tests::explicit_inbound_policy_can_take_over_active_viewing ... ok
+test preferences::tests::preferences_atomic_disk_save_and_load ... ok
+test tests::owner_connect_without_control_sender_does_not_change_role ... ok
+test tests::owner_expire_timed_out_returns_active_session_to_idle ... ok
+test tests::owner_disconnect_active_sends_stop_stream_and_returns_idle ... ok
+test tests::owner_routes_input_only_while_actively_viewing ... ok
+test tests::owner_connect_device_sends_start_stream_and_waits_for_connected_mark ... ok
+test tests::role_conflict_blocks_connect_while_serving ... ok
+test tests::same_device_reconnect_allocates_new_session ... ok
+test tests::service_owner_can_start_without_services ... ok
+test tests::service_owner_starts_discovery_runtime ... ok
+test tests::service_owner_starts_relay_and_wires_discovery_route_override ... ok
+test tests::timeout_delegates_to_role_state_machine ... ok
+test tests::service_owner_starts_websocket_relay_and_wires_discovery_route_override ... ok
+test tests::unavailable_side_services_cannot_be_enabled ... ok
+test tests::relay_runtime_config_uses_persistent_runtime_settings_without_process_env ... ok
+test tests::owner_exposes_and_persists_side_service_preferences ... ok
+test tests::viewer_media_start_failure_falls_back_to_sink_channels ... ok
+test ui::input_tests::absolute_pointer_mapping_accounts_for_cover_cropping ... ok
+test ui::input_tests::absolute_pointer_mapping_uses_the_contained_video_rect ... ok
+test ui::input_tests::control_island_only_exposes_controls_relevant_to_the_current_role ... ok
+test ui::input_tests::dashboard_only_uses_frame_rate_refresh_while_viewing ... ok
+test tests::unified_discovery_config_advertises_dual_role_capabilities ... ok
+test ui::input_tests::gpui_keys_map_to_macos_virtual_key_codes ... ok
+test ui::input_tests::gpui_modifiers_use_protocol_bit_flags ... ok
+test ui::input_tests::gpui_mouse_buttons_use_the_platform_neutral_protocol_ids ... ok
+test tests::runtime_reload_rebuilds_discovery_from_saved_device_group ... ok
+test ui::input_tests::locking_input_releases_tracked_buttons_keys_and_modifiers ... ok
+test ui::input_tests::precise_scroll_accumulates_subpixel_deltas ... ok
+test ui::input_tests::product_appearance_matches_the_dark_video_and_glass_surfaces ... ok
+test ui::input_tests::telemetry_is_only_available_while_recent_and_finite ... ok
+test tests::unified_runtime_starts_core_services_with_ephemeral_ports ... ok
+test ui::input_tests::focused_video_descendant_reaches_root_capture_handler ... ok
+test ui::input_tests::input_surface_probe_records_window_coordinates ... ok
+test tests::discovery_bridge_updates_owned_runtime_devices ... ok
+test tests::client_media_event_marks_connecting_owner_as_viewing ... ok
+test tests::owner_timeout_monitor_expires_connecting_session ... ok
+test tests::client_telemetry_event_marks_current_connecting_owner_as_viewing ... ok
+test tests::timeout_monitor_auto_reconnects_viewing_session ... ok
+test tests::unified_pairing_actions_request_runtime_reload ... ok
+test tests::mismatched_client_media_event_does_not_mark_owner_connected ... ok
+test tests::owner_keeps_an_idle_viewing_session_alive_without_user_input ... ok
+
+test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/main.rs (/tmp/remote-play-review-target/debug/deps/remote_play-79c181b3b76361b6)
+
+running 4 tests
+test tests::trace_analyze_arg_is_defined ... ok
+test tests::mesh_daemon_health_config_does_not_spawn_cli_probe_by_default ... ok
+test tests::mesh_daemon_config_key_changes_when_group_changes ... ok
+test tests::launchd_plist_runs_dynamic_mesh_daemon_without_static_secrets ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

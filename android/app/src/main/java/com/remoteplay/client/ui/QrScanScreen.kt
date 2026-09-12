@@ -1,5 +1,7 @@
 package com.remoteplay.client.ui
 
+import androidx.compose.foundation.clickable
+
 import android.Manifest
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -122,4 +124,4 @@ fun QrScanScreen(
 }
 
 private fun Modifier.clickableCancel(onCancel: () -> Unit): Modifier =
-    androidx.compose.foundation.clickable(onClick = onCancel)
+    clickable(onClick = onCancel)

@@ -85,8 +85,11 @@ impl ScheduledDataSender {
     pub fn spawn(
         udp_sender: UdpSender,
         target: SocketAddr,
-        config: ScheduledDataSenderConfig,
+        mut config: ScheduledDataSenderConfig,
     ) -> (Self, ScheduledDataSenderJoin) {
+        config.queue_capacity = config.queue_capacity.max(1);
+        config.send_budget_per_tick = config.send_budget_per_tick.max(1);
+        config.tick_interval = config.tick_interval.max(Duration::from_micros(1));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let counters = Arc::new(ScheduledDataSenderCounters::default());
         let worker = tokio::spawn(run_sender_worker(
@@ -163,11 +166,19 @@ async fn run_sender_worker(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut scheduler = LaneScheduler::with_config(config.scheduler);
     let mut interval = tokio::time::interval(config.tick_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Consume tokio interval's immediate first tick so initial submissions can batch.
     interval.tick().await;
 
     loop {
+        if scheduler.is_empty() {
+            let Some(envelope) = rx.recv().await else {
+                return Ok(());
+            };
+            record_push_result(&counters, scheduler.push(envelope, now_ms()));
+            interval.reset();
+        }
         tokio::select! {
             _ = interval.tick() => {
                 drain_ready_envelopes(&mut rx, &mut scheduler, &counters);
@@ -196,7 +207,10 @@ fn drain_ready_envelopes(
     scheduler: &mut LaneScheduler,
     counters: &ScheduledDataSenderCounters,
 ) {
-    while let Ok(envelope) = rx.try_recv() {
+    // A producer can refill the entrance concurrently. Bound this pass so a
+    // busy file transfer cannot prevent the worker from ever sending media.
+    for _ in 0..rx.len() {
+        let Ok(envelope) = rx.try_recv() else { break };
         record_push_result(counters, scheduler.push(envelope, now_ms()));
     }
 }
@@ -307,6 +321,32 @@ mod tests {
             },
             payload: vec![sequence_number as u8; 16],
         }
+    }
+
+    #[tokio::test]
+    async fn zero_configuration_still_sends_and_shuts_down() {
+        let sender_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let receiver_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp_sender, _) = sender_mux.split();
+        let (_, receiver) = receiver_mux.split();
+        let (sender, worker) = ScheduledDataSender::spawn(
+            udp_sender,
+            receiver_mux.local_addr().unwrap(),
+            ScheduledDataSenderConfig {
+                queue_capacity: 0,
+                send_budget_per_tick: 0,
+                tick_interval: Duration::ZERO,
+                ..Default::default()
+            },
+        );
+        sender.send(bulk(1)).await.unwrap();
+        drop(sender);
+        assert!(!recv_data(&receiver).await.header.lane.is_realtime());
+        timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     async fn recv_data(receiver: &crate::net::UdpReceiver) -> DataEnvelope {

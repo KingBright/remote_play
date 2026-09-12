@@ -4,6 +4,7 @@
   "description": "RemotePlay Ultra-Low-Latency Web Client powered by Rust WASM and WebCodecs",
   "type": "module",
   "scripts": {
+    "test": "node --test tests/*.test.js",
     "dev": "python3 -m http.server 3000 --directory .",
     "build:wasm": "wasm-pack build ../remote_client_bridge --target web --out-dir ./pkg -- --features wasm"
   },

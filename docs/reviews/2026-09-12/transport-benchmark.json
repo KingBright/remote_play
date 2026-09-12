@@ -1,0 +1,117 @@
+{
+  "baseline_commit": "7abf9f0",
+  "iterations_per_round": 15000,
+  "rounds": 5,
+  "architecture": "arm64",
+  "cpu": "Apple M2 Max",
+  "binary_sha256": {
+    "before": "08388a59e18d88e3aac25d3eda97ac0c1f783cc75fb37ecd46e189d22445a837",
+    "after": "fa5169b04daeacc7ab702acf3602fe09966537a5a48b20037688c1100b528b34"
+  },
+  "summary": [
+    {
+      "payload_bytes": 64,
+      "rtp": {
+        "before_us": 13.895,
+        "after_us": 13.209,
+        "change_pct": -4.9
+      },
+      "compact_data": {
+        "before_us": 13.762,
+        "after_us": 13.278,
+        "change_pct": -3.5
+      }
+    },
+    {
+      "payload_bytes": 512,
+      "rtp": {
+        "before_us": 14.417,
+        "after_us": 14.109,
+        "change_pct": -2.1
+      },
+      "compact_data": {
+        "before_us": 15.532,
+        "after_us": 13.678,
+        "change_pct": -11.9
+      }
+    },
+    {
+      "payload_bytes": 1400,
+      "rtp": {
+        "before_us": 18.705,
+        "after_us": 18.554,
+        "change_pct": -0.8
+      },
+      "compact_data": {
+        "before_us": 16.893,
+        "after_us": 16.875,
+        "change_pct": -0.1
+      }
+    },
+    {
+      "payload_bytes": 8000,
+      "rtp": {
+        "before_us": 51.971,
+        "after_us": 50.808,
+        "change_pct": -2.2
+      },
+      "compact_data": {
+        "before_us": 42.733,
+        "after_us": 42.13,
+        "change_pct": -1.4
+      }
+    }
+  ],
+  "runs": [
+    {
+      "variant": "before",
+      "run": 0,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=14876.9\n  compact_data_ns_per_packet=13369.3\npayload_size=512 bytes\n  rtp_ns_per_packet=14198.0\n  compact_data_ns_per_packet=15841.9\npayload_size=1400 bytes\n  rtp_ns_per_packet=18748.2\n  compact_data_ns_per_packet=16893.1\npayload_size=8000 bytes\n  rtp_ns_per_packet=51971.5\n  compact_data_ns_per_packet=43938.8\n"
+    },
+    {
+      "variant": "after",
+      "run": 0,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=16459.0\n  compact_data_ns_per_packet=13155.6\npayload_size=512 bytes\n  rtp_ns_per_packet=14202.1\n  compact_data_ns_per_packet=13678.2\npayload_size=1400 bytes\n  rtp_ns_per_packet=19135.4\n  compact_data_ns_per_packet=17196.3\npayload_size=8000 bytes\n  rtp_ns_per_packet=50195.2\n  compact_data_ns_per_packet=42130.2\n"
+    },
+    {
+      "variant": "after",
+      "run": 1,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13198.2\n  compact_data_ns_per_packet=13277.7\npayload_size=512 bytes\n  rtp_ns_per_packet=14218.8\n  compact_data_ns_per_packet=15183.5\npayload_size=1400 bytes\n  rtp_ns_per_packet=18563.2\n  compact_data_ns_per_packet=16875.4\npayload_size=8000 bytes\n  rtp_ns_per_packet=51983.2\n  compact_data_ns_per_packet=43405.8\n"
+    },
+    {
+      "variant": "before",
+      "run": 1,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13139.7\n  compact_data_ns_per_packet=15394.2\npayload_size=512 bytes\n  rtp_ns_per_packet=14262.2\n  compact_data_ns_per_packet=13617.2\npayload_size=1400 bytes\n  rtp_ns_per_packet=18535.9\n  compact_data_ns_per_packet=16769.2\npayload_size=8000 bytes\n  rtp_ns_per_packet=55721.5\n  compact_data_ns_per_packet=40773.2\n"
+    },
+    {
+      "variant": "before",
+      "run": 2,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13895.1\n  compact_data_ns_per_packet=13762.3\npayload_size=512 bytes\n  rtp_ns_per_packet=14641.6\n  compact_data_ns_per_packet=16114.0\npayload_size=1400 bytes\n  rtp_ns_per_packet=18781.8\n  compact_data_ns_per_packet=16674.1\npayload_size=8000 bytes\n  rtp_ns_per_packet=50791.2\n  compact_data_ns_per_packet=42732.5\n"
+    },
+    {
+      "variant": "after",
+      "run": 2,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13208.8\n  compact_data_ns_per_packet=14916.0\npayload_size=512 bytes\n  rtp_ns_per_packet=14091.3\n  compact_data_ns_per_packet=13753.0\npayload_size=1400 bytes\n  rtp_ns_per_packet=18535.2\n  compact_data_ns_per_packet=17071.4\npayload_size=8000 bytes\n  rtp_ns_per_packet=52742.7\n  compact_data_ns_per_packet=42111.8\n"
+    },
+    {
+      "variant": "after",
+      "run": 3,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13012.0\n  compact_data_ns_per_packet=13122.8\npayload_size=512 bytes\n  rtp_ns_per_packet=14106.9\n  compact_data_ns_per_packet=13358.2\npayload_size=1400 bytes\n  rtp_ns_per_packet=18554.4\n  compact_data_ns_per_packet=16624.2\npayload_size=8000 bytes\n  rtp_ns_per_packet=45400.9\n  compact_data_ns_per_packet=39002.7\n"
+    },
+    {
+      "variant": "before",
+      "run": 3,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=16302.6\n  compact_data_ns_per_packet=16069.6\npayload_size=512 bytes\n  rtp_ns_per_packet=14726.1\n  compact_data_ns_per_packet=14732.5\npayload_size=1400 bytes\n  rtp_ns_per_packet=18704.9\n  compact_data_ns_per_packet=16980.0\npayload_size=8000 bytes\n  rtp_ns_per_packet=50120.6\n  compact_data_ns_per_packet=42008.6\n"
+    },
+    {
+      "variant": "before",
+      "run": 4,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13573.2\n  compact_data_ns_per_packet=13112.5\npayload_size=512 bytes\n  rtp_ns_per_packet=14417.4\n  compact_data_ns_per_packet=15531.7\npayload_size=1400 bytes\n  rtp_ns_per_packet=18586.8\n  compact_data_ns_per_packet=17362.3\npayload_size=8000 bytes\n  rtp_ns_per_packet=53196.9\n  compact_data_ns_per_packet=43971.2\n"
+    },
+    {
+      "variant": "after",
+      "run": 4,
+      "raw": "loopback transport bench iterations=15000\ndata path uses UdpSender::send_data, which selects compact realtime wire format\npayload_size=64 bytes\n  rtp_ns_per_packet=13297.0\n  compact_data_ns_per_packet=13396.5\npayload_size=512 bytes\n  rtp_ns_per_packet=14108.8\n  compact_data_ns_per_packet=13598.7\npayload_size=1400 bytes\n  rtp_ns_per_packet=18427.0\n  compact_data_ns_per_packet=16605.2\npayload_size=8000 bytes\n  rtp_ns_per_packet=50807.7\n  compact_data_ns_per_packet=42767.6\n"
+    }
+  ]
+}

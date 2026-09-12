@@ -1,4 +1,5 @@
 use protocol::{FrameTimingCheckpoints, PipelineTelemetryReport, StageId, StageLatencyStats};
+use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -84,21 +85,22 @@ impl RollingQuantileAggregator {
         let max_us = sorted[n - 1];
 
         // 最近邻阶梯插值 (Nearest Rank Method)
-        let p50_idx = ((n - 1) * 50) / 100;
-        let p95_idx = ((n - 1) * 95) / 100;
-        let p99_idx = ((n - 1) * 99) / 100;
+        let p50_idx = (n * 50).div_ceil(100) - 1;
+        let p95_idx = (n * 95).div_ceil(100) - 1;
+        let p99_idx = (n * 99).div_ceil(100) - 1;
 
         let p50_us = sorted[p50_idx];
         let p95_us = sorted[p95_idx];
         let p99_us = sorted[p99_idx];
 
         let avg_us = (self.sum / (n as u64)) as u32;
+        let mean = self.sum as f64 / n as f64;
 
         // 计算真实总体标准差: sqrt( sum((x - avg)^2) / N )
         let variance: f64 = sorted
             .iter()
             .map(|&x| {
-                let diff = (x as f64) - (avg_us as f64);
+                let diff = (x as f64) - mean;
                 diff * diff
             })
             .sum::<f64>()
@@ -141,31 +143,44 @@ pub enum DropReason {
 /// 滚动 FPS 计算器 (平滑滑动时间戳窗口)
 #[derive(Debug, Clone)]
 pub struct RollingFpsCalculator {
-    timestamps: Vec<Instant>,
+    timestamps: VecDeque<Instant>,
     window_duration: Duration,
 }
 
 impl RollingFpsCalculator {
     pub fn new(window_duration: Duration) -> Self {
         Self {
-            timestamps: Vec::with_capacity(300),
+            timestamps: VecDeque::with_capacity(300),
             window_duration,
         }
     }
 
     pub fn record_tick(&mut self, now: Instant) {
-        self.timestamps.push(now);
+        self.timestamps.push_back(now);
         let cutoff = now.checked_sub(self.window_duration).unwrap_or(now);
-        self.timestamps.retain(|&ts| ts >= cutoff);
+        while self.timestamps.front().is_some_and(|&ts| ts < cutoff) {
+            self.timestamps.pop_front();
+        }
     }
 
     pub fn current_fps(&self) -> f32 {
+        self.fps_at(Instant::now())
+    }
+
+    fn fps_at(&self, now: Instant) -> f32 {
+        if self
+            .timestamps
+            .back()
+            .is_some_and(|&last| now.saturating_duration_since(last) > self.window_duration)
+        {
+            return 0.0;
+        }
         let n = self.timestamps.len();
         if n < 2 {
             return if n == 1 { 1.0 } else { 0.0 };
         }
         let first = self.timestamps[0];
-        let last = *self.timestamps.last().unwrap();
+        let last = *self.timestamps.back().unwrap();
         let elapsed = last.saturating_duration_since(first).as_secs_f32();
         if elapsed > 0.001 {
             ((n - 1) as f32) / elapsed
@@ -425,6 +440,26 @@ impl fmt::Display for PipelineTelemetryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_percentiles_use_nearest_rank_for_small_windows() {
+        let mut agg = RollingQuantileAggregator::new(10);
+        for value in 1..=10 {
+            agg.record(value);
+        }
+        let stats = agg.snapshot();
+        assert_eq!((stats.p50_us, stats.p95_us, stats.p99_us), (5, 10, 10));
+    }
+
+    #[test]
+    fn fps_expires_when_frames_stop_arriving() {
+        let now = Instant::now();
+        let mut fps = RollingFpsCalculator::new(Duration::from_secs(1));
+        fps.record_tick(now);
+        fps.record_tick(now + Duration::from_millis(10));
+        assert_eq!(fps.fps_at(now + Duration::from_millis(10)), 100.0);
+        assert_eq!(fps.fps_at(now + Duration::from_secs(2)), 0.0);
+    }
 
     #[test]
     fn test_rolling_quantile_empty() {

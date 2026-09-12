@@ -1,0 +1,6 @@
+    Checking remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.39s
+
+Android feature:
+    Checking remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.52s

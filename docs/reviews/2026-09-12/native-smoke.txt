@@ -1,0 +1,9 @@
+Smoke temp dir: /var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D
+Host log:       /var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D/host.log
+Client log:     /var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D/headless-client.log
+Build log:      /var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D/build.log
+Smoke passed.
+Headless smoke client listening on 0.0.0.0:53473, host=127.0.0.1:39271
+Smoke Audio | config stream=491124500 source=RemoteMicrophone direction=HostToClient 48000Hz 1ch 20ms
+Smoke FileTx | incoming completed: /var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D/client-received/smoke-source.bin
+Smoke summary: legacy_video=0 legacy_audio=0 data_video=103 data_audio=176 data_audio_configs=1 remote_mic_configs=1 remote_system_configs=0 telemetry=3 file_completed=/var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T//remote-play-smoke.1DOF4D/client-received/smoke-source.bin

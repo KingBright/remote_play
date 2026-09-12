@@ -25,6 +25,14 @@ echo "Smoke temp dir: $TMP_DIR"
 echo "Host log:       $HOST_LOG"
 echo "Client log:     $CLIENT_LOG"
 
+# Build before timing readiness. cargo run can spend the entire startup budget
+# compiling or waiting for another cargo process, without ever launching a host.
+BUILD_LOG="$TMP_DIR/build.log"
+echo "Build log:      $BUILD_LOG"
+cargo build -p remote_play_app --bin remote_play >"$BUILD_LOG" 2>&1
+cargo build -p remote_core --example headless_smoke_client >>"$BUILD_LOG" 2>&1
+SMOKE_TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+
 REMOTE_PLAY_DATA_PLANE_MEDIA=1 \
 REMOTE_PLAY_FILE_TRANSFER=1 \
 REMOTE_PLAY_HOST_SEND_FILE="$SOURCE_FILE" \
@@ -32,7 +40,7 @@ REMOTE_PLAY_HEADLESS=1 \
 REMOTE_PLAY_MESH=0 \
 REMOTE_PLAY_DISCOVERY=0 \
 REMOTE_PLAY_CLIENT_RECEIVER=0 \
-cargo run -p remote_play_app --bin remote_play >"$HOST_LOG" 2>&1 &
+"$SMOKE_TARGET_DIR/debug/remote_play" >"$HOST_LOG" 2>&1 &
 HOST_PID="$!"
 
 for _ in {1..80}; do
@@ -58,7 +66,7 @@ REMOTE_PLAY_EXPECT_AUDIO="${REMOTE_PLAY_EXPECT_AUDIO:-0}" \
 REMOTE_PLAY_EXPECT_FILE_NAME="$(basename "$SOURCE_FILE")" \
 REMOTE_PLAY_SMOKE_RECEIVE_DIR="$CLIENT_RECEIVE_DIR" \
 REMOTE_PLAY_SMOKE_SECONDS="${REMOTE_PLAY_SMOKE_SECONDS:-8}" \
-cargo run -p remote_core --example headless_smoke_client >"$CLIENT_LOG" 2>&1
+"$SMOKE_TARGET_DIR/debug/examples/headless_smoke_client" >"$CLIENT_LOG" 2>&1
 
 echo "Smoke passed."
 tail -40 "$CLIENT_LOG"

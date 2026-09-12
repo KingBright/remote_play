@@ -2,6 +2,10 @@ use crate::timing::quanta_now_us;
 use protocol::{FrameTimingCheckpoints, RtpPacket};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::time::Duration;
+
+const MAX_BUFFER_DEPTH: usize = 16;
+const MAX_REORDER_WAIT_US: u64 = 20_000;
 
 #[derive(Eq, PartialEq)]
 struct JitterPacket {
@@ -43,7 +47,7 @@ pub struct JitterBuffer {
 impl JitterBuffer {
     pub fn new(_start_seq: u16) -> Self {
         Self {
-            heap: BinaryHeap::new(),
+            heap: BinaryHeap::with_capacity(MAX_BUFFER_DEPTH + 1),
             expected_seq: None,
             late_frames_dropped: 0,
             queue_full_dropped: 0,
@@ -89,7 +93,11 @@ impl JitterBuffer {
 
         if let Some(expected) = self.expected_seq {
             let diff = packet.header.sequence_number.wrapping_sub(expected) as i16;
-            if !(-1000..=1000).contains(&diff) {
+            if diff < 0 {
+                self.late_frames_dropped += 1;
+                return;
+            }
+            if diff > 1000 {
                 self.heap.clear();
                 self.expected_seq = Some(packet.header.sequence_number);
             }
@@ -97,11 +105,23 @@ impl JitterBuffer {
             self.expected_seq = Some(packet.header.sequence_number);
         }
 
+        if self
+            .heap
+            .iter()
+            .any(|item| item.packet.header.sequence_number == packet.header.sequence_number)
+        {
+            return;
+        }
         self.heap.push(JitterPacket {
             packet,
             timing,
             enter_ts_us,
         });
+        if self.heap.len() > MAX_BUFFER_DEPTH {
+            let discarded = self.heap.pop().expect("full buffer");
+            self.expected_seq = Some(discarded.packet.header.sequence_number.wrapping_add(1));
+            self.queue_full_dropped += 1;
+        }
     }
 
     pub fn pop(&mut self) -> Option<RtpPacket> {
@@ -109,7 +129,22 @@ impl JitterBuffer {
     }
 
     pub fn pop_with_timing(&mut self) -> Option<(RtpPacket, FrameTimingCheckpoints)> {
-        let max_buffer_depth = 15;
+        self.pop_at(quanta_now_us())
+    }
+
+    /// Time until the next packet can be released, even if no more packets arrive.
+    pub fn next_ready_in(&self) -> Option<Duration> {
+        let item = self.heap.peek()?;
+        let ready = Some(item.packet.header.sequence_number) == self.expected_seq
+            || self.heap.len() >= MAX_BUFFER_DEPTH;
+        Some(Duration::from_micros(if ready {
+            0
+        } else {
+            MAX_REORDER_WAIT_US.saturating_sub(quanta_now_us().saturating_sub(item.enter_ts_us))
+        }))
+    }
+
+    fn pop_at(&mut self, exit_ts_us: u64) -> Option<(RtpPacket, FrameTimingCheckpoints)> {
         let expected = self.expected_seq?;
 
         while let Some(peek) = self.heap.peek() {
@@ -118,20 +153,28 @@ impl JitterBuffer {
             if diff == 0 {
                 let mut item = self.heap.pop().unwrap();
                 self.expected_seq = Some(expected.wrapping_add(1));
-                let exit_ts_us = quanta_now_us();
-                let residency_us = exit_ts_us.saturating_sub(item.enter_ts_us) as u32;
+                let residency_us = exit_ts_us
+                    .saturating_sub(item.enter_ts_us)
+                    .min(u32::MAX as u64) as u32;
                 item.timing.jitter_exit_ts_us =
                     item.timing.jitter_enter_ts_us.saturating_add(residency_us);
                 return Some((item.packet, item.timing));
             } else if diff < 0 {
                 self.heap.pop();
                 self.late_frames_dropped += 1;
-            } else if self.heap.len() > max_buffer_depth {
+            } else if self.heap.len() >= MAX_BUFFER_DEPTH
+                || exit_ts_us.saturating_sub(peek.enter_ts_us) >= MAX_REORDER_WAIT_US
+            {
                 let mut item = self.heap.pop().unwrap();
                 self.expected_seq = Some(item.packet.header.sequence_number.wrapping_add(1));
-                self.queue_full_dropped += 1;
-                let exit_ts_us = quanta_now_us();
-                let residency_us = exit_ts_us.saturating_sub(item.enter_ts_us) as u32;
+                if self.heap.len() + 1 >= MAX_BUFFER_DEPTH {
+                    self.queue_full_dropped += 1;
+                } else {
+                    self.late_frames_dropped += diff as u64;
+                }
+                let residency_us = exit_ts_us
+                    .saturating_sub(item.enter_ts_us)
+                    .min(u32::MAX as u64) as u32;
                 item.timing.jitter_exit_ts_us =
                     item.timing.jitter_enter_ts_us.saturating_add(residency_us);
                 return Some((item.packet, item.timing));
@@ -290,7 +333,47 @@ mod tests {
             buffer.push(packet(seq));
         }
         let overflow_pkt = buffer.pop().expect("should pop overflow packet");
-        assert_eq!(overflow_pkt.header.sequence_number, 102);
+        assert_eq!(overflow_pkt.header.sequence_number, 105);
         assert!(buffer.queue_full_dropped() >= 1);
+    }
+
+    #[test]
+    fn missing_packet_has_a_deadline_without_further_arrivals() {
+        let mut buffer = JitterBuffer::new(10);
+        buffer.push(packet(10));
+        assert_eq!(pop_seq(&mut buffer), Some(10));
+        buffer.push(packet(12));
+        let entered = buffer.heap.peek().unwrap().enter_ts_us;
+        assert!(buffer.pop_at(entered + MAX_REORDER_WAIT_US - 1).is_none());
+        let (packet, timing) = buffer.pop_at(entered + MAX_REORDER_WAIT_US).unwrap();
+        assert_eq!(packet.header.sequence_number, 12);
+        assert_eq!(
+            timing.jitter_exit_ts_us - timing.jitter_enter_ts_us,
+            MAX_REORDER_WAIT_US as u32
+        );
+        assert!(buffer.next_ready_in().is_none());
+    }
+
+    #[test]
+    fn duplicates_and_slow_consumers_cannot_grow_the_queue() {
+        let mut buffer = JitterBuffer::new(0);
+        for seq in 0..500 {
+            for _ in 0..4 {
+                buffer.push(packet(seq));
+                assert!(buffer.len() <= MAX_BUFFER_DEPTH);
+            }
+        }
+        assert_eq!(pop_seq(&mut buffer), Some(484));
+    }
+
+    #[test]
+    fn very_old_packet_does_not_rewind_the_stream() {
+        let mut buffer = JitterBuffer::new(2_000);
+        buffer.push(packet(2_000));
+        assert_eq!(pop_seq(&mut buffer), Some(2_000));
+        buffer.push(packet(5));
+        buffer.push(packet(2_001));
+        assert_eq!(pop_seq(&mut buffer), Some(2_001));
+        assert_eq!(buffer.late_frames_dropped(), 1);
     }
 }

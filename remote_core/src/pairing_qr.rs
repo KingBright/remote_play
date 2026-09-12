@@ -18,7 +18,10 @@ pub struct QrMatrix {
 
 impl QrMatrix {
     pub fn is_dark(&self, x: usize, y: usize) -> bool {
-        self.modules.get(y * self.width + x).copied().unwrap_or(false)
+        self.modules
+            .get(y * self.width + x)
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -64,10 +67,10 @@ pub fn parse_pairing_qr(raw: &str) -> Result<PairingQrPayload, PairingQrError> {
             for part in rest.split('&') {
                 if let Some(code) = part.strip_prefix("code=") {
                     invite_code = code.to_string();
-                } else if let Some(port) = part.strip_prefix("port=") {
-                    if let Ok(parsed) = port.parse::<u16>() {
-                        control_port = parsed;
-                    }
+                } else if let Some(port) = part.strip_prefix("port=")
+                    && let Ok(parsed) = port.parse::<u16>()
+                {
+                    control_port = parsed;
                 }
             }
         } else if !rest.is_empty() {

@@ -1,0 +1,19 @@
+   Compiling remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+     Running unittests src/lib.rs (/tmp/remote-play-review-target/debug/deps/remote_play_android-1a07663aa09bb382)
+
+running 12 tests
+test tests::telemetry_defaults_are_zero_not_marketing_numbers ... ok
+test touch_mapper::tests::virtual_key_events_support_modifiers ... ok
+test touch_mapper::tests::virtual_trackpad_moves_and_taps ... ok
+test touch_mapper::tests::direct_touch_maps_to_absolute_mouse_and_click ... ok
+test tests::keyframes_require_an_irap_header_not_just_a_start_code ... ok
+test tests::session_ids_skip_zero_without_repeating_one_at_wrap ... ok
+test tests::bridge_client_starts_disconnected ... ok
+test tests::invalid_connection_replaces_live_session_without_stale_media ... ok
+test tests::idle_desktop_with_fresh_zero_fps_telemetry_does_not_reconnect ... ok
+test tests::fresh_telemetry_does_not_hide_video_timeout_and_disconnect_cancels_retry ... ok
+test tests::replacing_session_stops_old_tasks_and_disconnect_reaches_host ... ok
+test tests::streaming_waits_for_video_and_overflow_recovers_at_keyframe ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s

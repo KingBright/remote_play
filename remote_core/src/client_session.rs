@@ -59,24 +59,13 @@ pub struct HostStats {
     pub latest_timing: Option<FrameTimingCheckpoints>,
 }
 
+#[derive(Default)]
 struct HostStatsExtra {
     link_status: &'static str,
     last_anomaly_reason: Option<String>,
     updated_at: Option<Instant>,
     pipeline_report: Option<PipelineTelemetryReport>,
     latest_timing: Option<FrameTimingCheckpoints>,
-}
-
-impl Default for HostStatsExtra {
-    fn default() -> Self {
-        Self {
-            link_status: "",
-            last_anomaly_reason: None,
-            updated_at: None,
-            pipeline_report: None,
-            latest_timing: None,
-        }
-    }
 }
 
 /// Lock-free numeric telemetry with a mutex only for the occasional report/string fields.
@@ -267,7 +256,20 @@ pub fn spawn_client_session_receiver(
         );
 
         loop {
-            match udp_receiver.recv().await {
+            let wait = media_handler.video_jitter_buffer.next_ready_in();
+            let received = tokio::select! {
+                packet = udp_receiver.recv() => packet,
+                _ = async {
+                    match wait {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    media_handler.drain_video();
+                    continue;
+                }
+            };
+            match received {
                 Ok(MultiplexedPacket::Rtp(packet, _addr)) => {
                     let packet_size = packet.payload.len() as u64 + 12;
                     media_handler.handle(packet, packet_size).await;
@@ -311,7 +313,7 @@ pub fn spawn_client_session_receiver(
                         }
                     }
                     protocol::ControlMessage::PipelineTelemetry(report) => {
-                        host_stats.set_pipeline_report(report);
+                        host_stats.set_pipeline_report(*report);
                     }
                     _ => {}
                 },
@@ -417,13 +419,14 @@ struct MediaPacketHandler {
     video_jitter_buffer: JitterBuffer,
     video_expected_seq_init: bool,
     last_video_ssrc: u32,
-    last_seq: u16,
+    last_seq: Option<u16>,
     packets_expected: u64,
     packets_lost: u64,
     loss_rate_pct: f32,
     last_loss_calc: Instant,
     audio_stream_session_id: u32,
     audio_stream_ids: HashSet<u32>,
+    pending_audio_configs: Vec<AudioStreamConfig>,
     clock_offset_ms: f64,
     rtt_ms: f32,
     smooth_e2e_ms: f32,
@@ -448,13 +451,14 @@ impl MediaPacketHandler {
             video_jitter_buffer: JitterBuffer::new(0),
             video_expected_seq_init: false,
             last_video_ssrc: 0,
-            last_seq: 0,
+            last_seq: None,
             packets_expected: 0,
             packets_lost: 0,
             loss_rate_pct: 0.0,
             last_loss_calc: Instant::now(),
             audio_stream_session_id: 0,
             audio_stream_ids: HashSet::new(),
+            pending_audio_configs: Vec::with_capacity(2),
             clock_offset_ms: 0.0,
             rtt_ms: 0.0,
             smooth_e2e_ms: 0.0,
@@ -475,7 +479,11 @@ impl MediaPacketHandler {
     }
 
     pub async fn handle(&mut self, packet: RtpPacket, packet_size: u64) {
-        let capture_ts_us = (packet.header.timestamp as u64) * 1000;
+        // Legacy RTP carries only the low 32 bits of epoch milliseconds.
+        // Expand near the synchronized host clock before deriving stage offsets.
+        let host_now_ms = (crate::timing::quanta_now_us() / 1000)
+            .saturating_add_signed(self.clock_offset_ms.round() as i64);
+        let capture_ts_us = expand_legacy_timestamp(packet.header.timestamp, host_now_ms) * 1000;
         let host_timing = FrameTimingCheckpoints::new(capture_ts_us);
         self.handle_with_host_timing(packet, packet_size, host_timing)
             .await;
@@ -507,6 +515,7 @@ impl MediaPacketHandler {
         timing: FrameTimingCheckpoints,
         current_session: u32,
     ) {
+        self.sync_audio_session(current_session);
         self.stats_net.udp_packets_recv.fetch_add(1, Relaxed);
         self.stats_net
             .udp_bytes_recv
@@ -525,10 +534,22 @@ impl MediaPacketHandler {
                     return;
                 }
                 self.emit_media_received(&packet, current_session);
-                let _ = self
+                self.flush_audio_configs();
+                if self
+                    .pending_audio_configs
+                    .iter()
+                    .any(|config| config.stream_id == packet.header.ssrc)
+                {
+                    self.stats_net.audio_ingress_dropped.fetch_add(1, Relaxed);
+                    return;
+                }
+                if self
                     .audio_tx
-                    .send(AudioIngressEvent::Packet(packet))
-                    .await;
+                    .try_send(AudioIngressEvent::Packet(packet))
+                    .is_err()
+                {
+                    self.stats_net.audio_ingress_dropped.fetch_add(1, Relaxed);
+                }
             }
             _ => {}
         }
@@ -545,10 +566,28 @@ impl MediaPacketHandler {
         }
 
         self.audio_stream_ids.insert(config.stream_id);
-        let _ = self
-            .audio_tx
-            .send(AudioIngressEvent::StreamConfig(config))
-            .await;
+        self.pending_audio_configs
+            .retain(|pending| pending.stream_id != config.stream_id);
+        // A host has at most a microphone stream and a system/mixed stream.
+        if self.pending_audio_configs.len() == 2 {
+            self.pending_audio_configs.remove(0);
+        }
+        self.pending_audio_configs.push(config);
+        self.flush_audio_configs();
+    }
+
+    fn flush_audio_configs(&mut self) {
+        while let Some(config) = self.pending_audio_configs.pop() {
+            if let Err(error) = self
+                .audio_tx
+                .try_send(AudioIngressEvent::StreamConfig(config))
+            {
+                if let AudioIngressEvent::StreamConfig(config) = error.into_inner() {
+                    self.pending_audio_configs.push(config);
+                }
+                break;
+            }
+        }
     }
 
     fn sync_audio_session(&mut self, current_session: u32) {
@@ -558,6 +597,7 @@ impl MediaPacketHandler {
 
         self.audio_stream_session_id = current_session;
         self.audio_stream_ids.clear();
+        self.pending_audio_configs.clear();
         if current_session != 0 {
             self.audio_stream_ids
                 .insert(remote_microphone_audio_stream_id(current_session));
@@ -584,32 +624,15 @@ impl MediaPacketHandler {
     }
 
     fn handle_video_timed(&mut self, packet: RtpPacket, timing: FrameTimingCheckpoints) {
-        let seq = packet.header.sequence_number;
-        if self.last_seq > 0 {
-            let diff = seq.wrapping_sub(self.last_seq);
-            if diff > 1 && diff < 1000 {
-                self.packets_lost += (diff - 1) as u64;
-            }
-            self.packets_expected += (diff as u64).max(1);
-        }
-        self.last_seq = seq;
-
-        if self.last_loss_calc.elapsed() >= Duration::from_secs(1) {
-            if self.packets_expected > 0 {
-                let rate = (self.packets_lost as f32 / self.packets_expected as f32 * 100.0)
-                    .clamp(0.0, 100.0);
-                self.loss_rate_pct = self.loss_rate_pct * 0.7 + rate * 0.3;
-            } else {
-                self.loss_rate_pct = 0.0;
-            }
-            self.packets_expected = 0;
-            self.packets_lost = 0;
-            self.last_loss_calc = Instant::now();
-        }
-
         if packet.header.ssrc != self.last_video_ssrc {
             self.last_video_ssrc = packet.header.ssrc;
             self.video_expected_seq_init = false;
+            self.last_seq = None;
+            self.packets_expected = 0;
+            self.packets_lost = 0;
+            self.loss_rate_pct = 0.0;
+            self.smooth_e2e_ms = 0.0;
+            self.last_loss_calc = Instant::now();
         }
 
         if !self.video_expected_seq_init {
@@ -620,15 +643,29 @@ impl MediaPacketHandler {
         self.stats_net
             .video_jitter_buffer_push
             .fetch_add(1, Relaxed);
+        self.drain_video();
+    }
 
+    fn drain_video(&mut self) {
         while let Some((ordered_pkt, timing)) = self.video_jitter_buffer.pop_with_timing() {
-            let recv_time = timing.recv_ts_us / 1000;
+            let seq = ordered_pkt.header.sequence_number;
+            let advance = self
+                .last_seq
+                .map_or(1, |last| seq.wrapping_sub(last) as u64);
+            self.packets_expected += advance;
+            self.packets_lost += advance.saturating_sub(1);
+            self.last_seq = Some(seq);
+            if self.last_loss_calc.elapsed() >= Duration::from_secs(1) {
+                let rate = self.packets_lost as f32 / self.packets_expected.max(1) as f32 * 100.0;
+                self.loss_rate_pct = self.loss_rate_pct * 0.7 + rate * 0.3;
+                self.packets_expected = 0;
+                self.packets_lost = 0;
+                self.last_loss_calc = Instant::now();
+            }
 
-            if self.rtt_ms > 0.0 && ordered_pkt.header.timestamp > 0 {
-                let capture_in_client_time =
-                    (ordered_pkt.header.timestamp as f64 - self.clock_offset_ms) as f32;
-                let sample_e2e = (recv_time as f32 - capture_in_client_time + (self.rtt_ms / 2.0))
-                    .clamp(0.5, 300.0);
+            if self.rtt_ms > 0.0 && timing.recv_ts_us > 0 && timing.recv_ts_us < u32::MAX {
+                // Checkpoints already contain clock-corrected offsets from capture.
+                let sample_e2e = timing.recv_ts_us as f32 / 1000.0;
                 if self.smooth_e2e_ms <= 0.01 {
                     self.smooth_e2e_ms = sample_e2e;
                 } else {
@@ -644,14 +681,33 @@ impl MediaPacketHandler {
             );
 
             self.stats_net.video_jitter_buffer_pop.fetch_add(1, Relaxed);
-            let _ = self.decode_tx.try_send((ordered_pkt, timing));
+            if self.decode_tx.try_send((ordered_pkt, timing)).is_err() {
+                self.stats_net
+                    .video_decode_queue_dropped
+                    .fetch_add(1, Relaxed);
+            }
         }
     }
+}
+
+fn expand_legacy_timestamp(timestamp_ms: u32, host_now_ms: u64) -> u64 {
+    let age_ms = (host_now_ms as u32).wrapping_sub(timestamp_ms) as i32;
+    host_now_ms.saturating_add_signed(-i64::from(age_ms))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_capture_timestamp_expands_across_wraparound() {
+        let reference = (1u64 << 32) + 5;
+        assert_eq!(
+            expand_legacy_timestamp(u32::MAX - 4, reference),
+            reference - 10
+        );
+        assert_eq!(expand_legacy_timestamp(10, reference), reference + 5);
+    }
     use crate::net::UdpMultiplexer;
     use protocol::{ControlMessage, RtpHeader};
     use std::time::Duration;
@@ -824,5 +880,105 @@ mod tests {
         assert_eq!(snap.latency, 3.5);
         assert_eq!(snap.bitrate_kbps, 8000);
         assert_eq!(snap.rtt_ms, 2.5);
+    }
+
+    #[tokio::test]
+    async fn audio_backpressure_does_not_block_media_ingress() {
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let mut handler = test_media_handler(Arc::new(AtomicU32::new(7)), event_tx);
+        let (audio_tx, _audio_rx) = mpsc::channel(1);
+        handler.audio_tx = audio_tx;
+        let mut packet = video_packet(remote_microphone_audio_stream_id(7));
+        packet.header.payload_type = PayloadType::AudioOpus as u8;
+        handler.handle(packet.clone(), 16).await;
+        tokio::time::timeout(Duration::from_millis(100), handler.handle(packet, 16))
+            .await
+            .expect("a full audio queue must not stall UDP ingress");
+        assert_eq!(handler.stats_net.audio_ingress_dropped.load(Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn audio_configuration_is_deferred_without_blocking_or_reordering_its_packets() {
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let mut handler = test_media_handler(Arc::new(AtomicU32::new(7)), event_tx);
+        let (audio_tx, mut audio_rx) = mpsc::channel(1);
+        handler.audio_tx = audio_tx;
+        let id = remote_microphone_audio_stream_id(7);
+        let mut packet = video_packet(id);
+        packet.header.payload_type = PayloadType::AudioOpus as u8;
+        handler.handle(packet.clone(), 16).await;
+        let config = AudioStreamConfig::remote_microphone(id, 48_000, 1, 20);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            handler.handle_audio_stream_config(config.clone()),
+        )
+        .await
+        .expect("configuration must not block ingress");
+        assert!(matches!(
+            audio_rx.try_recv().unwrap(),
+            AudioIngressEvent::Packet(_)
+        ));
+        handler.handle(packet.clone(), 16).await;
+        assert_eq!(
+            audio_rx.try_recv().unwrap(),
+            AudioIngressEvent::StreamConfig(config)
+        );
+        handler.handle(packet.clone(), 16).await;
+        assert_eq!(
+            audio_rx.try_recv().unwrap(),
+            AudioIngressEvent::Packet(packet)
+        );
+        assert!(handler.pending_audio_configs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reordered_packets_and_sequence_zero_do_not_inflate_loss() {
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let mut handler = test_media_handler(Arc::new(AtomicU32::new(7)), event_tx);
+        for sequence_number in [u16::MAX, 1, 0, 2, 2] {
+            let mut packet = video_packet(7);
+            packet.header.sequence_number = sequence_number;
+            handler.handle(packet, 16).await;
+        }
+        assert_eq!(handler.packets_expected, 4);
+        assert_eq!(handler.packets_lost, 0);
+        assert_eq!(handler.last_seq, Some(2));
+    }
+
+    #[tokio::test]
+    async fn receiver_releases_a_gap_without_another_datagram() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let addr = mux.local_addr().unwrap();
+        let (_, udp_receiver) = mux.split();
+        let sender_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = sender_mux.split();
+        let (audio_tx, _audio_rx) = mpsc::channel(1);
+        let (decode_tx, mut decode_rx) = mpsc::channel(4);
+        let task = spawn_client_session_receiver(ClientSessionReceiverConfig {
+            bind_addr: addr,
+            udp_receiver,
+            stats: Statistics::new(),
+            active_session_id: Arc::new(AtomicU32::new(7)),
+            host_stats: Arc::new(SharedHostStats::default()),
+            audio_tx,
+            decode_tx,
+            clipboard_control: None,
+            file_transfer_control: None,
+            session_event_tx: None,
+        });
+        for sequence_number in [10, 12] {
+            let mut packet = video_packet(7);
+            packet.header.sequence_number = sequence_number;
+            sender.send_rtp(&packet, addr).await.unwrap();
+        }
+        for expected in [10, 12] {
+            let packet = tokio::time::timeout(Duration::from_millis(250), decode_rx.recv()).await;
+            if packet.is_err() {
+                task.abort();
+            }
+            assert_eq!(packet.unwrap().unwrap().0.header.sequence_number, expected);
+        }
+        task.abort();
+        let _ = task.await;
     }
 }

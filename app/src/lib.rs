@@ -488,9 +488,11 @@ impl UnifiedSideServiceControls {
             return false;
         };
         self.preferences.clipboard_sync.store(enabled, Relaxed);
-        let mut prefs = crate::preferences::UserPreferences::load_or_default();
-        prefs.side_services.clipboard_sync = enabled;
-        let _ = prefs.save();
+        if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+            prefs.side_services.clipboard_sync = enabled;
+        }) {
+            eprintln!("Failed to save clipboard preference: {err}");
+        }
         if enabled {
             if let Some(target) = target {
                 control.start(target);
@@ -506,9 +508,11 @@ impl UnifiedSideServiceControls {
             return false;
         };
         self.preferences.file_transfer.store(enabled, Relaxed);
-        let mut prefs = crate::preferences::UserPreferences::load_or_default();
-        prefs.side_services.file_transfer = enabled;
-        let _ = prefs.save();
+        if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+            prefs.side_services.file_transfer = enabled;
+        }) {
+            eprintln!("Failed to save file transfer preference: {err}");
+        }
         if enabled {
             if let Some(target) = target {
                 control.start(target);
@@ -524,9 +528,11 @@ impl UnifiedSideServiceControls {
             return false;
         };
         self.preferences.talkback.store(enabled, Relaxed);
-        let mut prefs = crate::preferences::UserPreferences::load_or_default();
-        prefs.side_services.talkback = enabled;
-        let _ = prefs.save();
+        if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+            prefs.side_services.talkback = enabled;
+        }) {
+            eprintln!("Failed to save talkback preference: {err}");
+        }
         if enabled {
             if let Some((target, session_id)) = session {
                 control.start(target, session_id);

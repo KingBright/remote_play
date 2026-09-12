@@ -20,22 +20,22 @@
   <div id="drawer-trigger">
     <button class="glass-btn">
       <span class="status-dot"></span>
-      <span>Devices & Mesh (4)</span>
+      <span>Connection</span>
     </button>
   </div>
 
   <!-- 3. 顶部微型悬浮 Dynamic Island -->
   <div id="floating-island">
     <span class="status-dot"></span>
-    <span class="island-title" id="island-title">Gaming Rig RTX 4090</span>
-    <span class="telemetry-badge" id="telemetry-badge">120 FPS · 3.8ms</span>
+    <span class="island-title" id="island-title">RemotePlay Ready</span>
+    <span class="telemetry-badge" id="telemetry-badge" hidden>—</span>
     
     <div class="island-divider"></div>
     
-    <button class="glass-btn active" id="btn-touch-mode">TOUCH</button>
-    <button class="glass-btn" id="btn-mic">MIC</button>
-    <button class="glass-btn active" id="btn-clip">CLIP</button>
-    <button class="glass-btn destructive" id="btn-disconnect">DISCONNECT</button>
+    <button class="glass-btn active" id="btn-touch-mode" disabled title="Direct touch mode">TOUCH</button>
+    <button class="glass-btn" id="btn-mic" disabled title="Microphone transport is not connected in the web client">MIC</button>
+    <button class="glass-btn" id="btn-clip" disabled title="Clipboard transport is not connected in the web client">CLIP</button>
+    <button class="glass-btn destructive" id="btn-disconnect" disabled>DISCONNECT</button>
   </div>
 
   <!-- 4. 底部浮动虚拟修饰键条 (Floating Modifier Bar) -->
@@ -60,56 +60,41 @@
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="font-weight: 700; font-size: 14px;">RemotePlay Console</span>
       </div>
-      <button class="glass-btn" id="close-drawer-btn" style="padding: 4px 8px;">✕</button>
+      <button class="glass-btn" id="close-drawer-btn" aria-label="Close connection panel" style="padding: 4px 8px;">✕</button>
     </div>
 
     <div class="drawer-content">
       <!-- 发现的主机 -->
       <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); font-family: var(--font-mono);">
-        DISCOVERED HOSTS
+        VIDEO GATEWAY
       </div>
 
-      <div class="host-card">
-        <div>
-          <div style="font-weight: 600; font-size: 13px;">Gaming Rig RTX 4090</div>
-          <div style="font-size: 10px; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 2px;">
-            LAN P2P · 4K@120Hz Ready · 3.8ms RTT
-          </div>
-        </div>
-        <button class="cyan-btn">Connect</button>
-      </div>
-
-      <div class="host-card">
-        <div>
-          <div style="font-weight: 600; font-size: 13px;">MacBook Pro M3 Max</div>
-          <div style="font-size: 10px; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 2px;">
-            EasyTier Mesh · Standby
-          </div>
-        </div>
-        <button class="cyan-btn">Connect</button>
-      </div>
+      <label for="endpoint">WebSocket endpoint</label>
+      <input id="endpoint" type="url" value="ws://localhost:9002/relay" spellcheck="false" autocomplete="off">
+      <button class="cyan-btn" id="btn-connect">Connect / Reconnect</button>
+      <p id="connection-status" role="status">Enter an HEVC Annex B video gateway endpoint. The native RemotePlay relay requires a protocol adapter. Discovery, audio and clipboard are not connected in this web client.</p>
 
       <!-- 5 信道遥测 -->
       <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 8px;">
-        5-LANE MULTIPLEXED NETWORK
+        MEASURED NETWORK ACTIVITY
       </div>
 
       <div style="background: #16181D; border: 1px solid var(--color-border-fine); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px;">
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
-          <span style="color: var(--color-text-primary);">Realtime Video</span>
-          <span style="color: var(--color-accent-cyan); font-family: var(--font-mono); font-weight: 700;">42.5 Mbps</span>
+          <span style="color: var(--color-text-primary);">Received binary data</span>
+          <span id="video-bitrate" style="color: var(--color-accent-cyan); font-family: var(--font-mono); font-weight: 700;">—</span>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
           <span style="color: var(--color-text-primary);">Realtime Audio (Opus)</span>
-          <span style="color: var(--color-accent-emerald); font-family: var(--font-mono); font-weight: 700;">128 kbps</span>
+          <span style="color: var(--color-accent-emerald); font-family: var(--font-mono); font-weight: 700;">Unavailable</span>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
           <span style="color: var(--color-text-primary);">Interactive Control</span>
-          <span style="color: #FFB300; font-family: var(--font-mono); font-weight: 700;">64 kbps</span>
+          <span style="color: #FFB300; font-family: var(--font-mono); font-weight: 700;">Unavailable</span>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 11px;">
           <span style="color: var(--color-text-primary);">Reliable File Transfer</span>
-          <span style="color: #B388FF; font-family: var(--font-mono); font-weight: 700;">2.4 Mbps</span>
+          <span style="color: #B388FF; font-family: var(--font-mono); font-weight: 700;">Unavailable</span>
         </div>
       </div>
     </div>

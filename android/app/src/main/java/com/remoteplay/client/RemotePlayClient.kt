@@ -4,6 +4,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+data class EncodedVideoFrame(val data: ByteArray, val keyframe: Boolean, val ptsUs: Long, val dataOffset: Int)
 
 enum class SessionState {
     DISCONNECTED,
@@ -111,9 +115,16 @@ object RemotePlayClient {
         }
     }
 
-    fun pollVideoNalu(): ByteArray? {
+    fun pollVideoFrame(): EncodedVideoFrame? {
         if (!isNativeLoaded) return null
-        return nativePollVideoNalu()
+        val packed = nativePollVideoFrame() ?: return null
+        if (packed.size <= 9) return null
+        val pts = ByteBuffer.wrap(packed, 1, 8).order(ByteOrder.LITTLE_ENDIAN).long
+        return EncodedVideoFrame(packed, packed[0] != 0.toByte(), pts, 9)
+    }
+
+    fun requestKeyframe() {
+        if (isNativeLoaded) nativeRequestKeyframe()
     }
 
     fun pollAudioPacket(): ByteArray? {
@@ -153,6 +164,13 @@ object RemotePlayClient {
 
     fun pollTelemetry(): TelemetrySnapshot {
         if (isNativeLoaded) {
+            _sessionState.value = when (nativeGetSessionState()) {
+                0 -> SessionState.DISCONNECTED
+                1 -> SessionState.CONNECTING
+                2 -> SessionState.STREAMING
+                3 -> SessionState.RECONNECTING
+                else -> SessionState.ERROR
+            }
             val jsonStr = nativeGetTelemetryJson()
             if (!jsonStr.isNullOrEmpty()) {
                 try {
@@ -184,7 +202,8 @@ object RemotePlayClient {
     private external fun nativeSetTouchMode(modeCode: Int)
     private external fun nativeSetScreenBounds(width: Int, height: Int)
     private external fun nativeGetTelemetryJson(): String?
-    private external fun nativePollVideoNalu(): ByteArray?
+    private external fun nativePollVideoFrame(): ByteArray?
+    private external fun nativeRequestKeyframe()
     private external fun nativePollAudioPacket(): ByteArray?
     private external fun nativeGetDevicesJson(): String?
     private external fun nativeJoinPairingPayload(payload: String): String?

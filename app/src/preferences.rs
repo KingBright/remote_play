@@ -2,7 +2,7 @@ use remote_core::mesh::default_app_private_mesh_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
@@ -118,11 +118,29 @@ impl UserPreferences {
     }
 
     pub fn default_path() -> PathBuf {
-        Self::default_preferences_dir().join(PREFERENCES_FILE_NAME)
+        #[cfg(test)]
+        {
+            // Runtime-owner tests use this API too: never write the user's real preferences.
+            static TEST_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+            TEST_DIR
+                .get_or_init(|| tempfile::tempdir().expect("test preferences directory"))
+                .path()
+                .join(PREFERENCES_FILE_NAME)
+        }
+        #[cfg(not(test))]
+        {
+            Self::default_preferences_dir().join(PREFERENCES_FILE_NAME)
+        }
     }
 
     pub fn load_or_default() -> Self {
-        Self::load_from_path(&Self::default_path()).unwrap_or_default()
+        match Self::read_or_default(&Self::default_path()) {
+            Ok(preferences) => preferences,
+            Err(err) => {
+                eprintln!("Failed to load preferences; using defaults for this session: {err}");
+                Self::default()
+            }
+        }
     }
 
     pub fn load_from_path(path: &Path) -> Option<Self> {
@@ -135,16 +153,65 @@ impl UserPreferences {
     }
 
     pub fn save_to_path(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let _lock = Self::lock_file(path)?;
+        self.write_atomic(path)
+    }
+
+    /// Serialize the entire read/modify/replace operation, including other app processes.
+    /// Invalid or unreadable existing preferences must never be replaced with defaults.
+    pub fn update(change: impl FnOnce(&mut Self)) -> io::Result<()> {
+        Self::update_at_path(&Self::default_path(), change)
+    }
+
+    fn update_at_path(path: &Path, change: impl FnOnce(&mut Self)) -> io::Result<()> {
+        let _lock = Self::lock_file(path)?;
+        let mut preferences = Self::read_or_default(path)?;
+        let previous = preferences.clone();
+        change(&mut preferences);
+        if preferences != previous {
+            preferences.write_atomic(path)?;
         }
+        Ok(())
+    }
+
+    fn read_or_default(path: &Path) -> io::Result<Self> {
+        match fs::read(path) {
+            Ok(data) => serde_json::from_slice(&data)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn parent_dir(path: &Path) -> &Path {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    fn lock_file(path: &Path) -> io::Result<fs::File> {
+        fs::create_dir_all(Self::parent_dir(path))?;
+        // A stable sibling lock survives replacement of the preferences file itself.
+        let mut lock_path = path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(PathBuf::from(lock_path))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    fn write_atomic(&self, path: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        // Atomic write via temp file
-        let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, json)?;
-        fs::rename(&temp_path, path)?;
+        // Unique, same-filesystem temporary file; persist replaces atomically on Windows too.
+        let mut temp = tempfile::NamedTempFile::new_in(Self::parent_dir(path))?;
+        temp.write_all(json.as_bytes())?;
+        temp.as_file().sync_all()?;
+        temp.persist(path).map_err(|err| err.error)?;
         Ok(())
     }
 }
@@ -220,5 +287,60 @@ mod tests {
         assert_eq!(prefs.stream.bitrate_kbps, 20_000); // Default applied
         assert!(prefs.extra.contains_key("future_feature_flag"));
         assert!(prefs.extra.contains_key("future_nested_setting"));
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_each_field_and_increment() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..10 {
+                        UserPreferences::update_at_path(path, |prefs| {
+                            prefs.stream.bitrate_kbps += 1;
+                            prefs.extra.insert(format!("worker-{worker}"), true.into());
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let prefs = UserPreferences::load_from_path(&path).unwrap();
+        assert_eq!(prefs.stream.bitrate_kbps, 20_080);
+        assert_eq!(prefs.extra.len(), 8);
+    }
+
+    #[test]
+    fn invalid_preferences_are_preserved_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        fs::write(&path, b"{ invalid configuration").unwrap();
+        let err =
+            UserPreferences::update_at_path(&path, |prefs| prefs.stream.fps = 120).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), b"{ invalid configuration");
+    }
+
+    #[test]
+    fn failed_replace_leaves_destination_and_cleans_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), "original").unwrap();
+        assert!(UserPreferences::default().save_to_path(&path).is_err());
+        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2); // destination and lock
+    }
+
+    #[test]
+    fn unchanged_update_does_not_replace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let json = "{\"stream\":{\"fps\":60},\"future_feature\":true}";
+        fs::write(&path, json).unwrap();
+        UserPreferences::update_at_path(&path, |prefs| prefs.stream.fps = 60).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), json);
     }
 }

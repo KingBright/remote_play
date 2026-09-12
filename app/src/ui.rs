@@ -245,20 +245,17 @@ impl UnifiedDashboard {
     }
 
     fn persist_preferences(&self) {
-        let mut prefs = crate::preferences::UserPreferences::load_or_default();
-        prefs.stream.width = self.selected_resolution.0;
-        prefs.stream.height = self.selected_resolution.1;
-        prefs.stream.fps = self.selected_fps;
-        prefs.stream.bitrate_kbps = self.selected_bitrate_kbps;
-        prefs.ui.scale_mode = match self.scale_mode {
-            ViewportScaleMode::AspectFit => "aspect_fit".to_string(),
-            ViewportScaleMode::Fill => "fill".to_string(),
-        };
-        prefs.ui.telemetry_hud_collapsed = self.telemetry_hud_collapsed;
-        prefs.side_services.talkback = self.runtime.owner.talkback_enabled();
-        prefs.side_services.clipboard_sync = self.runtime.owner.clipboard_sync_enabled();
-        prefs.side_services.file_transfer = self.runtime.owner.file_transfer_enabled();
-        if let Err(err) = prefs.save() {
+        if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+            prefs.stream.width = self.selected_resolution.0;
+            prefs.stream.height = self.selected_resolution.1;
+            prefs.stream.fps = self.selected_fps;
+            prefs.stream.bitrate_kbps = self.selected_bitrate_kbps;
+            prefs.ui.scale_mode = match self.scale_mode {
+                ViewportScaleMode::AspectFit => "aspect_fit".to_string(),
+                ViewportScaleMode::Fill => "fill".to_string(),
+            };
+            prefs.ui.telemetry_hud_collapsed = self.telemetry_hud_collapsed;
+        }) {
             eprintln!("Failed to persist user preferences: {err}");
         }
     }
@@ -759,12 +756,14 @@ impl Render for PopoutStreamView {
                             ViewportScaleMode::AspectFit => ViewportScaleMode::Fill,
                             ViewportScaleMode::Fill => ViewportScaleMode::AspectFit,
                         };
-                        let mut prefs = crate::preferences::UserPreferences::load_or_default();
-                        prefs.ui.scale_mode = match this.scale_mode {
-                            ViewportScaleMode::AspectFit => "aspect_fit".to_string(),
-                            ViewportScaleMode::Fill => "fill".to_string(),
-                        };
-                        let _ = prefs.save();
+                        if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+                            prefs.ui.scale_mode = match this.scale_mode {
+                                ViewportScaleMode::AspectFit => "aspect_fit".to_string(),
+                                ViewportScaleMode::Fill => "fill".to_string(),
+                            };
+                        }) {
+                            eprintln!("Failed to save scale preference: {err}");
+                        }
                         cx.notify();
                     });
                 }
@@ -822,9 +821,11 @@ impl Render for PopoutStreamView {
                                     move |_event, _window, cx| {
                                         let _ = view.update(cx, |this, cx| {
                                             this.telemetry_hud_collapsed = false;
-                                            let mut prefs = crate::preferences::UserPreferences::load_or_default();
-                                            prefs.ui.telemetry_hud_collapsed = false;
-                                            let _ = prefs.save();
+                                            if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+                                                prefs.ui.telemetry_hud_collapsed = false;
+                                            }) {
+                                                eprintln!("Failed to save telemetry preference: {err}");
+                                            }
                                             cx.notify();
                                         });
                                     }
@@ -872,9 +873,11 @@ impl Render for PopoutStreamView {
                                             move |_event, _window, cx| {
                                                 let _ = view.update(cx, |this, cx| {
                                                     this.telemetry_hud_collapsed = true;
-                                                    let mut prefs = crate::preferences::UserPreferences::load_or_default();
-                                                    prefs.ui.telemetry_hud_collapsed = true;
-                                                    let _ = prefs.save();
+                                                    if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
+                                                        prefs.ui.telemetry_hud_collapsed = true;
+                                                    }) {
+                                                        eprintln!("Failed to save telemetry preference: {err}");
+                                                    }
                                                     cx.notify();
                                                 });
                                             }

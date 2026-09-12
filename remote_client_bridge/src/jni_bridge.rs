@@ -127,6 +127,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetTele
     _class: JClass,
 ) -> jstring {
     let client = client();
+    client.maybe_reconnect();
     client.refresh_telemetry_from_stats();
     let telemetry = client.telemetry_rx.borrow().clone();
     let json = serde_json::to_string(&telemetry).unwrap_or_else(|_| "{}".to_string());
@@ -138,17 +139,32 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetTele
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollVideoNalu(
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollVideoFrame(
     env: JNIEnv,
     _class: JClass,
 ) -> jbyteArray {
     match client().poll_video_nalu() {
-        Some(nalu) => match env.byte_array_from_slice(&nalu.data) {
-            Ok(array) => array.into_raw(),
-            Err(_) => std::ptr::null_mut(),
-        },
+        Some(nalu) => {
+            let mut packed = Vec::with_capacity(9 + nalu.data.len());
+            packed.push(u8::from(nalu.keyframe));
+            packed.extend_from_slice(&nalu.pts_us.to_le_bytes());
+            packed.extend_from_slice(&nalu.data);
+            match env.byte_array_from_slice(&packed) {
+                Ok(array) => array.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
         None => std::ptr::null_mut(),
     }
+}
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeRequestKeyframe(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    client().request_keyframe();
 }
 
 #[cfg(feature = "android")]

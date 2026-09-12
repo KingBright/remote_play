@@ -1,0 +1,7 @@
+    Checking remote_core v0.1.0 (/Users/jinliang/remote_play/remote_core)
+    Checking remote_platform v0.1.0 (/Users/jinliang/remote_play/remote_platform)
+    Checking remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+    Checking client v0.1.0 (/Users/jinliang/remote_play/client)
+    Checking host v0.1.0 (/Users/jinliang/remote_play/host)
+    Checking remote_play_app v0.1.0 (/Users/jinliang/remote_play/app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.62s

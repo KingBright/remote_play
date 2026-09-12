@@ -8,17 +8,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import com.remoteplay.client.ui.MobileConsoleScreen
 import com.remoteplay.client.ui.MobileViewportScreen
 import com.remoteplay.client.ui.QrScanScreen
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         setContent {
+            val scope = rememberCoroutineScope()
             val sessionState by RemotePlayClient.sessionState.collectAsState()
             val telemetry by RemotePlayClient.telemetry.collectAsState()
             val devices by RemotePlayClient.devices.collectAsState()
@@ -27,8 +32,10 @@ class MainActivity : ComponentActivity() {
 
             LaunchedEffect(Unit) {
                 while (true) {
-                    RemotePlayClient.refreshDevices()
-                    RemotePlayClient.pollTelemetry()
+                    withContext(Dispatchers.IO) {
+                        RemotePlayClient.refreshDevices()
+                        RemotePlayClient.pollTelemetry()
+                    }
                     delay(1000)
                 }
             }
@@ -45,9 +52,8 @@ class MainActivity : ComponentActivity() {
                 }
                 sessionState == SessionState.STREAMING || sessionState == SessionState.RECONNECTING -> {
                     MobileViewportScreen(
-                        telemetry = telemetry,
                         onDisconnect = {
-                            RemotePlayClient.disconnect()
+                            scope.launch(Dispatchers.IO) { RemotePlayClient.disconnect() }
                         }
                     )
                 }
@@ -57,8 +63,12 @@ class MainActivity : ComponentActivity() {
                         devices = devices,
                         nativeAvailable = RemotePlayClient.nativeAvailable,
                         pairingMessage = pairingMessage,
+                        sessionState = sessionState,
+                        onCancelConnect = {
+                            scope.launch(Dispatchers.IO) { RemotePlayClient.disconnect() }
+                        },
                         onConnectHost = { deviceId, endpoint ->
-                            RemotePlayClient.connect(deviceId, endpoint)
+                            scope.launch(Dispatchers.IO) { RemotePlayClient.connect(deviceId, endpoint) }
                         },
                         onScanQr = { scanningQr = true }
                     )

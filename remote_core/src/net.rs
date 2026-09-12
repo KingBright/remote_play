@@ -1,4 +1,4 @@
-use crate::session_crypto::{SessionCrypto, MULTIPLEX_ENCRYPTED};
+use crate::session_crypto::{MULTIPLEX_ENCRYPTED, SessionCrypto};
 use protocol::{CompactRealtimeError, ControlMessage, DataEnvelope, RtpPacket};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -83,9 +83,7 @@ impl UdpSender {
             inner.push(header);
             inner.extend_from_slice(bytes);
             let sealed = crypto.seal(&inner)?;
-            return self
-                .send_raw(MULTIPLEX_ENCRYPTED, &sealed, target)
-                .await;
+            return self.send_raw(MULTIPLEX_ENCRYPTED, &sealed, target).await;
         }
         self.send_raw(header, bytes, target).await
     }
@@ -96,7 +94,10 @@ impl UdpSender {
         bytes: &[u8],
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let max_payload = 1400;
+        let max_payload = MAX_FRAGMENT_PAYLOAD;
+        if bytes.len() > MAX_FRAGMENT_PAYLOAD * MAX_FRAGMENT_CHUNKS {
+            return Err("UDP message exceeds fragment size limit".into());
+        }
         if bytes.len() <= max_payload {
             let mut buf = [0u8; 1401];
             buf[0] = header;
@@ -186,13 +187,18 @@ use tokio::sync::Mutex;
 
 const MAX_FRAGMENT_AGE: Duration = Duration::from_secs(2);
 const MAX_FRAGMENT_CACHE_ENTRIES: usize = 10;
+const MAX_FRAGMENT_PAYLOAD: usize = 1400;
+const MAX_FRAGMENT_CHUNKS: usize = 4096;
 
 type FragmentChunks = Vec<Option<Vec<u8>>>;
-type FragmentMap = HashMap<u32, FragmentEntry>;
+// Fragment IDs are only unique within one sender and multiplexed content type.
+type FragmentKey = (SocketAddr, u8, u32);
+type FragmentMap = HashMap<FragmentKey, FragmentEntry>;
 
 #[derive(Debug)]
 struct FragmentEntry {
     received_chunks: u16,
+    received_bytes: usize,
     chunks: FragmentChunks,
     created_at: Instant,
 }
@@ -201,6 +207,7 @@ impl FragmentEntry {
     fn new(total_chunks: u16, now: Instant) -> Self {
         Self {
             received_chunks: 0,
+            received_bytes: 0,
             chunks: vec![None; total_chunks as usize],
             created_at: now,
         }
@@ -245,7 +252,7 @@ impl UdpReceiver {
                     return Err("encrypted packet received without session crypto".into());
                 };
                 let opened = crypto.open(&buf[1..len])?;
-                return self.decode_payload(&opened, opened.len(), addr);
+                self.decode_payload(&opened, opened.len(), addr)
             }
             0x01 => {
                 let rtp = RtpPacket::decode(&buf[1..len])?;
@@ -278,7 +285,7 @@ impl UdpReceiver {
         fragments.retain(|_, entry| now.duration_since(entry.created_at) <= MAX_FRAGMENT_AGE);
     }
 
-    fn enforce_fragment_cache_limit(fragments: &mut FragmentMap, protected_id: u32) {
+    fn enforce_fragment_cache_limit(fragments: &mut FragmentMap, protected_id: FragmentKey) {
         while fragments.len() > MAX_FRAGMENT_CACHE_ENTRIES {
             let oldest_unprotected_id = fragments
                 .iter()
@@ -295,11 +302,21 @@ impl UdpReceiver {
     }
 
     pub async fn recv(&self) -> Result<MultiplexedPacket, Box<dyn Error + Send + Sync>> {
+        // Keep the established receive-buffer layout: the small-buffer variant
+        // regressed small-packet loopback performance on the macOS target.
         let mut buf = [0u8; 65536];
         loop {
             let (len, addr) = self.socket.recv_from(&mut buf).await?;
             if len == 0 {
                 continue;
+            }
+            if len > MAX_FRAGMENT_PAYLOAD + 10 {
+                return Err(if buf[0] == 0x03 {
+                    "Invalid UDP fragment payload size"
+                } else {
+                    "UDP datagram exceeds size limit"
+                }
+                .into());
             }
             match buf[0] {
                 0x03 => {
@@ -310,20 +327,27 @@ impl UdpReceiver {
                     let fragment_id = u32::from_be_bytes(buf[2..6].try_into().unwrap());
                     let chunk_idx = u16::from_be_bytes(buf[6..8].try_into().unwrap());
                     let total_chunks = u16::from_be_bytes(buf[8..10].try_into().unwrap());
+                    let fragment_key = (addr, header, fragment_id);
 
-                    if total_chunks == 0 {
+                    if total_chunks == 0 || total_chunks as usize > MAX_FRAGMENT_CHUNKS {
                         return Err("Invalid UDP fragment total chunk count".into());
                     }
 
                     if chunk_idx >= total_chunks {
                         return Err("Invalid UDP fragment index".into());
                     }
+                    if len == 10 || len - 10 > MAX_FRAGMENT_PAYLOAD {
+                        return Err("Invalid UDP fragment payload size".into());
+                    }
+                    if !matches!(header, 0x01 | 0x02 | 0x04 | 0x05 | MULTIPLEX_ENCRYPTED) {
+                        return Err("Invalid UDP fragment multiplexing header".into());
+                    }
 
                     let mut fragments = self.fragments.lock().await;
                     let now = Instant::now();
                     Self::cleanup_expired_fragments(&mut fragments, now);
 
-                    let entry = match fragments.entry(fragment_id) {
+                    let entry = match fragments.entry(fragment_key) {
                         Entry::Occupied(entry) => {
                             if entry.get().chunks.len() != total_chunks as usize {
                                 return Err("Mismatched UDP fragment total chunk count".into());
@@ -336,25 +360,24 @@ impl UdpReceiver {
                     if entry.chunks[chunk_idx as usize].is_none() {
                         entry.chunks[chunk_idx as usize] = Some(buf[10..len].to_vec());
                         entry.received_chunks += 1;
+                        entry.received_bytes += len - 10;
                     }
 
                     if entry.received_chunks == total_chunks {
-                        let mut full_data = Vec::new();
-                        for chunk in entry.chunks.iter() {
-                            full_data.extend_from_slice(chunk.as_ref().unwrap());
-                        }
-                        fragments.remove(&fragment_id);
-
-                        let mut assembled = Vec::with_capacity(1 + full_data.len());
+                        let entry = fragments.remove(&fragment_key).expect("completed fragment");
+                        drop(fragments);
+                        let mut assembled = Vec::with_capacity(1 + entry.received_bytes);
                         assembled.push(header);
-                        assembled.extend_from_slice(&full_data);
+                        for chunk in entry.chunks.into_iter().flatten() {
+                            assembled.extend_from_slice(&chunk);
+                        }
                         if let Some(packet) =
                             self.decode_payload(&assembled, assembled.len(), addr)?
                         {
                             return Ok(packet);
                         }
                     } else {
-                        Self::enforce_fragment_cache_limit(&mut fragments, fragment_id);
+                        Self::enforce_fragment_cache_limit(&mut fragments, fragment_key);
                     }
                 }
                 _ => {
@@ -452,13 +475,35 @@ mod tests {
         chunk_idx: u16,
         total_chunks: u16,
         data: &[u8],
-    ) {
+    ) -> UdpSocket {
         let raw_sender = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("raw sender should bind");
+        send_fragment_from(
+            &raw_sender,
+            target,
+            0x01,
+            fragment_id,
+            chunk_idx,
+            total_chunks,
+            data,
+        )
+        .await;
+        raw_sender
+    }
+
+    async fn send_fragment_from(
+        raw_sender: &UdpSocket,
+        target: SocketAddr,
+        header: u8,
+        fragment_id: u32,
+        chunk_idx: u16,
+        total_chunks: u16,
+        data: &[u8],
+    ) {
         let mut bytes = Vec::with_capacity(10 + data.len());
         bytes.push(0x03);
-        bytes.push(0x01);
+        bytes.push(header);
         bytes.extend_from_slice(&fragment_id.to_be_bytes());
         bytes.extend_from_slice(&chunk_idx.to_be_bytes());
         bytes.extend_from_slice(&total_chunks.to_be_bytes());
@@ -482,20 +527,103 @@ mod tests {
         FragmentEntry::new(total_chunks, created_at)
     }
 
+    fn fragment_key(id: u32) -> FragmentKey {
+        ("127.0.0.1:39271".parse().unwrap(), 0x01, id)
+    }
+
+    #[tokio::test]
+    async fn receive_remains_usable_after_cancellation() {
+        let (left, right) = bind_pair().await;
+        let (sender, _) = left.split();
+        let (_, receiver) = right.split();
+        assert!(
+            timeout(Duration::from_millis(5), receiver.recv())
+                .await
+                .is_err()
+        );
+        let packet = rtp_packet(32);
+        sender
+            .send_rtp(&packet, right.local_addr().unwrap())
+            .await
+            .unwrap();
+        match recv_with_timeout(&receiver).await {
+            MultiplexedPacket::Rtp(actual, _) => assert_eq!(actual, packet),
+            other => panic!("unexpected packet: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn same_fragment_id_from_different_peers_is_isolated() {
+        let (_, right) = bind_pair().await;
+        let target = right.local_addr().unwrap();
+        let (_, receiver) = right.split();
+        let first = rtp_packet(64);
+        let mut second = first.clone();
+        second.payload.fill(9);
+        let a = first.encode().unwrap();
+        let b = second.encode().unwrap();
+        let sender_a = send_raw_fragment(target, 7, 1, 2, &a[40..]).await;
+        let sender_b = send_raw_fragment(target, 7, 0, 2, &b[..40]).await;
+        send_fragment_from(&sender_a, target, 0x01, 7, 0, 2, &a[..40]).await;
+        send_fragment_from(&sender_b, target, 0x01, 7, 1, 2, &b[40..]).await;
+        for (expected, sender) in [(first, sender_a), (second, sender_b)] {
+            match recv_with_timeout(&receiver).await {
+                MultiplexedPacket::Rtp(packet, addr) => {
+                    assert_eq!(packet, expected);
+                    assert_eq!(addr, sender.local_addr().unwrap());
+                }
+                packet => panic!("unexpected packet: {packet:?}"),
+            }
+        }
+        assert!(receiver.fragments.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_fragment_sizes_are_rejected_before_allocating() {
+        let (_, right) = bind_pair().await;
+        let target = right.local_addr().unwrap();
+        let (_, receiver) = right.split();
+        for (count, payload, error) in [
+            (u16::MAX, vec![1], "Invalid UDP fragment total chunk count"),
+            (
+                2,
+                vec![1; MAX_FRAGMENT_PAYLOAD + 1],
+                "Invalid UDP fragment payload size",
+            ),
+            (2, vec![], "Invalid UDP fragment payload size"),
+        ] {
+            send_raw_fragment(target, 1, 0, count, &payload).await;
+            assert_eq!(recv_error(&receiver).await, error);
+            assert!(receiver.fragments.lock().await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn sender_rejects_unrepresentable_message_sizes() {
+        let (left, right) = bind_pair().await;
+        let (sender, _) = left.split();
+        let payload = vec![0; MAX_FRAGMENT_PAYLOAD * MAX_FRAGMENT_CHUNKS + 1];
+        let error = sender
+            .send_raw(0x01, &payload, right.local_addr().unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "UDP message exceeds fragment size limit");
+    }
+
     #[test]
     fn cleanup_expired_fragments_removes_old_entries() {
         let now = Instant::now();
         let mut fragments = FragmentMap::new();
         fragments.insert(
-            1,
+            fragment_key(1),
             fragment_entry(2, now - MAX_FRAGMENT_AGE - Duration::from_millis(1)),
         );
-        fragments.insert(2, fragment_entry(2, now));
+        fragments.insert(fragment_key(2), fragment_entry(2, now));
 
         UdpReceiver::cleanup_expired_fragments(&mut fragments, now);
 
-        assert!(!fragments.contains_key(&1));
-        assert!(fragments.contains_key(&2));
+        assert!(!fragments.contains_key(&fragment_key(1)));
+        assert!(fragments.contains_key(&fragment_key(2)));
     }
 
     #[test]
@@ -505,17 +633,17 @@ mod tests {
 
         for id in 0..(MAX_FRAGMENT_CACHE_ENTRIES as u32 + 2) {
             fragments.insert(
-                id,
+                fragment_key(id),
                 fragment_entry(2, now + Duration::from_millis(id as u64)),
             );
         }
 
-        UdpReceiver::enforce_fragment_cache_limit(&mut fragments, 0);
+        UdpReceiver::enforce_fragment_cache_limit(&mut fragments, fragment_key(0));
 
         assert_eq!(fragments.len(), MAX_FRAGMENT_CACHE_ENTRIES);
-        assert!(fragments.contains_key(&0));
-        assert!(!fragments.contains_key(&1));
-        assert!(!fragments.contains_key(&2));
+        assert!(fragments.contains_key(&fragment_key(0)));
+        assert!(!fragments.contains_key(&fragment_key(1)));
+        assert!(!fragments.contains_key(&fragment_key(2)));
     }
 
     #[tokio::test]
@@ -809,8 +937,8 @@ mod tests {
             .expect("receiver should have local addr");
         let (_, receiver) = receiver_mux.split();
 
-        send_raw_fragment(receiver_addr, 7, 0, 2, b"first").await;
-        send_raw_fragment(receiver_addr, 7, 1, 3, b"second").await;
+        let raw_sender = send_raw_fragment(receiver_addr, 7, 0, 2, b"first").await;
+        send_fragment_from(&raw_sender, receiver_addr, 0x01, 7, 1, 3, b"second").await;
 
         assert_eq!(
             recv_error(&receiver).await,

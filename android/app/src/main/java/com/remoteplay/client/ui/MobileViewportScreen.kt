@@ -1,10 +1,14 @@
 package com.remoteplay.client.ui
 
 import android.view.SurfaceView
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,119 +27,173 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.remoteplay.client.AudioOpusPlayer
 import com.remoteplay.client.MediaCodecPlayer
 import com.remoteplay.client.RemotePlayClient
-import com.remoteplay.client.TelemetrySnapshot
+import com.remoteplay.client.SessionState
 import com.remoteplay.client.TouchMode
-import kotlinx.coroutines.delay
+import java.util.concurrent.atomic.AtomicBoolean
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MobileViewportScreen(
-    telemetry: TelemetrySnapshot,
     onDisconnect: () -> Unit
 ) {
     var touchMode by remember { mutableStateOf(TouchMode.DIRECT) }
-    var micEnabled by remember { mutableStateOf(false) }
-    var clipboardSync by remember { mutableStateOf(true) }
     var isModifierBarVisible by remember { mutableStateOf(true) }
-    var liveTelemetry by remember { mutableStateOf(telemetry) }
+    val sessionState by RemotePlayClient.sessionState.collectAsState()
+    var playbackError by remember { mutableStateOf<String?>(null) }
+    var decodedFps by remember { mutableStateOf<Int?>(null) }
 
-    LaunchedEffect(Unit) {
-        while (true) {
-            liveTelemetry = RemotePlayClient.pollTelemetry()
-            delay(500)
-        }
-    }
-
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .safeDrawingPadding()
     ) {
-        // 1. 100% 满屏硬件解码 SurfaceView 渲染层
+        // Keep the negotiated 1920x1080 stream and its input region at the same aspect ratio.
         AndroidView(
             modifier = Modifier
-                .fillMaxSize()
+                .align(Alignment.Center)
+                .width(minOf(maxWidth, maxHeight * (16f / 9f)))
+                .aspectRatio(16f / 9f)
                 .pointerInput(Unit) {
                     // 拦截手势并转化为 RemotePlay 统一触控协议
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            val normX = (offset.x / size.width).coerceIn(0f, 1f)
-                            val normY = (offset.y / size.height).coerceIn(0f, 1f)
-                            RemotePlayClient.sendTouchEvent(0, 0, normX, normY, 1.0f)
-                        },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            val normX = (change.position.x / size.width).coerceIn(0f, 1f)
-                            val normY = (change.position.y / size.height).coerceIn(0f, 1f)
-                            RemotePlayClient.sendTouchEvent(1, 0, normX, normY, 1.0f)
-                        },
-                        onDragEnd = {
-                            RemotePlayClient.sendTouchEvent(2, 0, 0f, 0f, 0.0f)
-                        },
-                        onDragCancel = {
-                            RemotePlayClient.sendTouchEvent(3, 0, 0f, 0f, 0.0f)
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        var position = down.position
+                        var released = false
+                        fun send(action: Int) {
+                            RemotePlayClient.sendTouchEvent(action, down.id.value.toInt(),
+                                (position.x / size.width.coerceAtLeast(1)).coerceIn(0f, 1f),
+                                (position.y / size.height.coerceAtLeast(1)).coerceIn(0f, 1f),
+                                if (action <= 1) 1f else 0f)
                         }
-                    )
+                        send(0)
+                        down.consume()
+                        try {
+                            while (true) {
+                                val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                position = change.position
+                                change.consume()
+                                if (!change.pressed) {
+                                    send(2)
+                                    released = true
+                                    break
+                                }
+                                send(1)
+                            }
+                        } finally {
+                            if (!released) send(3)
+                        }
+                    }
                 },
             factory = { context ->
                 SurfaceView(context).apply {
                     holder.addCallback(object : android.view.SurfaceHolder.Callback {
-                        var player: MediaCodecPlayer? = null
-                        var audio: AudioOpusPlayer? = null
                         var feeder: Thread? = null
-                        @Volatile var running = false
+                        var running = AtomicBoolean(false)
                         override fun surfaceCreated(holder: android.view.SurfaceHolder) {
-                            val codec = MediaCodecPlayer(holder.surface).apply {
-                                start(1920, 1080)
-                            }
-                            val audioPlayer = AudioOpusPlayer()
-                            player = codec
-                            audio = audioPlayer
-                            running = true
+                            val active = AtomicBoolean(true)
+                            running = active
+                            playbackError = null
+                            decodedFps = null
                             feeder = Thread {
-                                var pts = 0L
-                                while (running) {
-                                    val nalu = RemotePlayClient.pollVideoNalu()
-                                    if (nalu != null) {
-                                        codec.feedNalu(nalu, nalu.size > 4, pts)
-                                        pts += 16_000
-                                    }
-                                    val audioPacket = RemotePlayClient.pollAudioPacket()
-                                    if (audioPacket != null) {
-                                        audioPlayer.feed(audioPacket)
-                                    }
-                                    if (nalu == null && audioPacket == null) {
-                                        try { Thread.sleep(4) } catch (_: InterruptedException) { break }
-                                    }
+                                val codec = MediaCodecPlayer(holder.surface)
+                                val audioPlayer = AudioOpusPlayer()
+                                var audioEnabled = true
+                                fun report(message: String, error: Exception) {
+                                    Log.e("RemotePlay", message, error)
+                                    post { if (active.get()) playbackError = message }
                                 }
-                            }.also { it.start() }
+                                try {
+                                    codec.start(1920, 1080)
+                                    var waitingForKeyframe = true
+                                    var pending: com.remoteplay.client.EncodedVideoFrame? = null
+                                    var pendingSince = 0L
+                                    var lastKeyframeRequest = System.nanoTime()
+                                    var sampleTime = lastKeyframeRequest
+                                    var sampleFrames = 0L
+                                    RemotePlayClient.requestKeyframe()
+                                    while (active.get() && !Thread.currentThread().isInterrupted) {
+                                        val now = System.nanoTime()
+                                        if (pending == null) {
+                                            val frame = RemotePlayClient.pollVideoFrame()
+                                            if (frame != null && (!waitingForKeyframe || frame.keyframe)) {
+                                                pending = frame
+                                                pendingSince = now
+                                            }
+                                        }
+                                        val frame = pending
+                                        if (frame != null) {
+                                            if (codec.feedNalu(frame.data, frame.keyframe, frame.ptsUs, frame.dataOffset)) {
+                                                pending = null
+                                                waitingForKeyframe = false
+                                            } else if (now - pendingSince > 100_000_000L) {
+                                                pending = null
+                                                waitingForKeyframe = true
+                                            }
+                                        }
+                                        codec.drain()
+                                        if (now - sampleTime >= 500_000_000L) {
+                                            val fps = ((codec.outputFrames - sampleFrames) * 1_000_000_000.0 / (now - sampleTime)).toInt()
+                                            post { if (active.get()) decodedFps = fps }
+                                            sampleTime = now
+                                            sampleFrames = codec.outputFrames
+                                        }
+                                        if (waitingForKeyframe && now - lastKeyframeRequest >= 1_000_000_000L) {
+                                            RemotePlayClient.requestKeyframe()
+                                            lastKeyframeRequest = now
+                                        }
+                                        val audioPacket = RemotePlayClient.pollAudioPacket()
+                                        if (audioEnabled) {
+                                            try {
+                                                if (audioPacket != null) audioPlayer.feed(audioPacket)
+                                                audioPlayer.drain()
+                                            } catch (e: Exception) {
+                                                audioEnabled = false
+                                                audioPlayer.stop()
+                                                report("Audio unavailable: ${e.message}", e)
+                                            }
+                                        }
+                                        if (frame == null || pending != null) Thread.sleep(4)
+                                    }
+                                } catch (_: InterruptedException) {
+                                    Thread.currentThread().interrupt()
+                                } catch (e: Exception) {
+                                    report("Video unavailable: ${e.message}", e)
+                                } finally {
+                                    codec.stop()
+                                    audioPlayer.stop()
+                                }
+                            }.apply { name = "remote-play-media"; start() }
                         }
                         override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
-                            RemotePlayClient.setScreenBounds(width, height)
+                            RemotePlayClient.setScreenBounds(1920, 1080)
                         }
                         override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
-                            running = false
+                            running.set(false)
                             feeder?.interrupt()
                             feeder = null
-                            player?.stop()
-                            player = null
-                            audio?.stop()
-                            audio = null
                         }
                     })
                 }
             }
         )
 
+        playbackError?.let { message ->
+            Text(message, color = Color.White,
+                modifier = Modifier.align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.85f)).padding(16.dp))
+        }
+
         // 2. 顶部微型悬浮 Dynamic Touch Island
-        Row(
+        FlowRow(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .padding(top = 12.dp)
-                .clip(RoundedCornerShape(9999.dp))
+                .clip(RoundedCornerShape(16.dp))
                 .background(ColorSurfaceCard)
-                .border(1.dp, ColorBorderFine, RoundedCornerShape(9999.dp))
+                .border(1.dp, ColorBorderFine, RoundedCornerShape(16.dp))
                 .padding(horizontal = 14.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // 左侧：主机名与实时核心指标
@@ -145,7 +203,7 @@ fun MobileViewportScreen(
             ) {
                 Box(modifier = Modifier.size(6.dp).background(ColorAccentEmerald, CircleShape))
                 Text(
-                    text = "Gaming Rig RTX 4090",
+                    text = "Remote session",
                     color = ColorTextPrimary,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
@@ -158,7 +216,8 @@ fun MobileViewportScreen(
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "${liveTelemetry.fps.toInt()} FPS · ${liveTelemetry.latencyMs}ms",
+                        text = if (sessionState == SessionState.RECONNECTING) "Reconnecting…"
+                            else decodedFps?.let { "Decoded $it FPS" } ?: "Waiting for video",
                         color = ColorAccentCyan,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,
@@ -179,13 +238,8 @@ fun MobileViewportScreen(
                 RemotePlayClient.setTouchMode(touchMode)
             }
 
-            TouchIslandIconButton(text = "MIC", active = micEnabled) {
-                micEnabled = !micEnabled
-            }
-
-            TouchIslandIconButton(text = "CLIP", active = clipboardSync) {
-                clipboardSync = !clipboardSync
-            }
+            TouchIslandIconButton(text = "MIC N/A", active = false, enabled = false) {}
+            TouchIslandIconButton(text = "CLIP N/A", active = false, enabled = false) {}
 
             TouchIslandIconButton(text = "DISCONNECT", active = false, isDestructive = true) {
                 onDisconnect()
@@ -198,6 +252,7 @@ fun MobileViewportScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 12.dp)
+                    .horizontalScroll(rememberScrollState())
                     .clip(RoundedCornerShape(9999.dp))
                     .background(ColorSurfaceCard)
                     .border(1.dp, ColorBorderFine, RoundedCornerShape(9999.dp))
@@ -221,6 +276,7 @@ fun TouchIslandIconButton(
     text: String,
     active: Boolean,
     isDestructive: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     Box(
@@ -242,7 +298,7 @@ fun TouchIslandIconButton(
                 },
                 RoundedCornerShape(9999.dp)
             )
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
         Text(

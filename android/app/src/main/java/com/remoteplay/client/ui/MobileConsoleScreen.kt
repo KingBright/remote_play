@@ -8,6 +8,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.remoteplay.client.HostDevice
 import com.remoteplay.client.TelemetrySnapshot
+import com.remoteplay.client.SessionState
 
 // Obsidian Stream 统一设计系统色彩定义
 val ColorBaseBg = Color(0xFF0D0F12)
@@ -40,14 +45,18 @@ fun MobileConsoleScreen(
     devices: List<HostDevice> = emptyList(),
     nativeAvailable: Boolean = false,
     pairingMessage: String? = null,
+    sessionState: SessionState = SessionState.DISCONNECTED,
+    onCancelConnect: () -> Unit = {},
     onConnectHost: (String, String) -> Unit,
     onScanQr: () -> Unit
 ) {
     var activeTab by remember { mutableStateOf("Devices") }
+    var manualEndpoint by remember { mutableStateOf("") }
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(ColorBaseBg)
+            .safeDrawingPadding()
             .padding(horizontal = 16.dp, vertical = 20.dp)
     ) {
         Column(
@@ -84,7 +93,7 @@ fun MobileConsoleScreen(
                             .background(ColorAccentEmerald, CircleShape)
                     )
                     Text(
-                        text = "Mesh: 10.144.0.5",
+                        text = if (nativeAvailable) "Native ready" else "Native unavailable",
                         color = ColorAccentCyan,
                         fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
@@ -95,6 +104,18 @@ fun MobileConsoleScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            if (sessionState == SessionState.CONNECTING) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Waiting for host video…", color = ColorTextSecondary,
+                        modifier = Modifier.weight(1f))
+                    Text("Cancel", color = ColorAccentCyan,
+                        modifier = Modifier.clickable(onClick = onCancelConnect).padding(8.dp))
+                }
+            } else if (sessionState == SessionState.ERROR) {
+                Text("Connection failed. Check the host address and pairing settings.",
+                    color = ColorTextSecondary)
+            }
+
             // 2. 快捷动作按钮栏
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -104,11 +125,6 @@ fun MobileConsoleScreen(
                     text = "Scan QR to Pair",
                     modifier = Modifier.weight(1f),
                     onClick = onScanQr
-                )
-                QuickActionButton(
-                    text = "New Mesh Group",
-                    modifier = Modifier.weight(1f),
-                    onClick = {}
                 )
             }
 
@@ -154,6 +170,28 @@ fun MobileConsoleScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 item {
+                    OutlinedTextField(
+                        value = manualEndpoint,
+                        onValueChange = { manualEndpoint = it },
+                        label = { Text("Host IP:port") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = ColorTextPrimary, unfocusedTextColor = ColorTextPrimary,
+                            focusedLabelColor = ColorAccentCyan, unfocusedLabelColor = ColorTextSecondary,
+                            focusedBorderColor = ColorAccentCyan, unfocusedBorderColor = ColorTextSecondary,
+                            cursorColor = ColorAccentCyan
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        colors = ButtonDefaults.buttonColors(containerColor = ColorAccentCyan,
+                            contentColor = Color.Black, disabledContainerColor = ColorSurfaceCard,
+                            disabledContentColor = ColorTextSecondary),
+                        enabled = nativeAvailable && manualEndpoint.isNotBlank() && sessionState != SessionState.CONNECTING,
+                        onClick = { onConnectHost(manualEndpoint.trim(), manualEndpoint.trim()) }
+                    ) { Text("Connect to address") }
+                }
+                item {
                     Text(
                         text = "DISCOVERED HOSTS",
                         color = ColorTextSecondary,
@@ -166,12 +204,8 @@ fun MobileConsoleScreen(
 
                 if (devices.isEmpty()) {
                     item {
-                        HostCard(
-                            name = "Loopback",
-                            tag = "Local",
-                            subtext = "127.0.0.1:39271",
-                            onConnect = { onConnectHost("loopback", "127.0.0.1:39271") }
-                        )
+                        Text("No hosts discovered. Enter an address above or pair using a QR code.",
+                            color = ColorTextSecondary)
                     }
                 } else {
                     items(devices.size) { index ->
@@ -180,6 +214,7 @@ fun MobileConsoleScreen(
                             name = device.name.ifBlank { device.id },
                             tag = device.scope,
                             subtext = device.endpoint,
+                            enabled = nativeAvailable && device.online && device.canStream && sessionState != SessionState.CONNECTING,
                             onConnect = { onConnectHost(device.id, device.endpoint) }
                         )
                     }
@@ -188,7 +223,7 @@ fun MobileConsoleScreen(
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "5-LANE NETWORK TELEMETRY",
+                        text = "NETWORK TELEMETRY",
                         color = ColorTextSecondary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -208,10 +243,11 @@ fun MobileConsoleScreen(
                             .padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        TelemetryLaneRow("Realtime Video", "${telemetry.videoBitrateKbps / 1000f} Mbps", ColorAccentCyan)
-                        TelemetryLaneRow("Realtime Audio (Opus)", "${telemetry.audioBitrateKbps} kbps", ColorAccentEmerald)
-                        TelemetryLaneRow("Interactive Control", "${telemetry.controlBitrateKbps} kbps", Color(0xFFFFB300))
-                        TelemetryLaneRow("Reliable File Transfer", "${telemetry.fileBitrateKbps / 1000f} Mbps", Color(0xFFB388FF))
+                        TelemetryLaneRow("Realtime Video", if (sessionState == SessionState.STREAMING)
+                            "${telemetry.videoBitrateKbps / 1000f} Mbps" else "Unavailable", ColorAccentCyan)
+                        TelemetryLaneRow("Realtime Audio (Opus)", "Not measured", ColorAccentEmerald)
+                        TelemetryLaneRow("Interactive Control", "Not measured", Color(0xFFFFB300))
+                        TelemetryLaneRow("Reliable File Transfer", "Unavailable", Color(0xFFB388FF))
                     }
                 }
             }
@@ -259,7 +295,7 @@ fun QuickActionButton(text: String, modifier: Modifier = Modifier, onClick: () -
 }
 
 @Composable
-fun HostCard(name: String, tag: String, subtext: String, onConnect: () -> Unit) {
+fun HostCard(name: String, tag: String, subtext: String, enabled: Boolean = true, onConnect: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -315,7 +351,7 @@ fun HostCard(name: String, tag: String, subtext: String, onConnect: () -> Unit) 
             modifier = Modifier
                 .clip(RoundedCornerShape(9999.dp))
                 .background(ColorAccentCyan)
-                .clickable(onClick = onConnect)
+                .clickable(enabled = enabled, onClick = onConnect)
                 .padding(horizontal = 14.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center
         ) {

@@ -1,0 +1,20 @@
+{
+  "files": [
+    {
+      "path": "/var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T/remote-play-smoke.1DOF4D/smoke-source.bin",
+      "bytes": 65536,
+      "sha256": "340b8bb2a6d570a3a2385a0f7ff3e1e307615aa21190bfbf6ba1cf5a89bdb7d0"
+    },
+    {
+      "path": "/var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T/remote-play-smoke.1DOF4D/client-received/smoke-source.bin",
+      "bytes": 65536,
+      "sha256": "340b8bb2a6d570a3a2385a0f7ff3e1e307615aa21190bfbf6ba1cf5a89bdb7d0"
+    }
+  ],
+  "stop_stream_observed": true,
+  "host_send_errors": [
+    "0",
+    "0",
+    "0"
+  ]
+}

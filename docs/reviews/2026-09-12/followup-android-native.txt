@@ -1,0 +1,11 @@
+Using NDK /Users/jinliang/Library/Android/sdk/ndk/26.2.11394342 (darwin-x86_64)
+   Compiling remote_client_bridge v0.1.0 (/Users/jinliang/remote_play/remote_client_bridge)
+    Finished `release` profile [optimized] target(s) in 2.45s
+Skipping x86_64-linux-android (rust-std not installed)
+Native libraries staged under /Users/jinliang/remote_play/android/app/src/main/jniLibs
+/Users/jinliang/remote_play/android/app/src/main/jniLibs/arm64-v8a:
+total 4824
+-rwxr-xr-x@ 1 jinliang  staff  2467192 Sep 12 16:01 libremote_play_android.so
+
+/Users/jinliang/remote_play/android/app/src/main/jniLibs/x86_64:
+total 0

@@ -1,0 +1,23 @@
+
+> remote-play-web@1.0.0 test
+> node --test tests/*.test.js
+
+✔ connection failure is visible and never simulates streaming (28.107084ms)
+✔ an open socket is not streaming; FPS comes from rendered frames (1.06825ms)
+✔ reconnect ignores stale callbacks and releases timers, keys and decoders (1.135041ms)
+✔ disconnect during codec capability detection cannot reopen the connection (0.282041ms)
+✔ disconnect cancels active touches with their original identifiers (0.327875ms)
+✔ unsupported codec reports an error without changing the wire codec (0.24625ms)
+✔ decode overload discards the damaged dependency chain until a keyframe (0.439916ms)
+✔ drawing errors still close the native VideoFrame (0.301291ms)
+✔ connection timeout leaves no live resources (0.292625ms)
+✔ letterbox coordinates map to the actual remote image (0.186291ms)
+✔ audio backlog stays bounded and close resets the playback clock (1.237167ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 128.31825

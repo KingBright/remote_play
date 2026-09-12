@@ -1,0 +1,108 @@
+{
+  "recorded_at": "2026-09-12T16:10:08.746138+08:00",
+  "emulator": {
+    "avd": "Pixel_7_API_35",
+    "serial": "emulator-5582",
+    "api": 35,
+    "abi": "arm64-v8a",
+    "mode": "headless read-only, no audio device output"
+  },
+  "host": {
+    "endpoint_from_android": "10.0.2.2:39271",
+    "native_bind": "127.0.0.1:39271",
+    "requested_video": "1920x1080 HEVC, 60 FPS, 20000 kbps",
+    "transport": "native UDP media data plane"
+  },
+  "apk": {
+    "path": "/Users/jinliang/remote_play/android/app/build/outputs/apk/debug/app-debug.apk",
+    "sha256": "0ba10556d4f248df7a4c8efbc896ff951a2d0c600788a8f43e3cba7ba7b54cd3"
+  },
+  "jni": {
+    "path": "/Users/jinliang/remote_play/android/app/src/main/jniLibs/arm64-v8a/libremote_play_android.so",
+    "sha256": "baf545102f8cc85302f2884f6f776fb4ccec95a1a928edbcb7d9b647c1cfe94e",
+    "packaged_library_matches_final_build": true,
+    "x86_64_verified": false
+  },
+  "app_pid_across_disconnect_reconnect": 4713,
+  "checks": {
+    "native_library_loaded": true,
+    "native_desktop_video_visually_decoded": true,
+    "portrait_aspect_and_safe_insets_checked": true,
+    "landscape_aspect_and_controls_checked": true,
+    "same_process_disconnect_then_reconnect_decoded_video": true,
+    "final_disconnect_returned_to_console": true,
+    "last_host_event_is_stop_stream": true
+  },
+  "decoded_fps_snapshots": {
+    "portrait_image": 57,
+    "landscape_xml": 58,
+    "landscape_image": 51,
+    "reconnected_image": 51,
+    "meaning": "Individual 500ms codec-output samples; not a sustained benchmark or display scanout FPS."
+  },
+  "codec_creation_log": [
+    "09-12 16:04:15.665  4713  4874 I CCodec  : Created component [c2.android.hevc.decoder]",
+    "09-12 16:04:15.714  4713  4880 I CCodec  : Created component [c2.android.opus.decoder]",
+    "09-12 16:08:56.346  4713  5102 I CCodec  : Created component [c2.android.hevc.decoder]",
+    "09-12 16:08:56.381  4713  5104 I CCodec  : Created component [c2.android.opus.decoder]"
+  ],
+  "app_fatal_or_player_error_lines": [],
+  "host_control_events": [
+    {
+      "line": 21,
+      "message": "Received StartStream from 127.0.0.1:49303 with 1920x1080@60fps (20000 kbps)"
+    },
+    {
+      "line": 620,
+      "message": "Heartbeat timeout (>15s)! Stopping stream..."
+    },
+    {
+      "line": 700,
+      "message": "Received StartStream from 127.0.0.1:54630 with 1920x1080@60fps (20000 kbps)"
+    },
+    {
+      "line": 1293,
+      "message": "Received StopStream from client. Stopping..."
+    },
+    {
+      "line": 2107,
+      "message": "Received StartStream from 127.0.0.1:49667 with 1920x1080@60fps (20000 kbps)"
+    },
+    {
+      "line": 2710,
+      "message": "Received StopStream from client. Stopping..."
+    },
+    {
+      "line": 2976,
+      "message": "Received StartStream from 127.0.0.1:54337 with 1920x1080@60fps (20000 kbps)"
+    },
+    {
+      "line": 3139,
+      "message": "Received StopStream from client. Stopping..."
+    }
+  ],
+  "local_visual_evidence": [
+    {
+      "path": "/tmp/remote-play-followup-final-portrait-ready.png",
+      "sha256": "2a4a610050c1e4b1236f1a55f08e3c13d111077d1c1524cfc452fe63507c7f05"
+    },
+    {
+      "path": "/tmp/remote-play-followup-final-landscape.png",
+      "sha256": "d5b286ec2df2582f3b0d5bedf750e6af75b4957086f78447a85a2be10d5b869a"
+    },
+    {
+      "path": "/tmp/remote-play-followup-final-reconnected-ready.png",
+      "sha256": "c9f25a5ed16ad84a049b6b3fbd614082ed2fce03612e8cf9944417ee352be64a"
+    }
+  ],
+  "evidence_note": "Desktop screenshots were inspected locally and remain in temporary storage; private desktop pixels are not copied into the repository.",
+  "not_verified": [
+    "physical Android hardware decoder performance",
+    "speaker playback",
+    "input injection on physical devices",
+    "x86_64 Android binary",
+    "long-running loss/jitter tests",
+    "audio-video sync accuracy",
+    "end-to-end p95/p99 latency"
+  ]
+}

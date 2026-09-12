@@ -27,6 +27,8 @@ pub struct Statistics {
     pub video_jitter_buffer_pop: AtomicUsize,
     pub video_frames_decoded: AtomicUsize,
     pub video_frames_rendered: AtomicUsize,
+    pub video_decode_queue_dropped: AtomicUsize,
+    pub audio_ingress_dropped: AtomicUsize,
 }
 
 impl Statistics {
@@ -59,6 +61,8 @@ impl Statistics {
                 let v_jb_pop = stats.video_jitter_buffer_pop.swap(0, Relaxed);
                 let v_dec = stats.video_frames_decoded.swap(0, Relaxed);
                 let v_ren = stats.video_frames_rendered.swap(0, Relaxed);
+                let v_queue_drop = stats.video_decode_queue_dropped.swap(0, Relaxed);
+                let a_ingress_drop = stats.audio_ingress_dropped.swap(0, Relaxed);
 
                 println!("=== [{}] Telemetry (Last {}s) ===", role, interval_secs);
                 if role == "Host" {
@@ -81,6 +85,9 @@ impl Statistics {
                         (u_byte_s as f64) / 1024.0 / (interval_secs as f64)
                     );
                 } else if role == "Client" {
+                    println!(
+                        " Drops | Audio ingress: {a_ingress_drop} | Video decode queue: {v_queue_drop}"
+                    );
                     println!(
                         " Net   | Recv: {:>5} pkts | Bandwidth: {:>6.2} KB/s",
                         u_pkt_r,

@@ -213,10 +213,6 @@ impl MacVideoDecoder {
         pps: &[u8],
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         unsafe {
-            if !self.format_desc.is_null() {
-                CFRelease(self.format_desc as _);
-            }
-
             let pointers = [vps.as_ptr(), sps.as_ptr(), pps.as_ptr()];
             let sizes = [vps.len(), sps.len(), pps.len()];
 
@@ -233,14 +229,6 @@ impl MacVideoDecoder {
 
             if status != 0 {
                 return Err(format!("Failed to create format desc: {}", status).into());
-            }
-
-            self.format_desc = new_format_desc;
-
-            // Recreate session
-            if let Some(session) = self.session.take() {
-                VTDecompressionSessionInvalidate(session);
-                CFRelease(session as _);
             }
 
             let mut session: VTDecompressionSessionRef = std::ptr::null_mut();
@@ -266,7 +254,7 @@ impl MacVideoDecoder {
 
             let status = VTDecompressionSessionCreate(
                 std::ptr::null_mut(),
-                self.format_desc as _,
+                new_format_desc as _,
                 std::ptr::null_mut(),            // decoderSpecification
                 dict.as_CFTypeRef() as *const _, // destinationImageBufferAttributes
                 &callback_record,
@@ -274,6 +262,7 @@ impl MacVideoDecoder {
             );
 
             if status != 0 {
+                CFRelease(new_format_desc as _);
                 return Err(format!("Failed to create decompression session: {}", status).into());
             }
 
@@ -286,7 +275,18 @@ impl MacVideoDecoder {
                 rt_val.as_CFTypeRef() as _,
             );
 
-            self.session = Some(session);
+            // Commit only after both objects are valid. A bad parameter set must
+            // leave the running decoder intact and must never double-release it.
+            if let Some(old_session) = self.session.replace(session) {
+                VTDecompressionSessionWaitForAsynchronousFrames(old_session);
+                VTDecompressionSessionInvalidate(old_session);
+                CFRelease(old_session as _);
+            }
+            while self.rx.try_recv().is_ok() {}
+            if !self.format_desc.is_null() {
+                CFRelease(self.format_desc as _);
+            }
+            self.format_desc = new_format_desc;
         }
 
         Ok(())
@@ -359,10 +359,10 @@ impl VideoDecoder for MacVideoDecoder {
                 || s != self.last_sps
                 || p != self.last_pps)
         {
-            self.last_vps = v.clone();
-            self.last_sps = s.clone();
-            self.last_pps = p.clone();
             self.update_format_desc(&v, &s, &p)?;
+            self.last_vps = v;
+            self.last_sps = s;
+            self.last_pps = p;
         }
 
         if vcl_nalus.is_empty() || self.session.is_none() {
@@ -370,6 +370,7 @@ impl VideoDecoder for MacVideoDecoder {
             return Err("No frame data or session not ready".into());
         }
 
+        let start_time = std::time::Instant::now();
         unsafe {
             // Create CMBlockBuffer
             let mut block_buffer: *mut c_void = std::ptr::null_mut();
@@ -427,7 +428,6 @@ impl VideoDecoder for MacVideoDecoder {
             }
         }
 
-        let start_time = std::time::Instant::now();
         // Add a timeout to prevent deadlocks if the callback is never called
         match tokio::time::timeout(std::time::Duration::from_millis(200), self.rx.recv()).await {
             Ok(Some(Some(mut frame))) => {

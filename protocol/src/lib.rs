@@ -1039,7 +1039,7 @@ pub enum ControlMessage {
         reason: String,
     },
     /// Full 8-stage pipeline telemetry (M2). Distinct from the coarse HostTelemetry snapshot.
-    PipelineTelemetry(PipelineTelemetryReport),
+    PipelineTelemetry(Box<PipelineTelemetryReport>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1115,6 +1115,34 @@ impl ControlMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boxed_telemetry_preserves_legacy_wire_bytes_and_compact_control_messages() {
+        let report = PipelineTelemetryReport {
+            session_id: 7,
+            timestamp_ms: 123_456,
+            fps: 59.5,
+            bitrate_kbps: 8000,
+            stage_stats: [StageLatencyStats::default(); StageId::STAGE_COUNT],
+            e2e_stats: StageLatencyStats::default(),
+            jitter_buffer_depth: 2,
+            packets_lost: 3,
+            late_frames_dropped: 4,
+            queue_full_dropped: 5,
+            corrupt_frames_dropped: 6,
+        };
+        // Legacy enum discriminant 16 followed directly by the report payload.
+        let mut legacy = 16u32.to_le_bytes().to_vec();
+        legacy.extend(bincode::serialize(&report).unwrap());
+        let message = ControlMessage::PipelineTelemetry(Box::new(report.clone()));
+        assert_eq!(message.encode().unwrap(), legacy);
+        let ControlMessage::PipelineTelemetry(decoded) = ControlMessage::decode(&legacy).unwrap()
+        else {
+            panic!("legacy telemetry discriminant changed");
+        };
+        assert_eq!(*decoded, report);
+        assert!(std::mem::size_of::<ControlMessage>() <= 64);
+    }
 
     fn roundtrip_control(message: ControlMessage) -> ControlMessage {
         let encoded = message.encode().expect("control message should encode");
