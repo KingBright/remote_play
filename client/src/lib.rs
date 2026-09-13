@@ -1226,18 +1226,12 @@ fn start_file_transfer_runtime_controller(
                             .expect("file cancel tx should be active")
                             .subscribe();
                         spawn(async move {
-                            #[cfg(any(
-                                target_os = "macos",
-                                target_os = "linux",
-                                target_os = "windows"
-                            ))]
+                            #[cfg(any(target_os = "macos", target_os = "linux"))]
                             {
                                 #[cfg(target_os = "macos")]
                                 let provider = MacClipboardProvider::new();
                                 #[cfg(target_os = "linux")]
                                 let provider = LinuxClipboardProvider::new();
-                                #[cfg(target_os = "windows")]
-                                let provider = WindowsClipboardProvider::new();
                                 if let Err(err) = run_clipboard_file_sync(
                                     provider,
                                     bridge_command_tx,
@@ -1251,11 +1245,7 @@ fn start_file_transfer_runtime_controller(
                                     eprintln!("File clipboard sync error: {}", err);
                                 }
                             }
-                            #[cfg(not(any(
-                                target_os = "macos",
-                                target_os = "linux",
-                                target_os = "windows"
-                            )))]
+                            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                             {
                                 let _ =
                                     (bridge_command_tx, event_rx, log_event_tx, bridge_cancel_rx);

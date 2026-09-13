@@ -679,7 +679,6 @@ where
     })
 }
 
-#[cfg(target_os = "macos")]
 struct AudioSendContext<'a> {
     udp_sender: &'a UdpSender,
     scheduled_sender: Option<&'a ScheduledDataSender>,
@@ -690,7 +689,6 @@ struct AudioSendContext<'a> {
     timestamp_step: u32,
 }
 
-#[cfg(target_os = "macos")]
 impl AudioSendContext<'_> {
     async fn send(
         &self,
