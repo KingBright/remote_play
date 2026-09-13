@@ -50,7 +50,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::spawn;
 use tokio::sync::{broadcast, mpsc, watch};
 use transfer_center::TransferCenterState;
@@ -378,8 +377,7 @@ impl ClientMediaRuntime {
                     use remote_core::VideoDecoder;
                     let decode_start = std::time::Instant::now();
                     if timing.capture_ts_us > 0 {
-                        timing.decode_enter_ts_us =
-                            timing.jitter_exit_ts_us.max(timing.recv_ts_us);
+                        timing.decode_enter_ts_us = timing.jitter_exit_ts_us.max(timing.recv_ts_us);
                     }
                     match video_decoder.decode(&ordered_pkt.payload).await {
                         Ok(mut frame) => {
@@ -440,9 +438,7 @@ pub fn start_clipboard_runtime_control(
     {
         let _ = udp_sender;
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-        spawn(async move {
-            while command_rx.recv().await.is_some() {}
-        });
+        spawn(async move { while command_rx.recv().await.is_some() {} });
         ClipboardRuntimeControl {
             command_tx,
             inbound_tx: Arc::new(Mutex::new(None)),
@@ -627,12 +623,8 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
             host_stats: host_stats_udp,
             audio_tx: audio_ingress_bridge(audio_tx),
             decode_tx,
-            clipboard_control: clipboard_control
-                .clone()
-                .map(as_envelope_ingress),
-            file_transfer_control: file_transfer_control
-                .clone()
-                .map(as_envelope_ingress),
+            clipboard_control: clipboard_control.clone().map(as_envelope_ingress),
+            file_transfer_control: file_transfer_control.clone().map(as_envelope_ingress),
             session_event_tx: None,
         });
 
@@ -1053,8 +1045,7 @@ fn start_talkback_runtime_controller(
 
                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
                     active_cancel_tx = Some(cancel_tx);
-                    let (settings_tx, settings_rx) =
-                        tokio::sync::watch::channel(current_settings);
+                    let (settings_tx, settings_rx) = tokio::sync::watch::channel(current_settings);
                     active_settings_tx = Some(settings_tx);
                     let udp_sender = udp_sender.clone();
                     #[cfg(target_os = "macos")]
@@ -1126,8 +1117,6 @@ fn start_clipboard_runtime_controller(
                         udp_sender.clone(),
                         target,
                         ScheduledDataSenderConfig {
-                            tick_interval: Duration::from_millis(1),
-                            send_budget_per_tick: 16,
                             ..ScheduledDataSenderConfig::default()
                         },
                     );
@@ -1210,8 +1199,6 @@ fn start_file_transfer_runtime_controller(
                         udp_sender.clone(),
                         target,
                         ScheduledDataSenderConfig {
-                            tick_interval: Duration::from_millis(1),
-                            send_budget_per_tick: 16,
                             ..ScheduledDataSenderConfig::default()
                         },
                     );
@@ -1239,7 +1226,11 @@ fn start_file_transfer_runtime_controller(
                             .expect("file cancel tx should be active")
                             .subscribe();
                         spawn(async move {
-                            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+                            #[cfg(any(
+                                target_os = "macos",
+                                target_os = "linux",
+                                target_os = "windows"
+                            ))]
                             {
                                 #[cfg(target_os = "macos")]
                                 let provider = MacClipboardProvider::new();
@@ -1258,14 +1249,14 @@ fn start_file_transfer_runtime_controller(
                                     eprintln!("File clipboard sync error: {}", err);
                                 }
                             }
-                            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+                            #[cfg(not(any(
+                                target_os = "macos",
+                                target_os = "linux",
+                                target_os = "windows"
+                            )))]
                             {
-                                let _ = (
-                                    bridge_command_tx,
-                                    event_rx,
-                                    log_event_tx,
-                                    bridge_cancel_rx,
-                                );
+                                let _ =
+                                    (bridge_command_tx, event_rx, log_event_tx, bridge_cancel_rx);
                             }
                         });
                         let log_transfer_state = controller_transfer_state.clone();

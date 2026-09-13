@@ -106,7 +106,7 @@ pub fn audio_stream_config_to_envelope(
 pub fn audio_stream_config_from_envelope(
     envelope: &DataEnvelope,
 ) -> Result<AudioStreamConfig, MediaPlaneError> {
-    if envelope.header.lane != DataLane::InteractiveControl
+    if envelope.header.lane != DataLane::Interactive
         || envelope.header.kind != ContentKind::AudioStreamConfig
     {
         return Err(MediaPlaneError::UnsupportedEnvelopeKind {
@@ -128,8 +128,8 @@ pub fn audio_stream_config_from_envelope(
 
 pub fn realtime_data_to_rtp(envelope: DataEnvelope) -> Result<RtpPacket, MediaPlaneError> {
     let payload_type = match (envelope.header.lane, envelope.header.kind) {
-        (DataLane::RealtimeVideo, ContentKind::VideoH265) => PayloadType::VideoH265 as u8,
-        (DataLane::RealtimeAudio, ContentKind::AudioOpus) => PayloadType::AudioOpus as u8,
+        (DataLane::Realtime, ContentKind::VideoH265) => PayloadType::VideoH265 as u8,
+        (DataLane::Realtime, ContentKind::AudioOpus) => PayloadType::AudioOpus as u8,
         (lane, kind) => {
             return Err(MediaPlaneError::UnsupportedEnvelopeKind { lane, kind });
         }
@@ -192,7 +192,7 @@ mod tests {
         let rtp = packet(PayloadType::VideoH265 as u8, 42, 1_000, 77);
 
         let envelope = rtp_to_realtime_data_at(&rtp, now_ms).expect("video RTP should adapt");
-        assert_eq!(envelope.header.lane, DataLane::RealtimeVideo);
+        assert_eq!(envelope.header.lane, DataLane::Realtime);
         assert_eq!(envelope.header.kind, ContentKind::VideoH265);
         assert_eq!(envelope.header.stream_id, rtp.header.ssrc);
         assert_eq!(
@@ -211,7 +211,7 @@ mod tests {
         let rtp = packet(PayloadType::AudioOpus as u8, 12, 960, 78);
 
         let envelope = rtp_to_realtime_data(&rtp).expect("audio RTP should adapt");
-        assert_eq!(envelope.header.lane, DataLane::RealtimeAudio);
+        assert_eq!(envelope.header.lane, DataLane::Realtime);
         assert_eq!(envelope.header.kind, ContentKind::AudioOpus);
         assert_eq!(envelope.header.timestamp_ms, rtp.header.timestamp as u64);
         assert_eq!(envelope.header.deadline_ms, None);
@@ -231,7 +231,7 @@ mod tests {
         for (index, config) in configs.iter().enumerate() {
             let envelope = audio_stream_config_to_envelope(config, index as u64, 10_000)
                 .expect("audio stream config should adapt");
-            assert_eq!(envelope.header.lane, DataLane::InteractiveControl);
+            assert_eq!(envelope.header.lane, DataLane::Interactive);
             assert_eq!(envelope.header.kind, ContentKind::AudioStreamConfig);
             assert_eq!(envelope.header.stream_id, config.stream_id);
 
@@ -249,7 +249,7 @@ mod tests {
             audio_stream_config_from_envelope(&envelope)
                 .expect_err("audio packet should not decode as stream config"),
             MediaPlaneError::UnsupportedEnvelopeKind {
-                lane: DataLane::RealtimeAudio,
+                lane: DataLane::Realtime,
                 kind: ContentKind::AudioOpus,
             }
         );
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn rejects_data_envelopes_that_do_not_carry_media() {
         let envelope = DataEnvelope::new(
-            DataLane::InteractiveControl,
+            DataLane::Interactive,
             ContentKind::Control,
             1,
             1,
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(
             realtime_data_to_rtp(envelope).expect_err("control data should fail"),
             MediaPlaneError::UnsupportedEnvelopeKind {
-                lane: DataLane::InteractiveControl,
+                lane: DataLane::Interactive,
                 kind: ContentKind::Control
             }
         );

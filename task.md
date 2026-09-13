@@ -554,3 +554,26 @@ Move to a RemotePlay-owned relay/rendezvous fallback instead of depending on the
   - Two-machine headless verification, 2026-08-12: the packaged unified runtime on the local Mac streamed through the public WSS relay to the real release `headless_smoke_client` on Mac Studio. The receiver observed `data_video=284`, `data_audio=558`, one remote-microphone audio config, `telemetry=11`, and zero legacy video/audio packets. A 65,536-byte file completed with matching source/receiver SHA-256 `4d43f2603ab6f62384b5bc9c57e8f46d3cd5203f6f370fc5ae00ea0df2b6c5f2`.
   - Reverse-role verification, 2026-08-12: swapping the same two unified packages delivered `StartStream` from the local Mac through the public WSS relay to Mac Studio, proving the control path and role reversal. Mac Studio then rejected ScreenCaptureKit with the macOS TCC screen-capture denial, so reverse video/audio remains pending a one-time Screen Recording permission grant for the packaged app.
   - GUI verification, 2026-08-12: the packaged unified GUI launched as `RemotePlay Unified` without invoking Sony Remote Play or separate client/host apps. Mac Studio appeared automatically as a connectable device through relay discovery, and the GUI Connect action delivered the default `1920x1080@60fps` / `8000 kbps` request to Mac Studio. Full GUI video rendering remains pending the same Mac Studio TCC permission grant.
+
+## Phase 13: RemotePlay-Owned Connectivity Path (2026-09-13)
+
+Product networking is now intentionally reduced to one route policy: **LAN direct -> RemotePlay P2P direct -> RemotePlay Relay**. EasyTier is no longer enabled by default and is no longer bundled in the macOS product package.
+
+- [x] Add RemotePlay-owned UDP rendezvous / NAT punch protocol in `remote_core::p2p`.
+  - Opaque HMAC-derived group capabilities keep the private device-group secret off public infrastructure.
+  - Rendezvous keeps only short-lived in-memory endpoint registrations and never carries media after a direct path is established.
+  - One NAT-facing UDP socket supports multiple simultaneous peers; each peer receives an independent loopback route endpoint.
+- [x] Add `DiscoveryScope::P2p` without changing legacy wire values, and rank routes `LAN > P2P > legacy mesh > Relay`.
+- [x] Publish P2P discovery routes only after `Punch` / `PunchAck` or real peer data proves the direct path works.
+- [x] Wire P2P into the unified runtime with default rendezvous `p.hackerlife.fun:3478`.
+- [x] Make P2P and Relay non-fatal optional reachability layers: LAN remains usable if either public service is unavailable.
+- [x] Reload discovery, P2P and Relay together when device-group identity changes, preventing old/new group state from mixing.
+- [x] Keep NAS relay as the final fallback at `wss://relay.hackerlife.fun:8443/v1/relay`.
+- [x] Remove EasyTier binaries/install scripts from macOS packaging and make legacy mesh explicit opt-in only.
+- [x] Add bounded `p2p_rendezvous_server` deployment service under `deploy/bw/`.
+- [x] Add a cross-machine `p2p_peer_probe` for real public rendezvous/direct UDP acceptance.
+- [x] Validate NAS public relay with a real two-client bidirectional binary WebSocket exchange, not only `/healthz`.
+- [x] Unit verification: P2P packet/group-id, rendezvous candidate exchange, direct raw datagram forwarding, direct-ready discovery publication, and one-to-three-peer route isolation all pass.
+- [ ] Deploy the Rust rendezvous service to `bw:3478/udp` and validate cross-network P2P between real devices.
+- [ ] Pull the final main branch on Mac-Studio, HO5 and cube and run platform build checks.
+- [ ] Package/redeploy the final macOS app without third-party network binaries and complete end-to-end route acceptance.

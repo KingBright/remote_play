@@ -159,7 +159,8 @@ impl UdpSender {
         envelope: &DataEnvelope,
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.send_data_with_timing(envelope, None, target).await
+        self.send_data_with_timing(envelope, envelope.transport_timing, target)
+            .await
     }
 
     pub async fn send_data_with_timing(
@@ -168,6 +169,7 @@ impl UdpSender {
         timing: Option<protocol::FrameTimingCheckpoints>,
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let timing = timing.or(envelope.transport_timing);
         match envelope.encode_compact_realtime_with_timing(timing) {
             Ok(bytes) => self.send_multiplexed(0x05, &bytes, target).await,
             Err(
@@ -969,7 +971,10 @@ mod tests {
 
         match recv_with_timeout(&receiver).await {
             MultiplexedPacket::DataWithTiming(decoded, decoded_timing, _) => {
-                assert_eq!(decoded, envelope);
+                assert_eq!(
+                    decoded,
+                    envelope.clone().with_transport_timing(Some(timing))
+                );
                 assert_eq!(decoded_timing, Some(timing));
             }
             other => panic!("unexpected packet: {other:?}"),
@@ -999,7 +1004,10 @@ mod tests {
 
         match recv_with_timeout(&receiver).await {
             MultiplexedPacket::DataWithTiming(decoded, decoded_timing, _) => {
-                assert_eq!(decoded, envelope);
+                assert_eq!(
+                    decoded,
+                    envelope.clone().with_transport_timing(Some(timing))
+                );
                 assert_eq!(decoded_timing, Some(timing));
             }
             other => panic!("unexpected packet: {other:?}"),

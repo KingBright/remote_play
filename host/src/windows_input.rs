@@ -112,7 +112,10 @@ impl InputInjector for WindowsInputInjector {
                     }
                 }
             }
-            InputEvent::MouseScroll { delta_x: _, delta_y } => {
+            InputEvent::MouseScroll {
+                delta_x: _,
+                delta_y,
+            } => {
                 send_mouse(MOUSEEVENTF_WHEEL, 0, 0, (delta_y * 120) as u32);
             }
             InputEvent::Key {

@@ -378,7 +378,7 @@ pub fn control_to_envelope(
         Some(checksum),
         payload,
     );
-    envelope.header.lane = DataLane::InteractiveControl;
+    envelope.header.lane = DataLane::Interactive;
     envelope.header.priority = DataPriority::Interactive;
     Ok(envelope)
 }
@@ -1048,7 +1048,7 @@ mod tests {
         let envelope = control_to_envelope(&control, 90, 2, 100, 1_000)
             .expect("control envelope should encode");
         assert_eq!(envelope.header.kind, ContentKind::FileControl);
-        assert_eq!(envelope.header.lane, DataLane::InteractiveControl);
+        assert_eq!(envelope.header.lane, DataLane::Interactive);
 
         sender
             .send_data(&envelope, receiver_addr)

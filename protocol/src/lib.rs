@@ -17,46 +17,44 @@ pub enum PayloadType {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataLane {
-    RealtimeVideo,
-    RealtimeAudio,
-    InteractiveControl,
-    ReliableObject,
+    /// Deadline-sensitive traffic. Freshness beats completeness.
+    Realtime,
+    /// Human-interaction traffic. It preempts reliable/background work.
+    Interactive,
+    /// Ordered application objects with backpressure/retry semantics.
+    Reliable,
+    /// Lowest-priority background work.
     Background,
 }
 
 impl DataLane {
     pub fn is_realtime(self) -> bool {
-        matches!(
-            self,
-            DataLane::RealtimeVideo | DataLane::RealtimeAudio | DataLane::InteractiveControl
-        )
+        matches!(self, DataLane::Realtime | DataLane::Interactive)
     }
 
     pub fn allows_stale_drop(self) -> bool {
-        matches!(self, DataLane::RealtimeVideo | DataLane::RealtimeAudio)
+        matches!(self, DataLane::Realtime)
     }
 
     pub fn requires_reliable_delivery(self) -> bool {
-        matches!(self, DataLane::ReliableObject | DataLane::Background)
+        matches!(self, DataLane::Reliable | DataLane::Background)
     }
 
     fn wire_id(self) -> u8 {
         match self {
-            DataLane::RealtimeVideo => 1,
-            DataLane::RealtimeAudio => 2,
-            DataLane::InteractiveControl => 3,
-            DataLane::ReliableObject => 4,
-            DataLane::Background => 5,
+            DataLane::Realtime => 1,
+            DataLane::Interactive => 2,
+            DataLane::Reliable => 3,
+            DataLane::Background => 4,
         }
     }
 
     fn from_wire_id(id: u8) -> Result<Self, CompactRealtimeError> {
         match id {
-            1 => Ok(DataLane::RealtimeVideo),
-            2 => Ok(DataLane::RealtimeAudio),
-            3 => Ok(DataLane::InteractiveControl),
-            4 => Ok(DataLane::ReliableObject),
-            5 => Ok(DataLane::Background),
+            1 => Ok(DataLane::Realtime),
+            2 => Ok(DataLane::Interactive),
+            3 => Ok(DataLane::Reliable),
+            4 => Ok(DataLane::Background),
             _ => Err(CompactRealtimeError::InvalidLane(id)),
         }
     }
@@ -80,17 +78,17 @@ pub enum ContentKind {
 impl ContentKind {
     pub fn default_lane(self) -> DataLane {
         match self {
-            ContentKind::VideoH265 => DataLane::RealtimeVideo,
-            ContentKind::AudioOpus => DataLane::RealtimeAudio,
-            ContentKind::AudioStreamConfig => DataLane::InteractiveControl,
-            ContentKind::Control => DataLane::InteractiveControl,
+            ContentKind::VideoH265 => DataLane::Realtime,
+            ContentKind::AudioOpus => DataLane::Realtime,
+            ContentKind::AudioStreamConfig => DataLane::Interactive,
+            ContentKind::Control => DataLane::Interactive,
             ContentKind::ClipboardText
             | ContentKind::ClipboardBinary
             | ContentKind::FileManifest
             | ContentKind::FileChunk
             | ContentKind::Arbitrary
-            | ContentKind::ClipboardBundle => DataLane::ReliableObject,
-            ContentKind::FileControl => DataLane::InteractiveControl,
+            | ContentKind::ClipboardBundle => DataLane::Reliable,
+            ContentKind::FileControl => DataLane::Interactive,
         }
     }
 
@@ -390,9 +388,9 @@ pub enum DataPriority {
 impl DataPriority {
     pub fn for_lane(lane: DataLane) -> Self {
         match lane {
-            DataLane::RealtimeVideo | DataLane::RealtimeAudio => DataPriority::Realtime,
-            DataLane::InteractiveControl => DataPriority::Interactive,
-            DataLane::ReliableObject => DataPriority::Normal,
+            DataLane::Realtime => DataPriority::Realtime,
+            DataLane::Interactive => DataPriority::Interactive,
+            DataLane::Reliable => DataPriority::Normal,
             DataLane::Background => DataPriority::Background,
         }
     }
@@ -465,6 +463,10 @@ pub struct DataHeader {
 pub struct DataEnvelope {
     pub header: DataHeader,
     pub payload: Vec<u8>,
+    /// Local-only transport metadata. It is carried by the compact realtime
+    /// wire header, never by the generic/bincode object representation.
+    #[serde(skip)]
+    pub transport_timing: Option<FrameTimingCheckpoints>,
 }
 
 impl DataEnvelope {
@@ -491,7 +493,13 @@ impl DataEnvelope {
                 reliability_info: None,
             },
             payload,
+            transport_timing: None,
         }
+    }
+
+    pub fn with_transport_timing(mut self, timing: Option<FrameTimingCheckpoints>) -> Self {
+        self.transport_timing = timing;
+        self
     }
 
     pub fn realtime_video(
@@ -502,7 +510,7 @@ impl DataEnvelope {
         payload: Vec<u8>,
     ) -> Self {
         let mut envelope = Self::new(
-            DataLane::RealtimeVideo,
+            DataLane::Realtime,
             ContentKind::VideoH265,
             stream_id,
             sequence_number,
@@ -520,7 +528,7 @@ impl DataEnvelope {
         payload: Vec<u8>,
     ) -> Self {
         Self::new(
-            DataLane::RealtimeAudio,
+            DataLane::Realtime,
             ContentKind::AudioOpus,
             stream_id,
             sequence_number,
@@ -535,7 +543,7 @@ impl DataEnvelope {
         timestamp_ms: u64,
     ) -> Result<Self, bincode::Error> {
         Ok(Self::new(
-            DataLane::InteractiveControl,
+            DataLane::Interactive,
             ContentKind::AudioStreamConfig,
             config.stream_id,
             sequence_number,
@@ -554,7 +562,7 @@ impl DataEnvelope {
         payload: Vec<u8>,
     ) -> Self {
         let mut envelope = Self::new(
-            DataLane::ReliableObject,
+            DataLane::Reliable,
             kind,
             stream_id,
             sequence_number,
@@ -840,6 +848,7 @@ impl CompactRealtimeHeader {
         Ok(DataEnvelope {
             header: header.to_data_header()?,
             payload: payload.to_vec(),
+            transport_timing: None,
         })
     }
 
@@ -851,6 +860,7 @@ impl CompactRealtimeHeader {
         let envelope = DataEnvelope {
             header: header.to_data_header()?,
             payload: payload.to_vec(),
+            transport_timing: timing,
         };
         Ok((envelope, timing))
     }
@@ -1156,63 +1166,48 @@ mod tests {
 
     #[test]
     fn data_lane_classification_matches_latency_requirements() {
-        assert!(DataLane::RealtimeVideo.is_realtime());
-        assert!(DataLane::RealtimeAudio.is_realtime());
-        assert!(DataLane::InteractiveControl.is_realtime());
-        assert!(!DataLane::ReliableObject.is_realtime());
+        assert!(DataLane::Realtime.is_realtime());
+        assert!(DataLane::Realtime.is_realtime());
+        assert!(DataLane::Interactive.is_realtime());
+        assert!(!DataLane::Reliable.is_realtime());
         assert!(!DataLane::Background.is_realtime());
 
-        assert!(DataLane::RealtimeVideo.allows_stale_drop());
-        assert!(DataLane::RealtimeAudio.allows_stale_drop());
-        assert!(!DataLane::InteractiveControl.allows_stale_drop());
+        assert!(DataLane::Realtime.allows_stale_drop());
+        assert!(DataLane::Realtime.allows_stale_drop());
+        assert!(!DataLane::Interactive.allows_stale_drop());
 
         assert_eq!(
-            ReliabilityMode::for_lane(DataLane::ReliableObject),
+            ReliabilityMode::for_lane(DataLane::Reliable),
             ReliabilityMode::Reliable
         );
         assert_eq!(
-            ReliabilityMode::for_lane(DataLane::RealtimeVideo),
+            ReliabilityMode::for_lane(DataLane::Realtime),
             ReliabilityMode::BestEffort
         );
     }
 
     #[test]
     fn content_kind_defaults_to_expected_lane() {
-        assert_eq!(
-            ContentKind::VideoH265.default_lane(),
-            DataLane::RealtimeVideo
-        );
-        assert_eq!(
-            ContentKind::AudioOpus.default_lane(),
-            DataLane::RealtimeAudio
-        );
+        assert_eq!(ContentKind::VideoH265.default_lane(), DataLane::Realtime);
+        assert_eq!(ContentKind::AudioOpus.default_lane(), DataLane::Realtime);
         assert_eq!(
             ContentKind::AudioStreamConfig.default_lane(),
-            DataLane::InteractiveControl
+            DataLane::Interactive
         );
-        assert_eq!(
-            ContentKind::Control.default_lane(),
-            DataLane::InteractiveControl
-        );
+        assert_eq!(ContentKind::Control.default_lane(), DataLane::Interactive);
         assert_eq!(
             ContentKind::ClipboardText.default_lane(),
-            DataLane::ReliableObject
+            DataLane::Reliable
         );
         assert_eq!(
             ContentKind::ClipboardBundle.default_lane(),
-            DataLane::ReliableObject
+            DataLane::Reliable
         );
-        assert_eq!(
-            ContentKind::FileManifest.default_lane(),
-            DataLane::ReliableObject
-        );
-        assert_eq!(
-            ContentKind::FileChunk.default_lane(),
-            DataLane::ReliableObject
-        );
+        assert_eq!(ContentKind::FileManifest.default_lane(), DataLane::Reliable);
+        assert_eq!(ContentKind::FileChunk.default_lane(), DataLane::Reliable);
         assert_eq!(
             ContentKind::FileControl.default_lane(),
-            DataLane::InteractiveControl
+            DataLane::Interactive
         );
     }
 
@@ -1256,7 +1251,7 @@ mod tests {
         let envelope = DataEnvelope::audio_stream_config(&config, 7, 1_234)
             .expect("audio stream config envelope should encode");
 
-        assert_eq!(envelope.header.lane, DataLane::InteractiveControl);
+        assert_eq!(envelope.header.lane, DataLane::Interactive);
         assert_eq!(envelope.header.kind, ContentKind::AudioStreamConfig);
         assert_eq!(envelope.header.stream_id, config.stream_id);
         assert_eq!(envelope.header.sequence_number, 7);
@@ -1442,9 +1437,7 @@ mod tests {
 
         assert!(matches!(
             envelope.encode_compact_realtime(),
-            Err(CompactRealtimeError::NonRealtimeLane(
-                DataLane::ReliableObject
-            ))
+            Err(CompactRealtimeError::NonRealtimeLane(DataLane::Reliable))
         ));
     }
 
@@ -1802,7 +1795,7 @@ mod tests {
 
         let header = CompactRealtimeHeader {
             version: COMPACT_REALTIME_WIRE_VERSION,
-            lane: DataLane::RealtimeVideo,
+            lane: DataLane::Realtime,
             kind: ContentKind::VideoH265,
             priority: DataPriority::Realtime,
             stream_id: 42,

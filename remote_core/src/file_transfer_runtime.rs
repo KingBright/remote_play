@@ -1341,23 +1341,6 @@ mod tests {
         }
     }
 
-    async fn wait_until_file_sender_has_queued_reliable(sender: &ScheduledDataSender) {
-        timeout(Duration::from_secs(2), async {
-            loop {
-                let stats = sender.stats();
-                if stats.entrance_enqueued > 0
-                    && stats.sent_realtime == 0
-                    && stats.sent_reliable == 0
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(2)).await;
-            }
-        })
-        .await
-        .expect("file transfer should queue reliable data before the first sender tick");
-    }
-
     #[test]
     fn inbound_receive_config_applies_immediately_when_idle() {
         let mut inbound =
@@ -1439,8 +1422,6 @@ mod tests {
             source_sender,
             target_addr,
             ScheduledDataSenderConfig {
-                tick_interval: Duration::from_millis(1),
-                send_budget_per_tick: 8,
                 ..ScheduledDataSenderConfig::default()
             },
         );
@@ -1579,9 +1560,8 @@ mod tests {
                     max_realtime_queued: 8,
                     max_reliable_queued: 64,
                 },
-                queue_capacity: 128,
-                send_budget_per_tick: 1,
-                tick_interval: Duration::from_millis(250),
+                realtime_queue_capacity: 128,
+                reliable_queue_capacity: 128,
             },
         );
         let (target_scheduled_sender, _target_worker) = ScheduledDataSender::spawn(
@@ -1638,10 +1618,7 @@ mod tests {
                 };
 
                 let kind = envelope.header.kind;
-                let observed = if matches!(
-                    envelope.header.lane,
-                    protocol::DataLane::RealtimeVideo | protocol::DataLane::RealtimeAudio
-                ) {
+                let observed = if matches!(envelope.header.lane, protocol::DataLane::Realtime) {
                     ObservedDataPacket::Media(kind)
                 } else if matches!(
                     kind,
@@ -1663,6 +1640,18 @@ mod tests {
             }
         });
 
+        // Realtime traffic is event-driven and must not wait for a batching tick.
+        // Queue it before starting bulk transfer; the lower-level scheduler tests
+        // separately cover preemption when both classes are already pending.
+        let video = media_packet(PayloadType::VideoH265, 77, 900);
+        let audio = media_packet(PayloadType::AudioOpus, 78, 901);
+        source_scheduled_sender
+            .try_send(rtp_to_realtime_data(&video).expect("video should adapt"))
+            .expect("video should queue in the shared sender");
+        source_scheduled_sender
+            .try_send(rtp_to_realtime_data(&audio).expect("audio should adapt"))
+            .expect("audio should queue in the shared sender");
+
         source_command_tx
             .send(FileTransferCommand::SendFile {
                 path: source.clone(),
@@ -1670,16 +1659,6 @@ mod tests {
             })
             .await
             .expect("send command should queue");
-        wait_until_file_sender_has_queued_reliable(&source_scheduled_sender).await;
-
-        let video = media_packet(PayloadType::VideoH265, 77, 900);
-        let audio = media_packet(PayloadType::AudioOpus, 78, 901);
-        source_scheduled_sender
-            .try_send(rtp_to_realtime_data(&audio).expect("audio should adapt"))
-            .expect("audio should queue in the shared sender");
-        source_scheduled_sender
-            .try_send(rtp_to_realtime_data(&video).expect("video should adapt"))
-            .expect("video should queue in the shared sender");
 
         let first = timeout(Duration::from_secs(2), observed_rx.recv())
             .await
@@ -1769,8 +1748,6 @@ mod tests {
             source_sender,
             target_addr,
             ScheduledDataSenderConfig {
-                tick_interval: Duration::from_millis(1),
-                send_budget_per_tick: 8,
                 ..ScheduledDataSenderConfig::default()
             },
         );
@@ -1925,8 +1902,6 @@ mod tests {
             source_sender,
             target_addr,
             ScheduledDataSenderConfig {
-                tick_interval: Duration::from_millis(1),
-                send_budget_per_tick: 8,
                 ..ScheduledDataSenderConfig::default()
             },
         );
@@ -2137,8 +2112,6 @@ mod tests {
             sender,
             receiver_addr,
             ScheduledDataSenderConfig {
-                tick_interval: Duration::from_millis(1),
-                send_budget_per_tick: 4,
                 ..ScheduledDataSenderConfig::default()
             },
         );

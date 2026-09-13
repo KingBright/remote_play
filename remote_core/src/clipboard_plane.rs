@@ -428,7 +428,7 @@ mod tests {
 
         assert!(envelopes.len() > 1);
         for (index, envelope) in envelopes.iter().enumerate() {
-            assert_eq!(envelope.header.lane, DataLane::ReliableObject);
+            assert_eq!(envelope.header.lane, DataLane::Reliable);
             assert_eq!(envelope.header.kind, ContentKind::ClipboardBundle);
             assert_eq!(envelope.header.reliability, ReliabilityMode::Reliable);
             assert_eq!(

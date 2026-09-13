@@ -1,5 +1,5 @@
 use hmac::{Hmac, Mac};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305, NONCE_LEN};
+use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
 use sha2::Sha256;
 use std::error::Error;
@@ -46,8 +46,8 @@ pub struct SessionCrypto {
 impl SessionCrypto {
     pub fn from_psk(psk: &[u8], salt: &[u8]) -> Result<Self, SessionCryptoError> {
         let key_bytes = derive_key(psk, salt);
-        let unbound =
-            UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).map_err(|_| SessionCryptoError::InvalidKey)?;
+        let unbound = UnboundKey::new(&CHACHA20_POLY1305, &key_bytes)
+            .map_err(|_| SessionCryptoError::InvalidKey)?;
         Ok(Self {
             key: LessSafeKey::new(unbound),
         })
@@ -127,9 +127,8 @@ pub fn load_session_psk() -> Option<Vec<u8>> {
 
 pub fn require_session_auth() -> bool {
     load_session_psk().is_some()
-        || std::env::var("REMOTE_PLAY_REQUIRE_AUTH").is_ok_and(|value| {
-            matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES")
-        })
+        || std::env::var("REMOTE_PLAY_REQUIRE_AUTH")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 pub fn random_bytes_16() -> [u8; 16] {

@@ -488,7 +488,8 @@ impl RemotePlayView {
                 }
                 let scope = match peer.scope {
                     remote_core::discovery::DiscoveryScope::Lan => "LAN discovery",
-                    remote_core::discovery::DiscoveryScope::Mesh => "Mesh discovery",
+                    remote_core::discovery::DiscoveryScope::P2p => "P2P direct",
+                    remote_core::discovery::DiscoveryScope::Mesh => "Legacy mesh",
                     remote_core::discovery::DiscoveryScope::Relay => "Relay discovery",
                 };
                 rows.push(DeviceRow {

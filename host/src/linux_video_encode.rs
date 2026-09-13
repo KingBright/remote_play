@@ -41,7 +41,9 @@ impl LinuxVideoEncoder {
                 force_keyframe: false,
             }),
             Err(err) => {
-                eprintln!("[LinuxEncoder] ffmpeg HEVC unavailable ({err}); using non-decodable placeholder.");
+                eprintln!(
+                    "[LinuxEncoder] ffmpeg HEVC unavailable ({err}); using non-decodable placeholder."
+                );
                 Ok(Self {
                     width,
                     height,
@@ -77,8 +79,7 @@ impl LinuxVideoEncoder {
     ) -> Result<EncodedChunk, Box<dyn Error + Send + Sync>> {
         if let Some(source) = &self.source {
             let started = std::time::Instant::now();
-            let (nalu, is_keyframe) =
-                tokio::task::block_in_place(|| source.pull_access_unit())?;
+            let (nalu, is_keyframe) = tokio::task::block_in_place(|| source.pull_access_unit())?;
             let capture_ts_us = remote_core::timing::quanta_now_us();
             let mut timing = protocol::FrameTimingCheckpoints::new(capture_ts_us);
             timing.encode_done_ts_us = started.elapsed().as_micros() as u32;

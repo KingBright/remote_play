@@ -142,8 +142,6 @@ mod tests {
             source_tx,
             target_addr,
             ScheduledDataSenderConfig {
-                tick_interval: Duration::from_millis(1),
-                send_budget_per_tick: 8,
                 ..ScheduledDataSenderConfig::default()
             },
         );

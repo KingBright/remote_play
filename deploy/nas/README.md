@@ -1,6 +1,6 @@
 # NAS Relay Deployment
 
-RemotePlay uses a WebSocket relay on the Synology NAS so the existing Caddy listener on external port `8443` can serve both HTTP applications and RemotePlay. Direct LAN and EasyTier routes remain preferred; this relay is the restricted-network fallback.
+RemotePlay uses a WebSocket relay on the Synology NAS so the existing Caddy listener on external port `8443` can serve both HTTP applications and RemotePlay. Direct LAN and RemotePlay P2P routes remain preferred; this relay is the final restricted-network fallback.
 
 ## Public Route
 

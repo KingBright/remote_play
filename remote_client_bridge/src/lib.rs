@@ -460,7 +460,8 @@ impl RemoteBridgeClient {
                 endpoint: peer.endpoint.to_string(),
                 scope: match peer.scope {
                     DiscoveryScope::Lan => "LAN".to_string(),
-                    DiscoveryScope::Mesh => "Mesh".to_string(),
+                    DiscoveryScope::P2p => "P2P".to_string(),
+                    DiscoveryScope::Mesh => "Legacy Mesh".to_string(),
                     DiscoveryScope::Relay => "Relay".to_string(),
                 },
                 can_stream: peer.announcement.capabilities.can_stream,
@@ -710,7 +711,8 @@ async fn run_lan_discovery(
                 endpoint: peer.endpoint.to_string(),
                 scope: match peer.scope {
                     DiscoveryScope::Lan => "LAN".to_string(),
-                    DiscoveryScope::Mesh => "Mesh".to_string(),
+                    DiscoveryScope::P2p => "P2P".to_string(),
+                    DiscoveryScope::Mesh => "Legacy Mesh".to_string(),
                     DiscoveryScope::Relay => "Relay".to_string(),
                 },
                 can_stream: peer.announcement.capabilities.can_stream,

@@ -25,6 +25,7 @@ const CAP_TALKBACK: u32 = 1 << 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryScope {
     Lan,
+    P2p,
     Mesh,
     Relay,
 }
@@ -116,6 +117,7 @@ impl DiscoveryAnnouncement {
             DiscoveryScope::Lan => 0,
             DiscoveryScope::Mesh => 1,
             DiscoveryScope::Relay => 2,
+            DiscoveryScope::P2p => 3,
         });
         out.extend_from_slice(&self.control_port.to_be_bytes());
         out.extend_from_slice(&self.capabilities.bits().to_be_bytes());
@@ -159,6 +161,7 @@ impl DiscoveryAnnouncement {
             0 => DiscoveryScope::Lan,
             1 => DiscoveryScope::Mesh,
             2 => DiscoveryScope::Relay,
+            3 => DiscoveryScope::P2p,
             _ => return Err(DiscoveryError::InvalidField("scope")),
         };
         let control_port = reader.read_u16()?;
@@ -751,9 +754,11 @@ mod tests {
         let mut cache = DiscoveryPeerCache::new("local-net", "android-1").accept_any_network(true);
         let mut foreign = sample_announcement();
         foreign.network_name = "other-network".to_string();
-        assert!(cache
-            .apply_announcement(foreign, "192.168.1.20:38117".parse().unwrap(), 1)
-            .is_some());
+        assert!(
+            cache
+                .apply_announcement(foreign, "192.168.1.20:38117".parse().unwrap(), 1)
+                .is_some()
+        );
     }
 
     #[test]

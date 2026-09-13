@@ -16,13 +16,13 @@ mod talkback_player;
 mod video_encode;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+mod ffmpeg_hevc;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod linux_audio;
 #[cfg(target_os = "linux")]
 pub mod linux_capture;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-mod ffmpeg_hevc;
 #[cfg(target_os = "linux")]
 pub mod linux_video_encode;
 #[cfg(target_os = "windows")]
@@ -52,9 +52,7 @@ use remote_core::mesh::{
     REMOTE_PLAY_MESH_ENV, default_app_private_mesh_dir, spawn_easytier_health_monitor,
 };
 use remote_core::net::DEFAULT_CONTROL_PORT;
-use remote_core::scheduled_sender::{
-    ScheduledDataSender, ScheduledDataSenderConfig,
-};
+use remote_core::scheduled_sender::{ScheduledDataSender, ScheduledDataSenderConfig};
 use remote_core::stats::Statistics;
 use remote_core::{AudioCapturer, VideoCapturer, VideoEncoder};
 pub use service::{HostServiceConfig, run_host_service};
@@ -470,11 +468,12 @@ async fn send_media_packet(
         let packet_size = envelope.payload.len() as u64
             + protocol::COMPACT_REALTIME_HEADER_LEN as u64
             + extra_len as u64;
-        // Realtime media bypasses the 1ms scheduler so host timing stays on the wire.
-        let _ = scheduled_sender;
-        udp_sender
-            .send_data_with_timing(&envelope, timing, client_addr)
-            .await?;
+        let envelope = envelope.with_transport_timing(timing);
+        if let Some(scheduled_sender) = scheduled_sender {
+            scheduled_sender.send(envelope).await?;
+        } else {
+            udp_sender.send_data(&envelope, client_addr).await?;
+        }
         Ok(packet_size)
     } else {
         let packet_size = packet.payload.len() as u64 + 12;
@@ -856,8 +855,6 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             udp_sender.clone(),
             client_addr,
             ScheduledDataSenderConfig {
-                send_budget_per_tick: 64,
-                tick_interval: Duration::from_millis(1),
                 ..ScheduledDataSenderConfig::default()
             },
         );

@@ -6,7 +6,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -15,25 +15,26 @@ pub type ScheduledDataSenderJoin = JoinHandle<Result<(), Box<dyn Error + Send + 
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduledDataSenderConfig {
     pub scheduler: LaneSchedulerConfig,
-    pub queue_capacity: usize,
-    pub send_budget_per_tick: usize,
-    pub tick_interval: Duration,
+    /// Dedicated ingress capacity for deadline-sensitive/interactive traffic.
+    pub realtime_queue_capacity: usize,
+    /// Independent ingress capacity for reliable/background traffic.
+    pub reliable_queue_capacity: usize,
 }
 
 impl Default for ScheduledDataSenderConfig {
     fn default() -> Self {
         Self {
             scheduler: LaneSchedulerConfig::default(),
-            queue_capacity: 512,
-            send_budget_per_tick: 32,
-            tick_interval: Duration::from_millis(1),
+            realtime_queue_capacity: 256,
+            reliable_queue_capacity: 64,
         }
     }
 }
 
 #[derive(Clone)]
 pub struct ScheduledDataSender {
-    tx: mpsc::Sender<DataEnvelope>,
+    realtime_tx: mpsc::Sender<DataEnvelope>,
+    reliable_tx: mpsc::Sender<DataEnvelope>,
     counters: Arc<ScheduledDataSenderCounters>,
 }
 
@@ -87,23 +88,40 @@ impl ScheduledDataSender {
         target: SocketAddr,
         mut config: ScheduledDataSenderConfig,
     ) -> (Self, ScheduledDataSenderJoin) {
-        config.queue_capacity = config.queue_capacity.max(1);
-        config.send_budget_per_tick = config.send_budget_per_tick.max(1);
-        config.tick_interval = config.tick_interval.max(Duration::from_micros(1));
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        config.realtime_queue_capacity = config.realtime_queue_capacity.max(1);
+        config.reliable_queue_capacity = config.reliable_queue_capacity.max(1);
+        let (realtime_tx, realtime_rx) = mpsc::channel(config.realtime_queue_capacity);
+        let (reliable_tx, reliable_rx) = mpsc::channel(config.reliable_queue_capacity);
         let counters = Arc::new(ScheduledDataSenderCounters::default());
         let worker = tokio::spawn(run_sender_worker(
             udp_sender,
             target,
-            config,
-            rx,
+            config.scheduler,
+            realtime_rx,
+            reliable_rx,
             counters.clone(),
         ));
-        (Self { tx, counters }, worker)
+        (
+            Self {
+                realtime_tx,
+                reliable_tx,
+                counters,
+            },
+            worker,
+        )
+    }
+
+    fn ingress(&self, envelope: &DataEnvelope) -> &mpsc::Sender<DataEnvelope> {
+        if envelope.header.lane.is_realtime() {
+            &self.realtime_tx
+        } else {
+            &self.reliable_tx
+        }
     }
 
     pub async fn send(&self, envelope: DataEnvelope) -> Result<(), ScheduledDataSendError> {
-        match self.tx.send(envelope).await {
+        let tx = self.ingress(&envelope);
+        match tx.send(envelope).await {
             Ok(()) => {
                 self.counters.entrance_enqueued.fetch_add(1, Relaxed);
                 Ok(())
@@ -116,7 +134,8 @@ impl ScheduledDataSender {
     }
 
     pub fn try_send(&self, envelope: DataEnvelope) -> Result<(), ScheduledDataSendError> {
-        match self.tx.try_send(envelope) {
+        let tx = self.ingress(&envelope);
+        match tx.try_send(envelope) {
             Ok(()) => {
                 self.counters.entrance_enqueued.fetch_add(1, Relaxed);
                 Ok(())
@@ -134,7 +153,8 @@ impl ScheduledDataSender {
 
     pub fn stats(&self) -> ScheduledDataSenderStats {
         ScheduledDataSenderStats {
-            entrance_queued: self.tx.max_capacity() - self.tx.capacity(),
+            entrance_queued: (self.realtime_tx.max_capacity() - self.realtime_tx.capacity())
+                + (self.reliable_tx.max_capacity() - self.reliable_tx.capacity()),
             entrance_enqueued: self.counters.entrance_enqueued.load(Relaxed),
             entrance_full: self.counters.entrance_full.load(Relaxed),
             entrance_closed: self.counters.entrance_closed.load(Relaxed),
@@ -160,57 +180,59 @@ impl ScheduledDataSender {
 async fn run_sender_worker(
     udp_sender: UdpSender,
     target: SocketAddr,
-    config: ScheduledDataSenderConfig,
-    mut rx: mpsc::Receiver<DataEnvelope>,
+    scheduler_config: LaneSchedulerConfig,
+    mut realtime_rx: mpsc::Receiver<DataEnvelope>,
+    mut reliable_rx: mpsc::Receiver<DataEnvelope>,
     counters: Arc<ScheduledDataSenderCounters>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut scheduler = LaneScheduler::with_config(config.scheduler);
-    let mut interval = tokio::time::interval(config.tick_interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    // Consume tokio interval's immediate first tick so initial submissions can batch.
-    interval.tick().await;
+    let mut scheduler = LaneScheduler::with_config(scheduler_config);
+    let mut realtime_open = true;
+    let mut reliable_open = true;
 
     loop {
-        if scheduler.is_empty() {
-            let Some(envelope) = rx.recv().await else {
-                return Ok(());
-            };
-            record_push_result(&counters, scheduler.push(envelope, now_ms()));
-            interval.reset();
+        // Always ingest deadline-sensitive traffic before choosing the next
+        // packet. This keeps bulk backpressure completely off the hot path.
+        drain_realtime_ingress(&mut realtime_rx, &mut scheduler, &counters);
+
+        if let Some(envelope) = scheduler.pop_next(now_ms()) {
+            send_scheduled_envelope(&udp_sender, target, envelope, &counters).await?;
+            continue;
         }
+
+        if !realtime_open && !reliable_open {
+            return Ok(());
+        }
+
         tokio::select! {
-            _ = interval.tick() => {
-                drain_ready_envelopes(&mut rx, &mut scheduler, &counters);
-                drain_scheduled_envelopes(&mut scheduler, &udp_sender, target, config.send_budget_per_tick, &counters).await?;
+            biased;
+            maybe = realtime_rx.recv(), if realtime_open => {
+                match maybe {
+                    Some(envelope) => record_push_result(&counters, scheduler.push(envelope, now_ms())),
+                    None => realtime_open = false,
+                }
             }
-            maybe_envelope = rx.recv() => {
-                match maybe_envelope {
+            maybe = reliable_rx.recv(), if reliable_open => {
+                match maybe {
                     Some(envelope) => {
                         record_push_result(&counters, scheduler.push(envelope, now_ms()));
+                        // Bulk traffic is allowed to yield one executor turn so a
+                        // simultaneously-produced realtime/control packet can
+                        // preempt it. Realtime itself is never timer-delayed.
+                        tokio::task::yield_now().await;
                     }
-                    None => {
-                        while !scheduler.is_empty() {
-                            drain_scheduled_envelopes(&mut scheduler, &udp_sender, target, config.send_budget_per_tick, &counters).await?;
-                            tokio::task::yield_now().await;
-                        }
-                        return Ok(());
-                    }
+                    None => reliable_open = false,
                 }
             }
         }
     }
 }
 
-fn drain_ready_envelopes(
+fn drain_realtime_ingress(
     rx: &mut mpsc::Receiver<DataEnvelope>,
     scheduler: &mut LaneScheduler,
     counters: &ScheduledDataSenderCounters,
 ) {
-    // A producer can refill the entrance concurrently. Bound this pass so a
-    // busy file transfer cannot prevent the worker from ever sending media.
-    for _ in 0..rx.len() {
-        let Ok(envelope) = rx.try_recv() else { break };
+    while let Ok(envelope) = rx.try_recv() {
         record_push_result(counters, scheduler.push(envelope, now_ms()));
     }
 }
@@ -236,27 +258,21 @@ fn record_push_result(counters: &ScheduledDataSenderCounters, result: SchedulerP
     }
 }
 
-async fn drain_scheduled_envelopes(
-    scheduler: &mut LaneScheduler,
+async fn send_scheduled_envelope(
     udp_sender: &UdpSender,
     target: SocketAddr,
-    budget: usize,
+    envelope: DataEnvelope,
     counters: &ScheduledDataSenderCounters,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    for _ in 0..budget {
-        let Some(envelope) = scheduler.pop_next(now_ms()) else {
-            break;
-        };
-        let is_realtime = envelope.header.lane.is_realtime();
-        if let Err(err) = udp_sender.send_data(&envelope, target).await {
-            counters.send_errors.fetch_add(1, Relaxed);
-            return Err(err);
-        }
-        if is_realtime {
-            counters.sent_realtime.fetch_add(1, Relaxed);
-        } else {
-            counters.sent_reliable.fetch_add(1, Relaxed);
-        }
+    let is_realtime = envelope.header.lane.is_realtime();
+    if let Err(err) = udp_sender.send_data(&envelope, target).await {
+        counters.send_errors.fetch_add(1, Relaxed);
+        return Err(err);
+    }
+    if is_realtime {
+        counters.sent_realtime.fetch_add(1, Relaxed);
+    } else {
+        counters.sent_reliable.fetch_add(1, Relaxed);
     }
     Ok(())
 }
@@ -277,6 +293,7 @@ mod tests {
     use crate::media_plane::{realtime_data_to_rtp, rtp_to_realtime_data};
     use crate::net::{MultiplexedPacket, UdpMultiplexer};
     use protocol::{PayloadType, RtpHeader, RtpPacket};
+    use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
     fn realtime(sequence_number: u64) -> DataEnvelope {
@@ -333,9 +350,8 @@ mod tests {
             udp_sender,
             receiver_mux.local_addr().unwrap(),
             ScheduledDataSenderConfig {
-                queue_capacity: 0,
-                send_budget_per_tick: 0,
-                tick_interval: Duration::ZERO,
+                realtime_queue_capacity: 0,
+                reliable_queue_capacity: 0,
                 ..Default::default()
             },
         );
@@ -379,9 +395,11 @@ mod tests {
 
     #[test]
     fn scheduled_sender_reports_entrance_backpressure() {
-        let (tx, _rx) = mpsc::channel(1);
+        let (realtime_tx, _realtime_rx) = mpsc::channel(1);
+        let (reliable_tx, _reliable_rx) = mpsc::channel(1);
         let scheduled = ScheduledDataSender {
-            tx,
+            realtime_tx,
+            reliable_tx,
             counters: Arc::new(ScheduledDataSenderCounters::default()),
         };
 
@@ -423,9 +441,8 @@ mod tests {
                     max_realtime_queued: 8,
                     max_reliable_queued: 8,
                 },
-                queue_capacity: 8,
-                send_budget_per_tick: 1,
-                tick_interval: Duration::from_millis(20),
+                realtime_queue_capacity: 8,
+                reliable_queue_capacity: 8,
             },
         );
 
@@ -473,9 +490,8 @@ mod tests {
                     max_realtime_queued: 8,
                     max_reliable_queued: 8,
                 },
-                queue_capacity: 8,
-                send_budget_per_tick: 1,
-                tick_interval: Duration::from_millis(20),
+                realtime_queue_capacity: 8,
+                reliable_queue_capacity: 8,
             },
         );
         let video = media_packet(PayloadType::VideoH265, 2, 10);
@@ -533,9 +549,8 @@ mod tests {
                     max_realtime_queued: 8,
                     max_reliable_queued: 4,
                 },
-                queue_capacity: 32,
-                send_budget_per_tick: 1,
-                tick_interval: Duration::from_millis(100),
+                realtime_queue_capacity: 32,
+                reliable_queue_capacity: 32,
             },
         );
         let video = media_packet(PayloadType::VideoH265, 50, 10);
@@ -565,11 +580,12 @@ mod tests {
         assert_eq!(second_media, audio);
 
         let stats = wait_for_stats(&scheduled, |stats| {
-            stats.sent_realtime == 2 && stats.scheduler_rejected_reliable_capacity >= 8
+            stats.sent_realtime == 2 && stats.sent_reliable > 0
         })
         .await;
         assert_eq!(stats.scheduler_dropped_stale_realtime, 0);
         assert_eq!(stats.scheduler_dropped_realtime_capacity, 0);
+        assert_eq!(stats.entrance_full, 0);
         assert_eq!(stats.send_errors, 0);
 
         drop(scheduled);

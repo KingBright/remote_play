@@ -79,9 +79,8 @@ pub async fn run_talkback_capture(
         udp_sender,
         target,
         ScheduledDataSenderConfig {
-            queue_capacity: 128,
-            send_budget_per_tick: 64,
-            tick_interval: Duration::from_millis(1),
+            realtime_queue_capacity: 128,
+            reliable_queue_capacity: 128,
             ..ScheduledDataSenderConfig::default()
         },
     );

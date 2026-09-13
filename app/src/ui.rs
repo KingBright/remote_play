@@ -2,7 +2,6 @@ use crate::design_system::{
     color_accent_amber, color_accent_cyan, color_accent_emerald, color_accent_purple,
     color_border_fine, color_glass_card, remote_play_themes,
 };
-use crate::mesh_admin::{mesh_setup_was_cancelled, run_mesh_admin_setup};
 use crate::{
     AppDevice, HostStats, MacDecodedVideoFrame, MeshPairingControl, MeshPairingMessageKind,
     MeshPairingSnapshot, RoleState, SharedHostStats, StreamStartOptions, UnifiedRuntimeConfig,
@@ -357,36 +356,6 @@ impl UnifiedDashboard {
             .and_then(|item| item.text())
             .unwrap_or_default();
         self.mesh_pairing_snapshot = Some(control.join_from_invite_code(&invite_code));
-    }
-
-    fn install_mesh_admin_setup(&mut self, cx: &mut Context<Self>) {
-        self.status = "Opening Mesh setup".to_string();
-        let background = cx.background_executor().clone();
-        cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            let result = background
-                .spawn(async move { run_mesh_admin_setup() })
-                .await;
-            let _ = this.update(cx, |this: &mut Self, cx: &mut Context<Self>| {
-                match result {
-                    Ok(()) => {
-                        this.status = "Mesh setup installed".to_string();
-                        if let Some(control) = &this.mesh_pairing {
-                            this.mesh_pairing_snapshot =
-                                Some(control.request_runtime_reload("Mesh setup installed."));
-                        }
-                    }
-                    Err(err) => {
-                        this.status = if mesh_setup_was_cancelled(&err) {
-                            "Mesh setup cancelled".to_string()
-                        } else {
-                            format!("Mesh setup failed: {}", setup_error_summary(&err))
-                        };
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn open_popout_pip_window(&mut self, cx: &mut Context<Self>) {
@@ -802,92 +771,102 @@ impl Render for PopoutStreamView {
                         Some(scale_btn),
                     )),
             )
-            .child(
-                if self.telemetry_hud_collapsed {
-                    div()
-                        .absolute()
-                        .bottom(px(12.0))
-                        .right(px(16.0))
-                        .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
-                            cx.stop_propagation();
-                        }))
-                        .child(
-                            command_button("expand_pip_hud_btn", ActionVariantKind::Neutral, cx)
-                                .size(px(26.0))
+            .child(if self.telemetry_hud_collapsed {
+                div()
+                    .absolute()
+                    .bottom(px(12.0))
+                    .right(px(16.0))
+                    .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        command_button("expand_pip_hud_btn", ActionVariantKind::Neutral, cx)
+                            .size(px(26.0))
+                            .rounded_full()
+                            .tooltip(tooltip("Show live telemetry").build())
+                            .on_click({
+                                let view = view.clone();
+                                move |_event, _window, cx| {
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.telemetry_hud_collapsed = false;
+                                        if let Err(err) =
+                                            crate::preferences::UserPreferences::update(|prefs| {
+                                                prefs.ui.telemetry_hud_collapsed = false;
+                                            })
+                                        {
+                                            eprintln!("Failed to save telemetry preference: {err}");
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .child(icon(IconName::PingIndicator(3)).size(px(12.0))),
+                    )
+            } else {
+                div()
+                    .absolute()
+                    .bottom(px(12.0))
+                    .right(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .p_3()
+                    .bg(color_glass_card())
+                    .border_1()
+                    .border_color(color_border_fine())
+                    .rounded(px(8.0))
+                    .shadow_lg()
+                    .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(color_accent_cyan())
+                                    .child("LIVE TELEMETRY"),
+                            )
+                            .child(
+                                command_button(
+                                    "collapse_pip_hud_btn",
+                                    ActionVariantKind::Neutral,
+                                    cx,
+                                )
+                                .size(px(18.0))
                                 .rounded_full()
-                                .tooltip(tooltip("Show live telemetry").build())
+                                .text_size(px(8.0))
+                                .tooltip(tooltip("Collapse live telemetry").build())
                                 .on_click({
                                     let view = view.clone();
                                     move |_event, _window, cx| {
                                         let _ = view.update(cx, |this, cx| {
-                                            this.telemetry_hud_collapsed = false;
-                                            if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
-                                                prefs.ui.telemetry_hud_collapsed = false;
-                                            }) {
-                                                eprintln!("Failed to save telemetry preference: {err}");
+                                            this.telemetry_hud_collapsed = true;
+                                            if let Err(err) =
+                                                crate::preferences::UserPreferences::update(
+                                                    |prefs| {
+                                                        prefs.ui.telemetry_hud_collapsed = true;
+                                                    },
+                                                )
+                                            {
+                                                eprintln!(
+                                                    "Failed to save telemetry preference: {err}"
+                                                );
                                             }
                                             cx.notify();
                                         });
                                     }
                                 })
-                                .child(icon(IconName::PingIndicator(3)).size(px(12.0))),
-                        )
-                } else {
-                    div()
-                        .absolute()
-                        .bottom(px(12.0))
-                        .right(px(16.0))
-                        .flex()
-                        .flex_col()
-                        .gap_1p5()
-                        .p_3()
-                        .bg(color_glass_card())
-                        .border_1()
-                        .border_color(color_border_fine())
-                        .rounded(px(8.0))
-                        .shadow_lg()
-                        .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
-                            cx.stop_propagation();
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_4()
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(color_accent_cyan())
-                                        .child("LIVE TELEMETRY"),
-                                )
-                                .child(
-                                    command_button("collapse_pip_hud_btn", ActionVariantKind::Neutral, cx)
-                                        .size(px(18.0))
-                                        .rounded_full()
-                                        .text_size(px(8.0))
-                                        .tooltip(tooltip("Collapse live telemetry").build())
-                                        .on_click({
-                                            let view = view.clone();
-                                            move |_event, _window, cx| {
-                                                let _ = view.update(cx, |this, cx| {
-                                                    this.telemetry_hud_collapsed = true;
-                                                    if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
-                                                        prefs.ui.telemetry_hud_collapsed = true;
-                                                    }) {
-                                                        eprintln!("Failed to save telemetry preference: {err}");
-                                                    }
-                                                    cx.notify();
-                                                });
-                                            }
-                                        })
-                                        .child(icon(IconName::Minimize).size(px(10.0))),
-                                ),
-                        )
-                        .child(telemetry_hud_metrics_list(stats.as_ref(), &theme))
-                },
-            )
+                                .child(icon(IconName::Minimize).size(px(10.0))),
+                            ),
+                    )
+                    .child(telemetry_hud_metrics_list(stats.as_ref(), &theme))
+            })
     }
 }
 
@@ -1625,7 +1604,7 @@ fn drawer_trigger_capsule(
                             .text_size(px(11.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .whitespace_nowrap()
-                            .child("Devices & Mesh"),
+                            .child("Devices"),
                     )
                 })
                 .child(
@@ -1747,7 +1726,12 @@ fn slide_over_management_drawer(
                     active_tab,
                     cx,
                 ))
-                .child(drawer_tab_button("Mesh", DrawerTab::Mesh, active_tab, cx))
+                .child(drawer_tab_button(
+                    "Pairing",
+                    DrawerTab::Mesh,
+                    active_tab,
+                    cx,
+                ))
                 .child(drawer_tab_button(
                     "Security",
                     DrawerTab::Security,
@@ -2190,12 +2174,16 @@ fn drawer_security_tab(
             },
             cx,
         ))
-        .when(file_transfer_enabled && side_services.file_transfer.available, |this| {
-            this.child(file_transfer_panel(owner, cx))
-        })
+        .when(
+            file_transfer_enabled && side_services.file_transfer.available,
+            |this| this.child(file_transfer_panel(owner, cx)),
+        )
 }
 
-fn file_transfer_panel(owner: Arc<crate::UnifiedServiceOwner>, cx: &mut Context<UnifiedDashboard>) -> Div {
+fn file_transfer_panel(
+    owner: Arc<crate::UnifiedServiceOwner>,
+    cx: &mut Context<UnifiedDashboard>,
+) -> Div {
     let theme = cx.theme().clone();
     let transfers = owner.file_transfer_snapshot();
     let send_owner = owner.clone();
@@ -3041,7 +3029,6 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
     let copy_view = cx.weak_entity();
     let join_view = cx.weak_entity();
     let create_view = cx.weak_entity();
-    let repair_view = cx.weak_entity();
 
     let mut card = div()
         .flex()
@@ -3069,7 +3056,7 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.content.primary)
-                                .child("EasyTier Private Mesh"),
+                                .child("RemotePlay Device Group"),
                         )
                         .child(
                             div()
@@ -3166,41 +3153,20 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
                 ),
         )
         .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    command_button("unified_create_mesh_group", ActionVariantKind::Neutral, cx)
-                        .h(px(28.0))
-                        .flex_1()
-                        .px_2()
-                        .text_size(px(10.0))
-                        .on_click(move |_event, _window, cx| {
-                            let _ = create_view.update(cx, |this, cx| {
-                                this.create_mesh_group();
-                                cx.notify();
-                            });
-                        })
-                        .child("Create New Group"),
-                )
-                .child(
-                    command_button(
-                        "unified_mesh_admin_setup_from_group",
-                        ActionVariantKind::Neutral,
-                        cx,
-                    )
+            div().flex().gap_2().child(
+                command_button("unified_create_mesh_group", ActionVariantKind::Neutral, cx)
                     .h(px(28.0))
                     .flex_1()
                     .px_2()
                     .text_size(px(10.0))
                     .on_click(move |_event, _window, cx| {
-                        let _ = repair_view.update(cx, |this, cx| {
-                            this.install_mesh_admin_setup(cx);
+                        let _ = create_view.update(cx, |this, cx| {
+                            this.create_mesh_group();
                             cx.notify();
                         });
                     })
-                    .child("Repair Mesh"),
-                ),
+                    .child("Create New Group"),
+            ),
         )
         .child(
             div()
@@ -3262,18 +3228,13 @@ fn qr_matrix_view(matrix: &remote_core::QrMatrix) -> Div {
         .bg(rgb(0xffffff))
         .rounded(px(6.0))
         .children((0..width).map(|y| {
-            div()
-                .flex()
-                .flex_row()
-                .children((0..width).map(move |x| {
-                    div()
-                        .size(cell)
-                        .bg(if matrix.is_dark(x, y) {
-                            rgb(0x0d0f12)
-                        } else {
-                            rgb(0xffffff)
-                        })
-                }))
+            div().flex().flex_row().children((0..width).map(move |x| {
+                div().size(cell).bg(if matrix.is_dark(x, y) {
+                    rgb(0x0d0f12)
+                } else {
+                    rgb(0xffffff)
+                })
+            }))
         }))
 }
 
@@ -3288,24 +3249,6 @@ fn command_button<T: 'static>(
         .focusable()
         .focus_visible(move |style| style.border_2().border_color(focus))
         .active(|style| style.opacity(0.82))
-}
-
-fn setup_error_summary(message: &str) -> String {
-    let trimmed = message.trim();
-    if trimmed.is_empty() {
-        return "unknown error".to_string();
-    }
-
-    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-    const MAX_LEN: usize = 96;
-    if first_line.chars().count() <= MAX_LEN {
-        first_line.to_string()
-    } else {
-        format!(
-            "{}...",
-            first_line.chars().take(MAX_LEN).collect::<String>()
-        )
-    }
 }
 
 fn empty_state(
@@ -3407,9 +3350,10 @@ fn pairing_message_tone(kind: MeshPairingMessageKind) -> StatusTone {
 
 fn discovery_scope_label(scope: remote_core::discovery::DiscoveryScope) -> &'static str {
     match scope {
-        remote_core::discovery::DiscoveryScope::Lan => "LAN P2P",
-        remote_core::discovery::DiscoveryScope::Mesh => "EasyTier Mesh",
-        remote_core::discovery::DiscoveryScope::Relay => "Relay Tunnel",
+        remote_core::discovery::DiscoveryScope::Lan => "LAN",
+        remote_core::discovery::DiscoveryScope::P2p => "P2P Direct",
+        remote_core::discovery::DiscoveryScope::Mesh => "Legacy Mesh",
+        remote_core::discovery::DiscoveryScope::Relay => "Relay",
     }
 }
 

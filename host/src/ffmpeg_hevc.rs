@@ -169,9 +169,8 @@ fn start_code_len(data: &[u8]) -> usize {
 
 fn find_start(data: &[u8], from: usize) -> Option<usize> {
     let slice = data.get(from..)?;
-    (0..slice.len()).find_map(|offset| {
-        (start_code_len(&slice[offset..]) > 0).then_some(from + offset)
-    })
+    (0..slice.len())
+        .find_map(|offset| (start_code_len(&slice[offset..]) > 0).then_some(from + offset))
 }
 
 fn hevc_nal_type(nal: &[u8]) -> Option<u8> {

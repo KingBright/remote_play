@@ -156,11 +156,7 @@ impl HostFrameTracker {
 /// sample from `capture_ts_us` directly: that saturates to 0 when the client
 /// clock is behind the host, and inflates e2e when the client is ahead.
 #[inline]
-pub fn client_stage_offset_us(
-    capture_ts_us: u64,
-    client_now_us: u64,
-    clock_offset_us: i64,
-) -> u32 {
+pub fn client_stage_offset_us(capture_ts_us: u64, client_now_us: u64, clock_offset_us: i64) -> u32 {
     aligned_client_offset_us(capture_ts_us, client_now_us, clock_offset_us, 0)
 }
 

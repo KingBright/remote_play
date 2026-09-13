@@ -1,6 +1,5 @@
 #[cfg(target_os = "macos")]
 mod design_system;
-mod mesh_admin;
 pub mod preferences;
 #[cfg(target_os = "macos")]
 mod ui;
@@ -18,6 +17,7 @@ use remote_core::mesh::{
     spawn_easytier_static_health_monitor,
 };
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
+use remote_core::p2p::{BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot, derive_p2p_group_id};
 use remote_core::relay::{
     BoundTcpRelayTunnel, BoundWebSocketRelayTunnel, RelayConfigError, TcpRelayTunnelConfig,
     WebSocketRelayTunnelConfig, derive_relay_group_id,
@@ -332,8 +332,10 @@ impl UnifiedAppRuntime {
 
 fn app_device_route_rank(device: &AppDevice) -> u8 {
     match device.scope {
-        DiscoveryScope::Lan | DiscoveryScope::Mesh => 0,
-        DiscoveryScope::Relay => 1,
+        DiscoveryScope::Lan => 0,
+        DiscoveryScope::P2p => 1,
+        DiscoveryScope::Mesh => 2,
+        DiscoveryScope::Relay => 3,
     }
 }
 
@@ -347,6 +349,7 @@ impl Default for UnifiedAppRuntime {
 pub struct UnifiedServiceOwnerConfig {
     pub app: UnifiedAppConfig,
     pub mesh: Option<UnifiedMeshRuntimeConfig>,
+    pub p2p: Option<UnifiedP2pRuntimeConfig>,
     pub relay: Option<UnifiedRelayRuntimeConfig>,
     pub discovery: Option<DiscoveryRuntimeConfig>,
     pub passive_host: Option<HostServiceConfig>,
@@ -364,6 +367,11 @@ pub struct UnifiedRuntimeReloadConfig {
     pub reload_rx: mpsc::UnboundedReceiver<()>,
 }
 
+pub const REMOTE_PLAY_P2P_ENV: &str = "REMOTE_PLAY_P2P";
+pub const REMOTE_PLAY_P2P_RENDEZVOUS_ENV: &str = "REMOTE_PLAY_P2P_RENDEZVOUS";
+pub const REMOTE_PLAY_P2P_BIND_ADDR_ENV: &str = "REMOTE_PLAY_P2P_BIND_ADDR";
+pub const REMOTE_PLAY_P2P_LOG_ENV: &str = "REMOTE_PLAY_P2P_LOG";
+pub const DEFAULT_P2P_RENDEZVOUS: &str = "p.hackerlife.fun:3478";
 pub const REMOTE_PLAY_RELAY_ENV: &str = "REMOTE_PLAY_RELAY";
 pub const REMOTE_PLAY_RELAY_SERVER_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_SERVER_ADDR";
 pub const REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR";
@@ -565,6 +573,18 @@ pub struct UnifiedMeshRuntimeConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedP2pRuntimeConfig {
+    pub rendezvous: String,
+    pub group_id: String,
+    pub peer_id: String,
+    pub bind_addr: SocketAddr,
+    pub announcement: Vec<u8>,
+    pub host_control_target_addr: Option<SocketAddr>,
+    pub discovery_target_addr: Option<SocketAddr>,
+    pub log_events: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnifiedRelayRuntimeConfig {
     pub endpoint: UnifiedRelayEndpoint,
     pub control_group_id: String,
@@ -642,6 +662,10 @@ pub struct UnifiedRuntimeConfig {
     pub client_bind_addr: SocketAddr,
     pub discovery_port: u16,
     pub enable_mesh: bool,
+    pub enable_p2p: bool,
+    pub p2p_rendezvous: String,
+    pub p2p_bind_addr: SocketAddr,
+    pub p2p_log_events: bool,
     pub relay_endpoint: Option<UnifiedRelayEndpoint>,
     pub relay_control_bind_addr: SocketAddr,
     pub relay_discovery_bind_addr: SocketAddr,
@@ -665,6 +689,10 @@ impl UnifiedRuntimeConfig {
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             discovery_port: remote_core::discovery::DEFAULT_DISCOVERY_PORT,
             enable_mesh: false,
+            enable_p2p: true,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+            p2p_log_events: false,
             relay_endpoint: Some(UnifiedRelayEndpoint::WebSocket(
                 DEFAULT_RELAY_SERVER_URL.to_string(),
             )),
@@ -695,7 +723,17 @@ impl UnifiedRuntimeConfig {
         config.client_bind_addr =
             env_socket_addr("REMOTE_PLAY_CLIENT_BIND_ADDR", config.client_bind_addr)?;
         config.discovery_port = discovery_port_from_env()?;
-        config.enable_mesh = env_flag_or(REMOTE_PLAY_MESH_ENV, bundled_mesh_available());
+        // Legacy EasyTier is opt-in only. The product route is LAN -> RemotePlay P2P -> RemotePlay Relay.
+        config.enable_mesh = env_flag_or(REMOTE_PLAY_MESH_ENV, false);
+        config.enable_p2p = env_flag_or(REMOTE_PLAY_P2P_ENV, true);
+        if let Ok(value) = std::env::var(REMOTE_PLAY_P2P_RENDEZVOUS_ENV)
+            && !value.trim().is_empty()
+        {
+            config.p2p_rendezvous = value.trim().to_string();
+        }
+        config.p2p_bind_addr =
+            env_socket_addr(REMOTE_PLAY_P2P_BIND_ADDR_ENV, config.p2p_bind_addr)?;
+        config.p2p_log_events = env_flag_or(REMOTE_PLAY_P2P_LOG_ENV, false);
         config.relay_endpoint = if env_flag_or(REMOTE_PLAY_RELAY_ENV, true) {
             env_optional_relay_endpoint(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?
                 .or(config.relay_endpoint)
@@ -715,8 +753,10 @@ impl UnifiedRuntimeConfig {
         config.enable_passive_host = env_flag_or("REMOTE_PLAY_PASSIVE_HOST", true);
         config.enable_client_receiver = env_flag_or("REMOTE_PLAY_CLIENT_RECEIVER", true);
         let prefs = crate::preferences::UserPreferences::load_or_default();
-        config.enable_clipboard_sync =
-            env_flag_or("REMOTE_PLAY_CLIPBOARD_SYNC", prefs.side_services.clipboard_sync);
+        config.enable_clipboard_sync = env_flag_or(
+            "REMOTE_PLAY_CLIPBOARD_SYNC",
+            prefs.side_services.clipboard_sync,
+        );
         config.enable_file_transfer = env_flag_or(
             "REMOTE_PLAY_FILE_TRANSFER",
             prefs.side_services.file_transfer,
@@ -826,7 +866,11 @@ pub async fn start_unified_runtime(
     owner_config.relay = build_unified_relay_config(&config)?;
 
     if config.enable_discovery {
-        owner_config.discovery = Some(build_unified_discovery_config(&config, None)?);
+        let discovery_config = build_unified_discovery_config(&config, None)?;
+        if config.enable_p2p {
+            owner_config.p2p = Some(build_unified_p2p_config(&config, &discovery_config)?);
+        }
+        owner_config.discovery = Some(discovery_config);
     }
 
     if config.enable_passive_host {
@@ -1018,6 +1062,32 @@ fn build_unified_discovery_config(
     ))
 }
 
+fn build_unified_p2p_config(
+    config: &UnifiedRuntimeConfig,
+    discovery: &DiscoveryRuntimeConfig,
+) -> Result<UnifiedP2pRuntimeConfig, Box<dyn Error + Send + Sync>> {
+    let store = AppPrivateMeshConfigStore::new(&config.mesh_dir);
+    let identity = store.load_or_generate(&config.display_name)?;
+    let group_id = derive_p2p_group_id(
+        &identity.network_name,
+        identity.network_secret.expose_secret(),
+    )?;
+    let announcement = discovery.announcement.encode()?;
+    Ok(UnifiedP2pRuntimeConfig {
+        rendezvous: config.p2p_rendezvous.clone(),
+        group_id,
+        peer_id: identity.node_id,
+        bind_addr: config.p2p_bind_addr,
+        announcement,
+        host_control_target_addr: config
+            .enable_passive_host
+            .then_some(config.host_bind_addr)
+            .and_then(local_udp_target_for_bind),
+        discovery_target_addr: local_udp_target_for_bind(discovery.bind_addr),
+        log_events: config.p2p_log_events,
+    })
+}
+
 fn build_unified_relay_config(
     config: &UnifiedRuntimeConfig,
 ) -> Result<Option<UnifiedRelayRuntimeConfig>, Box<dyn Error + Send + Sync>> {
@@ -1116,10 +1186,6 @@ fn env_flag_or(name: &str, default: bool) -> bool {
     }
 }
 
-fn bundled_mesh_available() -> bool {
-    EasyTierBinaryLocator::from_environment().locate().is_ok()
-}
-
 #[derive(Clone)]
 struct ReloadableMeshRuntime {
     monitor: Arc<Mutex<Option<EasyTierHealthMonitorHandle>>>,
@@ -1130,6 +1196,38 @@ struct ReloadableMeshRuntime {
 struct ReloadableDiscoveryRuntime {
     runtime: Arc<Mutex<Option<UnifiedDiscoveryRuntime>>>,
     snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
+}
+
+#[derive(Clone)]
+struct ReloadableP2pRuntime {
+    runtime: Arc<Mutex<Option<UnifiedP2pRuntime>>>,
+}
+
+#[derive(Clone)]
+struct ReloadableRelayRuntime {
+    runtime: Arc<Mutex<Option<UnifiedRelayRuntime>>>,
+}
+
+struct UnifiedP2pRuntime {
+    snapshot_rx: watch::Receiver<P2pTunnelSnapshot>,
+    cancel_tx: broadcast::Sender<()>,
+    _task: AbortOnDropTask,
+}
+
+impl UnifiedP2pRuntime {
+    fn task_count(&self) -> usize {
+        1
+    }
+
+    fn snapshot(&self) -> P2pTunnelSnapshot {
+        self.snapshot_rx.borrow().clone()
+    }
+}
+
+impl Drop for UnifiedP2pRuntime {
+    fn drop(&mut self) {
+        let _ = self.cancel_tx.send(());
+    }
 }
 
 struct UnifiedRelayRuntime {
@@ -1176,7 +1274,8 @@ pub struct UnifiedServiceOwner {
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
     mesh_runtime: Option<ReloadableMeshRuntime>,
     mesh_health_rx: Option<watch::Receiver<EasyTierHealthSnapshot>>,
-    relay_runtime: Option<UnifiedRelayRuntime>,
+    p2p_runtime: Option<ReloadableP2pRuntime>,
+    relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
     discovery_snapshot_rx: Option<watch::Receiver<DiscoveryPeerSnapshot>>,
     client_control_sender: Option<UdpSender>,
@@ -1213,8 +1312,37 @@ impl UnifiedServiceOwner {
             None => (None, None),
         };
 
+        let p2p_runtime = match config.p2p {
+            Some(p2p_config) => {
+                let runtime = match start_unified_p2p_runtime(p2p_config).await {
+                    Ok(runtime) => Some(runtime),
+                    Err(err) => {
+                        eprintln!(
+                            "RemotePlay P2P unavailable; relay fallback remains active: {err}"
+                        );
+                        None
+                    }
+                };
+                Some(ReloadableP2pRuntime {
+                    runtime: Arc::new(Mutex::new(runtime)),
+                })
+            }
+            None => None,
+        };
+
         let relay_runtime = match config.relay {
-            Some(relay_config) => Some(start_unified_relay_runtime(relay_config).await?),
+            Some(relay_config) => {
+                let runtime = match start_unified_relay_runtime(relay_config).await {
+                    Ok(runtime) => Some(runtime),
+                    Err(err) => {
+                        eprintln!("RemotePlay relay unavailable; LAN/P2P remain active: {err}");
+                        None
+                    }
+                };
+                Some(ReloadableRelayRuntime {
+                    runtime: Arc::new(Mutex::new(runtime)),
+                })
+            }
             None => None,
         };
 
@@ -1227,17 +1355,20 @@ impl UnifiedServiceOwner {
                     discovery_config.announcement.virtual_ip = Some(virtual_ip);
                     discovery_config.announcement.scope = DiscoveryScope::Mesh;
                 }
-                if let Some(relay_runtime) = &relay_runtime {
-                    discovery_config
-                        .announce_targets
-                        .push(relay_runtime.discovery_endpoint);
-                    discovery_config
-                        .route_overrides
-                        .push(DiscoveryRouteOverride {
-                            source: relay_runtime.discovery_endpoint,
-                            endpoint: relay_runtime.control_endpoint,
-                            scope: DiscoveryScope::Relay,
-                        });
+                if let Some(relay_state) = &relay_runtime {
+                    let relay_guard = relay_state.runtime.lock().expect("relay runtime lock");
+                    if let Some(relay_runtime) = relay_guard.as_ref() {
+                        discovery_config
+                            .announce_targets
+                            .push(relay_runtime.discovery_endpoint);
+                        discovery_config
+                            .route_overrides
+                            .push(DiscoveryRouteOverride {
+                                source: relay_runtime.discovery_endpoint,
+                                endpoint: relay_runtime.control_endpoint,
+                                scope: DiscoveryScope::Relay,
+                            });
+                    }
                 }
                 let (snapshot_tx, snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
                 let discovery =
@@ -1310,6 +1441,8 @@ impl UnifiedServiceOwner {
             tasks.push(spawn_unified_runtime_reload_task(
                 runtime.clone(),
                 mesh_runtime.clone(),
+                p2p_runtime.clone(),
+                relay_runtime.clone(),
                 discovery_runtime.clone(),
                 reload_config,
             ));
@@ -1319,6 +1452,7 @@ impl UnifiedServiceOwner {
             runtime,
             mesh_runtime,
             mesh_health_rx,
+            p2p_runtime,
             relay_runtime,
             discovery_runtime,
             discovery_snapshot_rx,
@@ -1370,16 +1504,70 @@ impl UnifiedServiceOwner {
             .is_some()
     }
 
+    pub fn owns_p2p(&self) -> bool {
+        self.p2p_runtime
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .runtime
+                    .lock()
+                    .expect("p2p runtime lock")
+                    .as_ref()
+                    .map(|_| ())
+            })
+            .is_some()
+    }
+
+    pub fn p2p_snapshot(&self) -> Option<P2pTunnelSnapshot> {
+        self.p2p_runtime.as_ref().and_then(|state| {
+            state
+                .runtime
+                .lock()
+                .expect("p2p runtime lock")
+                .as_ref()
+                .map(UnifiedP2pRuntime::snapshot)
+        })
+    }
+
     pub fn owns_relay(&self) -> bool {
-        self.relay_runtime.is_some()
+        self.relay_runtime
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .runtime
+                    .lock()
+                    .expect("relay runtime lock")
+                    .as_ref()
+                    .map(|_| ())
+            })
+            .is_some()
     }
 
     pub fn task_count(&self) -> usize {
         self.tasks.len()
             + self
+                .p2p_runtime
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .runtime
+                        .lock()
+                        .expect("p2p runtime lock")
+                        .as_ref()
+                        .map(UnifiedP2pRuntime::task_count)
+                })
+                .unwrap_or(0)
+            + self
                 .relay_runtime
                 .as_ref()
-                .map(UnifiedRelayRuntime::task_count)
+                .and_then(|state| {
+                    state
+                        .runtime
+                        .lock()
+                        .expect("relay runtime lock")
+                        .as_ref()
+                        .map(UnifiedRelayRuntime::task_count)
+                })
                 .unwrap_or(0)
             + self
                 .discovery_runtime
@@ -1705,6 +1893,47 @@ impl Drop for AbortOnDropTask {
     }
 }
 
+async fn start_unified_p2p_runtime(
+    config: UnifiedP2pRuntimeConfig,
+) -> Result<UnifiedP2pRuntime, Box<dyn Error + Send + Sync>> {
+    let rendezvous = tokio::net::lookup_host(config.rendezvous.as_str())
+        .await?
+        .next()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                format!("P2P rendezvous did not resolve: {}", config.rendezvous),
+            )
+        })?;
+    let mut tunnel_config = P2pTunnelConfig::new(
+        config.bind_addr,
+        rendezvous,
+        config.group_id,
+        config.peer_id,
+        config.announcement,
+    )?
+    .with_event_logging(config.log_events);
+    if let Some(target) = config.host_control_target_addr {
+        tunnel_config = tunnel_config.with_local_target_addr(target);
+    }
+    if let Some(target) = config.discovery_target_addr {
+        tunnel_config = tunnel_config.with_discovery_target_addr(target);
+    }
+    let tunnel = BoundP2pTunnel::bind(tunnel_config).await?;
+    let (snapshot_tx, snapshot_rx) = watch::channel(P2pTunnelSnapshot::default());
+    let (cancel_tx, cancel_rx) = broadcast::channel(1);
+    let task = AbortOnDropTask(tokio::spawn(async move {
+        if let Err(err) = tunnel.run(cancel_rx, snapshot_tx).await {
+            eprintln!("Unified P2P tunnel stopped: {err}");
+        }
+    }));
+    Ok(UnifiedP2pRuntime {
+        snapshot_rx,
+        cancel_tx,
+        _task: task,
+    })
+}
+
 async fn start_unified_relay_runtime(
     config: UnifiedRelayRuntimeConfig,
 ) -> Result<UnifiedRelayRuntime, UnifiedServiceOwnerError> {
@@ -1913,6 +2142,8 @@ fn spawn_unified_discovery_runtime(
 fn spawn_unified_runtime_reload_task(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
     mesh_runtime: Option<ReloadableMeshRuntime>,
+    p2p_runtime: Option<ReloadableP2pRuntime>,
+    relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
     mut reload_config: UnifiedRuntimeReloadConfig,
 ) -> AbortOnDropTask {
@@ -1921,6 +2152,8 @@ fn spawn_unified_runtime_reload_task(
             if let Err(err) = reload_unified_runtime_components(
                 runtime.clone(),
                 mesh_runtime.clone(),
+                p2p_runtime.clone(),
+                relay_runtime.clone(),
                 discovery_runtime.clone(),
                 &reload_config.runtime,
             )
@@ -1935,9 +2168,29 @@ fn spawn_unified_runtime_reload_task(
 async fn reload_unified_runtime_components(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
     mesh_runtime: Option<ReloadableMeshRuntime>,
+    p2p_runtime: Option<ReloadableP2pRuntime>,
+    relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
     config: &UnifiedRuntimeConfig,
-) -> Result<(), UnifiedServiceOwnerError> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Stop discovery first so a newly selected device group cannot mix old and new peers.
+    if let Some(discovery_state) = &discovery_runtime {
+        let old_discovery = discovery_state
+            .runtime
+            .lock()
+            .expect("discovery runtime lock")
+            .take();
+        drop(old_discovery);
+        let _ = discovery_state
+            .snapshot_tx
+            .send(DiscoveryPeerSnapshot::default());
+        runtime
+            .lock()
+            .expect("unified runtime lock")
+            .apply_discovery_snapshot(&DiscoveryPeerSnapshot::default());
+    }
+
+    // Legacy EasyTier is opt-in only. Keep its explicit reload path isolated from the product route.
     let virtual_ip = if let Some(mesh_state) = mesh_runtime {
         let old_monitor = mesh_state.monitor.lock().expect("mesh runtime lock").take();
         drop(old_monitor);
@@ -1961,9 +2214,8 @@ async fn reload_unified_runtime_components(
                 let _ = mesh_state.health_tx.send(EasyTierHealthSnapshot::degraded(
                     EasyTierProcessState::NotStarted,
                     None,
-                    format!("EasyTier mesh reload failed: {err}"),
+                    format!("Legacy mesh reload failed: {err}"),
                 ));
-                eprintln!("Unified EasyTier mesh reload failed: {err}");
                 None
             }
         }
@@ -1971,22 +2223,61 @@ async fn reload_unified_runtime_components(
         None
     };
 
-    if let Some(discovery_state) = discovery_runtime {
-        let old_discovery = discovery_state
+    let mut discovery_config = if discovery_runtime.is_some() {
+        Some(build_unified_discovery_config(config, virtual_ip)?)
+    } else {
+        None
+    };
+
+    // Device-group identity is shared by P2P and relay capabilities, so both must rotate together.
+    if let Some(p2p_state) = p2p_runtime {
+        let old_p2p = p2p_state.runtime.lock().expect("p2p runtime lock").take();
+        drop(old_p2p);
+        if config.enable_p2p
+            && let Some(discovery) = discovery_config.as_ref()
+        {
+            match build_unified_p2p_config(config, discovery) {
+                Ok(p2p_config) => match start_unified_p2p_runtime(p2p_config).await {
+                    Ok(new_p2p) => {
+                        *p2p_state.runtime.lock().expect("p2p runtime lock") = Some(new_p2p);
+                    }
+                    Err(err) => eprintln!("RemotePlay P2P reload failed: {err}"),
+                },
+                Err(err) => eprintln!("RemotePlay P2P reload config failed: {err}"),
+            }
+        }
+    }
+
+    if let Some(relay_state) = relay_runtime {
+        let old_relay = relay_state
             .runtime
             .lock()
-            .expect("discovery runtime lock")
+            .expect("relay runtime lock")
             .take();
-        drop(old_discovery);
+        drop(old_relay);
+        match build_unified_relay_config(config) {
+            Ok(Some(relay_config)) => match start_unified_relay_runtime(relay_config).await {
+                Ok(new_relay) => {
+                    if let Some(discovery) = discovery_config.as_mut() {
+                        discovery
+                            .announce_targets
+                            .push(new_relay.discovery_endpoint);
+                        discovery.route_overrides.push(DiscoveryRouteOverride {
+                            source: new_relay.discovery_endpoint,
+                            endpoint: new_relay.control_endpoint,
+                            scope: DiscoveryScope::Relay,
+                        });
+                    }
+                    *relay_state.runtime.lock().expect("relay runtime lock") = Some(new_relay);
+                }
+                Err(err) => eprintln!("RemotePlay relay reload failed: {err}"),
+            },
+            Ok(None) => {}
+            Err(err) => eprintln!("RemotePlay relay reload config failed: {err}"),
+        }
+    }
 
-        let _ = discovery_state
-            .snapshot_tx
-            .send(DiscoveryPeerSnapshot::default());
-        runtime
-            .lock()
-            .expect("unified runtime lock")
-            .apply_discovery_snapshot(&DiscoveryPeerSnapshot::default());
-        let discovery_config = build_unified_discovery_config(config, virtual_ip)?;
+    if let (Some(discovery_state), Some(discovery_config)) = (discovery_runtime, discovery_config) {
         let discovery =
             spawn_unified_discovery_runtime(discovery_config, discovery_state.snapshot_tx.clone());
         *discovery_state
@@ -2090,9 +2381,7 @@ fn spawn_session_timeout_monitor(
                 match runtime.connect_device(&session.peer.device_id, unix_now_ms()) {
                     Ok(request) => Some(request),
                     Err(err) => {
-                        eprintln!(
-                            "Auto-reconnect attempt {reconnect_attempts} failed: {err}"
-                        );
+                        eprintln!("Auto-reconnect attempt {reconnect_attempts} failed: {err}");
                         None
                     }
                 }
@@ -2397,6 +2686,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39118,
             enable_mesh: false,
+            enable_p2p: false,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            p2p_log_events: false,
             relay_endpoint: Some(UnifiedRelayEndpoint::WebSocket(
                 DEFAULT_RELAY_SERVER_URL.to_string(),
             )),
@@ -2440,6 +2733,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39117,
             enable_mesh: false,
+            enable_p2p: false,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            p2p_log_events: false,
             relay_endpoint: None,
             relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2484,6 +2781,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 0,
             enable_mesh: false,
+            enable_p2p: false,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            p2p_log_events: false,
             relay_endpoint: None,
             relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2553,6 +2854,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39119,
             enable_mesh: false,
+            enable_p2p: false,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            p2p_log_events: false,
             relay_endpoint: None,
             relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2607,6 +2912,10 @@ mod tests {
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39120,
             enable_mesh: false,
+            enable_p2p: false,
+            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            p2p_log_events: false,
             relay_endpoint: None,
             relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2775,6 +3084,50 @@ mod tests {
             SocketAddr::from(([192, 168, 1, 50], DEFAULT_CONTROL_PORT))
         );
         assert_eq!(devices[0].scope, DiscoveryScope::Lan);
+    }
+
+    #[test]
+    fn discovery_snapshot_prefers_p2p_over_relay_when_lan_is_unavailable() {
+        let mut runtime = UnifiedAppRuntime::default();
+        let mut cache = DiscoveryPeerCache::new("test-net", "local-device");
+        let p2p_endpoint = SocketAddr::from(([127, 0, 0, 1], 49170));
+        let relay_endpoint = SocketAddr::from(([127, 0, 0, 1], 49171));
+        for (scope, endpoint, source_port) in [
+            (DiscoveryScope::P2p, p2p_endpoint, 48116),
+            (DiscoveryScope::Relay, relay_endpoint, 48117),
+        ] {
+            cache
+                .apply_announcement_with_route_override(
+                    DiscoveryAnnouncement {
+                        network_name: "test-net".to_string(),
+                        device_id: "peer-a".to_string(),
+                        display_name: "Peer A".to_string(),
+                        control_port: DEFAULT_CONTROL_PORT,
+                        virtual_ip: None,
+                        capabilities: DiscoveryCapabilities {
+                            can_stream: true,
+                            can_view: true,
+                            ..DiscoveryCapabilities::default()
+                        },
+                        scope: DiscoveryScope::Lan,
+                        ttl: DEFAULT_PEER_TTL,
+                    },
+                    SocketAddr::from(([127, 0, 0, 1], source_port)),
+                    100,
+                    remote_core::discovery::DiscoveryRouteOverride {
+                        source: SocketAddr::from(([127, 0, 0, 1], source_port)),
+                        endpoint,
+                        scope,
+                    },
+                )
+                .expect("route candidate");
+        }
+
+        runtime.apply_discovery_snapshot(&cache.snapshot());
+        let devices = runtime.streamable_devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].endpoint, p2p_endpoint);
+        assert_eq!(devices[0].scope, DiscoveryScope::P2p);
     }
 
     #[test]

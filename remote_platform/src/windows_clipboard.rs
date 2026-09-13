@@ -1,14 +1,12 @@
 use async_trait::async_trait;
 use protocol::ClipboardBundle;
 use remote_core::clipboard_plane::{ClipboardSyncPolicy, validate_clipboard_bundle};
-use remote_core::{
-    ClipboardBackendCapabilities, ClipboardProvider, PlatformKind,
-};
+use remote_core::{ClipboardBackendCapabilities, ClipboardProvider, PlatformKind};
 use std::error::Error;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{HANDLE, HWND};
 use windows_sys::Win32::System::DataExchange::{
-    CloseClipboard, GetClipboardData, OpenClipboard, CF_UNICODETEXT,
+    CF_UNICODETEXT, CloseClipboard, GetClipboardData, OpenClipboard,
 };
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 
@@ -53,7 +51,9 @@ fn read_unicode_text() -> Option<String> {
         }
         GlobalUnlock(handle.cast());
         CloseClipboard();
-        String::from_utf16(&wide).ok().filter(|text| !text.is_empty())
+        String::from_utf16(&wide)
+            .ok()
+            .filter(|text| !text.is_empty())
     }
 }
 

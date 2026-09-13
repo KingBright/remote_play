@@ -1,12 +1,13 @@
 use protocol::{ChunkInfo, ContentKind, DataEnvelope, DataLane, DataPriority};
 use std::cmp::Ordering;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealtimePacketSpec {
     pub lane: DataLane,
+    pub kind: ContentKind,
     pub stream_id: u32,
     pub sequence_number: u64,
     pub timestamp_ms: u64,
@@ -21,7 +22,8 @@ impl RealtimePacketSpec {
         deadline_ms: u64,
     ) -> Self {
         Self {
-            lane: DataLane::RealtimeVideo,
+            lane: DataLane::Realtime,
+            kind: ContentKind::VideoH265,
             stream_id,
             sequence_number,
             timestamp_ms,
@@ -36,7 +38,8 @@ impl RealtimePacketSpec {
         deadline_ms: u64,
     ) -> Self {
         Self {
-            lane: DataLane::RealtimeAudio,
+            lane: DataLane::Realtime,
+            kind: ContentKind::AudioOpus,
             stream_id,
             sequence_number,
             timestamp_ms,
@@ -46,15 +49,14 @@ impl RealtimePacketSpec {
 }
 
 pub fn make_realtime_envelope(spec: RealtimePacketSpec, payload: Vec<u8>) -> DataEnvelope {
-    let kind = match spec.lane {
-        DataLane::RealtimeVideo => ContentKind::VideoH265,
-        DataLane::RealtimeAudio => ContentKind::AudioOpus,
-        _ => panic!("realtime packet spec requires an audio or video lane"),
-    };
-
+    assert_eq!(
+        spec.lane,
+        DataLane::Realtime,
+        "realtime packet spec requires realtime QoS"
+    );
     let mut envelope = DataEnvelope::new(
         spec.lane,
-        kind,
+        spec.kind,
         spec.stream_id,
         spec.sequence_number,
         spec.timestamp_ms,
@@ -98,9 +100,9 @@ pub fn should_preempt_bulk(realtime: &DataEnvelope, bulk: &DataEnvelope) -> bool
 
 pub fn default_realtime_priority(lane: DataLane) -> DataPriority {
     match lane {
-        DataLane::RealtimeVideo | DataLane::RealtimeAudio => DataPriority::Realtime,
-        DataLane::InteractiveControl => DataPriority::Interactive,
-        DataLane::ReliableObject => DataPriority::Normal,
+        DataLane::Realtime => DataPriority::Realtime,
+        DataLane::Interactive => DataPriority::Interactive,
+        DataLane::Reliable => DataPriority::Normal,
         DataLane::Background => DataPriority::Background,
     }
 }
@@ -137,8 +139,25 @@ pub enum SchedulerPushResult {
     RejectedReliableForCapacity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RealtimeQueueEntry(DataEnvelope);
+
+impl Ord for RealtimeQueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap pops the greatest item; reverse the existing send-order
+        // comparator so highest priority / earliest deadline wins.
+        realtime_send_order(&self.0, &other.0).reverse()
+    }
+}
+
+impl PartialOrd for RealtimeQueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub struct LaneScheduler {
-    realtime: Vec<DataEnvelope>,
+    realtime: BinaryHeap<RealtimeQueueEntry>,
     reliable: VecDeque<DataEnvelope>,
     config: LaneSchedulerConfig,
     dropped_stale_realtime: u64,
@@ -153,7 +172,7 @@ impl LaneScheduler {
 
     pub fn with_config(config: LaneSchedulerConfig) -> Self {
         Self {
-            realtime: Vec::new(),
+            realtime: BinaryHeap::new(),
             reliable: VecDeque::new(),
             config,
             dropped_stale_realtime: 0,
@@ -169,14 +188,20 @@ impl LaneScheduler {
                 return SchedulerPushResult::DroppedStaleRealtime;
             }
 
-            let insert_at = self
-                .realtime
-                .binary_search_by(|queued| realtime_send_order(queued, &envelope))
-                .unwrap_or_else(|index| index);
-            self.realtime.insert(insert_at, envelope);
+            self.realtime.push(RealtimeQueueEntry(envelope));
 
             if self.realtime.len() > self.config.max_realtime_queued {
-                self.realtime.pop();
+                // Overload is exceptional. Keep the most urgent bounded set,
+                // paying O(n) only when capacity is actually exceeded.
+                let mut queued = std::mem::take(&mut self.realtime).into_vec();
+                let worst = queued
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, left), (_, right)| left.cmp(right))
+                    .map(|(index, _)| index)
+                    .expect("over-capacity realtime queue cannot be empty");
+                queued.swap_remove(worst);
+                self.realtime = BinaryHeap::from(queued);
                 self.dropped_realtime_capacity += 1;
                 return SchedulerPushResult::DroppedRealtimeForCapacity;
             }
@@ -192,17 +217,17 @@ impl LaneScheduler {
     }
 
     pub fn pop_next(&mut self, now_ms: u64) -> Option<DataEnvelope> {
-        while let Some(envelope) = self.realtime.first() {
-            if !is_stale(envelope, now_ms) {
+        while let Some(envelope) = self.realtime.peek() {
+            if !is_stale(&envelope.0, now_ms) {
                 break;
             }
 
-            self.realtime.remove(0);
+            self.realtime.pop();
             self.dropped_stale_realtime += 1;
         }
 
-        if !self.realtime.is_empty() {
-            return Some(self.realtime.remove(0));
+        if let Some(envelope) = self.realtime.pop() {
+            return Some(envelope.0);
         }
 
         self.reliable.pop_front()
@@ -496,7 +521,7 @@ mod tests {
             vec![1, 2, 3],
         );
 
-        assert_eq!(envelope.header.lane, DataLane::RealtimeVideo);
+        assert_eq!(envelope.header.lane, DataLane::Realtime);
         assert_eq!(envelope.header.kind, ContentKind::VideoH265);
         assert_eq!(envelope.header.priority, DataPriority::Realtime);
         assert_eq!(envelope.header.deadline_ms, Some(1_016));
@@ -615,7 +640,7 @@ mod tests {
         let earlier =
             make_realtime_envelope(RealtimePacketSpec::video(1, 30, 1_000, 1_020), vec![30]);
         let control = DataEnvelope::new(
-            DataLane::InteractiveControl,
+            DataLane::Interactive,
             ContentKind::Control,
             1,
             1,
