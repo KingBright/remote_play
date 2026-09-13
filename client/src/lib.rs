@@ -1236,6 +1236,8 @@ fn start_file_transfer_runtime_controller(
                                 let provider = MacClipboardProvider::new();
                                 #[cfg(target_os = "linux")]
                                 let provider = LinuxClipboardProvider::new();
+                                #[cfg(target_os = "windows")]
+                                let provider = WindowsClipboardProvider::new();
                                 if let Err(err) = run_clipboard_file_sync(
                                     provider,
                                     bridge_command_tx,
