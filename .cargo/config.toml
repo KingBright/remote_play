@@ -1,2 +1,12 @@
-[build]
+[env]
+# audiopus_sys 0.2.2 vendors an older Opus CMake project. CMake 4.x requires an
+# explicit compatibility floor instead of accepting the project's historic
+# cmake_minimum_required value. Keep this workspace-local so Windows machines
+# do not need to downgrade CMake manually.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+
+[target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]

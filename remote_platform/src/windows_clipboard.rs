@@ -5,10 +5,9 @@ use remote_core::{ClipboardBackendCapabilities, ClipboardProvider, PlatformKind}
 use std::error::Error;
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{HANDLE, HWND};
-use windows_sys::Win32::System::DataExchange::{
-    CF_UNICODETEXT, CloseClipboard, GetClipboardData, OpenClipboard,
-};
+use windows_sys::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
 use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 
 pub struct WindowsClipboardProvider {
     cached: Mutex<Option<ClipboardBundle>>,

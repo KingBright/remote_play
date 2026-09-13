@@ -2883,6 +2883,8 @@ mod tests {
         reload_unified_runtime_components(
             Arc::new(Mutex::new(UnifiedAppRuntime::default())),
             None,
+            None,
+            None,
             Some(discovery_state.clone()),
             &config,
         )
@@ -3407,7 +3409,20 @@ mod tests {
         .await
         .unwrap();
 
-        let relay_runtime = owner.relay_runtime.as_ref().expect("relay runtime");
+        let (relay_discovery_endpoint, relay_control_endpoint) = {
+            let relay_runtime = owner
+                .relay_runtime
+                .as_ref()
+                .expect("relay runtime")
+                .runtime
+                .lock()
+                .expect("relay runtime lock");
+            let relay_runtime = relay_runtime.as_ref().expect("live relay runtime");
+            (
+                relay_runtime.discovery_endpoint,
+                relay_runtime.control_endpoint,
+            )
+        };
         let discovery_runtime = owner
             .discovery_runtime
             .as_ref()
@@ -3431,8 +3446,8 @@ mod tests {
         assert_eq!(
             discovery_runtime.0,
             vec![DiscoveryRouteOverride {
-                source: relay_runtime.discovery_endpoint,
-                endpoint: relay_runtime.control_endpoint,
+                source: relay_discovery_endpoint,
+                endpoint: relay_control_endpoint,
                 scope: DiscoveryScope::Relay,
             }]
         );
@@ -3469,7 +3484,17 @@ mod tests {
         .unwrap();
 
         assert!(owner.owns_relay());
-        assert_eq!(owner.relay_runtime.as_ref().unwrap().task_count(), 2);
+        let relay_task_count = owner
+            .relay_runtime
+            .as_ref()
+            .unwrap()
+            .runtime
+            .lock()
+            .expect("relay runtime lock")
+            .as_ref()
+            .expect("live relay runtime")
+            .task_count();
+        assert_eq!(relay_task_count, 2);
 
         drop(owner);
         let _ = relay_cancel_tx.send(());
