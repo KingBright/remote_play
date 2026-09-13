@@ -1,5 +1,5 @@
 #[cfg(feature = "android")]
-use crate::{RemoteBridgeClient, touch_mapper::TouchMode};
+use crate::{RemoteBridgeClient, configure_device_group_dir, touch_mapper::TouchMode};
 #[cfg(feature = "android")]
 use jni::JNIEnv;
 #[cfg(feature = "android")]
@@ -24,9 +24,20 @@ fn client() -> Arc<RemoteBridgeClient> {
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInit(
-    _env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
+    storage_dir: JString,
 ) -> jboolean {
+    let storage_dir: String = match env.get_string(&storage_dir) {
+        Ok(value) => value.into(),
+        Err(_) => return 0,
+    };
+    let device_group_dir = std::path::PathBuf::from(storage_dir)
+        .join("remote-play")
+        .join("device-group");
+    if configure_device_group_dir(device_group_dir).is_err() && GLOBAL_CLIENT.get().is_none() {
+        return 0;
+    }
     let _ = client();
     1
 }

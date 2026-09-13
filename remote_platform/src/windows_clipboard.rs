@@ -32,7 +32,7 @@ fn read_unicode_text() -> Option<String> {
         if OpenClipboard(HWND::default()) == 0 {
             return None;
         }
-        let handle: HANDLE = GetClipboardData(CF_UNICODETEXT);
+        let handle: HANDLE = GetClipboardData(u32::from(CF_UNICODETEXT));
         if handle.is_null() {
             CloseClipboard();
             return None;

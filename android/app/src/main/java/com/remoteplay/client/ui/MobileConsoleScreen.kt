@@ -77,7 +77,7 @@ fun MobileConsoleScreen(
                     fontWeight = FontWeight.Bold
                 )
 
-                // 磨砂 Mesh 状态胶囊
+                // Private device-group status capsule
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(9999.dp))
@@ -155,7 +155,7 @@ fun MobileConsoleScreen(
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "Discovery: LAN accept-any-network\nControl port: 39271\nSet REMOTE_PLAY_SESSION_PSK for encrypted sessions.",
+                        text = "Routes: LAN → P2P Direct → Relay\nDevice-group scoped discovery\nSet REMOTE_PLAY_SESSION_PSK for encrypted sessions.",
                         color = ColorTextSecondary,
                         fontSize = 12.sp
                     )

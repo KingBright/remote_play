@@ -11,25 +11,46 @@ use remote_core::client_session::{
     AudioIngressEvent, ClientSessionReceiverConfig, SharedHostStats, spawn_client_session_receiver,
 };
 use remote_core::discovery::{
-    DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryPeerSnapshot,
-    DiscoveryRuntimeConfig, DiscoveryScope, run_discovery_runtime,
+    DEFAULT_DISCOVERY_PORT, DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities,
+    DiscoveryPeerSnapshot, DiscoveryRouteOverride, DiscoveryRuntimeConfig, DiscoveryScope,
+    run_discovery_runtime,
 };
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshConfig, default_app_private_mesh_dir};
 use remote_core::net::{UdpMultiplexer, UdpSender};
+use remote_core::p2p::{BoundP2pTunnel, P2pTunnelConfig, derive_p2p_group_id};
 use remote_core::pairing_qr::parse_pairing_qr;
+use remote_core::relay::{
+    BoundWebSocketRelayTunnel, WebSocketRelayTunnelConfig, derive_relay_group_id,
+};
 use remote_core::session_crypto::{
     SessionCrypto, load_session_psk, mac_session_hello, now_unix_ms, random_bytes_16,
 };
 use remote_core::stats::Statistics;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::{broadcast, mpsc, watch};
 use touch_mapper::{TouchMode, TouchStateTracker};
+
+const DEFAULT_P2P_RENDEZVOUS: &str = "p.hackerlife.fun:3478";
+const DEFAULT_RELAY_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
+static BRIDGE_DEVICE_GROUP_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn configure_device_group_dir(path: impl Into<PathBuf>) -> Result<(), PathBuf> {
+    BRIDGE_DEVICE_GROUP_DIR.set(path.into())
+}
+
+fn bridge_device_group_dir() -> PathBuf {
+    BRIDGE_DEVICE_GROUP_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(default_app_private_mesh_dir)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BridgeSessionState {
@@ -153,6 +174,7 @@ pub struct RemoteBridgeClient {
     active_target: Arc<RwLock<Option<String>>>,
     active_session_id: Arc<AtomicU32>,
     next_session_id: AtomicU32,
+    network_reload_tx: mpsc::UnboundedSender<()>,
 }
 
 impl Default for RemoteBridgeClient {
@@ -172,6 +194,7 @@ impl RemoteBridgeClient {
         let (state_tx, state_rx) = watch::channel(BridgeSessionState::Disconnected);
         let (telemetry_tx, telemetry_rx) = watch::channel(BridgeTelemetry::default());
         let (devices_tx, devices_rx) = watch::channel(Vec::new());
+        let (network_reload_tx, network_reload_rx) = mpsc::unbounded_channel();
         let client = Self {
             runtime: OnceLock::new(),
             state_tx,
@@ -191,8 +214,9 @@ impl RemoteBridgeClient {
             active_target: Arc::new(RwLock::new(None)),
             active_session_id: Arc::new(AtomicU32::new(0)),
             next_session_id: AtomicU32::new(1),
+            network_reload_tx,
         };
-        client.ensure_discovery();
+        client.ensure_discovery(network_reload_rx);
         client
     }
 
@@ -261,23 +285,21 @@ impl RemoteBridgeClient {
 
     pub fn join_pairing_payload(&self, raw: &str) -> Result<String, String> {
         let payload = parse_pairing_qr(raw).map_err(|err| err.to_string())?;
-        let store = AppPrivateMeshConfigStore::new(default_app_private_mesh_dir());
+        let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
         let config = MeshConfig::from_invite_code(&payload.invite_code, "RemotePlay Android")
             .map_err(|err| err.to_string())?;
         store.save(&config).map_err(|err| err.to_string())?;
+        let _ = self.network_reload_tx.send(());
         Ok(format!(
             "Joined {} (control port {})",
             config.network_name, payload.control_port
         ))
     }
 
-    fn ensure_discovery(&self) {
+    fn ensure_discovery(&self, network_reload_rx: mpsc::UnboundedReceiver<()>) {
         let devices_tx = self.devices_tx.clone();
-        self.runtime().spawn(async move {
-            if let Err(err) = run_lan_discovery(devices_tx).await {
-                eprintln!("Bridge discovery stopped: {err}");
-            }
-        });
+        self.runtime()
+            .spawn(run_bridge_network_supervisor(devices_tx, network_reload_rx));
     }
 
     fn next_session(&self) -> u32 {
@@ -338,14 +360,6 @@ impl RemoteBridgeClient {
         match result {
             Ok(live) => {
                 *self.live.lock().unwrap() = Some(live);
-                self.devices_tx.send_replace(vec![BridgeDiscoveredDevice {
-                    device_id,
-                    display_name: endpoint.clone(),
-                    endpoint,
-                    scope: "LAN".to_string(),
-                    can_stream: true,
-                    online: true,
-                }]);
             }
             Err(err) => {
                 eprintln!("Bridge connect failed: {err}");
@@ -410,9 +424,16 @@ impl RemoteBridgeClient {
         if !stale {
             return;
         }
-        let Some((device_id, endpoint)) = self.last_connect.lock().unwrap().clone() else {
+        let Some((device_id, previous_endpoint)) = self.last_connect.lock().unwrap().clone() else {
             return;
         };
+        let endpoint = self
+            .devices_rx
+            .borrow()
+            .iter()
+            .find(|device| device.device_id == device_id && device.online && device.can_stream)
+            .map(|device| device.endpoint.clone())
+            .unwrap_or(previous_endpoint);
         let _ = self.state_tx.send(BridgeSessionState::Reconnecting);
         self.stop_live();
         self.connect_locked(device_id, endpoint);
@@ -451,25 +472,7 @@ impl RemoteBridgeClient {
     }
 
     pub fn update_devices_from_snapshot(&self, snapshot: &DiscoveryPeerSnapshot) {
-        let devices: Vec<BridgeDiscoveredDevice> = snapshot
-            .peers()
-            .iter()
-            .map(|peer| BridgeDiscoveredDevice {
-                device_id: peer.announcement.device_id.clone(),
-                display_name: peer.announcement.display_name.clone(),
-                endpoint: peer.endpoint.to_string(),
-                scope: match peer.scope {
-                    DiscoveryScope::Lan => "LAN".to_string(),
-                    DiscoveryScope::P2p => "P2P".to_string(),
-                    DiscoveryScope::Mesh => "Legacy Mesh".to_string(),
-                    DiscoveryScope::Relay => "Relay".to_string(),
-                },
-                can_stream: peer.announcement.capabilities.can_stream,
-                online: true,
-            })
-            .collect();
-
-        let _ = self.devices_tx.send(devices);
+        let _ = self.devices_tx.send(devices_from_snapshot(snapshot));
     }
 }
 
@@ -662,17 +665,59 @@ fn hevc_keyframe(data: &[u8]) -> bool {
     })
 }
 
-async fn run_lan_discovery(
+async fn run_bridge_network_supervisor(
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
+    mut reload_rx: mpsc::UnboundedReceiver<()>,
+) {
+    loop {
+        let (cancel_tx, _) = broadcast::channel(8);
+        let network_devices_tx = devices_tx.clone();
+        let network_cancel_tx = cancel_tx.clone();
+        let mut network_task =
+            tokio::spawn(
+                async move { run_bridge_network(network_devices_tx, network_cancel_tx).await },
+            );
+
+        tokio::select! {
+            reload = reload_rx.recv() => {
+                let _ = cancel_tx.send(());
+                let _ = network_task.await;
+                devices_tx.send_replace(Vec::new());
+                if reload.is_none() {
+                    break;
+                }
+            }
+            result = &mut network_task => {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => eprintln!("Bridge network stopped: {err}"),
+                    Err(err) if !err.is_cancelled() => eprintln!("Bridge network task stopped: {err}"),
+                    Err(_) => {}
+                }
+                devices_tx.send_replace(Vec::new());
+                tokio::select! {
+                    reload = reload_rx.recv() => {
+                        if reload.is_none() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn run_bridge_network(
+    devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
+    cancel_tx: broadcast::Sender<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let device_id = format!(
-        "android-{}",
-        u32::from_be_bytes(random_bytes_16()[..4].try_into().unwrap())
-    );
+    let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
+    let identity = store.load_or_generate("RemotePlay Android")?;
     let announcement = DiscoveryAnnouncement {
-        network_name: "RemotePlay".to_string(),
-        device_id,
-        display_name: "RemotePlay Android".to_string(),
+        network_name: identity.network_name.clone(),
+        device_id: identity.node_id.clone(),
+        display_name: identity.display_name.clone(),
         control_port: 0,
         virtual_ip: None,
         capabilities: DiscoveryCapabilities {
@@ -685,44 +730,210 @@ async fn run_lan_discovery(
         scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
-    let mut config = DiscoveryRuntimeConfig::lan_default(announcement);
-    config.accept_any_network = true;
-    let (events_tx, _events_rx) = mpsc::unbounded_channel();
+    let discovery_target = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DISCOVERY_PORT));
+    let mut discovery_config = DiscoveryRuntimeConfig::lan_default(announcement.clone());
+    discovery_config.accept_any_network = false;
+    let mut network_tasks = Vec::new();
+
+    // Unit tests stay hermetic. Android/native builds use the same public P2P + relay
+    // fabric as the desktop app.
+    if !cfg!(test) {
+        match start_bridge_p2p(
+            &identity,
+            &announcement,
+            discovery_target,
+            cancel_tx.clone(),
+        )
+        .await
+        {
+            Ok(task) => network_tasks.push(task),
+            Err(err) => eprintln!("Bridge P2P unavailable; relay fallback remains active: {err}"),
+        }
+
+        match start_bridge_relay(&identity, discovery_target, cancel_tx.clone()).await {
+            Ok((control_endpoint, discovery_endpoint, tasks)) => {
+                discovery_config.announce_targets.push(discovery_endpoint);
+                discovery_config
+                    .route_overrides
+                    .push(DiscoveryRouteOverride {
+                        source: discovery_endpoint,
+                        endpoint: control_endpoint,
+                        scope: DiscoveryScope::Relay,
+                    });
+                network_tasks.extend(tasks);
+            }
+            Err(err) => eprintln!("Bridge relay unavailable; LAN/P2P remain active: {err}"),
+        }
+    }
+
+    let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let (snapshot_tx, mut snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
-    let (_cancel_tx, cancel_rx) = broadcast::channel(1);
-    let discovery = tokio::spawn(run_discovery_runtime(
-        config,
+    let discovery_cancel_rx = cancel_tx.subscribe();
+    let discovery_task = tokio::spawn(run_discovery_runtime(
+        discovery_config,
         events_tx,
         snapshot_tx,
-        cancel_rx,
+        discovery_cancel_rx,
     ));
-    loop {
-        if snapshot_rx.changed().await.is_err() {
-            break;
+    let event_task = tokio::spawn(async move {
+        while let Some(event) = events_rx.recv().await {
+            if let remote_core::discovery::DiscoveryEvent::Error(err) = event {
+                eprintln!("Bridge discovery: {err}");
+            }
         }
-        let snapshot = snapshot_rx.borrow().clone();
-        let devices: Vec<BridgeDiscoveredDevice> = snapshot
-            .peers()
-            .iter()
-            .filter(|peer| peer.announcement.capabilities.can_stream)
-            .map(|peer| BridgeDiscoveredDevice {
-                device_id: peer.announcement.device_id.clone(),
-                display_name: peer.announcement.display_name.clone(),
-                endpoint: peer.endpoint.to_string(),
-                scope: match peer.scope {
-                    DiscoveryScope::Lan => "LAN".to_string(),
-                    DiscoveryScope::P2p => "P2P".to_string(),
-                    DiscoveryScope::Mesh => "Legacy Mesh".to_string(),
-                    DiscoveryScope::Relay => "Relay".to_string(),
-                },
-                can_stream: peer.announcement.capabilities.can_stream,
-                online: true,
-            })
-            .collect();
-        let _ = devices_tx.send(devices);
+    });
+    let mut cancel_rx = cancel_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            _ = cancel_rx.recv() => break,
+            changed = snapshot_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let snapshot = snapshot_rx.borrow().clone();
+                devices_tx.send_replace(devices_from_snapshot(&snapshot));
+            }
+        }
     }
-    discovery.abort();
+
+    let _ = cancel_tx.send(());
+    discovery_task.abort();
+    event_task.abort();
+    let _ = discovery_task.await;
+    let _ = event_task.await;
+    for task in network_tasks {
+        task.abort();
+        let _ = task.await;
+    }
     Ok(())
+}
+
+async fn start_bridge_p2p(
+    identity: &MeshConfig,
+    announcement: &DiscoveryAnnouncement,
+    discovery_target: SocketAddr,
+    cancel_tx: broadcast::Sender<()>,
+) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
+    let rendezvous_name = std::env::var("REMOTE_PLAY_P2P_RENDEZVOUS")
+        .unwrap_or_else(|_| DEFAULT_P2P_RENDEZVOUS.to_string());
+    let rendezvous = tokio::net::lookup_host(rendezvous_name.as_str())
+        .await?
+        .next()
+        .ok_or_else(|| std::io::Error::other("P2P rendezvous did not resolve"))?;
+    let group_id = derive_p2p_group_id(
+        &identity.network_name,
+        identity.network_secret.expose_secret(),
+    )?;
+    let tunnel = BoundP2pTunnel::bind(
+        P2pTunnelConfig::new(
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            rendezvous,
+            group_id,
+            identity.node_id.clone(),
+            announcement.encode()?,
+        )?
+        .with_discovery_target_addr(discovery_target),
+    )
+    .await?;
+    let (snapshot_tx, _snapshot_rx) = watch::channel(Default::default());
+    Ok(tokio::spawn(async move {
+        if let Err(err) = tunnel.run(cancel_tx.subscribe(), snapshot_tx).await {
+            eprintln!("Bridge P2P tunnel stopped: {err}");
+        }
+    }))
+}
+
+async fn start_bridge_relay(
+    identity: &MeshConfig,
+    discovery_target: SocketAddr,
+    cancel_tx: broadcast::Sender<()>,
+) -> Result<
+    (SocketAddr, SocketAddr, Vec<tokio::task::JoinHandle<()>>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let relay_url = std::env::var("REMOTE_PLAY_RELAY_SERVER_ADDR")
+        .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
+    let control_group = derive_relay_group_id(
+        &identity.network_name,
+        identity.network_secret.expose_secret(),
+        "control",
+    )?;
+    let discovery_group = derive_relay_group_id(
+        &identity.network_name,
+        identity.network_secret.expose_secret(),
+        "discovery",
+    )?;
+    let control_tunnel = BoundWebSocketRelayTunnel::bind(WebSocketRelayTunnelConfig::new(
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        relay_url.clone(),
+        control_group,
+        identity.node_id.clone(),
+    )?)
+    .await?;
+    let control_endpoint = control_tunnel.local_addr()?;
+    let discovery_tunnel = BoundWebSocketRelayTunnel::bind(
+        WebSocketRelayTunnelConfig::new(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_url,
+            discovery_group,
+            identity.node_id.clone(),
+        )?
+        .with_local_target_addr(discovery_target),
+    )
+    .await?;
+    let discovery_endpoint = discovery_tunnel.local_addr()?;
+    let control_cancel_tx = cancel_tx.clone();
+    let discovery_cancel_tx = cancel_tx;
+    let tasks = vec![
+        tokio::spawn(async move {
+            if let Err(err) = control_tunnel.run(control_cancel_tx.subscribe()).await {
+                eprintln!("Bridge relay control tunnel stopped: {err}");
+            }
+        }),
+        tokio::spawn(async move {
+            if let Err(err) = discovery_tunnel.run(discovery_cancel_tx.subscribe()).await {
+                eprintln!("Bridge relay discovery tunnel stopped: {err}");
+            }
+        }),
+    ];
+    Ok((control_endpoint, discovery_endpoint, tasks))
+}
+
+fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscoveredDevice> {
+    let mut selected = BTreeMap::<String, (u8, BridgeDiscoveredDevice)>::new();
+    for peer in snapshot.peers() {
+        if !peer.announcement.capabilities.can_stream || peer.scope == DiscoveryScope::Mesh {
+            continue;
+        }
+        let rank = match peer.scope {
+            DiscoveryScope::Lan => 0,
+            DiscoveryScope::P2p => 1,
+            DiscoveryScope::Relay => 2,
+            DiscoveryScope::Mesh => continue,
+        };
+        let device = BridgeDiscoveredDevice {
+            device_id: peer.announcement.device_id.clone(),
+            display_name: peer.announcement.display_name.clone(),
+            endpoint: peer.endpoint.to_string(),
+            scope: match peer.scope {
+                DiscoveryScope::Lan => "LAN",
+                DiscoveryScope::P2p => "P2P Direct",
+                DiscoveryScope::Relay => "Relay",
+                DiscoveryScope::Mesh => continue,
+            }
+            .to_string(),
+            can_stream: true,
+            online: true,
+        };
+        match selected.get(&device.device_id) {
+            Some((existing_rank, _)) if *existing_rank <= rank => {}
+            _ => {
+                selected.insert(device.device_id.clone(), (rank, device));
+            }
+        }
+    }
+    selected.into_values().map(|(_, device)| device).collect()
 }
 
 async fn maybe_authenticate(
@@ -796,6 +1007,49 @@ mod tests {
         assert_eq!(telemetry.fps, 0.0);
         assert_eq!(telemetry.latency_ms, 0.0);
         assert_eq!(telemetry.video_bitrate_kbps, 0);
+    }
+
+    #[test]
+    fn bridge_devices_choose_lan_then_p2p_then_relay() {
+        let mut cache = remote_core::discovery::DiscoveryPeerCache::new("group", "android");
+        let announcement = |scope, control_port| DiscoveryAnnouncement {
+            network_name: "group".to_string(),
+            device_id: "host-a".to_string(),
+            display_name: "Host A".to_string(),
+            control_port,
+            virtual_ip: None,
+            capabilities: DiscoveryCapabilities {
+                can_stream: true,
+                can_view: true,
+                ..DiscoveryCapabilities::default()
+            },
+            scope,
+            ttl: DEFAULT_PEER_TTL,
+        };
+        cache.apply_announcement(
+            announcement(DiscoveryScope::Relay, 46001),
+            "127.0.0.1:46000".parse().unwrap(),
+            1,
+        );
+        cache.apply_announcement(
+            announcement(DiscoveryScope::P2p, 45001),
+            "127.0.0.1:45000".parse().unwrap(),
+            2,
+        );
+        let devices = devices_from_snapshot(&cache.snapshot());
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].scope, "P2P Direct");
+        assert_eq!(devices[0].endpoint, "127.0.0.1:45001");
+
+        cache.apply_announcement(
+            announcement(DiscoveryScope::Lan, 39271),
+            "192.168.1.20:38117".parse().unwrap(),
+            3,
+        );
+        let devices = devices_from_snapshot(&cache.snapshot());
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].scope, "LAN");
+        assert_eq!(devices[0].endpoint, "192.168.1.20:39271");
     }
 
     #[test]

@@ -40,10 +40,10 @@ RemotePlay discovery uses the compact `RPDISC1` UDP announcement on port `38117`
 The discovery cache keeps multiple route candidates for the same device. The unified app ranks them:
 
 ```text
-LAN < P2P direct < legacy mesh < Relay
+LAN < P2P direct < Relay
 ```
 
-The legacy-mesh rank exists only for old/manual builds. EasyTier is disabled by default and is no longer bundled into the macOS product package.
+Legacy EasyTier code is excluded from the product route and macOS package; route selection never needs it for normal operation.
 
 ## P2P Rendezvous on bw
 

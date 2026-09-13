@@ -21,6 +21,7 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RemotePlayClient.initialize(filesDir.absolutePath)
 
         setContent {
             val scope = rememberCoroutineScope()

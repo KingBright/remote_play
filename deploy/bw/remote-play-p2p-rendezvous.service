@@ -5,8 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=nobody
-Group=nobody
+DynamicUser=yes
 Environment=REMOTE_PLAY_P2P_RENDEZVOUS_BIND_ADDR=0.0.0.0:3478
 Environment=REMOTE_PLAY_P2P_MAX_PEERS_PER_GROUP=16
 Environment=REMOTE_PLAY_P2P_MAX_TOTAL_PEERS=4096
@@ -23,6 +22,7 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

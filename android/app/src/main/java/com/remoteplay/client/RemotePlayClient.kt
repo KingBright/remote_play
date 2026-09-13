@@ -59,7 +59,6 @@ object RemotePlayClient {
     init {
         try {
             System.loadLibrary("remote_play_android")
-            nativeInit()
             isNativeLoaded = true
         } catch (e: UnsatisfiedLinkError) {
             isNativeLoaded = false
@@ -68,6 +67,13 @@ object RemotePlayClient {
 
     val nativeAvailable: Boolean
         get() = isNativeLoaded
+
+    fun initialize(storageDir: String): Boolean {
+        if (!isNativeLoaded) return false
+        val initialized = nativeInit(storageDir)
+        isNativeLoaded = initialized
+        return initialized
+    }
 
     fun connect(deviceId: String, endpoint: String) {
         _sessionState.value = SessionState.CONNECTING
@@ -194,7 +200,7 @@ object RemotePlayClient {
         return _telemetry.value
     }
 
-    private external fun nativeInit(): Boolean
+    private external fun nativeInit(storageDir: String): Boolean
     private external fun nativeConnect(deviceId: String, endpoint: String)
     private external fun nativeDisconnect()
     private external fun nativeSendTouch(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float)

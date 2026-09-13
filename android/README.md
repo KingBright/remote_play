@@ -21,7 +21,9 @@ The verified macOS build used HotSpot JDK 17 and these Gradle resource limits:
   :app:assembleDebug :app:lintDebug
 ```
 
-Connect using a discovered host or enter `IP:port`; the default host port is 39271. An Android emulator reaches its development host at `10.0.2.2:39271`. `127.0.0.1` refers to the Android device itself. The current native bridge uses UDP and HEVC. HEVC initialization failure is displayed explicitly; AVC requires sender-side codec negotiation and is not an automatic decoder fallback.
+Pair Android into the same RemotePlay device group with the QR flow, then connect using a discovered host or enter `IP:port`. Discovery and routing use the same product order as desktop: **LAN direct → RemotePlay P2P direct → NAS Relay**. Only one best route is exposed per device, and reconnect resolves the latest best endpoint so a lost LAN route can fall through to P2P or Relay without pinning the stale address. Device-group metadata and secret are stored under the app-private `filesDir/remote-play/device-group` directory.
+
+The default host port is 39271. An Android emulator reaches its development host at `10.0.2.2:39271`; `127.0.0.1` refers to the Android device itself. The native bridge uses UDP for LAN/P2P and local UDP tunnel endpoints for WSS Relay. The media path remains HEVC. HEVC initialization failure is displayed explicitly; AVC requires sender-side codec negotiation and is not an automatic decoder fallback.
 
 `Decoded N FPS` counts codec output buffers released to the Surface during a monotonic 500 ms sampling window. It does not measure display scanout or end-to-end latency. Unsupported file, microphone and clipboard controls are marked unavailable, and unmeasured channel rates are not shown as zero.
 
