@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0d10">
+<title>RemotePlay · Android</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0c0f;--card:#12161c;--muted:#88919d;--line:#242a33;--text:#f5f7fa;--accent:#7ee787;--accent2:#5da9ff}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#17283b 0,transparent 34%),var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:860px;margin:auto;padding:64px 22px 80px}.eyebrow{color:var(--accent);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px}.hero{font-size:clamp(42px,9vw,76px);line-height:.96;margin:14px 0 20px;letter-spacing:-.055em}.lead{max-width:620px;color:#b8c0ca;font-size:18px}.card{margin-top:34px;background:color-mix(in srgb,var(--card) 92%,transparent);border:1px solid var(--line);border-radius:22px;padding:24px;box-shadow:0 18px 70px #0007}.top{display:flex;gap:18px;align-items:flex-start;justify-content:space-between}.version{font-size:28px;font-weight:760}.meta{color:var(--muted);margin-top:4px}.button{display:inline-flex;align-items:center;justify-content:center;background:var(--text);color:#090b0e;text-decoration:none;border-radius:14px;padding:13px 18px;font-weight:760;white-space:nowrap}.button:hover{transform:translateY(-1px)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:22px}.kv{background:#0c1015;border:1px solid var(--line);border-radius:14px;padding:13px}.k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.v{margin-top:3px;word-break:break-all}.notes{margin:20px 0 0;padding-left:20px;color:#cbd2da}.history{margin-top:28px}.history h2{font-size:17px}.release{display:flex;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding:14px 0}.release a{color:var(--accent2);text-decoration:none}.foot{margin-top:28px;color:var(--muted);font-size:13px}@media(max-width:640px){.wrap{padding-top:40px}.top{display:block}.button{width:100%;margin-top:18px}.grid{grid-template-columns:1fr}.hero{font-size:52px}}
+</style>
+</head>
+<body><main class="wrap">
+<div class="eyebrow">RemotePlay / Android</div>
+<h1 class="hero">你的机器，<br>就在手边。</h1>
+<p class="lead">RemotePlay 自研低延迟远程桌面客户端。连接策略始终优先 LAN，其次 P2P 直连，只有直连不可用时才回退到 NAS Relay。</p>
+<section class="card" id="current"><div>正在读取版本信息…</div></section>
+<section class="history"><h2>历史版本</h2><div id="history">正在读取…</div></section>
+<div class="foot">APK 为 Android ARM64 调试构建。安装前可核对页面显示的 SHA-256。</div>
+</main>
+<script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const mb=n=>(n/1024/1024).toFixed(1)+' MB';
+Promise.all([fetch('release.json',{cache:'no-store'}).then(r=>r.json()),fetch('versions.json',{cache:'no-store'}).then(r=>r.json())]).then(([r,v])=>{
+ document.getElementById('current').innerHTML=`<div class="top"><div><div class="eyebrow">Latest ${esc(r.channel)}</div><div class="version">v${esc(r.version)} <span style="color:#66707c;font-size:16px">${esc(r.commit)}</span></div><div class="meta">发布于 ${esc(r.published_at)} · Android ARM64</div></div><a class="button" href="${esc(r.url)}">下载 APK</a></div><div class="grid"><div class="kv"><div class="k">文件大小</div><div class="v">${mb(r.size_bytes)}</div></div><div class="kv"><div class="k">Version Code</div><div class="v">${esc(r.version_code)}</div></div><div class="kv"><div class="k">最低 SDK</div><div class="v">${esc(r.min_sdk)}</div></div><div class="kv"><div class="k">SHA-256</div><div class="v" style="font:12px ui-monospace,SFMono-Regular,monospace">${esc(r.sha256)}</div></div></div><ul class="notes">${r.notes.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`;
+ document.getElementById('history').innerHTML=v.releases.map(x=>`<div class="release"><div><strong>v${esc(x.version)}</strong> · ${esc(x.commit)}<div class="meta">${esc(x.published_at)} · ${mb(x.size_bytes)}</div></div><a href="${encodeURI(x.file)}">下载</a></div>`).join('')||'<div class="meta">暂无历史版本</div>';
+}).catch(e=>{document.getElementById('current').textContent='版本信息加载失败：'+e;});
+</script></body></html>

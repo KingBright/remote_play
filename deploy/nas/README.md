@@ -43,3 +43,23 @@ This workspace may configure a shared Cargo target directory. Use `cargo metadat
 5. Verify `news.hackerlife.fun:8443`, `nexus.service`, and the Caddy `8443` listener again.
 
 Never store the Cloudflare token in this repository or directly in the Caddyfile. Keep it in a root-readable environment file referenced by `caddy.service`, and rotate any token that has appeared in logs or command output.
+
+## Android Release Landing Page
+
+The same `relay.hackerlife.fun` TLS endpoint also serves a read-only Android release area without changing the relay protocol path:
+
+- Landing page: `https://relay.hackerlife.fun:8443/download/`
+- Current release metadata: `https://relay.hackerlife.fun:8443/download/release.json`
+- Historical release index: `https://relay.hackerlife.fun:8443/download/versions.json`
+- Stable latest alias: `https://relay.hackerlife.fun:8443/download/RemotePlay-Android-latest.apk`
+- Immutable versioned APKs live under `/opt/remoteplay/downloads/` on the NAS.
+
+`release.json` is the machine-readable latest-version contract intended for future in-app update checks. `versions.json` retains every published version entry. APK names include both Android `versionName` and the Git short commit, so rebuilding the same semantic version never overwrites a previous artifact.
+
+Publish an already-built APK with:
+
+```bash
+./scripts/publish_android_nas.sh android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+The publisher uploads the versioned APK first, verifies SHA-256 on the NAS, merges the historical index, atomically replaces `release.json` and the `latest` symlink, then downloads the public APK again and verifies its checksum. Existing versioned artifacts are never replaced unless their bytes are identical.

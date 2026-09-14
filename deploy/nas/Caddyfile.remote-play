@@ -1,5 +1,40 @@
 relay.hackerlife.fun {
 	import cloudflare_dns
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	@download_without_slash path /download
+	redir @download_without_slash /download/ 308
+
+	@release_metadata path /download/ /download/index.html /download/release.json /download/versions.json
+	header @release_metadata {
+		>Cache-Control "no-store, max-age=0"
+		>Pragma no-cache
+		>Expires 0
+	}
+
+	@android_apk path /download/*.apk
+	header @android_apk {
+		>Content-Type application/vnd.android.package-archive
+		>Content-Disposition attachment
+	}
+
+	@versioned_apk path_regexp remoteplay_versioned ^/download/RemotePlay-Android-[0-9].*\.apk$
+	header @versioned_apk Cache-Control "public, max-age=31536000, immutable"
+
+	@latest_apk path /download/RemotePlay-Android-latest.apk
+	header @latest_apk Cache-Control "no-cache, max-age=0"
+
+	handle_path /download/* {
+		root * /opt/remoteplay/downloads
+		file_server
+	}
 
 	handle /healthz {
 		respond "RemotePlay relay ready" 200
