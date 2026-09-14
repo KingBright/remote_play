@@ -9,13 +9,7 @@ use remote_core::discovery::{
     DiscoveryPeerSnapshot, DiscoveryRouteOverride, DiscoveryRuntimeConfig, DiscoveryScope,
     REMOTE_PLAY_DISCOVERY_ENV, discovery_port_from_env, run_discovery_runtime,
 };
-use remote_core::mesh::{
-    AppPrivateMeshConfigStore, EASYTIER_SIDECAR_LOG_FILE_NAME, EasyTierBinaryLocator,
-    EasyTierHealthMonitorConfig, EasyTierHealthMonitorHandle, EasyTierHealthSnapshot,
-    EasyTierProcessState, EasyTierSidecarManager, EasyTierSidecarRuntimeError, MeshStoreError,
-    REMOTE_PLAY_MESH_ENV, default_app_private_mesh_dir, spawn_easytier_health_monitor,
-    spawn_easytier_static_health_monitor,
-};
+use remote_core::mesh::{AppPrivateMeshConfigStore, MeshStoreError, default_app_private_mesh_dir};
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
 use remote_core::p2p::{
     BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot, derive_p2p_group_id,
@@ -351,7 +345,6 @@ impl Default for UnifiedAppRuntime {
 #[derive(Default)]
 pub struct UnifiedServiceOwnerConfig {
     pub app: UnifiedAppConfig,
-    pub mesh: Option<UnifiedMeshRuntimeConfig>,
     pub p2p: Option<UnifiedP2pRuntimeConfig>,
     pub relay: Option<UnifiedRelayRuntimeConfig>,
     pub discovery: Option<DiscoveryRuntimeConfig>,
@@ -568,14 +561,6 @@ impl UnifiedSideServiceControls {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnifiedMeshRuntimeConfig {
-    pub display_name: String,
-    pub mesh_dir: PathBuf,
-    pub locator: EasyTierBinaryLocator,
-    pub health_config: Option<EasyTierHealthMonitorConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnifiedP2pRuntimeConfig {
     pub rendezvous: String,
     pub group_id: String,
@@ -646,17 +631,6 @@ impl UnifiedRelayRuntimeConfig {
     }
 }
 
-impl UnifiedMeshRuntimeConfig {
-    pub fn app_private(display_name: impl Into<String>) -> Self {
-        Self {
-            display_name: display_name.into(),
-            mesh_dir: default_app_private_mesh_dir(),
-            locator: EasyTierBinaryLocator::from_environment(),
-            health_config: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnifiedRuntimeConfig {
     pub display_name: String,
@@ -664,7 +638,6 @@ pub struct UnifiedRuntimeConfig {
     pub host_bind_addr: SocketAddr,
     pub client_bind_addr: SocketAddr,
     pub discovery_port: u16,
-    pub enable_mesh: bool,
     pub enable_p2p: bool,
     pub p2p_rendezvous: String,
     pub p2p_bind_addr: SocketAddr,
@@ -691,7 +664,6 @@ impl UnifiedRuntimeConfig {
             host_bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_CONTROL_PORT)),
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             discovery_port: remote_core::discovery::DEFAULT_DISCOVERY_PORT,
-            enable_mesh: false,
             enable_p2p: true,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -726,8 +698,6 @@ impl UnifiedRuntimeConfig {
         config.client_bind_addr =
             env_socket_addr("REMOTE_PLAY_CLIENT_BIND_ADDR", config.client_bind_addr)?;
         config.discovery_port = discovery_port_from_env()?;
-        // Legacy EasyTier is opt-in only. The product route is LAN -> RemotePlay P2P -> RemotePlay Relay.
-        config.enable_mesh = env_flag_or(REMOTE_PLAY_MESH_ENV, false);
         config.enable_p2p = env_flag_or(REMOTE_PLAY_P2P_ENV, true);
         if let Ok(value) = std::env::var(REMOTE_PLAY_P2P_RENDEZVOUS_ENV)
             && !value.trim().is_empty()
@@ -836,12 +806,13 @@ pub async fn start_unified_runtime(
     let mut viewer_frame = None;
     let mut viewer_media = None;
     let mut viewer_media_status = UnifiedViewerMediaStatus::Disabled;
-    let (reload_tx, reload_rx) = if config.enable_mesh || config.enable_discovery {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
+    let (reload_tx, reload_rx) =
+        if config.enable_discovery || config.enable_p2p || config.relay_endpoint.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
     let mesh_pairing = match MeshPairingControl::load_or_create(
         config.mesh_dir.clone(),
         config.display_name.clone(),
@@ -857,19 +828,10 @@ pub async fn start_unified_runtime(
         }
     };
 
-    if config.enable_mesh {
-        owner_config.mesh = Some(UnifiedMeshRuntimeConfig {
-            display_name: config.display_name.clone(),
-            mesh_dir: config.mesh_dir.clone(),
-            locator: EasyTierBinaryLocator::from_environment(),
-            health_config: None,
-        });
-    }
-
     owner_config.relay = build_unified_relay_config(&config)?;
 
     if config.enable_discovery {
-        let discovery_config = build_unified_discovery_config(&config, None)?;
+        let discovery_config = build_unified_discovery_config(&config)?;
         if config.enable_p2p {
             owner_config.p2p = Some(build_unified_p2p_config(&config, &discovery_config)?);
         }
@@ -1029,7 +991,6 @@ fn build_client_side_services(
 
 fn build_unified_discovery_config(
     config: &UnifiedRuntimeConfig,
-    virtual_ip: Option<IpAddr>,
 ) -> Result<DiscoveryRuntimeConfig, MeshStoreError> {
     let mesh_store = AppPrivateMeshConfigStore::new(&config.mesh_dir);
     let mesh_config = mesh_store.load_or_generate(&config.display_name)?;
@@ -1050,13 +1011,9 @@ fn build_unified_discovery_config(
         device_id: mesh_config.node_id,
         display_name: mesh_config.display_name,
         control_port,
-        virtual_ip,
+        virtual_ip: None,
         capabilities,
-        scope: if virtual_ip.is_some() {
-            DiscoveryScope::Mesh
-        } else {
-            DiscoveryScope::Lan
-        },
+        scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
     Ok(DiscoveryRuntimeConfig::lan_on_port(
@@ -1190,12 +1147,6 @@ fn env_flag_or(name: &str, default: bool) -> bool {
 }
 
 #[derive(Clone)]
-struct ReloadableMeshRuntime {
-    monitor: Arc<Mutex<Option<EasyTierHealthMonitorHandle>>>,
-    health_tx: watch::Sender<EasyTierHealthSnapshot>,
-}
-
-#[derive(Clone)]
 struct ReloadableDiscoveryRuntime {
     runtime: Arc<Mutex<Option<UnifiedDiscoveryRuntime>>>,
     snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
@@ -1275,8 +1226,6 @@ impl Drop for UnifiedDiscoveryRuntime {
 
 pub struct UnifiedServiceOwner {
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
-    mesh_runtime: Option<ReloadableMeshRuntime>,
-    mesh_health_rx: Option<watch::Receiver<EasyTierHealthSnapshot>>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
@@ -1298,22 +1247,6 @@ impl UnifiedServiceOwner {
             .client_receiver
             .as_ref()
             .map(|receiver| receiver.active_session_id.clone());
-        let (mesh_runtime, mesh_health_rx) = match config.mesh {
-            Some(mesh_config) => {
-                let monitor = start_unified_mesh_monitor(mesh_config).await?;
-                let initial_snapshot = monitor.snapshot_rx.borrow().clone();
-                let (health_tx, health_rx) = watch::channel(initial_snapshot);
-                spawn_mesh_health_bridge(monitor.snapshot_rx.clone(), health_tx.clone());
-                (
-                    Some(ReloadableMeshRuntime {
-                        monitor: Arc::new(Mutex::new(Some(monitor))),
-                        health_tx,
-                    }),
-                    Some(health_rx),
-                )
-            }
-            None => (None, None),
-        };
 
         let p2p_runtime = match config.p2p {
             Some(p2p_config) => {
@@ -1351,13 +1284,6 @@ impl UnifiedServiceOwner {
 
         let (discovery_runtime, discovery_snapshot_rx) = match config.discovery {
             Some(mut discovery_config) => {
-                if discovery_config.announcement.virtual_ip.is_none()
-                    && let Some(mesh_health_rx) = &mesh_health_rx
-                    && let Some(virtual_ip) = mesh_health_rx.borrow().virtual_ip
-                {
-                    discovery_config.announcement.virtual_ip = Some(virtual_ip);
-                    discovery_config.announcement.scope = DiscoveryScope::Mesh;
-                }
                 if let Some(relay_state) = &relay_runtime {
                     let relay_guard = relay_state.runtime.lock().expect("relay runtime lock");
                     if let Some(relay_runtime) = relay_guard.as_ref() {
@@ -1443,7 +1369,6 @@ impl UnifiedServiceOwner {
         if let Some(reload_config) = config.runtime_reload {
             tasks.push(spawn_unified_runtime_reload_task(
                 runtime.clone(),
-                mesh_runtime.clone(),
                 p2p_runtime.clone(),
                 relay_runtime.clone(),
                 discovery_runtime.clone(),
@@ -1453,8 +1378,6 @@ impl UnifiedServiceOwner {
 
         Ok(Self {
             runtime,
-            mesh_runtime,
-            mesh_health_rx,
             p2p_runtime,
             relay_runtime,
             discovery_runtime,
@@ -1471,26 +1394,8 @@ impl UnifiedServiceOwner {
         self.runtime.clone()
     }
 
-    pub fn mesh_health_rx(&self) -> Option<watch::Receiver<EasyTierHealthSnapshot>> {
-        self.mesh_health_rx.clone()
-    }
-
     pub fn discovery_snapshot_rx(&self) -> Option<watch::Receiver<DiscoveryPeerSnapshot>> {
         self.discovery_snapshot_rx.clone()
-    }
-
-    pub fn owns_mesh(&self) -> bool {
-        self.mesh_runtime
-            .as_ref()
-            .and_then(|state| {
-                state
-                    .monitor
-                    .lock()
-                    .expect("mesh runtime lock")
-                    .as_ref()
-                    .map(|_| ())
-            })
-            .is_some()
     }
 
     pub fn owns_discovery(&self) -> bool {
@@ -1829,7 +1734,6 @@ impl Drop for UnifiedServiceOwner {
 #[derive(Debug)]
 pub enum UnifiedServiceOwnerError {
     MeshStore(MeshStoreError),
-    MeshRuntime(EasyTierSidecarRuntimeError),
     RelayConfig(RelayConfigError),
     RelayRuntime(std::io::Error),
 }
@@ -1839,9 +1743,6 @@ impl fmt::Display for UnifiedServiceOwnerError {
         match self {
             UnifiedServiceOwnerError::MeshStore(err) => {
                 write!(f, "mesh config initialization failed: {err}")
-            }
-            UnifiedServiceOwnerError::MeshRuntime(err) => {
-                write!(f, "mesh sidecar startup failed: {err}")
             }
             UnifiedServiceOwnerError::RelayConfig(err) => {
                 write!(f, "relay tunnel configuration failed: {err}")
@@ -1857,7 +1758,6 @@ impl Error for UnifiedServiceOwnerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             UnifiedServiceOwnerError::MeshStore(err) => Some(err),
-            UnifiedServiceOwnerError::MeshRuntime(err) => Some(err),
             UnifiedServiceOwnerError::RelayConfig(err) => Some(err),
             UnifiedServiceOwnerError::RelayRuntime(err) => Some(err),
         }
@@ -1867,12 +1767,6 @@ impl Error for UnifiedServiceOwnerError {
 impl From<MeshStoreError> for UnifiedServiceOwnerError {
     fn from(value: MeshStoreError) -> Self {
         Self::MeshStore(value)
-    }
-}
-
-impl From<EasyTierSidecarRuntimeError> for UnifiedServiceOwnerError {
-    fn from(value: EasyTierSidecarRuntimeError) -> Self {
-        Self::MeshRuntime(value)
     }
 }
 
@@ -2044,65 +1938,6 @@ fn relay_discovery_group(group_id: &str) -> String {
     format!("{group_id}:discovery")
 }
 
-async fn start_unified_mesh_monitor(
-    config: UnifiedMeshRuntimeConfig,
-) -> Result<EasyTierHealthMonitorHandle, UnifiedServiceOwnerError> {
-    let store = AppPrivateMeshConfigStore::new(config.mesh_dir);
-    let mesh_config = store.load_or_generate(config.display_name)?;
-    let mut manager = EasyTierSidecarManager::from_locator(mesh_config, &config.locator)?;
-    manager.set_log_file_path(store.root_dir().join(EASYTIER_SIDECAR_LOG_FILE_NAME));
-    let expected_virtual_ip = manager.config().virtual_ipv4.map(IpAddr::V4);
-    let health_config = config.health_config.unwrap_or_default();
-    if use_system_mesh_daemon() {
-        return Ok(spawn_easytier_static_health_monitor(
-            EasyTierHealthSnapshot::from_process_and_probe(
-                EasyTierProcessState::Running,
-                expected_virtual_ip,
-            ),
-        ));
-    }
-
-    manager.start().await?;
-    Ok(spawn_easytier_health_monitor(
-        manager,
-        health_config,
-        expected_virtual_ip,
-    ))
-}
-
-fn use_system_mesh_daemon() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        macos_mesh_daemon_plist_path().is_file()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_mesh_daemon_plist_path() -> PathBuf {
-    let label = std::env::var("REMOTE_PLAY_MESH_DAEMON_LABEL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "com.remoteplay.mesh".to_string());
-    PathBuf::from("/Library/LaunchDaemons").join(format!("{label}.plist"))
-}
-
-fn spawn_mesh_health_bridge(
-    mut source_rx: watch::Receiver<EasyTierHealthSnapshot>,
-    target_tx: watch::Sender<EasyTierHealthSnapshot>,
-) {
-    tokio::spawn(async move {
-        let _ = target_tx.send(source_rx.borrow().clone());
-        while source_rx.changed().await.is_ok() {
-            let _ = target_tx.send(source_rx.borrow().clone());
-        }
-    });
-}
-
 fn spawn_unified_discovery_runtime(
     discovery_config: DiscoveryRuntimeConfig,
     snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
@@ -2138,7 +1973,6 @@ fn spawn_unified_discovery_runtime(
 
 fn spawn_unified_runtime_reload_task(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
-    mesh_runtime: Option<ReloadableMeshRuntime>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
@@ -2148,7 +1982,6 @@ fn spawn_unified_runtime_reload_task(
         while reload_config.reload_rx.recv().await.is_some() {
             if let Err(err) = reload_unified_runtime_components(
                 runtime.clone(),
-                mesh_runtime.clone(),
                 p2p_runtime.clone(),
                 relay_runtime.clone(),
                 discovery_runtime.clone(),
@@ -2164,7 +1997,6 @@ fn spawn_unified_runtime_reload_task(
 
 async fn reload_unified_runtime_components(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
-    mesh_runtime: Option<ReloadableMeshRuntime>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
@@ -2187,41 +2019,8 @@ async fn reload_unified_runtime_components(
             .apply_discovery_snapshot(&DiscoveryPeerSnapshot::default());
     }
 
-    // Legacy EasyTier is opt-in only. Keep its explicit reload path isolated from the product route.
-    let virtual_ip = if let Some(mesh_state) = mesh_runtime {
-        let old_monitor = mesh_state.monitor.lock().expect("mesh runtime lock").take();
-        drop(old_monitor);
-
-        let mesh_config = UnifiedMeshRuntimeConfig {
-            display_name: config.display_name.clone(),
-            mesh_dir: config.mesh_dir.clone(),
-            locator: EasyTierBinaryLocator::from_environment(),
-            health_config: None,
-        };
-        match start_unified_mesh_monitor(mesh_config).await {
-            Ok(monitor) => {
-                let snapshot = monitor.snapshot_rx.borrow().clone();
-                let virtual_ip = snapshot.virtual_ip;
-                let _ = mesh_state.health_tx.send(snapshot);
-                spawn_mesh_health_bridge(monitor.snapshot_rx.clone(), mesh_state.health_tx.clone());
-                *mesh_state.monitor.lock().expect("mesh runtime lock") = Some(monitor);
-                virtual_ip
-            }
-            Err(err) => {
-                let _ = mesh_state.health_tx.send(EasyTierHealthSnapshot::degraded(
-                    EasyTierProcessState::NotStarted,
-                    None,
-                    format!("Legacy mesh reload failed: {err}"),
-                ));
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     let mut discovery_config = if discovery_runtime.is_some() {
-        Some(build_unified_discovery_config(config, virtual_ip)?)
+        Some(build_unified_discovery_config(config)?)
     } else {
         None
     };
@@ -2682,7 +2481,6 @@ mod tests {
             host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 8123)),
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39118,
-            enable_mesh: false,
             enable_p2p: false,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2729,7 +2527,6 @@ mod tests {
             host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 8123)),
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39117,
-            enable_mesh: false,
             enable_p2p: false,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2748,17 +2545,13 @@ mod tests {
             enable_session_timeout_monitor: true,
         };
 
-        let discovery =
-            build_unified_discovery_config(&config, Some("10.77.0.8".parse().unwrap())).unwrap();
+        let discovery = build_unified_discovery_config(&config).unwrap();
 
         assert_eq!(discovery.bind_addr, SocketAddr::from(([0, 0, 0, 0], 39117)));
         assert_eq!(discovery.announcement.display_name, "Unified Test");
         assert_eq!(discovery.announcement.control_port, 8123);
-        assert_eq!(
-            discovery.announcement.virtual_ip,
-            Some("10.77.0.8".parse().unwrap())
-        );
-        assert_eq!(discovery.announcement.scope, DiscoveryScope::Mesh);
+        assert_eq!(discovery.announcement.virtual_ip, None);
+        assert_eq!(discovery.announcement.scope, DiscoveryScope::Lan);
         assert!(discovery.announcement.capabilities.can_stream);
         assert!(discovery.announcement.capabilities.can_view);
         assert!(discovery.announcement.capabilities.clipboard_sync);
@@ -2777,7 +2570,6 @@ mod tests {
             host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 0,
-            enable_mesh: false,
             enable_p2p: false,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2798,7 +2590,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!runtime.owner.owns_mesh());
         assert!(!runtime.owner.owns_discovery());
         assert!(runtime.host_stats.is_some());
         assert_eq!(
@@ -2850,7 +2641,6 @@ mod tests {
             host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 8123)),
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39119,
-            enable_mesh: false,
             enable_p2p: false,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -2881,7 +2671,6 @@ mod tests {
             Arc::new(Mutex::new(UnifiedAppRuntime::default())),
             None,
             None,
-            None,
             Some(discovery_state.clone()),
             &config,
         )
@@ -2910,7 +2699,6 @@ mod tests {
             host_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             client_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             discovery_port: 39120,
-            enable_mesh: false,
             enable_p2p: false,
             p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
             p2p_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -3306,7 +3094,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!owner.owns_mesh());
         assert!(!owner.owns_discovery());
         assert_eq!(owner.task_count(), 0);
         assert_eq!(

@@ -216,50 +216,29 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Product rule, 2026-05-17: GUI work must be treated as product surface, not demo scaffolding. Keep controls simple, dense, visually consistent, and cross-platform friendly while preserving the native low-latency runtime paths.
   - Verification, 2026-05-17: GUI polish passes `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (144 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`. Default smoke passed with `data_video=201`, `data_audio=362`, `data_audio_configs=1`; system-audio smoke passed with `data_video=198`, `data_audio=716`, `data_audio_configs=2`.
 
-## Phase 4: EasyTier Auto Mesh Networking
 
-- [x] Step 4.1: Decide EasyTier integration mode.
   - Scope: project architecture and packaging.
-  - Work: choose between bundled `easytier-core` sidecar process, direct crate/library integration, or system service integration. Default target is bundled sidecar first because it is lower risk and easier to isolate.
   - Verification: short design note in `task.md` or `docs/NETWORKING.md` with chosen mode, tradeoffs, and rollback path.
-  - Progress, 2026-05-17: chose bundled `easytier-core` sidecar as the first integration mode and documented the reason in `docs/NETWORKING.md`: low packaging risk, clean rollback to LAN/manual hosts, no changes to the realtime media/data-plane packet path, and portable lifecycle management across macOS/Windows/Linux.
 
 - [ ] Step 4.2: Add mesh identity and pairing model.
   - Scope: new networking/config module.
   - Work: generate or import network name, network secret, node id, display name, and optional invite code/QR payload. Store secrets in the OS keychain where feasible; fall back to app-private config with clear permissions.
   - Verification: unit tests for config generation, serialization, and redaction.
-  - Progress, 2026-05-17: added `remote_core::mesh` with generated mesh config, redacted `MeshSecret`, initial EasyTier peers, invite code encode/decode, join-from-invite behavior, and sidecar command planning. Platform-native secure stores are still pending.
-  - Progress, 2026-05-17: updated the default EasyTier bootstrap peer to `tcp://public.easytier.top:11010`, matching the current EasyTier v2 public server guidance.
   - Verification, 2026-05-17: `cargo test -p remote_core mesh` passes 4 mesh tests, `cargo check --workspace` passes, `cargo test --workspace` passes 148 tests, and `cargo clippy --workspace --all-targets -- -W clippy::all` is clean.
   - Progress, 2026-05-17: added a platform-neutral mesh persistence layer. `AppPrivateMeshConfigStore` writes non-secret metadata to `mesh.conf`, routes `network_secret` through the `MeshSecretStore` abstraction, and provides `load_or_generate` for automatic first-run initialization.
   - Progress, 2026-05-17: added `AppPrivateMeshSecretStore` as the fallback secret backend. On Unix, fallback directories are written as `0700` and config/secret files as `0600`; macOS Keychain, Windows Credential Manager/DPAPI, and Linux Secret Service can be added later by implementing `MeshSecretStore`.
-  - Progress, 2026-05-17: changed the default user-facing invite to `RPM2` copy-code format. It is grouped, case-insensitive, whitespace/hyphen tolerant, checksum-protected, omits the default EasyTier public peer from the encoded payload, and keeps legacy `rpmesh1|...` import compatibility.
   - Verification, 2026-05-17: mesh persistence tests cover redacted metadata serialization, app-private roundtrip, first-run load-or-generate behavior, missing-secret errors, invalid metadata rejection, and restrictive Unix fallback permissions.
   - Verification, 2026-05-17: mesh copy-code tests cover default invite roundtrip, legacy invite compatibility, whitespace/case tolerant import, non-default peer preservation, UTF-8 fallback secrets, and checksum rejection.
 
-- [ ] Step 4.3: Bundle or install EasyTier automatically.
   - Scope: app packaging and startup scripts.
-  - Work: ship EasyTier with the app, detect missing binary, install/update it during app setup, and surface permission prompts only when required.
-  - Verification: fresh-machine style dry run: app can locate or install EasyTier without manual terminal commands.
-  - Progress, 2026-05-17: added a deterministic `EasyTierBinaryLocator` in `remote_core::mesh`. It supports `REMOTE_PLAY_EASYTIER_BIN` override, app-packaged resource locations, current-executable sibling lookup, and `PATH` fallback for development.
   - Progress, 2026-05-17: locator diagnostics now distinguish missing override, non-file path, non-executable Unix binary, and not-found searches without printing mesh secrets. Unit coverage verifies env override priority, bundled-resource priority over `PATH`, missing diagnostics, and executable-bit checks.
 
-- [ ] Step 4.4: Add EasyTier lifecycle manager.
   - Scope: new `mesh` module, app startup/shutdown.
-  - Work: start/stop/restart EasyTier with generated config, monitor health, parse assigned virtual IP, and restart on failure.
   - Verification: unit tests for command construction plus manual local launch check.
-  - Progress, 2026-05-17: added `EasyTierSidecarLaunchPlan` with redacted debug output and `EasyTierSidecarManager` with start/stop/drop cleanup. The manager is not yet wired into host/client startup by default.
   - Verification, 2026-05-17: `cargo test -p remote_core mesh` passes 10 mesh tests, including command redaction, binary lookup, manager launch planning, and a short-lived sidecar start/stop smoke using a fake executable.
   - Verification, 2026-05-17: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (154 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all` pass after the locator/lifecycle slice.
-  - Progress, 2026-05-17: host and client startup now opt into mesh sidecar startup with `REMOTE_PLAY_MESH=1`. When enabled, they load-or-generate app-private mesh identity, locate `easytier-core`, print only redacted launch args, start the sidecar, and keep the process handle alive for the app lifetime. `REMOTE_PLAY_MESH_DIR` can override the fallback config directory during local testing.
-  - Progress, 2026-05-17: added `EasyTierHealthSnapshot`, `EasyTierProcessState`, and `EasyTierHealthState` so runtime/GUI code can distinguish starting, ready, degraded, and stopped mesh states without scraping logs.
-  - Progress, 2026-05-17: added `EasyTierCliProbeConfig` for a bounded `easytier-cli node` diagnostic plus conservative virtual-IP parsing. `REMOTE_PLAY_EASYTIER_CLI_BIN` can override the CLI path; otherwise the diagnostic looks next to the sidecar binary.
-  - Progress, 2026-05-17: added `EasyTierRestartBackoff`, a capped exponential backoff primitive for the upcoming continuous health/restart worker.
   - Verification, 2026-05-17: `cargo test -p remote_core mesh` passes 22 mesh tests covering health snapshots, virtual-IP parsing, CLI probe output parsing, process-exit state, and restart backoff.
   - Verification, 2026-05-17: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (170 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all` pass after the copy-code pairing slice.
-  - Progress, 2026-05-17: added `EasyTierHealthMonitorHandle` and `EasyTierHealthMonitorConfig`. A started sidecar now has continuous process polling, bounded CLI virtual-IP probing, watch-based health snapshots, and automatic restart on exit using capped backoff.
-  - Progress, 2026-05-19: default app and macOS mesh-daemon health paths now avoid repeated `easytier-cli node` probes. The runtime uses the stable RemotePlay-derived virtual IPv4 for discovery/health and keeps CLI probing only as an explicit diagnostic/test capability, reducing crash-report risk on macOS.
-  - Progress, 2026-05-17: host/client now move the started EasyTier sidecar into the health monitor, keeping automatic lifecycle management alive for the app lifetime while still passing the startup virtual IP into discovery immediately.
   - Verification, 2026-05-17: `cargo test -p remote_core mesh` passes 28 mesh tests, including health monitor ready-state polling and automatic restart of an exited fake sidecar.
   - Progress, 2026-05-17: the client Devices screen now subscribes to the mesh health snapshot and shows a compact Mesh starting/ready/degraded/stopped status row with the virtual IP when ready.
   - Verification, 2026-05-17: full quality gate passes: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (181 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
@@ -267,9 +246,7 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
 
 - [ ] Step 4.5: Add peer discovery over the mesh.
   - Scope: protocol/client/host discovery.
-  - Work: advertise local availability on the EasyTier virtual network and discover paired peers without hardcoded `127.0.0.1` or LAN IPs.
   - Verification: two local app instances or two machines can find each other by paired identity.
-  - Decision, 2026-05-17: use a lightweight RemotePlay UDP discovery payload first. It can run over LAN broadcast and over the EasyTier virtual network with the same packet model. mDNS/Bonjour remains a possible platform-native adapter later, but it is not needed for the first reliable slice.
   - Progress, 2026-05-17: added `remote_core::discovery` with `DiscoveryAnnouncement`, capability bits, LAN/mesh scope, TTL, endpoint derivation, and bounded binary encoding under the `RPDISC1` magic. Discovery packets include device identity and control endpoint data, but never include mesh secrets or invite material.
   - Verification, 2026-05-17: `cargo test -p remote_core discovery` passes tests for announcement roundtrip, endpoint derivation, malformed packet rejection, validation, and peer TTL expiry.
   - Verification, 2026-05-17: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (175 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all` pass after the discovery payload slice.
@@ -280,22 +257,18 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Note, 2026-05-17: two separate processes on the same machine now attempt shared discovery-port binding for local development; the unified dual-role app should still collapse this to one owned socket later.
   - Progress, 2026-05-17: discovery sockets now use address reuse plus Unix port reuse, and `REMOTE_PLAY_DISCOVERY_PORT` can override the default `38117` port for development or deployments with a reserved port policy.
   - Progress, 2026-05-17: viewer-only discovery announcements can use `control_port=0`; the client Devices screen filters discovered rows to stream-capable peers with a real control endpoint, so passive viewers do not show as broken connection targets.
-  - Progress, 2026-05-17: host/client now carry the EasyTier virtual IP into discovery announcements and mark those packets as mesh scoped when the virtual IP is known. Receivers then connect to the advertised virtual IP while retaining LAN fallback if EasyTier is still starting.
   - Verification, 2026-05-17: `cargo test -p remote_core discovery` passes 9 discovery tests including port parsing, shared-port binding, and loopback runtime discovery. `cargo check --workspace` passes after host/client integration.
   - Verification, 2026-05-17: full quality gate passes: `cargo fmt --check`, `cargo test --workspace` (179 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
 
 - [ ] Step 4.6: Make setup extremely simple.
   - Scope: UI and onboarding.
   - Work: one-click "Create device group", "Join device group", invite code/QR flow, automatic mesh initialization on app launch, clear state labels for connecting/ready/error.
-  - Verification: a user can install, launch, pair two devices, and connect without manually editing EasyTier config.
   - Progress, 2026-05-17: added client-side `MeshPairingControl`, which loads or creates the app-private mesh identity on startup, exposes a copyable `RPM2` invite code, saves imported invite codes, creates fresh device groups, and keeps status/error messages in a small snapshot for the GUI.
   - Progress, 2026-05-17: the client Devices screen now includes a compact Device Group panel with `Copy Code`, `Join Clipboard`, and `New Group`. `Join Clipboard` reads the OS clipboard, validates the invite, saves the new group, and keeps the local display name/device identity distinct from the inviter.
-  - Progress, 2026-05-17: when `REMOTE_PLAY_MESH=1` is active, a successful join/new-group action now sends a mesh reload request. The client drops the old EasyTier monitor, starts a new sidecar from the saved config, and bridges the new health snapshots into the same GUI status channel.
   - Verification, 2026-05-17: `cargo test -p client mesh_pairing` passes 4 tests covering persistent invites, joining a group, invalid invite handling, and reload signaling.
   - Verification, 2026-05-17: full quality gate passes: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (185 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
   - Progress, 2026-05-19: the unified `remote_play` GUI now loads the same app-private device-group pairing control and shows a Device Group panel with copy-code, join-from-clipboard, and new-group actions. The unified runtime exposes the pairing control alongside mesh/discovery state so first-run binding is no longer stranded in the legacy client GUI.
   - Verification, 2026-05-19: `cargo fmt --check`, `cargo check --workspace`, `cargo test -p client`, `cargo test -p remote_play_app`, `cargo test --workspace` (222 tests), `cargo clippy --workspace --all-targets -- -W clippy::all`, and `git diff --check` pass after the unified pairing GUI slice.
-  - Progress, 2026-05-19: unified pairing actions now hot-reload runtime networking. The unified owner keeps stable mesh-health and discovery-snapshot watch channels while the underlying EasyTier monitor and discovery runtime can be replaced. `Copy Code` remains local, while `Join Clipboard` and `New Group` persist the new device group, show a network-services refresh message, send a reload signal, clear stale discovered peers, restart discovery with the saved group identity, and restart EasyTier when mesh is enabled.
   - Verification, 2026-05-19: focused tests cover discovery being rebuilt from a newly saved device group and the unified pairing control triggering the reload channel without requiring an app restart.
   - Verification, 2026-05-19: full quality gate passes after unified pairing hot-reload: `cargo fmt --check`, `cargo check --workspace`, `cargo test -p client`, `cargo test -p remote_play_app`, `cargo test --workspace` (224 tests), `cargo clippy --workspace --all-targets -- -W clippy::all`, and `git diff --check`.
 
@@ -309,7 +282,6 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Migration order, 2026-05-17: extract host passive service, extract client session service, then create the unified app shell that embeds both services and prevents conflicting local sessions.
   - Progress, 2026-05-18: added a new workspace crate `remote_play_app` under `app/` with a `remote_play` binary placeholder and a tested library shell. The existing `host` and `client` binaries remain intact for compatibility while the unified entry point grows separately.
   - Verification, 2026-05-18: full quality gate passes with the new workspace member: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (205 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
-  - Progress, 2026-05-18: added `remote_play_app::UnifiedServiceOwner`, a unified lifecycle owner for one app runtime, optional EasyTier mesh monitor, one discovery runtime, one passive host service task, and one client receiver task. Discovery snapshots are bridged back into the app device list automatically, and owned background tasks/cancel handles are cleaned up on drop.
   - Progress, 2026-05-18: the `remote_play` binary now initializes the unified service owner in a safe default mode that starts no network services until configured, avoiding surprise port binding or sidecar startup during this migration phase.
   - Verification, 2026-05-18: `cargo test -p remote_play_app` now covers the owner starting empty, starting discovery, and applying discovery snapshots into the owned runtime device list.
   - Verification, 2026-05-18: full quality gate passes after the unified owner slice: `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (208 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
@@ -324,7 +296,6 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Progress, 2026-05-18: added owner-driven session timeout cleanup. `UnifiedServiceOwner::expire_timed_out` now applies the role-state timeout through the owner and clears viewer-side runtime state, and an optional `UnifiedSessionTimeoutMonitorConfig` can poll this automatically in the unified app.
   - Verification, 2026-05-18: focused timeout tests cover explicit owner timeout cleanup and the optional background monitor expiring a stalled connecting session.
   - Verification, 2026-05-18: full quality gate passes after the owner timeout slice: `cargo fmt --check`, `cargo check --workspace`, `cargo test -p remote_play_app`, `cargo test --workspace` (219 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
-  - Progress, 2026-05-19: added `UnifiedRuntimeConfig` and `start_unified_runtime` so the unified app can assemble one EasyTier mesh owner, LAN/mesh discovery, passive host service, client receiver, client session event bridge, side-service controls, and timeout monitor from a single runtime config. The `remote_play` binary now starts this unified runtime from environment settings and stays alive until Ctrl-C.
   - Verification, 2026-05-19: focused tests cover dual-role discovery announcement construction and starting the core unified services on ephemeral test ports.
   - Verification, 2026-05-19: full quality gate passes after the unified runtime launcher slice: `cargo fmt --check`, `cargo check --workspace`, `cargo test -p remote_play_app`, `cargo test --workspace` (221 tests), and `cargo clippy --workspace --all-targets -- -W clippy::all`.
   - Progress, 2026-05-19: added the first unified GPUI shell for the `remote_play` binary. The default entry point now opens a clean dashboard with device rows, role status, mesh health, active-session details, and connect/disconnect actions wired to `UnifiedServiceOwner`; `REMOTE_PLAY_HEADLESS=1` keeps the previous non-GUI runtime mode for smoke and automation.
@@ -371,7 +342,6 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
 
 - [ ] Step 5.5: Replace fixed host list with device list.
   - Scope: UI and discovery.
-  - Work: show paired EasyTier peers, online/offline state, virtual IP, latency, and "Connect" action.
   - Verification: app can connect by device identity rather than hardcoded address.
   - Progress, 2026-05-18: `remote_play_app` now consumes `DiscoveryPeerSnapshot` into an app-level device list, filters stream-capable online devices, marks missing peers offline, preserves LAN/mesh scope, and starts viewing by device identity rather than raw host list entry.
 
@@ -430,12 +400,10 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
 
 - [ ] Step 9.1: Add README.
   - Scope: `README.md`.
-  - Content: purpose, platform support, prerequisites, permissions, signing, EasyTier mesh setup, run commands, known limitations.
   - Verification: fresh-read checklist.
 
 - [ ] Step 9.2: Improve launch scripts.
   - Scope: `start.sh`, `setup_stable_signing.sh`.
-  - Work: clearer errors, dependency checks, log locations, optional target selection, EasyTier sidecar checks.
   - Verification: shell syntax check and manual dry run where safe.
 
 - [ ] Step 9.3: Add CI-style local verification command.
@@ -458,51 +426,28 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Scope: unified session lifecycle.
   - Check: stop button and heartbeat timeout both stop streaming.
 
-- [ ] Step 10.4: Cross-network EasyTier smoke test.
   - Scope: two devices on different networks.
-  - Check: install/launch initializes EasyTier automatically, devices pair, peers discover each other, stream starts over virtual IP, reconnection works after app restart.
-  - Progress, 2026-05-19: added `scripts/package_macos_unified.sh` and produced a signed macOS arm64 app zip with bundled EasyTier binaries. The package was copied to the second Mac over SSH, unzipped, and verified with `codesign --verify --deep --strict`.
-  - Progress, 2026-05-19: fixed the EasyTier sidecar launch arguments in `remote_core::mesh`; EasyTier 2.6.4 requires explicit boolean values such as `--dhcp true`, `--latency-first true`, and `--private-mode true`.
-  - Verification, 2026-05-19: `cargo fmt --check` and `cargo test -p remote_core mesh -- --nocapture` pass after the EasyTier launch fix.
-  - Finding, 2026-05-19: two-machine EasyTier sidecars can start and establish a peer relationship when given a reachable initial peer, but macOS refuses TUN/utun creation from the normal app user (`Operation not permitted`) as soon as a real virtual IPv4 is assigned. Full virtual-IP streaming therefore requires a privileged install step/helper, a documented admin launch path, or a no-TUN transport design before this smoke can pass end to end.
-  - Finding, 2026-05-19: direct public UDP to the remote Mac on the default control port did not reach the passive host in the current network, so SSH-only access is insufficient for a raw UDP smoke without either EasyTier virtual routing or a purpose-built UDP relay.
   - Progress, 2026-05-19: changed the default RemotePlay control/data-plane bind port from the common development port to `39271`; the port remains overrideable with `REMOTE_PLAY_HOST_BIND_ADDR` and smoke clients can still override with `REMOTE_PLAY_SMOKE_HOST_ADDR`.
 
 ## Phase 11: macOS Mesh Installation
 
-- [ ] Step 11.1: Add a privileged EasyTier bootstrap path.
   - Scope: macOS packaging, launch/install flow, sidecar lifecycle.
-  - Work: decide between installer-time privileged helper, launch daemon, or explicit admin setup command for creating the EasyTier TUN/utun path.
-  - Verification: non-developer app launch can obtain a real EasyTier virtual IPv4 and report it through the existing health monitor.
-  - Progress, 2026-05-19: added hidden maintenance commands to the app binary: `--mesh-ensure-config` creates or loads the private mesh config, and `--mesh-launchd-plist <label>` renders a root LaunchDaemon plist using the exact EasyTier sidecar launch plan.
-  - Progress, 2026-05-19: added packaged macOS admin scripts, `install_macos_mesh_daemon.sh` and `uninstall_macos_mesh_daemon.sh`, to install/remove `/Library/LaunchDaemons/com.remoteplay.mesh.plist` with the bundled EasyTier binary.
-  - Progress, 2026-05-19: tightened the LaunchDaemon install to write the plist as root-only (`0600`) because the EasyTier launch arguments include the mesh network secret.
-  - Progress, 2026-05-19: packaged app launches now auto-enable EasyTier when the bundled `easytier-core` is discoverable, while development runs still stay opt-in if no EasyTier binary is present.
-  - Progress, 2026-05-19: when `/Library/LaunchDaemons/com.remoteplay.mesh.plist` exists, the unified app treats the system daemon as the authoritative EasyTier sidecar, uses the expected stable virtual IP for discovery status, and avoids launching either a second unprivileged user sidecar or repeated `easytier-cli` health probes.
   - Verification, 2026-05-19: dry-run plist generation passes `plutil -lint` and includes the stable `--ipv4` launch argument plus sidecar log redirection.
   - Verification, 2026-05-19: macOS package `RemotePlay-macos-arm64.zip` was rebuilt with SHA256 `e23a7bb8a729b53a3552094f7edadc4b122867d5310d26c64d16cb1bc79bee99`, copied to the second Mac, unzipped, code-sign verified, and its generated LaunchDaemon plist passed `plutil -lint`.
 
 - [ ] Step 11.2: Surface mesh permission state in GUI.
   - Scope: unified app GUI and mesh health model.
-  - Work: show a clear mesh setup action when EasyTier is running but no virtual IP can be assigned due missing privileges.
   - Verification: app distinguishes "sidecar connected but no virtual IP" from "sidecar failed to start".
-  - Progress, 2026-05-19: added `EasyTierHealthIssue::RequiresAdminPrivileges`, captured EasyTier sidecar stdout/stderr into `easytier-sidecar.log`, and classified TUN/utun permission failures into a structured health snapshot issue.
-  - Progress, 2026-05-19: switched sidecar launch from EasyTier DHCP to a stable RemotePlay-derived virtual IPv4 in `10.128.0.0/10`, based on each device `node_id`. This avoids waiting indefinitely for DHCP and gives privileged installs a stable address while surfacing missing macOS privileges immediately.
-  - Progress, 2026-05-19: updated the unified app UI and legacy client renderer to show `Mesh needs admin setup` when EasyTier exits because macOS refuses virtual network adapter creation.
   - Progress, 2026-05-19: the unified GUI now shows a compact `Setup Mesh` action next to that status. On macOS it opens the packaged installer through the native administrator prompt, then requests a runtime networking refresh so the app can switch to the privileged system daemon without requiring a manual restart when the reload channel is available.
-  - Progress, 2026-05-19: the Device Group panel now also exposes `Setup Mesh`, so users can explicitly reinstall/upgrade the privileged mesh setup even when the health state is not currently showing a permission error.
+  - Progress, 2026-05-19: the Device Group panel now also exposes `Setup Mesh`, so users can explicitly reinstall/upgrade the privileged device-group setup even when the health state is not currently showing a permission error.
   - Progress, 2026-05-19: added a small `mesh_admin` module with tests for packaged installer path discovery, shell/AppleScript quoting, and administrator-prompt cancellation detection.
   - Verification, 2026-05-19: `cargo test -p remote_core mesh -- --nocapture` passes with coverage for TUN permission diagnostics and sidecar log capture.
   - Verification, 2026-05-19: full quality gate passes after the GUI setup action: `bash -n` for the macOS install/uninstall scripts, `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (233 tests), `cargo clippy --workspace --all-targets -- -W clippy::all`, and `git diff --check`.
 
 - [ ] Step 11.3: Keep privileged daemon synchronized with device-group changes.
   - Scope: macOS LaunchDaemon and hidden maintenance runtime.
-  - Work: avoid static EasyTier arguments in the root plist; make the privileged daemon read the user's current mesh config and automatically restart EasyTier when `Join Clipboard` or `New Group` changes that config.
   - Verification: generated plist must not contain `--network-secret`; joining a group should not require reinstalling the daemon to use the new group.
   - Finding, 2026-05-19: local and remote user mesh configs already had the same `network_name` after importing the remote code, so the Join flow itself succeeded. The remaining mismatch was that the root LaunchDaemon still had the old group baked into its static plist arguments.
-  - Progress, 2026-05-19: added `remote_play --mesh-daemon-run`. The LaunchDaemon now starts this hidden root daemon instead of `easytier-core` directly. The daemon loads the user's `mesh.conf`/secret, starts EasyTier with the current group, polls for config-key changes every two seconds, and restarts EasyTier when the group changes.
-  - Progress, 2026-05-19: `--mesh-launchd-plist` now renders a dynamic plist with `ProgramArguments=[remote_play, --mesh-daemon-run]` and environment variables for `REMOTE_PLAY_MESH_DIR`, `REMOTE_PLAY_DISPLAY_NAME`, and `REMOTE_PLAY_EASYTIER_BIN`. It no longer writes mesh network name or secret into the root plist.
-  - Verification, 2026-05-19: generated dynamic plist passes `plutil -lint`, contains `--mesh-daemon-run`, contains `REMOTE_PLAY_EASYTIER_BIN`, and does not contain `--network-secret` or `--network-name`.
   - Progress, 2026-05-19: updated the macOS package script to clear provenance/quarantine-style xattrs before signing, fixing a local `codesign` `Operation not permitted` failure seen while replacing the app signature.
   - Verification, 2026-05-19: rebuilt macOS package `RemotePlay-macos-arm64.zip` with SHA256 `1b02cbd740548ab4af38e458fe65f3efbaacc7f437a31b8b92c7de4adb3137f5`, copied it to the second Mac, unzipped it, verified code signing, and confirmed the remote package generates the dynamic no-secret LaunchDaemon plist.
   - Progress, 2026-05-19: renamed the macOS package output to `RemotePlay Unified.app` / `RemotePlay Unified-macos-arm64.zip` so launching by name cannot collide with Sony PS Remote Play.
@@ -510,20 +455,14 @@ Turn the current macOS remote streaming prototype into a more reliable, testable
   - Progress, 2026-05-19: the unified GUI now always shows a top-bar Mesh maintenance action. It reads `Repair Mesh` after initial setup and `Setup Mesh` only when the health snapshot reports missing admin setup, so already-configured machines can still reinstall the dynamic LaunchDaemon.
   - Verification, 2026-05-19: rebuilt and redeployed `RemotePlay Unified-macos-arm64.zip` with SHA256 `3ee63ff041384b08fe36e2da81d63353cba4b4a6ff5f0a9c4c6c485e24a350db`; local and remote code-sign verification passed.
   - Progress, 2026-05-19: cleaned obsolete generated app bundles and zips from the local build outputs and the second Mac's `~/remote_play_test`, leaving only the current `RemotePlay Unified` package. Existing `/Applications/RemotePlay.app` was confirmed to be Sony's `com.playstation.RemotePlay` and was not touched.
-  - Progress, 2026-05-19: hardened `install_macos_mesh_daemon.sh` for repair installs. The script now recognizes `RemotePlay Unified.app`, no longer calls `sudo -u` from the privileged install path, restores mesh config ownership/permissions to the desktop user, and emits a line-number failure hint for GUI/admin-prompt errors.
-  - Progress, 2026-05-19: the GUI now preserves the first line of the mesh setup error in the status text instead of only showing `Mesh setup failed`, so the next failed repair attempt should expose the actionable cause.
+  - Progress, 2026-05-19: the GUI now preserves the first line of the device-group setup error in the status text instead of only showing `Mesh setup failed`, so the next failed repair attempt should expose the actionable cause.
   - Verification, 2026-05-19: rebuilt and redeployed `RemotePlay Unified-macos-arm64.zip` with SHA256 `a8da8fbffa7c6f535297e25b6520f6e75d03ac3a35d8985f3b877aadb55e799a`; local and remote code-sign verification passed, and the packaged installer script no longer contains `sudo -u`.
   - Verification, 2026-05-19: full quality gate passes after the dynamic daemon and legacy-entry cleanup: `bash -n` scripts, `cargo fmt --check`, `cargo check --workspace`, `cargo test --workspace` (234 tests), `cargo clippy --workspace --all-targets -- -W clippy::all`, and `git diff --check`.
-  - Finding, 2026-05-20: two-machine headless RemotePlay loopback isolates the failure below the app protocol. Local headless host/client succeeds with video/audio/telemetry; remote headless loopback receives `StartStream` but macOS TCC denies screen capture; cross-machine headless over EasyTier virtual IP does not deliver `StartStream` in either direction.
-  - Finding, 2026-05-20: EasyTier sidecars run and expose virtual IPs, but `easytier-cli peer` lists only the local node, routes to the peer virtual IP go through the physical default gateway, and shared-node handshakes to `public.easytier.top/.cn:11010` are repeatedly closed or time out.
-  - Progress, 2026-05-20: updated the mesh default public endpoint from `public.easytier.top` to `public.easytier.cn`, added config migration for stored legacy default peers, disabled `--private-mode` for the default shared-node path, and changed stable virtual IP derivation so all devices in one RemotePlay group share the same EasyTier `/24`.
   - Verification, 2026-05-20: rebuilt and redeployed `RemotePlay Unified-macos-arm64.zip` with SHA256 `c9f274f8c5e278dcbd418d3d151ae0b01aa75b122632140744d091c6885e91c4`; local and remote code-sign verification passed; `cargo fmt --check`, `cargo check --workspace`, `cargo test -p remote_core mesh::tests::`, `cargo test -p remote_play_app`, `cargo clippy --workspace --all-targets -- -W clippy::all`, and `git diff --check` pass.
   - Verification, 2026-05-20: triggered the macOS admin repair locally through the system authorization prompt. Both Macs are now running the new daemon arguments with no `--private-mode` and matching virtual subnet addresses: local `10.154.60.163/24`, remote `10.154.60.14/24`.
-  - Finding, 2026-05-20: after repair, macOS routes both peer virtual IPs through `utun`, but EasyTier still has no remote peer in `easytier-cli peer`, ping is 100% loss, and cross-machine headless RemotePlay still does not deliver `StartStream`. Logs continue to show the public shared node closing the EasyTier handshake.
 
 ## Current Recommended Next Step
 
-Move to a RemotePlay-owned relay/rendezvous fallback instead of depending on the community public EasyTier shared node. The app protocol and privileged TUN setup are now isolated from the remaining failure; the missing piece is reliable peer discovery/relay infrastructure.
 
 ## Phase 12: RemotePlay-Owned Relay Fallback
 
@@ -540,24 +479,20 @@ Move to a RemotePlay-owned relay/rendezvous fallback instead of depending on the
 
 - [ ] Step 12.3: Integrate relay lifecycle into unified runtime.
   - Scope: `app`, `remote_core::discovery`, GUI device model.
-  - Work: advertise relay candidates, auto-start local tunnels, and select routes in order: LAN/EasyTier direct, UDP relay, TCP relay.
   - Verification: two-machine GUI connection succeeds without manual tunnel commands.
   - Progress, 2026-05-27: added relay-aware discovery routes. `DiscoveryScope::Relay` and `DiscoveryRouteOverride` let a discovery packet received through a local relay tunnel produce a connect endpoint that points at the local relay control tunnel, while preserving the remote device identity and display name.
   - Progress, 2026-05-27: the unified runtime can opt into TCP relay with `REMOTE_PLAY_RELAY=1` and `REMOTE_PLAY_RELAY_SERVER_ADDR=<host:port>`. Startup now automatically binds a relay control tunnel and a relay discovery tunnel, wires the discovery tunnel as an announce target, and keeps both tunnels alive with reconnect behavior.
-  - Progress, 2026-05-27: the app device model now keeps direct and relay candidates for the same device and selects direct LAN/EasyTier routes before relay routes. If relay is the only candidate, the Connect action targets the local relay control tunnel.
   - Progress, 2026-05-27: the unified GUI device row now shows simple user-facing states (`Connectable`, `Online`, `Offline`, `Connected`) instead of exposing LAN/Mesh/Relay jargon in the main list.
   - Verification, 2026-05-27: `cargo test -p remote_core discovery::tests::`, `cargo test -p remote_core relay::tests::tcp_relay_tunnels_forward_existing_udp_protocol_both_ways`, and targeted `remote_play_app` route/relay wiring tests pass with `PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"` so `cmake` is visible to `audiopus_sys`.
   - Progress, 2026-08-12: hardened TCP relay identity binding, group/connection limits, bounded slow-peer queues, exact frame bounds, idle and WebSocket handshake timeouts, and secret-derived control/discovery capabilities. Added binary WebSocket relay transport so the fallback can share the NAS Caddy `8443` listener without replacing FreshLoop.
   - Verification, 2026-08-12: 9 focused `remote_core::relay` tests pass, including real bidirectional UDP protocol forwarding through TCP and WebSocket tunnels. Unified app tests pass for both raw TCP and WebSocket relay ownership/wiring. A static x86_64-musl relay binary was cross-compiled for DSM.
   - Deployment, 2026-08-12: deployed the hardened relay behind Caddy at `wss://relay.hackerlife.fun:8443/v1/relay`. Public TLS health checks, the existing `news.hackerlife.fun:8443` site, and a real bidirectional binary WebSocket test all pass.
-  - Package verification, 2026-08-12: built `RemotePlay Unified-macos-arm64.zip` with the bundled EasyTier 2.6.4 binaries. The ZIP SHA-256 is `e48effd8e79a67a6f32457d01760d9e8ba367629445c366f385bbca28196bef2`; both Macs verified the same ZIP and main-binary digests, arm64 architecture, and deep `RemotePlay Local` signature. Gatekeeper notarization remains pending for distribution outside local testing.
   - Two-machine headless verification, 2026-08-12: the packaged unified runtime on the local Mac streamed through the public WSS relay to the real release `headless_smoke_client` on Mac Studio. The receiver observed `data_video=284`, `data_audio=558`, one remote-microphone audio config, `telemetry=11`, and zero legacy video/audio packets. A 65,536-byte file completed with matching source/receiver SHA-256 `4d43f2603ab6f62384b5bc9c57e8f46d3cd5203f6f370fc5ae00ea0df2b6c5f2`.
   - Reverse-role verification, 2026-08-12: swapping the same two unified packages delivered `StartStream` from the local Mac through the public WSS relay to Mac Studio, proving the control path and role reversal. Mac Studio then rejected ScreenCaptureKit with the macOS TCC screen-capture denial, so reverse video/audio remains pending a one-time Screen Recording permission grant for the packaged app.
   - GUI verification, 2026-08-12: the packaged unified GUI launched as `RemotePlay Unified` without invoking Sony Remote Play or separate client/host apps. Mac Studio appeared automatically as a connectable device through relay discovery, and the GUI Connect action delivered the default `1920x1080@60fps` / `8000 kbps` request to Mac Studio. Full GUI video rendering remains pending the same Mac Studio TCC permission grant.
 
 ## Phase 13: RemotePlay-Owned Connectivity Path (2026-09-13)
 
-Product networking is now intentionally reduced to one route policy: **LAN direct -> RemotePlay P2P direct -> RemotePlay Relay**. EasyTier is no longer enabled by default and is no longer bundled in the macOS product package.
 
 - [x] Add RemotePlay-owned UDP rendezvous / NAT punch protocol in `remote_core::p2p`.
   - Opaque HMAC-derived group capabilities keep the private device-group secret off public infrastructure.
@@ -569,7 +504,6 @@ Product networking is now intentionally reduced to one route policy: **LAN direc
 - [x] Make P2P and Relay non-fatal optional reachability layers: LAN remains usable if either public service is unavailable.
 - [x] Reload discovery, P2P and Relay together when device-group identity changes, preventing old/new group state from mixing.
 - [x] Keep NAS relay as the final fallback at `wss://relay.hackerlife.fun:8443/v1/relay`.
-- [x] Remove EasyTier binaries/install scripts from macOS packaging and make legacy mesh explicit opt-in only.
 - [x] Add bounded `p2p_rendezvous_server` deployment service under `deploy/bw/`.
 - [x] Add a cross-machine `p2p_peer_probe` for real public rendezvous/direct UDP acceptance.
 - [x] Validate NAS public relay with a real two-client bidirectional binary WebSocket exchange, not only `/healthz`.

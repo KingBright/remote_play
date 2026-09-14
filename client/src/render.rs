@@ -11,7 +11,6 @@ use core_foundation::base::TCFType;
 use gpui::{ClipboardItem, *};
 use protocol::{AudioControlTarget, ControlMessage};
 use remote_core::discovery::DiscoveryPeerSnapshot;
-use remote_core::mesh::{EasyTierHealthIssue, EasyTierHealthSnapshot, EasyTierHealthState};
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpSender};
 use std::error::Error;
 use std::net::SocketAddr;
@@ -38,7 +37,6 @@ pub struct ClientRuntimeControls {
     pub file_transfer: Option<crate::FileTransferRuntimeControl>,
     pub talkback: Option<crate::TalkbackRuntimeControl>,
     pub discovery: Option<tokio::sync::watch::Receiver<DiscoveryPeerSnapshot>>,
-    pub mesh_health: Option<tokio::sync::watch::Receiver<EasyTierHealthSnapshot>>,
     pub mesh_pairing: Option<MeshPairingControl>,
 }
 
@@ -172,7 +170,6 @@ pub struct RemotePlayView {
     state: ViewState,
     hosts: Vec<SocketAddr>,
     discovery: Option<tokio::sync::watch::Receiver<DiscoveryPeerSnapshot>>,
-    mesh_health: Option<tokio::sync::watch::Receiver<EasyTierHealthSnapshot>>,
     mesh_pairing: Option<MeshPairingControl>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     show_panel: bool,
@@ -216,7 +213,6 @@ impl RemotePlayView {
         };
         let hosts = configured_hosts();
         let discovery = controls.discovery.clone();
-        let mesh_health = controls.mesh_health.clone();
         let mesh_pairing = controls.mesh_pairing.clone();
         let mesh_pairing_snapshot = mesh_pairing.as_ref().map(MeshPairingControl::snapshot);
         let current_session_id = active_session_id.load(std::sync::atomic::Ordering::Relaxed);
@@ -234,7 +230,6 @@ impl RemotePlayView {
             state: ViewState::HostList,
             hosts,
             discovery,
-            mesh_health,
             mesh_pairing,
             mesh_pairing_snapshot,
             show_panel: false,
@@ -260,10 +255,6 @@ impl RemotePlayView {
             talkback_remote_volume_percent: 100,
             telemetry_engine,
         }
-    }
-
-    fn mesh_health_snapshot(&self) -> Option<EasyTierHealthSnapshot> {
-        self.mesh_health.as_ref().map(|rx| rx.borrow().clone())
     }
 
     fn copy_mesh_invite_code(&mut self, cx: &mut gpui::Context<Self>) {
@@ -489,7 +480,7 @@ impl RemotePlayView {
                 let scope = match peer.scope {
                     remote_core::discovery::DiscoveryScope::Lan => "LAN discovery",
                     remote_core::discovery::DiscoveryScope::P2p => "P2P direct",
-                    remote_core::discovery::DiscoveryScope::Mesh => "Legacy mesh",
+                    remote_core::discovery::DiscoveryScope::Mesh => "Legacy route",
                     remote_core::discovery::DiscoveryScope::Relay => "Relay discovery",
                 };
                 rows.push(DeviceRow {
@@ -530,34 +521,6 @@ fn control_fill(active: bool) -> Rgba {
 
 fn toggle_fill(is_on: bool) -> Rgba {
     if is_on { rgb(0x2f7d68) } else { rgb(0x57343d) }
-}
-
-fn mesh_status_text(snapshot: &EasyTierHealthSnapshot) -> String {
-    if snapshot.issue == Some(EasyTierHealthIssue::RequiresAdminPrivileges) {
-        return "Mesh needs admin setup".to_string();
-    }
-
-    match snapshot.state {
-        EasyTierHealthState::Ready => format!(
-            "Mesh ready · {}",
-            snapshot
-                .virtual_ip
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|| "virtual IP pending".to_string())
-        ),
-        EasyTierHealthState::Starting => "Mesh starting".to_string(),
-        EasyTierHealthState::Degraded => "Mesh degraded".to_string(),
-        EasyTierHealthState::Stopped => "Mesh stopped".to_string(),
-    }
-}
-
-fn mesh_status_color(snapshot: &EasyTierHealthSnapshot) -> Rgba {
-    match snapshot.state {
-        EasyTierHealthState::Ready => rgb(0x39a275),
-        EasyTierHealthState::Starting => rgb(0xd49a3a),
-        EasyTierHealthState::Degraded => rgb(0xd65f5f),
-        EasyTierHealthState::Stopped => rgb(0x6f7a86),
-    }
 }
 
 fn pairing_message_color(kind: MeshPairingMessageKind) -> Rgba {
@@ -623,36 +586,11 @@ impl Render for RemotePlayView {
                         ),
                 );
 
-                if let Some(snapshot) = self.mesh_health_snapshot() {
-                    let color = mesh_status_color(&snapshot);
-                    device_list = device_list.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .mb_2()
-                            .px_3()
-                            .py_2()
-                            .bg(rgb(0x181b20))
-                            .border_1()
-                            .border_color(rgb(0x2a3038))
-                            .rounded_md()
-                            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(color))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(0xb6c2cf))
-                                    .truncate()
-                                    .child(mesh_status_text(&snapshot)),
-                            ),
-                    );
-                }
-
                 if let Some(snapshot) = self.mesh_pairing_snapshot.clone() {
                     let invite_code = snapshot.invite_code.clone();
                     let message_color = pairing_message_color(snapshot.message_kind);
                     let restart_text = if snapshot.restart_required {
-                        "Mesh will use this group after restart."
+                        "Device group will refresh after restart."
                     } else {
                         ""
                     };

@@ -13,7 +13,6 @@
 
 ### 1. 移动端竖屏极简控制中心 (Mobile Portrait Unified Console)
 
-> 专为单手握持设计，极简管理设备流、EasyTier Mesh 虚拟组网与 5 信道网络性能。
 
 ![移动端竖屏极简控制中心](/Users/jinliang/.gemini/antigravity/brain/a55ce59b-1cef-4f11-9fe6-01ad1cf11456/mobile_screen1_portrait.png)
 
@@ -29,7 +28,6 @@
 - **发现的主机流卡片 (Discovered Hosts)**：
   - 继承桌面端一致的卡片风格（深色 Obsidian 底色、发丝级细微边框、呼吸感间距）；
   - `Gaming Rig RTX 4090`（单行标题、`LAN P2P` 灰色标签、`Direct UDP · 4K@120Hz Ready · 3.8ms RTT`、右侧高亮青色胶囊 `Connect` 按钮）；
-  - `MacBook Pro M3 Max`（`EasyTier Mesh` 标签、`Virtual P2P · Standby`、`Connect` 按钮）；
 - **5 信道多路复用网络卡片 (5-Lane Multiplexed Network)**：
   - 极简微型水平条形图展示 Realtime Video (42.5 Mbps)、Audio (128 kbps)、Control (64 kbps)、File (2.4 Mbps)；
 - **底部悬浮磨砂导航坞 (Bottom Floating Glass Dock)**：

@@ -304,7 +304,7 @@ impl TransferCenterState {
 
     pub fn snapshots(&self) -> Vec<TransferEntrySnapshot> {
         let mut entries = self.entries.clone();
-        entries.sort_by(|left, right| right.updated_seq.cmp(&left.updated_seq));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_seq));
         entries
             .into_iter()
             .map(|entry| entry.snapshot)

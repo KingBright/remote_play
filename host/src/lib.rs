@@ -46,19 +46,15 @@ use remote_core::file_transfer_runtime::{
     FileTransferCommand, FileTransferEvent, FileTransferRuntimeConfig, run_file_transfer_runtime,
 };
 use remote_core::media_plane::{audio_stream_config_to_envelope, rtp_to_realtime_data};
-use remote_core::mesh::{
-    AppPrivateMeshConfigStore, EasyTierBinaryLocator, EasyTierCliProbeConfig,
-    EasyTierHealthMonitorConfig, EasyTierHealthMonitorHandle, EasyTierSidecarManager,
-    REMOTE_PLAY_MESH_ENV, default_app_private_mesh_dir, spawn_easytier_health_monitor,
-};
+use remote_core::mesh::{AppPrivateMeshConfigStore, default_app_private_mesh_dir};
 use remote_core::net::DEFAULT_CONTROL_PORT;
 use remote_core::scheduled_sender::{ScheduledDataSender, ScheduledDataSenderConfig};
 use remote_core::stats::Statistics;
 use remote_core::{AudioCapturer, VideoCapturer, VideoEncoder};
 pub use service::{HostServiceConfig, run_host_service};
 use std::error::Error;
-use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -83,14 +79,9 @@ use remote_platform::WindowsClipboardProvider;
 
 pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Host starting in Standby Mode...");
-    let _mesh_runtime = maybe_start_mesh_sidecar("RemotePlay Host").await;
-    let discovery_virtual_ip = _mesh_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.virtual_ip);
     let _discovery = maybe_start_discovery_runtime(
         "RemotePlay Host",
         DEFAULT_CONTROL_PORT,
-        discovery_virtual_ip,
         DiscoveryCapabilities {
             can_stream: true,
             can_view: false,
@@ -134,11 +125,6 @@ struct DiscoveryRuntimeHandle {
     cancel_tx: broadcast::Sender<()>,
 }
 
-struct MeshRuntimeHandle {
-    _monitor: EasyTierHealthMonitorHandle,
-    virtual_ip: Option<IpAddr>,
-}
-
 impl Drop for DiscoveryRuntimeHandle {
     fn drop(&mut self) {
         let _ = self.cancel_tx.send(());
@@ -148,7 +134,6 @@ impl Drop for DiscoveryRuntimeHandle {
 async fn maybe_start_discovery_runtime(
     display_name: &str,
     control_port: u16,
-    virtual_ip: Option<std::net::IpAddr>,
     capabilities: DiscoveryCapabilities,
 ) -> Option<DiscoveryRuntimeHandle> {
     if !env_flag_enabled(REMOTE_PLAY_DISCOVERY_ENV) {
@@ -174,13 +159,9 @@ async fn maybe_start_discovery_runtime(
         device_id: mesh_config.node_id,
         display_name: mesh_config.display_name,
         control_port,
-        virtual_ip,
+        virtual_ip: None,
         capabilities,
-        scope: if virtual_ip.is_some() {
-            DiscoveryScope::Mesh
-        } else {
-            DiscoveryScope::Lan
-        },
+        scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
     let discovery_port = match discovery_port_from_env() {
@@ -225,92 +206,6 @@ fn log_discovery_event(label: &str, event: DiscoveryEvent) {
             println!("{label} Discovery | {} peer(s)", snapshot.len());
         }
         DiscoveryEvent::Error(err) => eprintln!("{label} Discovery | {err}"),
-    }
-}
-
-async fn maybe_start_mesh_sidecar(display_name: &str) -> Option<MeshRuntimeHandle> {
-    if !env_flag_enabled(REMOTE_PLAY_MESH_ENV) {
-        return None;
-    }
-
-    let mesh_dir = default_app_private_mesh_dir();
-    let store = AppPrivateMeshConfigStore::new(&mesh_dir);
-    let mesh_config = match store.load_or_generate(display_name) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!(
-                "EasyTier mesh enabled, but mesh config initialization failed in {}: {}",
-                mesh_dir.display(),
-                err
-            );
-            return None;
-        }
-    };
-
-    let locator = EasyTierBinaryLocator::from_environment();
-    let mut manager = match EasyTierSidecarManager::from_locator(mesh_config, &locator) {
-        Ok(manager) => manager,
-        Err(err) => {
-            eprintln!("EasyTier mesh enabled, but sidecar setup failed: {err}");
-            return None;
-        }
-    };
-
-    let launch_plan = manager.launch_plan();
-    println!(
-        "EasyTier mesh enabled. Starting sidecar: {} {}",
-        launch_plan.binary_path.display(),
-        launch_plan.redacted_args.join(" ")
-    );
-
-    match manager.start().await {
-        Ok(()) => {
-            println!("EasyTier sidecar started.");
-            let virtual_ip = probe_mesh_virtual_ip(&launch_plan.binary_path).await;
-            match manager.health_snapshot(virtual_ip) {
-                Ok(snapshot) => println!(
-                    "EasyTier mesh status: {:?}; virtual_ip={}",
-                    snapshot.state,
-                    snapshot
-                        .virtual_ip
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_else(|| "pending".to_string())
-                ),
-                Err(err) => eprintln!("EasyTier mesh status check failed: {err}"),
-            }
-            let monitor = spawn_easytier_health_monitor(
-                manager,
-                EasyTierHealthMonitorConfig::from_sidecar_binary(&launch_plan.binary_path),
-                virtual_ip,
-            );
-            Some(MeshRuntimeHandle {
-                _monitor: monitor,
-                virtual_ip,
-            })
-        }
-        Err(err) => {
-            eprintln!("EasyTier sidecar failed to start: {err}");
-            None
-        }
-    }
-}
-
-async fn probe_mesh_virtual_ip(sidecar_binary_path: &Path) -> Option<std::net::IpAddr> {
-    let probe = EasyTierCliProbeConfig::from_sidecar_binary(sidecar_binary_path);
-    match probe.run().await {
-        Ok(result) => {
-            if let Some(ip) = result.virtual_ip {
-                println!("EasyTier virtual IP detected: {ip}");
-                Some(ip)
-            } else {
-                eprintln!("EasyTier node probe completed, but no virtual IP was reported yet.");
-                None
-            }
-        }
-        Err(err) => {
-            eprintln!("EasyTier virtual IP probe is pending: {err}");
-            None
-        }
     }
 }
 

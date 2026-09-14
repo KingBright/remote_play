@@ -701,8 +701,7 @@ impl BoundP2pTunnel {
                                 ensure_peer_route(
                                     &mut peers,
                                     &peer_id,
-                                    endpoint,
-                                    CandidateKind::Observed,
+                                    (endpoint, CandidateKind::Observed),
                                     &announcement,
                                     public_socket.clone(),
                                     &route_cancel_tx,
@@ -743,8 +742,7 @@ impl BoundP2pTunnel {
                                 ensure_peer_route(
                                     &mut peers,
                                     &peer_id,
-                                    addr,
-                                    CandidateKind::Observed,
+                                    (addr, CandidateKind::Observed),
                                     &[],
                                     public_socket.clone(),
                                     &route_cancel_tx,
@@ -771,8 +769,7 @@ impl BoundP2pTunnel {
                                 ensure_peer_route(
                                     &mut peers,
                                     &peer_id,
-                                    addr,
-                                    CandidateKind::Observed,
+                                    (addr, CandidateKind::Observed),
                                     &[],
                                     public_socket.clone(),
                                     &route_cancel_tx,
@@ -794,8 +791,7 @@ impl BoundP2pTunnel {
                                 ensure_peer_route(
                                     &mut peers,
                                     &peer_id,
-                                    addr,
-                                    CandidateKind::Observed,
+                                    (addr, CandidateKind::Observed),
                                     &[],
                                     public_socket.clone(),
                                     &route_cancel_tx,
@@ -897,13 +893,13 @@ struct PeerRoute {
 async fn ensure_peer_route(
     peers: &mut HashMap<String, PeerRoute>,
     peer_id: &str,
-    candidate: SocketAddr,
-    kind: CandidateKind,
+    candidate: (SocketAddr, CandidateKind),
     announcement: &[u8],
     public_socket: Arc<UdpSocket>,
     route_cancel_tx: &broadcast::Sender<()>,
     config: &P2pTunnelConfig,
 ) -> io::Result<()> {
+    let (candidate, kind) = candidate;
     if let Some(route) = peers.get_mut(peer_id) {
         route.last_seen = Instant::now();
         add_candidate_set(route, candidate, kind, config);
@@ -974,15 +970,15 @@ fn add_candidate_set(
                 config.max_candidates_per_peer,
             );
         }
-        if let Some(port) = candidate.port().checked_sub(delta) {
-            if port != 0 {
-                add_candidate(
-                    route,
-                    SocketAddr::new(candidate.ip(), port),
-                    CandidateKind::Predicted,
-                    config.max_candidates_per_peer,
-                );
-            }
+        if let Some(port) = candidate.port().checked_sub(delta)
+            && port != 0
+        {
+            add_candidate(
+                route,
+                SocketAddr::new(candidate.ip(), port),
+                CandidateKind::Predicted,
+                config.max_candidates_per_peer,
+            );
         }
     }
 

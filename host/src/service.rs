@@ -103,29 +103,31 @@ pub async fn run_host_service(
                                 last_heartbeat = Instant::now();
                             }
                             match msg {
-                                ControlMessage::Input(input_event) => {
-                                    if is_active_client(active_client_addr, client_addr) {
-                                        let _ = input_injector.inject_input(input_event);
-                                    }
+                                ControlMessage::Input(input_event)
+                                    if is_active_client(active_client_addr, client_addr) =>
+                                {
+                                    let _ = input_injector.inject_input(input_event);
                                 }
+                                ControlMessage::Input(_) => {}
                                 ControlMessage::Heartbeat => {
                                     // already refreshed last_heartbeat
                                 }
-                                ControlMessage::Ping { client_send_ts } => {
-                                    if is_active_client(active_client_addr, client_addr) {
-                                        let now_ms = (std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_millis()
-                                            & 0xFFFFFFFFFFFFFFFF) as u64;
-                                        let pong = ControlMessage::Pong {
-                                            client_send_ts,
-                                            host_recv_ts: now_ms,
-                                            host_send_ts: now_ms,
-                                        };
-                                        let _ = udp_sender.send_control(&pong, client_addr).await;
-                                    }
+                                ControlMessage::Ping { client_send_ts }
+                                    if is_active_client(active_client_addr, client_addr) =>
+                                {
+                                    let now_ms = (std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis()
+                                        & 0xFFFFFFFFFFFFFFFF) as u64;
+                                    let pong = ControlMessage::Pong {
+                                        client_send_ts,
+                                        host_recv_ts: now_ms,
+                                        host_send_ts: now_ms,
+                                    };
+                                    let _ = udp_sender.send_control(&pong, client_addr).await;
                                 }
+                                ControlMessage::Ping { .. } => {}
                                 ControlMessage::UpdateStreamSettings { width, height, fps, bitrate_kbps, session_id } => {
                                     if is_active_client(active_client_addr, client_addr)
                                         && active_session_id == Some(session_id)
@@ -212,22 +214,27 @@ pub async fn run_host_service(
                                     active_client_addr = None;
                                     input_injector.release_all_input();
                                 }
-                                ControlMessage::AudioControl { session_id, target, muted, volume_percent } => {
-                                    if is_active_client(active_client_addr, client_addr)
-                                        && active_session_id == Some(session_id) {
-                                        #[cfg(target_os = "macos")]
-                                        if target == AudioControlTarget::ViewerTalkbackPlayback
-                                            && let Some(settings_tx) = &active_talkback_settings_tx
-                                        {
-                                            let _ = settings_tx.send(
-                                                crate::talkback_player::TalkbackPlaybackSettings {
-                                                    muted,
-                                                    volume_percent,
-                                                },
-                                            );
-                                        }
+                                ControlMessage::AudioControl {
+                                    session_id,
+                                    target: _target,
+                                    muted: _muted,
+                                    volume_percent: _volume_percent,
+                                } if is_active_client(active_client_addr, client_addr)
+                                    && active_session_id == Some(session_id) =>
+                                {
+                                    #[cfg(target_os = "macos")]
+                                    if _target == AudioControlTarget::ViewerTalkbackPlayback
+                                        && let Some(settings_tx) = &active_talkback_settings_tx
+                                    {
+                                        let _ = settings_tx.send(
+                                            crate::talkback_player::TalkbackPlaybackSettings {
+                                                muted: _muted,
+                                                volume_percent: _volume_percent,
+                                            },
+                                        );
                                     }
                                 }
+                                ControlMessage::AudioControl { .. } => {}
                                 ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
                                     if require_auth && !authenticated_peers.contains(&client_addr) {
                                         let reject = ControlMessage::SessionReject {

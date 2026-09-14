@@ -247,7 +247,6 @@ test mesh::tests::sidecar_command_args_are_safe_to_log_without_debugging_the_sec
 test mesh::tests::binary_locator_searches_bundled_resources_before_path ... ok
 test mesh::tests::app_private_mesh_store_roundtrips_config_and_secret ... ok
 test mesh::tests::static_health_monitor_publishes_snapshot_without_probe_process ... ok
-test mesh::tests::virtual_ip_parser_accepts_common_easytier_node_output_shapes ... ok
 test mesh::tests::virtual_ip_parser_ignores_unusable_addresses_and_unrelated_peers ... ok
 test mesh::tests::virtual_ipv4_derivation_is_stable_and_private ... ok
 test mesh::tests::app_private_mesh_store_migrates_legacy_default_public_peer ... ok

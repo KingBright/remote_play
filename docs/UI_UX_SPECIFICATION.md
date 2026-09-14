@@ -18,7 +18,6 @@
    - 竖屏控制中心 (Mobile Portrait Dashboard)
    - 横屏 100% 满屏远程触控操控 (Mobile Landscape Screen-First Viewport)
    - 触控与手势模式体系（直触 Direct Touch / 虚拟触控板 Virtual Trackpad / 虚拟手柄 Gamepad）
-   - 移动端扫码免密加入 EasyTier Mesh 组网
    - 详见完整文档：[docs/MOBILE_UI_UX_DESIGN.md](file:///Users/jinliang/remote_play/docs/MOBILE_UI_UX_DESIGN.md)
 
 ---

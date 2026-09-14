@@ -12,7 +12,6 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use remote_core::{
     VideoFrame,
-    mesh::{EasyTierHealthIssue, EasyTierHealthSnapshot, EasyTierHealthState},
     net::DEFAULT_CONTROL_PORT,
     pairing_qr::{encode_pairing_qr, qr_matrix_from_payload},
     role::RoleKind,
@@ -21,7 +20,6 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::watch;
 use yororen_ui::{
     assets::UiAsset,
     component::{self, Button, IconName, button, icon, tooltip},
@@ -117,7 +115,7 @@ fn apply_product_window_appearance() {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawerTab {
     Devices,
-    Mesh,
+    DeviceGroup,
     Security,
     Network,
 }
@@ -126,7 +124,7 @@ pub enum DrawerTab {
 pub enum DeviceFilterKind {
     All,
     Lan,
-    Mesh,
+    P2p,
     Relay,
 }
 
@@ -156,7 +154,6 @@ struct UnifiedDashboard {
     current_frame: Option<Arc<MacDecodedVideoFrame>>,
     presentation_frame: Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>,
     host_stats: Option<Arc<SharedHostStats>>,
-    mesh_health: Option<watch::Receiver<EasyTierHealthSnapshot>>,
     viewer_media_status: UnifiedViewerMediaStatus,
     mesh_pairing: Option<MeshPairingControl>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
@@ -183,7 +180,6 @@ impl UnifiedDashboard {
         let app_runtime = runtime.owner.runtime();
         let viewer_frame = runtime.viewer_frame.clone();
         let host_stats = runtime.host_stats.clone();
-        let mesh_health = runtime.owner.mesh_health_rx();
         let viewer_media_status = runtime.viewer_media_status.clone();
         let mesh_pairing = runtime.mesh_pairing.clone();
         let mesh_pairing_snapshot = mesh_pairing.as_ref().map(MeshPairingControl::snapshot);
@@ -220,7 +216,6 @@ impl UnifiedDashboard {
             current_frame: None,
             presentation_frame: Arc::new(Mutex::new(None)),
             host_stats,
-            mesh_health,
             viewer_media_status,
             mesh_pairing,
             mesh_pairing_snapshot,
@@ -265,10 +260,6 @@ impl UnifiedDashboard {
             role: runtime.role_state().clone(),
             devices: runtime.devices(),
         }
-    }
-
-    fn mesh_snapshot(&self) -> Option<EasyTierHealthSnapshot> {
-        self.mesh_health.as_ref().map(|rx| rx.borrow().clone())
     }
 
     fn drain_latest_frame(&mut self) {
@@ -877,7 +868,6 @@ impl Render for UnifiedDashboard {
         let role = snapshot.role.clone();
         self.sync_input_session(&role);
         let active_session = role.session().cloned();
-        let mesh_snapshot = self.mesh_snapshot();
         let theme = cx.theme().clone();
         let show_drawer = self.drawer_open;
         let is_fullscreen = window.is_fullscreen();
@@ -954,7 +944,6 @@ impl Render for UnifiedDashboard {
             .child(drawer_trigger_capsule(
                 &snapshot.devices,
                 show_drawer,
-                mesh_snapshot.as_ref(),
                 compact,
                 cx,
             ))
@@ -962,7 +951,6 @@ impl Render for UnifiedDashboard {
                 this.child(slide_over_management_drawer(
                     &snapshot.devices,
                     active_session.as_ref(),
-                    mesh_snapshot.as_ref(),
                     self.mesh_pairing_snapshot.clone(),
                     self.active_tab,
                     self.device_filter,
@@ -1564,7 +1552,6 @@ fn scale_mode_control(current: ViewportScaleMode, cx: &Context<UnifiedDashboard>
 fn drawer_trigger_capsule(
     devices: &[AppDevice],
     drawer_open: bool,
-    mesh_snapshot: Option<&EasyTierHealthSnapshot>,
     compact: bool,
     cx: &mut Context<UnifiedDashboard>,
 ) -> Div {
@@ -1618,16 +1605,7 @@ fn drawer_trigger_capsule(
                         .text_color(color_accent_cyan())
                         .whitespace_nowrap()
                         .child(format!("{online_count}")),
-                )
-                .when(mesh_snapshot.is_some() && !compact, |this| {
-                    this.child(
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(color_accent_emerald()),
-                    )
-                }),
+                ),
         ),
     )
 }
@@ -1636,7 +1614,6 @@ fn drawer_trigger_capsule(
 fn slide_over_management_drawer(
     devices: &[AppDevice],
     active_session: Option<&crate::RoleSession>,
-    mesh_snapshot: Option<&EasyTierHealthSnapshot>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     active_tab: DrawerTab,
     device_filter: DeviceFilterKind,
@@ -1728,7 +1705,7 @@ fn slide_over_management_drawer(
                 ))
                 .child(drawer_tab_button(
                     "Pairing",
-                    DrawerTab::Mesh,
+                    DrawerTab::DeviceGroup,
                     active_tab,
                     cx,
                 ))
@@ -1761,8 +1738,8 @@ fn slide_over_management_drawer(
                         cx,
                     )
                     .into_any_element(),
-                    DrawerTab::Mesh => {
-                        drawer_mesh_tab(mesh_snapshot, mesh_pairing_snapshot, cx).into_any_element()
+                    DrawerTab::DeviceGroup => {
+                        drawer_device_group_tab(mesh_pairing_snapshot, cx).into_any_element()
                     }
                     DrawerTab::Security => {
                         drawer_security_tab(input_locked, side_services, owner, cx)
@@ -1772,7 +1749,6 @@ fn slide_over_management_drawer(
                         selected_resolution,
                         selected_fps,
                         selected_bitrate_kbps,
-                        mesh_snapshot,
                         host_stats,
                         owner,
                         cx,
@@ -1829,7 +1805,7 @@ fn drawer_devices_tab(
             .gap_1()
             .child(filter_pill("All", DeviceFilterKind::All, filter, cx))
             .child(filter_pill("LAN", DeviceFilterKind::Lan, filter, cx))
-            .child(filter_pill("Mesh", DeviceFilterKind::Mesh, filter, cx))
+            .child(filter_pill("P2P", DeviceFilterKind::P2p, filter, cx))
             .child(filter_pill("Relay", DeviceFilterKind::Relay, filter, cx)),
     );
 
@@ -1838,7 +1814,7 @@ fn drawer_devices_tab(
         .filter(|d| match filter {
             DeviceFilterKind::All => true,
             DeviceFilterKind::Lan => d.scope == remote_core::discovery::DiscoveryScope::Lan,
-            DeviceFilterKind::Mesh => d.scope == remote_core::discovery::DiscoveryScope::Mesh,
+            DeviceFilterKind::P2p => d.scope == remote_core::discovery::DiscoveryScope::P2p,
             DeviceFilterKind::Relay => d.scope == remote_core::discovery::DiscoveryScope::Relay,
         })
         .collect();
@@ -2025,57 +2001,11 @@ fn filter_pill(
     .child(label)
 }
 
-fn drawer_mesh_tab(
-    mesh_snapshot: Option<&EasyTierHealthSnapshot>,
+fn drawer_device_group_tab(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     cx: &mut Context<UnifiedDashboard>,
 ) -> Div {
-    let theme = cx.theme().clone();
     let mut content = div().flex().flex_col().gap_3();
-
-    if let Some(snapshot) = mesh_snapshot {
-        content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .bg(theme.surface.raised)
-                .border_1()
-                .border_color(color_border_fine())
-                .rounded(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.content.primary)
-                                .child("EasyTier Sidecar Status"),
-                        )
-                        .child(status_pill(
-                            &mesh_status_text(snapshot),
-                            mesh_status_tone(snapshot),
-                            cx,
-                        )),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(theme.content.tertiary)
-                        .child(format!(
-                            "Virtual IP: {}",
-                            snapshot
-                                .virtual_ip
-                                .map(|ip| ip.to_string())
-                                .unwrap_or_else(|| "Pending...".into())
-                        )),
-                ),
-        );
-    }
 
     if let Some(snapshot) = mesh_pairing_snapshot {
         content = content.child(mesh_pairing_card(snapshot, cx));
@@ -2414,7 +2344,6 @@ fn drawer_network_telemetry_tab(
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
-    mesh_snapshot: Option<&EasyTierHealthSnapshot>,
     host_stats: Option<&HostStats>,
     owner: Arc<crate::UnifiedServiceOwner>,
     cx: &mut Context<UnifiedDashboard>,
@@ -2708,31 +2637,7 @@ fn drawer_network_telemetry_tab(
             ),
     );
 
-    content.child(
-        div()
-            .mt(px(2.0))
-            .p_3()
-            .bg(theme.surface.sunken)
-            .border_1()
-            .border_color(color_border_fine())
-            .rounded(px(6.0))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .gap_3()
-                    .text_size(px(10.0))
-                    .text_color(theme.content.secondary)
-                    .child(div().whitespace_nowrap().truncate().child("EasyTier mesh"))
-                    .child(
-                        div().whitespace_nowrap().truncate().child(
-                            mesh_snapshot
-                                .map(mesh_status_text)
-                                .unwrap_or_else(|| "Not configured".to_string()),
-                        ),
-                    ),
-            ),
-    )
+    content
 }
 
 fn telemetry_metric_row(
@@ -3308,29 +3213,6 @@ fn status_color(tone: StatusTone, cx: &Context<UnifiedDashboard>) -> Hsla {
     }
 }
 
-fn status_pill(label: &str, tone: StatusTone, cx: &mut Context<UnifiedDashboard>) -> Div {
-    let theme = cx.theme().clone();
-    div()
-        .h(px(22.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .px_2()
-        .rounded_full()
-        .bg(theme.surface.sunken)
-        .border_1()
-        .border_color(theme.border.muted)
-        .child(status_dot(tone, px(5.0), cx))
-        .child(
-            div()
-                .text_size(px(9.0))
-                .text_color(theme.content.secondary)
-                .truncate()
-                .child(label.to_string()),
-        )
-}
-
 fn status_dot(tone: StatusTone, size: Pixels, cx: &Context<UnifiedDashboard>) -> Div {
     div()
         .size(size)
@@ -3352,7 +3234,7 @@ fn discovery_scope_label(scope: remote_core::discovery::DiscoveryScope) -> &'sta
     match scope {
         remote_core::discovery::DiscoveryScope::Lan => "LAN",
         remote_core::discovery::DiscoveryScope::P2p => "P2P Direct",
-        remote_core::discovery::DiscoveryScope::Mesh => "Legacy Mesh",
+        remote_core::discovery::DiscoveryScope::Mesh => "Legacy Route",
         remote_core::discovery::DiscoveryScope::Relay => "Relay",
     }
 }
@@ -3362,37 +3244,6 @@ fn compact_device_id(device_id: &str) -> String {
         device_id.to_string()
     } else {
         format!("{}...", &device_id[..8])
-    }
-}
-
-fn mesh_status_text(snapshot: &EasyTierHealthSnapshot) -> String {
-    if mesh_needs_admin_setup(Some(snapshot)) {
-        return "Mesh needs admin setup".to_string();
-    }
-
-    match snapshot.state {
-        EasyTierHealthState::Ready => snapshot
-            .virtual_ip
-            .map(|ip| format!("Mesh {ip}"))
-            .unwrap_or_else(|| "Mesh ready".to_string()),
-        EasyTierHealthState::Starting => "Mesh starting".to_string(),
-        EasyTierHealthState::Degraded => "Mesh degraded".to_string(),
-        EasyTierHealthState::Stopped => "Mesh stopped".to_string(),
-    }
-}
-
-fn mesh_needs_admin_setup(snapshot: Option<&EasyTierHealthSnapshot>) -> bool {
-    snapshot.is_some_and(|snapshot| {
-        snapshot.issue == Some(EasyTierHealthIssue::RequiresAdminPrivileges)
-    })
-}
-
-fn mesh_status_tone(snapshot: &EasyTierHealthSnapshot) -> StatusTone {
-    match snapshot.state {
-        EasyTierHealthState::Ready => StatusTone::Success,
-        EasyTierHealthState::Starting => StatusTone::Warning,
-        EasyTierHealthState::Degraded => StatusTone::Error,
-        EasyTierHealthState::Stopped => StatusTone::Neutral,
     }
 }
 

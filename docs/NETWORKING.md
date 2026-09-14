@@ -1,3 +1,5 @@
+RemotePlay networking is product-native. The route policy is **LAN direct → RemotePlay P2P direct → RemotePlay Relay**. No third-party overlay network or sidecar is required.
+
 # RemotePlay Networking
 
 ## Product Route
@@ -43,7 +45,6 @@ The discovery cache keeps multiple route candidates for the same device. The uni
 LAN < P2P direct < Relay
 ```
 
-Legacy EasyTier code is excluded from the product route and macOS package; route selection never needs it for normal operation.
 
 ## P2P Rendezvous on bw
 
@@ -81,7 +82,6 @@ Deployment files live under `deploy/nas/`.
 
 ## Runtime Configuration
 
-Defaults are product-safe and require no EasyTier installation:
 
 ```text
 REMOTE_PLAY_P2P=1
@@ -100,7 +100,6 @@ REMOTE_PLAY_RELAY_LOG=1
 REMOTE_PLAY_DISCOVERY_PORT=38117
 ```
 
-Set `REMOTE_PLAY_MESH=1` only for deliberate legacy EasyTier testing. It is off by default and not included in normal packaging.
 
 ## Performance Rules
 

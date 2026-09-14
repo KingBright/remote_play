@@ -36,18 +36,13 @@ use remote_core::file_transfer_runtime::{
     FileTransferCommand, FileTransferEvent, FileTransferGroupFile, FileTransferRuntimeConfig,
     run_file_transfer_runtime,
 };
-use remote_core::mesh::{
-    AppPrivateMeshConfigStore, EASYTIER_SIDECAR_LOG_FILE_NAME, EasyTierBinaryLocator,
-    EasyTierCliProbeConfig, EasyTierHealthMonitorConfig, EasyTierHealthMonitorHandle,
-    EasyTierHealthSnapshot, EasyTierProcessState, EasyTierSidecarManager, REMOTE_PLAY_MESH_ENV,
-    default_app_private_mesh_dir, spawn_easytier_health_monitor,
-};
+use remote_core::mesh::{AppPrivateMeshConfigStore, default_app_private_mesh_dir};
 use remote_core::net::UdpMultiplexer;
 use remote_core::scheduled_sender::{ScheduledDataSender, ScheduledDataSenderConfig};
 use remote_core::stats::Statistics;
 use std::error::Error;
-use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 use tokio::spawn;
@@ -68,13 +63,6 @@ pub use transfer_center::TransferEntrySnapshot;
 pub struct DiscoveryRuntimeHandle {
     cancel_tx: broadcast::Sender<()>,
     pub snapshot_rx: watch::Receiver<DiscoveryPeerSnapshot>,
-}
-
-pub struct MeshRuntimeHandle {
-    _monitor: Arc<Mutex<Option<EasyTierHealthMonitorHandle>>>,
-    health_rx: watch::Receiver<EasyTierHealthSnapshot>,
-    reload_tx: mpsc::UnboundedSender<()>,
-    virtual_ip: Option<IpAddr>,
 }
 
 impl Drop for DiscoveryRuntimeHandle {
@@ -489,28 +477,19 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 #[cfg(target_os = "macos")]
 pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Client starting...");
-    let _mesh_runtime = maybe_start_mesh_sidecar("RemotePlay Viewer").await;
     let mesh_pairing = match MeshPairingControl::load_or_create(
         default_app_private_mesh_dir(),
         "RemotePlay Viewer",
     ) {
-        Ok(control) => Some(if let Some(runtime) = &_mesh_runtime {
-            control.with_mesh_reload_tx(runtime.reload_tx.clone())
-        } else {
-            control
-        }),
+        Ok(control) => Some(control),
         Err(err) => {
             eprintln!("Mesh pairing setup is unavailable: {err}");
             None
         }
     };
-    let discovery_virtual_ip = _mesh_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.virtual_ip);
     let discovery = maybe_start_discovery_runtime(
         "RemotePlay Viewer",
         0,
-        discovery_virtual_ip,
         DiscoveryCapabilities {
             can_view: true,
             can_stream: false,
@@ -665,9 +644,6 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
                 file_transfer: file_transfer_control,
                 talkback: talkback_control,
                 discovery: discovery.as_ref().map(|handle| handle.snapshot_rx.clone()),
-                mesh_health: _mesh_runtime
-                    .as_ref()
-                    .map(|runtime| runtime.health_rx.clone()),
                 mesh_pairing,
             },
         )
@@ -686,7 +662,6 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 async fn maybe_start_discovery_runtime(
     display_name: &str,
     control_port: u16,
-    virtual_ip: Option<std::net::IpAddr>,
     capabilities: DiscoveryCapabilities,
 ) -> Option<DiscoveryRuntimeHandle> {
     if !env_flag_enabled(REMOTE_PLAY_DISCOVERY_ENV) {
@@ -712,13 +687,9 @@ async fn maybe_start_discovery_runtime(
         device_id: mesh_config.node_id,
         display_name: mesh_config.display_name,
         control_port,
-        virtual_ip,
+        virtual_ip: None,
         capabilities,
-        scope: if virtual_ip.is_some() {
-            DiscoveryScope::Mesh
-        } else {
-            DiscoveryScope::Lan
-        },
+        scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
     let discovery_port = match discovery_port_from_env() {
@@ -778,144 +749,6 @@ fn env_path_or_temp(name: &str, fallback_dir_name: &str) -> PathBuf {
     std::env::var_os(name)
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join(fallback_dir_name))
-}
-
-async fn maybe_start_mesh_sidecar(display_name: &str) -> Option<MeshRuntimeHandle> {
-    if !env_flag_enabled(REMOTE_PLAY_MESH_ENV) {
-        return None;
-    }
-
-    let (monitor, virtual_ip) = start_mesh_monitor(display_name).await?;
-    let initial_snapshot = monitor.snapshot_rx.borrow().clone();
-    let (health_tx, health_rx) = watch::channel(initial_snapshot);
-    spawn_mesh_health_bridge(monitor.snapshot_rx.clone(), health_tx.clone());
-
-    let monitor = Arc::new(Mutex::new(Some(monitor)));
-    let (reload_tx, mut reload_rx) = mpsc::unbounded_channel();
-    let reload_monitor = monitor.clone();
-    let reload_health_tx = health_tx.clone();
-    let display_name = display_name.to_string();
-    tokio::spawn(async move {
-        while reload_rx.recv().await.is_some() {
-            let old_monitor = reload_monitor.lock().unwrap().take();
-            drop(old_monitor);
-
-            match start_mesh_monitor(&display_name).await {
-                Some((monitor, _virtual_ip)) => {
-                    spawn_mesh_health_bridge(monitor.snapshot_rx.clone(), reload_health_tx.clone());
-                    *reload_monitor.lock().unwrap() = Some(monitor);
-                }
-                None => {
-                    let _ = reload_health_tx.send(EasyTierHealthSnapshot::degraded(
-                        EasyTierProcessState::NotStarted,
-                        None,
-                        "EasyTier mesh reload failed",
-                    ));
-                }
-            }
-        }
-    });
-
-    Some(MeshRuntimeHandle {
-        _monitor: monitor,
-        health_rx,
-        reload_tx,
-        virtual_ip,
-    })
-}
-
-async fn start_mesh_monitor(
-    display_name: &str,
-) -> Option<(EasyTierHealthMonitorHandle, Option<IpAddr>)> {
-    let mesh_dir = default_app_private_mesh_dir();
-    let store = AppPrivateMeshConfigStore::new(&mesh_dir);
-    let mesh_config = match store.load_or_generate(display_name) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!(
-                "EasyTier mesh enabled, but mesh config initialization failed in {}: {}",
-                mesh_dir.display(),
-                err
-            );
-            return None;
-        }
-    };
-
-    let locator = EasyTierBinaryLocator::from_environment();
-    let mut manager = match EasyTierSidecarManager::from_locator(mesh_config, &locator) {
-        Ok(manager) => manager,
-        Err(err) => {
-            eprintln!("EasyTier mesh enabled, but sidecar setup failed: {err}");
-            return None;
-        }
-    };
-    manager.set_log_file_path(mesh_dir.join(EASYTIER_SIDECAR_LOG_FILE_NAME));
-
-    let launch_plan = manager.launch_plan();
-    println!(
-        "EasyTier mesh enabled. Starting sidecar: {} {}",
-        launch_plan.binary_path.display(),
-        launch_plan.redacted_args.join(" ")
-    );
-
-    match manager.start().await {
-        Ok(()) => {
-            println!("EasyTier sidecar started.");
-            let virtual_ip = probe_mesh_virtual_ip(&launch_plan.binary_path).await;
-            match manager.health_snapshot(virtual_ip) {
-                Ok(snapshot) => println!(
-                    "EasyTier mesh status: {:?}; virtual_ip={}",
-                    snapshot.state,
-                    snapshot
-                        .virtual_ip
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_else(|| "pending".to_string())
-                ),
-                Err(err) => eprintln!("EasyTier mesh status check failed: {err}"),
-            }
-            let monitor = spawn_easytier_health_monitor(
-                manager,
-                EasyTierHealthMonitorConfig::from_sidecar_binary(&launch_plan.binary_path),
-                virtual_ip,
-            );
-            Some((monitor, virtual_ip))
-        }
-        Err(err) => {
-            eprintln!("EasyTier sidecar failed to start: {err}");
-            None
-        }
-    }
-}
-
-fn spawn_mesh_health_bridge(
-    mut source_rx: watch::Receiver<EasyTierHealthSnapshot>,
-    target_tx: watch::Sender<EasyTierHealthSnapshot>,
-) {
-    tokio::spawn(async move {
-        let _ = target_tx.send(source_rx.borrow().clone());
-        while source_rx.changed().await.is_ok() {
-            let _ = target_tx.send(source_rx.borrow().clone());
-        }
-    });
-}
-
-async fn probe_mesh_virtual_ip(sidecar_binary_path: &Path) -> Option<std::net::IpAddr> {
-    let probe = EasyTierCliProbeConfig::from_sidecar_binary(sidecar_binary_path);
-    match probe.run().await {
-        Ok(result) => {
-            if let Some(ip) = result.virtual_ip {
-                println!("EasyTier virtual IP detected: {ip}");
-                Some(ip)
-            } else {
-                eprintln!("EasyTier node probe completed, but no virtual IP was reported yet.");
-                None
-            }
-        }
-        Err(err) => {
-            eprintln!("EasyTier virtual IP probe is pending: {err}");
-            None
-        }
-    }
 }
 
 fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
