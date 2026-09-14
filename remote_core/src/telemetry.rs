@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 pub struct RollingQuantileAggregator {
     window_size: usize,
     samples: Vec<u32>,
+    sorted_samples: Vec<u32>,
     head: usize,
     count: usize,
     sum: u64,
+    sum_squares: u128,
 }
 
 impl RollingQuantileAggregator {
@@ -20,29 +22,59 @@ impl RollingQuantileAggregator {
         Self {
             window_size: cap,
             samples: Vec::with_capacity(cap),
+            sorted_samples: Vec::with_capacity(cap),
             head: 0,
             count: 0,
             sum: 0,
+            sum_squares: 0,
         }
     }
 
-    /// 以 O(1) 零堆分配录入一个微秒耗时样本
+    /// 零额外堆分配录入一个微秒耗时样本，并同步维护有序窗口。
+    ///
+    /// 窗口很小（通常 120~300），用连续内存中的二分定位 + memmove 换取
+    /// 报告阶段 O(1) 的精确分位数读取，避免周期性 clone/sort 抖动进入媒体热路径。
     #[inline]
     pub fn record(&mut self, val_us: u32) {
+        let val_sq = (val_us as u128) * (val_us as u128);
         if self.samples.len() < self.window_size {
             self.samples.push(val_us);
             self.sum = self.sum.saturating_add(val_us as u64);
-            self.count = self.count.saturating_add(1);
+            self.sum_squares = self.sum_squares.saturating_add(val_sq);
         } else {
             let old_val = self.samples[self.head];
+            let old_sq = (old_val as u128) * (old_val as u128);
             self.sum = self
                 .sum
                 .saturating_sub(old_val as u64)
                 .saturating_add(val_us as u64);
+            self.sum_squares = self
+                .sum_squares
+                .saturating_sub(old_sq)
+                .saturating_add(val_sq);
             self.samples[self.head] = val_us;
             self.head = (self.head + 1) % self.window_size;
-            self.count = self.count.saturating_add(1);
+            self.remove_sorted(old_val);
         }
+        self.insert_sorted(val_us);
+        self.count = self.count.saturating_add(1);
+    }
+
+    #[inline]
+    fn insert_sorted(&mut self, val_us: u32) {
+        let idx = self
+            .sorted_samples
+            .partition_point(|&sample| sample <= val_us);
+        self.sorted_samples.insert(idx, val_us);
+    }
+
+    #[inline]
+    fn remove_sorted(&mut self, val_us: u32) {
+        let idx = self
+            .sorted_samples
+            .partition_point(|&sample| sample < val_us);
+        debug_assert_eq!(self.sorted_samples.get(idx), Some(&val_us));
+        self.sorted_samples.remove(idx);
     }
 
     /// 获取当前窗口内样本数
@@ -66,9 +98,11 @@ impl RollingQuantileAggregator {
     /// 重置所有样本
     pub fn reset(&mut self) {
         self.samples.clear();
+        self.sorted_samples.clear();
         self.head = 0;
         self.count = 0;
         self.sum = 0;
+        self.sum_squares = 0;
     }
 
     /// 生成当前窗口的完整分位数与统计指标快照
@@ -78,13 +112,13 @@ impl RollingQuantileAggregator {
             return StageLatencyStats::default();
         }
 
-        let mut sorted = self.samples.clone();
-        sorted.sort_unstable();
-
+        debug_assert_eq!(n, self.sorted_samples.len());
+        let sorted = &self.sorted_samples;
         let min_us = sorted[0];
         let max_us = sorted[n - 1];
 
-        // 最近邻阶梯插值 (Nearest Rank Method)
+        // 最近邻阶梯插值 (Nearest Rank Method)。有序窗口在 record() 时增量维护，
+        // 因此报告阶段不再 clone/sort，也不会产生瞬时堆分配。
         let p50_idx = (n * 50).div_ceil(100) - 1;
         let p95_idx = (n * 95).div_ceil(100) - 1;
         let p99_idx = (n * 99).div_ceil(100) - 1;
@@ -95,17 +129,8 @@ impl RollingQuantileAggregator {
 
         let avg_us = (self.sum / (n as u64)) as u32;
         let mean = self.sum as f64 / n as f64;
-
-        // 计算真实总体标准差: sqrt( sum((x - avg)^2) / N )
-        let variance: f64 = sorted
-            .iter()
-            .map(|&x| {
-                let diff = (x as f64) - mean;
-                diff * diff
-            })
-            .sum::<f64>()
-            / (n as f64);
-
+        let mean_square = self.sum_squares as f64 / n as f64;
+        let variance = (mean_square - mean * mean).max(0.0);
         let stddev_us = variance.sqrt().round() as u32;
 
         StageLatencyStats {
@@ -199,22 +224,29 @@ impl Default for RollingFpsCalculator {
 /// 滚动码率计算器 (比特率统计窗口)
 #[derive(Debug, Clone)]
 pub struct RollingBitrateCalculator {
-    records: Vec<(Instant, usize)>,
+    records: VecDeque<(Instant, usize)>,
     window_duration: Duration,
+    total_bytes: u64,
 }
 
 impl RollingBitrateCalculator {
     pub fn new(window_duration: Duration) -> Self {
         Self {
-            records: Vec::with_capacity(300),
+            records: VecDeque::with_capacity(300),
             window_duration,
+            total_bytes: 0,
         }
     }
 
     pub fn record_bytes(&mut self, bytes: usize, now: Instant) {
-        self.records.push((now, bytes));
+        self.records.push_back((now, bytes));
+        self.total_bytes = self.total_bytes.saturating_add(bytes as u64);
         let cutoff = now.checked_sub(self.window_duration).unwrap_or(now);
-        self.records.retain(|&(ts, _)| ts >= cutoff);
+        while self.records.front().is_some_and(|&(ts, _)| ts < cutoff) {
+            if let Some((_, expired_bytes)) = self.records.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(expired_bytes as u64);
+            }
+        }
     }
 
     pub fn current_bitrate_kbps(&self) -> u32 {
@@ -222,12 +254,11 @@ impl RollingBitrateCalculator {
         if n < 2 {
             return 0;
         }
-        let first_ts = self.records[0].0;
-        let last_ts = self.records.last().unwrap().0;
+        let first_ts = self.records.front().expect("non-empty bitrate window").0;
+        let last_ts = self.records.back().expect("non-empty bitrate window").0;
         let elapsed = last_ts.saturating_duration_since(first_ts).as_secs_f32();
         if elapsed > 0.001 {
-            let total_bytes: usize = self.records.iter().map(|&(_, b)| b).sum();
-            let kbps = (total_bytes as f32 * 8.0) / (elapsed * 1000.0);
+            let kbps = (self.total_bytes as f32 * 8.0) / (elapsed * 1000.0);
             kbps.round() as u32
         } else {
             0
