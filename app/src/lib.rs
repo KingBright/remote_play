@@ -17,7 +17,10 @@ use remote_core::mesh::{
     spawn_easytier_static_health_monitor,
 };
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
-use remote_core::p2p::{BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot, derive_p2p_group_id};
+use remote_core::p2p::{
+    BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot, derive_p2p_group_id,
+    resolve_p2p_rendezvous_addrs,
+};
 use remote_core::relay::{
     BoundTcpRelayTunnel, BoundWebSocketRelayTunnel, RelayConfigError, TcpRelayTunnelConfig,
     WebSocketRelayTunnelConfig, derive_relay_group_id,
@@ -1896,22 +1899,16 @@ impl Drop for AbortOnDropTask {
 async fn start_unified_p2p_runtime(
     config: UnifiedP2pRuntimeConfig,
 ) -> Result<UnifiedP2pRuntime, Box<dyn Error + Send + Sync>> {
-    let rendezvous = tokio::net::lookup_host(config.rendezvous.as_str())
-        .await?
-        .next()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                format!("P2P rendezvous did not resolve: {}", config.rendezvous),
-            )
-        })?;
+    let rendezvous_addrs =
+        resolve_p2p_rendezvous_addrs(&config.rendezvous, config.bind_addr).await?;
     let mut tunnel_config = P2pTunnelConfig::new(
         config.bind_addr,
-        rendezvous,
+        rendezvous_addrs[0],
         config.group_id,
         config.peer_id,
         config.announcement,
     )?
+    .with_rendezvous_addrs(rendezvous_addrs)
     .with_event_logging(config.log_events);
     if let Some(target) = config.host_control_target_addr {
         tunnel_config = tunnel_config.with_local_target_addr(target);

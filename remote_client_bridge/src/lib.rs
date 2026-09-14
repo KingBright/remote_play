@@ -17,7 +17,9 @@ use remote_core::discovery::{
 };
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshConfig, default_app_private_mesh_dir};
 use remote_core::net::{UdpMultiplexer, UdpSender};
-use remote_core::p2p::{BoundP2pTunnel, P2pTunnelConfig, derive_p2p_group_id};
+use remote_core::p2p::{
+    BoundP2pTunnel, P2pTunnelConfig, derive_p2p_group_id, resolve_p2p_rendezvous_addrs,
+};
 use remote_core::pairing_qr::parse_pairing_qr;
 use remote_core::relay::{
     BoundWebSocketRelayTunnel, WebSocketRelayTunnelConfig, derive_relay_group_id,
@@ -817,22 +819,21 @@ async fn start_bridge_p2p(
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
     let rendezvous_name = std::env::var("REMOTE_PLAY_P2P_RENDEZVOUS")
         .unwrap_or_else(|_| DEFAULT_P2P_RENDEZVOUS.to_string());
-    let rendezvous = tokio::net::lookup_host(rendezvous_name.as_str())
-        .await?
-        .next()
-        .ok_or_else(|| std::io::Error::other("P2P rendezvous did not resolve"))?;
+    let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
+    let rendezvous_addrs = resolve_p2p_rendezvous_addrs(&rendezvous_name, bind_addr).await?;
     let group_id = derive_p2p_group_id(
         &identity.network_name,
         identity.network_secret.expose_secret(),
     )?;
     let tunnel = BoundP2pTunnel::bind(
         P2pTunnelConfig::new(
-            SocketAddr::from(([0, 0, 0, 0], 0)),
-            rendezvous,
+            bind_addr,
+            rendezvous_addrs[0],
             group_id,
             identity.node_id.clone(),
             announcement.encode()?,
         )?
+        .with_rendezvous_addrs(rendezvous_addrs)
         .with_discovery_target_addr(discovery_target),
     )
     .await?;

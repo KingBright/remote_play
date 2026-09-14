@@ -15,6 +15,9 @@ const PACKET_REGISTER: u8 = 1;
 const PACKET_CANDIDATE: u8 = 2;
 const PACKET_PUNCH: u8 = 3;
 const PACKET_PUNCH_ACK: u8 = 4;
+const PACKET_OBSERVATION: u8 = 5;
+const PACKET_PROBE: u8 = 6;
+const PACKET_PROBE_ACK: u8 = 7;
 const MAX_ID_LEN: usize = 128;
 const MAX_ANNOUNCEMENT_LEN: usize = 1200;
 const MAX_PACKET_LEN: usize = 1536;
@@ -42,6 +45,21 @@ pub enum P2pPacket {
     PunchAck {
         group_id: String,
         peer_id: String,
+    },
+    Observation {
+        group_id: String,
+        peer_id: String,
+        endpoint: SocketAddr,
+    },
+    Probe {
+        group_id: String,
+        peer_id: String,
+        token: u64,
+    },
+    ProbeAck {
+        group_id: String,
+        peer_id: String,
+        token: u64,
     },
 }
 
@@ -83,6 +101,36 @@ impl P2pPacket {
                 push_id(&mut out, group_id)?;
                 push_id(&mut out, peer_id)?;
             }
+            Self::Observation {
+                group_id,
+                peer_id,
+                endpoint,
+            } => {
+                out.push(PACKET_OBSERVATION);
+                push_id(&mut out, group_id)?;
+                push_id(&mut out, peer_id)?;
+                push_socket_addr(&mut out, *endpoint);
+            }
+            Self::Probe {
+                group_id,
+                peer_id,
+                token,
+            } => {
+                out.push(PACKET_PROBE);
+                push_id(&mut out, group_id)?;
+                push_id(&mut out, peer_id)?;
+                out.extend_from_slice(&token.to_be_bytes());
+            }
+            Self::ProbeAck {
+                group_id,
+                peer_id,
+                token,
+            } => {
+                out.push(PACKET_PROBE_ACK);
+                push_id(&mut out, group_id)?;
+                push_id(&mut out, peer_id)?;
+                out.extend_from_slice(&token.to_be_bytes());
+            }
         }
         if out.len() > MAX_PACKET_LEN {
             return Err(P2pError::PacketTooLarge(out.len()));
@@ -119,6 +167,21 @@ impl P2pPacket {
             },
             PACKET_PUNCH => Self::Punch { group_id, peer_id },
             PACKET_PUNCH_ACK => Self::PunchAck { group_id, peer_id },
+            PACKET_OBSERVATION => Self::Observation {
+                group_id,
+                peer_id,
+                endpoint: reader.socket_addr()?,
+            },
+            PACKET_PROBE => Self::Probe {
+                group_id,
+                peer_id,
+                token: reader.u64()?,
+            },
+            PACKET_PROBE_ACK => Self::ProbeAck {
+                group_id,
+                peer_id,
+                token: reader.u64()?,
+            },
             _ => return Err(P2pError::InvalidPacket),
         };
         if !reader.finished() {
@@ -161,6 +224,37 @@ impl std::error::Error for P2pError {}
 
 /// Derive an opaque rendezvous capability from the private device-group secret.
 /// The secret itself never leaves the device.
+/// Resolve a comma/semicolon separated rendezvous list and keep endpoints that
+/// match the public P2P socket address family. Multiple observations let the
+/// client detect endpoint-dependent mappings and try more than one path.
+pub async fn resolve_p2p_rendezvous_addrs(
+    spec: &str,
+    bind_addr: SocketAddr,
+) -> io::Result<Vec<SocketAddr>> {
+    let mut resolved = Vec::new();
+    for item in spec
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        for addr in tokio::net::lookup_host(item).await? {
+            if addr.is_ipv4() == bind_addr.is_ipv4() && !resolved.contains(&addr) {
+                resolved.push(addr);
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            format!(
+                "P2P rendezvous list did not resolve for {}: {spec}",
+                if bind_addr.is_ipv4() { "IPv4" } else { "IPv6" }
+            ),
+        ));
+    }
+    Ok(resolved)
+}
+
 pub fn derive_p2p_group_id(network_name: &str, network_secret: &str) -> Result<String, P2pError> {
     if network_name.trim().is_empty() {
         return Err(P2pError::InvalidId);
@@ -271,6 +365,15 @@ impl BoundP2pRendezvousServer {
                         println!("P2P rendezvous register group={group_id} peer={peer_id} addr={addr} peers={}", existing.len());
                     }
 
+                    let observation = P2pPacket::Observation {
+                        group_id: group_id.clone(),
+                        peer_id: peer_id.clone(),
+                        endpoint: addr,
+                    };
+                    if let Ok(bytes) = observation.encode() {
+                        let _ = self.socket.send_to(&bytes, addr).await;
+                    }
+
                     for (other_peer_id, other) in existing {
                         let to_new = P2pPacket::Candidate {
                             group_id: group_id.clone(),
@@ -308,7 +411,7 @@ struct RendezvousPeer {
 #[derive(Debug, Clone)]
 pub struct P2pTunnelConfig {
     pub bind_addr: SocketAddr,
-    pub rendezvous_addr: SocketAddr,
+    pub rendezvous_addrs: Vec<SocketAddr>,
     pub group_id: String,
     pub peer_id: String,
     pub announcement: Vec<u8>,
@@ -316,7 +419,11 @@ pub struct P2pTunnelConfig {
     pub discovery_target_addr: Option<SocketAddr>,
     pub register_interval: Duration,
     pub punch_interval: Duration,
+    pub probe_interval: Duration,
     pub peer_ttl: Duration,
+    pub direct_timeout: Duration,
+    pub predicted_port_span: u16,
+    pub max_candidates_per_peer: usize,
     pub log_events: bool,
 }
 
@@ -335,17 +442,34 @@ impl P2pTunnelConfig {
         }
         Ok(Self {
             bind_addr,
-            rendezvous_addr,
+            rendezvous_addrs: vec![rendezvous_addr],
             group_id,
             peer_id,
             announcement,
             local_target_addr: None,
             discovery_target_addr: None,
             register_interval: Duration::from_secs(2),
-            punch_interval: Duration::from_millis(750),
+            punch_interval: Duration::from_millis(500),
+            probe_interval: Duration::from_millis(700),
             peer_ttl: Duration::from_secs(20),
+            direct_timeout: Duration::from_secs(5),
+            predicted_port_span: 4,
+            max_candidates_per_peer: 16,
             log_events: false,
         })
+    }
+
+    pub fn with_rendezvous_addrs(mut self, addrs: impl IntoIterator<Item = SocketAddr>) -> Self {
+        let mut unique = Vec::new();
+        for addr in addrs {
+            if !unique.contains(&addr) {
+                unique.push(addr);
+            }
+        }
+        if !unique.is_empty() {
+            self.rendezvous_addrs = unique;
+        }
+        self
     }
 
     pub fn with_local_target_addr(mut self, addr: SocketAddr) -> Self {
@@ -358,10 +482,30 @@ impl P2pTunnelConfig {
         self
     }
 
+    pub fn with_direct_timeout(mut self, timeout: Duration) -> Self {
+        self.direct_timeout = timeout.max(Duration::from_secs(1));
+        self
+    }
+
+    pub fn with_prediction(mut self, port_span: u16, max_candidates_per_peer: usize) -> Self {
+        self.predicted_port_span = port_span.min(32);
+        self.max_candidates_per_peer = max_candidates_per_peer.clamp(1, 64);
+        self
+    }
+
     pub fn with_event_logging(mut self, enabled: bool) -> Self {
         self.log_events = enabled;
         self
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum P2pNatBehavior {
+    #[default]
+    Unknown,
+    EndpointIndependent,
+    PortVarying,
+    AddressAndPortVarying,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,18 +514,22 @@ pub struct P2pPeerSnapshot {
     pub candidate: SocketAddr,
     pub local_endpoint: SocketAddr,
     pub direct_ready: bool,
+    pub candidate_count: usize,
+    pub rtt_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct P2pTunnelSnapshot {
     pub peers: Vec<P2pPeerSnapshot>,
+    pub nat_behavior: P2pNatBehavior,
+    pub observed_endpoints: Vec<SocketAddr>,
 }
 
 impl P2pTunnelSnapshot {
     pub fn route_for_peer(&self, peer_id: &str) -> Option<SocketAddr> {
         self.peers
             .iter()
-            .find(|peer| peer.peer_id == peer_id)
+            .find(|peer| peer.peer_id == peer_id && peer.direct_ready)
             .map(|peer| peer.local_endpoint)
     }
 
@@ -412,6 +560,12 @@ impl BoundP2pTunnel {
         mut cancel_rx: broadcast::Receiver<()>,
         snapshot_tx: watch::Sender<P2pTunnelSnapshot>,
     ) -> io::Result<()> {
+        if self.config.rendezvous_addrs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "P2P requires at least one rendezvous endpoint",
+            ));
+        }
         let public_socket = Arc::new(self.socket);
         let register = P2pPacket::Register {
             group_id: self.config.group_id.clone(),
@@ -424,14 +578,19 @@ impl BoundP2pTunnel {
         register_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut punch_interval = tokio::time::interval(self.config.punch_interval);
         punch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut probe_interval = tokio::time::interval(self.config.probe_interval);
+        probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut prune_interval = tokio::time::interval(Duration::from_secs(1));
         prune_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (route_cancel_tx, _) = broadcast::channel(1);
         let mut peers: HashMap<String, PeerRoute> = HashMap::new();
+        let mut observations: HashMap<SocketAddr, SocketAddr> = HashMap::new();
+        let mut probe_token = 1u64;
         let mut buf = vec![0u8; 65_535];
-        let _ = public_socket
-            .send_to(&register, self.config.rendezvous_addr)
-            .await;
+
+        for rendezvous in &self.config.rendezvous_addrs {
+            let _ = public_socket.send_to(&register, rendezvous).await;
+        }
 
         loop {
             tokio::select! {
@@ -443,7 +602,9 @@ impl BoundP2pTunnel {
                     return Ok(());
                 }
                 _ = register_interval.tick() => {
-                    let _ = public_socket.send_to(&register, self.config.rendezvous_addr).await;
+                    for rendezvous in &self.config.rendezvous_addrs {
+                        let _ = public_socket.send_to(&register, rendezvous).await;
+                    }
                 }
                 _ = punch_interval.tick() => {
                     let punch = P2pPacket::Punch {
@@ -451,11 +612,57 @@ impl BoundP2pTunnel {
                         peer_id: self.config.peer_id.clone(),
                     }.encode().map_err(p2p_io_error)?;
                     for route in peers.values() {
-                        let _ = public_socket.send_to(&punch, route.candidate).await;
+                        if route.direct_ready {
+                            continue;
+                        }
+                        for candidate in &route.candidates {
+                            let _ = public_socket.send_to(&punch, candidate.addr).await;
+                        }
+                    }
+                }
+                _ = probe_interval.tick() => {
+                    for route in peers.values_mut() {
+                        for candidate in &mut route.candidates {
+                            if route.direct_ready
+                                && !candidate.confirmed
+                                && candidate.kind == CandidateKind::Predicted
+                            {
+                                continue;
+                            }
+                            let token = probe_token;
+                            probe_token = probe_token.wrapping_add(1).max(1);
+                            candidate.last_probe = Some((token, Instant::now()));
+                            let probe = P2pPacket::Probe {
+                                group_id: self.config.group_id.clone(),
+                                peer_id: self.config.peer_id.clone(),
+                                token,
+                            }.encode().map_err(p2p_io_error)?;
+                            let _ = public_socket.send_to(&probe, candidate.addr).await;
+                        }
                     }
                 }
                 _ = prune_interval.tick() => {
                     let ttl = self.config.peer_ttl;
+                    let mut changed = false;
+                    for route in peers.values_mut() {
+                        for candidate in &mut route.candidates {
+                            if candidate.confirmed
+                                && candidate
+                                    .last_confirmed
+                                    .is_none_or(|seen| seen.elapsed() > self.config.direct_timeout)
+                            {
+                                candidate.confirmed = false;
+                                candidate.rtt = None;
+                                changed = true;
+                            }
+                        }
+                        let was_ready = route.direct_ready;
+                        route.direct_ready = route.candidates.iter().any(|candidate| candidate.confirmed);
+                        if route.direct_ready {
+                            choose_active_candidate(route);
+                        }
+                        changed |= was_ready != route.direct_ready;
+                    }
                     let stale = peers
                         .iter()
                         .filter(|(_, route)| route.last_seen.elapsed() > ttl)
@@ -467,41 +674,63 @@ impl BoundP2pTunnel {
                                 route.task.abort();
                             }
                         }
-                        publish_snapshot(&snapshot_tx, &peers);
+                        changed = true;
+                    }
+                    if changed {
+                        publish_snapshot(&snapshot_tx, &peers, &observations);
                     }
                 }
                 received = public_socket.recv_from(&mut buf) => {
                     let (len, addr) = received?;
                     let bytes = &buf[..len];
 
-                    if addr == self.config.rendezvous_addr && P2pPacket::is_wire_packet(bytes) {
-                        if let Ok(P2pPacket::Candidate { group_id, peer_id, endpoint, announcement }) = P2pPacket::decode(bytes)
-                            && group_id == self.config.group_id
-                            && peer_id != self.config.peer_id
-                        {
-                            ensure_peer_route(
-                                &mut peers,
-                                &peer_id,
-                                endpoint,
-                                &announcement,
-                                public_socket.clone(),
-                                &route_cancel_tx,
-                                &self.config,
-                            ).await?;
-                            if let Some(route) = peers.get_mut(&peer_id) {
-                                route.last_seen = Instant::now();
-                                route.candidate = endpoint;
-                                let _ = route.candidate_tx.send(endpoint);
+                    if self.config.rendezvous_addrs.contains(&addr) && P2pPacket::is_wire_packet(bytes) {
+                        match P2pPacket::decode(bytes) {
+                            Ok(P2pPacket::Observation { group_id, peer_id, endpoint })
+                                if group_id == self.config.group_id && peer_id == self.config.peer_id =>
+                            {
+                                observations.insert(addr, endpoint);
+                                publish_snapshot(&snapshot_tx, &peers, &observations);
+                                if self.config.log_events {
+                                    println!("P2P observation rendezvous={addr} endpoint={endpoint} nat={:?}", classify_nat_behavior(&observations));
+                                }
                             }
-                            let punch = P2pPacket::Punch {
-                                group_id: self.config.group_id.clone(),
-                                peer_id: self.config.peer_id.clone(),
-                            }.encode().map_err(p2p_io_error)?;
-                            let _ = public_socket.send_to(&punch, endpoint).await;
-                            publish_snapshot(&snapshot_tx, &peers);
-                            if self.config.log_events {
-                                println!("P2P candidate peer={peer_id} endpoint={endpoint}");
+                            Ok(P2pPacket::Candidate { group_id, peer_id, endpoint, announcement })
+                                if group_id == self.config.group_id && peer_id != self.config.peer_id =>
+                            {
+                                ensure_peer_route(
+                                    &mut peers,
+                                    &peer_id,
+                                    endpoint,
+                                    CandidateKind::Observed,
+                                    &announcement,
+                                    public_socket.clone(),
+                                    &route_cancel_tx,
+                                    &self.config,
+                                ).await?;
+                                if let Some(route) = peers.get_mut(&peer_id) {
+                                    route.last_seen = Instant::now();
+                                    add_candidate_set(route, endpoint, CandidateKind::Observed, &self.config);
+                                }
+                                if peers.get(&peer_id).is_some_and(|route| route.direct_ready) {
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                }
+                                let punch = P2pPacket::Punch {
+                                    group_id: self.config.group_id.clone(),
+                                    peer_id: self.config.peer_id.clone(),
+                                }.encode().map_err(p2p_io_error)?;
+                                if let Some(route) = peers.get(&peer_id) {
+                                    for candidate in &route.candidates {
+                                        let _ = public_socket.send_to(&punch, candidate.addr).await;
+                                    }
+                                }
+                                publish_snapshot(&snapshot_tx, &peers, &observations);
+                                if self.config.log_events {
+                                    let count = peers.get(&peer_id).map(|route| route.candidates.len()).unwrap_or(0);
+                                    println!("P2P candidates peer={peer_id} observed={endpoint} total={count}");
+                                }
                             }
+                            _ => {}
                         }
                         continue;
                     }
@@ -515,29 +744,25 @@ impl BoundP2pTunnel {
                                     &mut peers,
                                     &peer_id,
                                     addr,
+                                    CandidateKind::Observed,
                                     &[],
                                     public_socket.clone(),
                                     &route_cancel_tx,
                                     &self.config,
                                 ).await?;
-                                if let Some(route) = peers.get_mut(&peer_id) {
-                                    route.candidate = addr;
-                                    route.direct_ready = true;
+                                let became_ready = if let Some(route) = peers.get_mut(&peer_id) {
                                     route.last_seen = Instant::now();
-                                    let _ = route.candidate_tx.send(addr);
-                                    inject_discovery_announcement(
-                                        route.local_endpoint,
-                                        &route.announcement,
-                                        self.config.discovery_target_addr,
-                                    )
-                                    .await?;
-                                }
+                                    confirm_candidate(route, addr, None, &self.config)
+                                } else { false };
                                 let ack = P2pPacket::PunchAck {
                                     group_id: self.config.group_id.clone(),
                                     peer_id: self.config.peer_id.clone(),
                                 }.encode().map_err(p2p_io_error)?;
                                 let _ = public_socket.send_to(&ack, addr).await;
-                                publish_snapshot(&snapshot_tx, &peers);
+                                if became_ready {
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                }
+                                publish_snapshot(&snapshot_tx, &peers, &observations);
                                 continue;
                             }
                             Ok(P2pPacket::PunchAck { group_id, peer_id })
@@ -547,49 +772,84 @@ impl BoundP2pTunnel {
                                     &mut peers,
                                     &peer_id,
                                     addr,
+                                    CandidateKind::Observed,
                                     &[],
                                     public_socket.clone(),
                                     &route_cancel_tx,
                                     &self.config,
                                 ).await?;
-                                if let Some(route) = peers.get_mut(&peer_id) {
-                                    route.candidate = addr;
-                                    route.direct_ready = true;
+                                let became_ready = if let Some(route) = peers.get_mut(&peer_id) {
                                     route.last_seen = Instant::now();
-                                    let _ = route.candidate_tx.send(addr);
-                                    inject_discovery_announcement(
-                                        route.local_endpoint,
-                                        &route.announcement,
-                                        self.config.discovery_target_addr,
-                                    )
-                                    .await?;
+                                    confirm_candidate(route, addr, None, &self.config)
+                                } else { false };
+                                if became_ready {
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
                                 }
-                                publish_snapshot(&snapshot_tx, &peers);
+                                publish_snapshot(&snapshot_tx, &peers, &observations);
+                                continue;
+                            }
+                            Ok(P2pPacket::Probe { group_id, peer_id, token })
+                                if group_id == self.config.group_id && peer_id != self.config.peer_id =>
+                            {
+                                ensure_peer_route(
+                                    &mut peers,
+                                    &peer_id,
+                                    addr,
+                                    CandidateKind::Observed,
+                                    &[],
+                                    public_socket.clone(),
+                                    &route_cancel_tx,
+                                    &self.config,
+                                ).await?;
+                                let became_ready = if let Some(route) = peers.get_mut(&peer_id) {
+                                    route.last_seen = Instant::now();
+                                    confirm_candidate(route, addr, None, &self.config)
+                                } else { false };
+                                let ack = P2pPacket::ProbeAck {
+                                    group_id: self.config.group_id.clone(),
+                                    peer_id: self.config.peer_id.clone(),
+                                    token,
+                                }.encode().map_err(p2p_io_error)?;
+                                let _ = public_socket.send_to(&ack, addr).await;
+                                if became_ready {
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                }
+                                publish_snapshot(&snapshot_tx, &peers, &observations);
+                                continue;
+                            }
+                            Ok(P2pPacket::ProbeAck { group_id, peer_id, token })
+                                if group_id == self.config.group_id && peer_id != self.config.peer_id =>
+                            {
+                                if let Some(route) = peers.get_mut(&peer_id) {
+                                    route.last_seen = Instant::now();
+                                    let rtt = route.candidates.iter()
+                                        .find_map(|candidate| candidate.last_probe.filter(|(sent_token, _)| *sent_token == token).map(|(_, sent)| sent.elapsed()));
+                                    let became_ready = confirm_candidate(route, addr, rtt, &self.config);
+                                    if became_ready {
+                                        publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                    }
+                                    publish_snapshot(&snapshot_tx, &peers, &observations);
+                                }
                                 continue;
                             }
                             _ => {}
                         }
                     }
 
-                    let peer_id = peers
-                        .iter()
-                        .find_map(|(peer_id, route)| (route.candidate == addr).then(|| peer_id.clone()));
-                    if let Some(peer_id) = peer_id
-                        && let Some(route) = peers.get_mut(&peer_id)
-                    {
-                        let was_ready = route.direct_ready;
-                        route.direct_ready = true;
-                        route.last_seen = Instant::now();
-                        if !was_ready {
-                            inject_discovery_announcement(
-                                route.local_endpoint,
-                                &route.announcement,
-                                self.config.discovery_target_addr,
-                            )
-                            .await?;
+                    let peer_id = peers.iter().find_map(|(peer_id, route)| {
+                        route.candidates.iter().any(|candidate| candidate.addr == addr).then(|| peer_id.clone())
+                    });
+                    if let Some(peer_id) = peer_id {
+                        let became_ready = if let Some(route) = peers.get_mut(&peer_id) {
+                            route.last_seen = Instant::now();
+                            let became_ready = confirm_candidate(route, addr, None, &self.config);
+                            let _ = route.inbound_tx.try_send(bytes.to_vec());
+                            became_ready
+                        } else { false };
+                        if became_ready {
+                            publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
                         }
-                        let _ = route.inbound_tx.try_send(bytes.to_vec());
-                        publish_snapshot(&snapshot_tx, &peers);
+                        publish_snapshot(&snapshot_tx, &peers, &observations);
                     }
                 }
             }
@@ -597,8 +857,34 @@ impl BoundP2pTunnel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateKind {
+    Observed,
+    Predicted,
+}
+
+impl CandidateKind {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Observed => 0,
+            Self::Predicted => 1,
+        }
+    }
+}
+
+struct CandidateState {
+    addr: SocketAddr,
+    kind: CandidateKind,
+    confirmed: bool,
+    rtt: Option<Duration>,
+    last_seen: Instant,
+    last_confirmed: Option<Instant>,
+    last_probe: Option<(u64, Instant)>,
+}
+
 struct PeerRoute {
-    candidate: SocketAddr,
+    candidates: Vec<CandidateState>,
+    active_candidate: SocketAddr,
     local_endpoint: SocketAddr,
     announcement: Vec<u8>,
     candidate_tx: watch::Sender<SocketAddr>,
@@ -612,26 +898,18 @@ async fn ensure_peer_route(
     peers: &mut HashMap<String, PeerRoute>,
     peer_id: &str,
     candidate: SocketAddr,
+    kind: CandidateKind,
     announcement: &[u8],
     public_socket: Arc<UdpSocket>,
     route_cancel_tx: &broadcast::Sender<()>,
     config: &P2pTunnelConfig,
 ) -> io::Result<()> {
     if let Some(route) = peers.get_mut(peer_id) {
-        route.candidate = candidate;
         route.last_seen = Instant::now();
-        let _ = route.candidate_tx.send(candidate);
+        add_candidate_set(route, candidate, kind, config);
         if !announcement.is_empty() {
             route.announcement.clear();
             route.announcement.extend_from_slice(announcement);
-            if route.direct_ready {
-                inject_discovery_announcement(
-                    route.local_endpoint,
-                    &route.announcement,
-                    config.discovery_target_addr,
-                )
-                .await?;
-            }
         }
         return Ok(());
     }
@@ -658,20 +936,195 @@ async fn ensure_peer_route(
         }
     });
 
-    peers.insert(
-        peer_id.to_string(),
-        PeerRoute {
-            candidate,
-            local_endpoint,
-            announcement: announcement.to_vec(),
-            candidate_tx,
-            inbound_tx,
-            direct_ready: false,
-            last_seen: Instant::now(),
-            task,
-        },
-    );
+    let mut route = PeerRoute {
+        candidates: Vec::new(),
+        active_candidate: candidate,
+        local_endpoint,
+        announcement: announcement.to_vec(),
+        candidate_tx,
+        inbound_tx,
+        direct_ready: false,
+        last_seen: Instant::now(),
+        task,
+    };
+    add_candidate_set(&mut route, candidate, kind, config);
+    peers.insert(peer_id.to_string(), route);
+    Ok(())
+}
 
+fn add_candidate_set(
+    route: &mut PeerRoute,
+    candidate: SocketAddr,
+    kind: CandidateKind,
+    config: &P2pTunnelConfig,
+) {
+    add_candidate(route, candidate, kind, config.max_candidates_per_peer);
+    if kind != CandidateKind::Observed || config.predicted_port_span == 0 {
+        choose_active_candidate(route);
+        return;
+    }
+
+    let span = config.predicted_port_span;
+    for delta in 1..=span {
+        if let Some(port) = candidate.port().checked_add(delta) {
+            add_candidate(
+                route,
+                SocketAddr::new(candidate.ip(), port),
+                CandidateKind::Predicted,
+                config.max_candidates_per_peer,
+            );
+        }
+        if let Some(port) = candidate.port().checked_sub(delta) {
+            if port != 0 {
+                add_candidate(
+                    route,
+                    SocketAddr::new(candidate.ip(), port),
+                    CandidateKind::Predicted,
+                    config.max_candidates_per_peer,
+                );
+            }
+        }
+    }
+
+    let observed = route
+        .candidates
+        .iter()
+        .filter(|entry| entry.kind == CandidateKind::Observed && entry.addr.ip() == candidate.ip())
+        .map(|entry| entry.addr.port())
+        .collect::<Vec<_>>();
+    if observed.len() >= 2 {
+        let a = observed[observed.len() - 2] as i32;
+        let b = observed[observed.len() - 1] as i32;
+        let delta = b - a;
+        for predicted in [b + delta, a - delta] {
+            if (1..=u16::MAX as i32).contains(&predicted) {
+                add_candidate(
+                    route,
+                    SocketAddr::new(candidate.ip(), predicted as u16),
+                    CandidateKind::Predicted,
+                    config.max_candidates_per_peer,
+                );
+            }
+        }
+    }
+    choose_active_candidate(route);
+}
+
+fn add_candidate(
+    route: &mut PeerRoute,
+    addr: SocketAddr,
+    kind: CandidateKind,
+    max_candidates: usize,
+) {
+    if let Some(existing) = route.candidates.iter_mut().find(|entry| entry.addr == addr) {
+        existing.last_seen = Instant::now();
+        if kind.rank() < existing.kind.rank() {
+            existing.kind = kind;
+        }
+        return;
+    }
+    if route.candidates.len() >= max_candidates {
+        if kind == CandidateKind::Observed {
+            if let Some(index) = route
+                .candidates
+                .iter()
+                .rposition(|entry| entry.kind == CandidateKind::Predicted && !entry.confirmed)
+            {
+                route.candidates.remove(index);
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+    route.candidates.push(CandidateState {
+        addr,
+        kind,
+        confirmed: false,
+        rtt: None,
+        last_seen: Instant::now(),
+        last_confirmed: None,
+        last_probe: None,
+    });
+}
+
+fn confirm_candidate(
+    route: &mut PeerRoute,
+    addr: SocketAddr,
+    rtt: Option<Duration>,
+    config: &P2pTunnelConfig,
+) -> bool {
+    let was_ready = route.direct_ready;
+    add_candidate(
+        route,
+        addr,
+        CandidateKind::Observed,
+        config.max_candidates_per_peer,
+    );
+    if let Some(candidate) = route.candidates.iter_mut().find(|entry| entry.addr == addr) {
+        candidate.confirmed = true;
+        candidate.last_seen = Instant::now();
+        candidate.last_confirmed = Some(Instant::now());
+        if let Some(rtt) = rtt {
+            candidate.rtt = Some(match candidate.rtt {
+                Some(previous) => (previous * 3 + rtt) / 4,
+                None => rtt,
+            });
+        }
+    }
+    route.direct_ready = true;
+    choose_active_candidate(route);
+    !was_ready
+}
+
+fn choose_active_candidate(route: &mut PeerRoute) {
+    let best = route.candidates.iter().min_by_key(|candidate| {
+        (
+            !candidate.confirmed,
+            candidate.rtt.unwrap_or(Duration::MAX),
+            candidate.kind.rank(),
+            candidate.addr,
+        )
+    });
+    let Some(best) = best else {
+        return;
+    };
+    if route.active_candidate == best.addr {
+        return;
+    }
+
+    let current = route
+        .candidates
+        .iter()
+        .find(|candidate| candidate.addr == route.active_candidate);
+    let should_switch = match (current, best.confirmed) {
+        (Some(current), true) if current.confirmed => match (current.rtt, best.rtt) {
+            (Some(current_rtt), Some(best_rtt)) => {
+                best_rtt + Duration::from_millis(2) < current_rtt
+            }
+            (None, Some(_)) => true,
+            _ => best.kind.rank() < current.kind.rank(),
+        },
+        (_, true) => true,
+        (Some(current), false) => !current.confirmed && best.kind.rank() < current.kind.rank(),
+        (None, false) => true,
+    };
+    if should_switch {
+        route.active_candidate = best.addr;
+        let _ = route.candidate_tx.send(best.addr);
+    }
+}
+
+async fn publish_peer_discovery(
+    peers: &HashMap<String, PeerRoute>,
+    peer_id: &str,
+    discovery_target: Option<SocketAddr>,
+) -> io::Result<()> {
+    if let Some(route) = peers.get(peer_id) {
+        inject_discovery_announcement(route.local_endpoint, &route.announcement, discovery_target)
+            .await?;
+    }
     Ok(())
 }
 
@@ -732,20 +1185,54 @@ async fn inject_discovery_announcement(
 fn publish_snapshot(
     snapshot_tx: &watch::Sender<P2pTunnelSnapshot>,
     peers: &HashMap<String, PeerRoute>,
+    observations: &HashMap<SocketAddr, SocketAddr>,
 ) {
+    let mut observed_endpoints = observations.values().copied().collect::<Vec<_>>();
+    observed_endpoints.sort();
+    observed_endpoints.dedup();
     let mut snapshot = P2pTunnelSnapshot {
         peers: peers
             .iter()
-            .map(|(peer_id, route)| P2pPeerSnapshot {
-                peer_id: peer_id.clone(),
-                candidate: route.candidate,
-                local_endpoint: route.local_endpoint,
-                direct_ready: route.direct_ready,
+            .map(|(peer_id, route)| {
+                let active = route
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.addr == route.active_candidate);
+                P2pPeerSnapshot {
+                    peer_id: peer_id.clone(),
+                    candidate: route.active_candidate,
+                    local_endpoint: route.local_endpoint,
+                    direct_ready: route.direct_ready,
+                    candidate_count: route.candidates.len(),
+                    rtt_ms: active
+                        .and_then(|candidate| candidate.rtt)
+                        .map(|rtt| rtt.as_millis().min(u32::MAX as u128) as u32),
+                }
             })
             .collect(),
+        nat_behavior: classify_nat_behavior(observations),
+        observed_endpoints,
     };
     snapshot.peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
     let _ = snapshot_tx.send(snapshot);
+}
+
+fn classify_nat_behavior(observations: &HashMap<SocketAddr, SocketAddr>) -> P2pNatBehavior {
+    if observations.len() < 2 {
+        return P2pNatBehavior::Unknown;
+    }
+    let mut endpoints = observations.values().copied().collect::<Vec<_>>();
+    endpoints.sort();
+    endpoints.dedup();
+    if endpoints.len() == 1 {
+        return P2pNatBehavior::EndpointIndependent;
+    }
+    let first_ip = endpoints[0].ip();
+    if endpoints.iter().all(|endpoint| endpoint.ip() == first_ip) {
+        P2pNatBehavior::PortVarying
+    } else {
+        P2pNatBehavior::AddressAndPortVarying
+    }
 }
 
 fn validate_id(value: String) -> Result<String, P2pError> {
@@ -808,6 +1295,10 @@ impl<'a> Reader<'a> {
         };
         self.pos += 1;
         Ok(value)
+    }
+
+    fn u64(&mut self) -> Result<u64, P2pError> {
+        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], P2pError> {
@@ -913,6 +1404,21 @@ mod tests {
                 group_id: "group-a".into(),
                 peer_id: "peer-b".into(),
             },
+            P2pPacket::Observation {
+                group_id: "group-a".into(),
+                peer_id: "peer-a".into(),
+                endpoint: "198.51.100.7:45678".parse().unwrap(),
+            },
+            P2pPacket::Probe {
+                group_id: "group-a".into(),
+                peer_id: "peer-a".into(),
+                token: 42,
+            },
+            P2pPacket::ProbeAck {
+                group_id: "group-a".into(),
+                peer_id: "peer-b".into(),
+                token: 42,
+            },
         ] {
             assert_eq!(
                 P2pPacket::decode(&packet.encode().unwrap()).unwrap(),
@@ -945,21 +1451,25 @@ mod tests {
             socket.send_to(&reg, server_addr).await.unwrap();
         }
 
-        let mut buf = [0u8; 1536];
-        let (len_a, _) = tokio::time::timeout(Duration::from_secs(1), a.recv_from(&mut buf))
+        async fn recv_candidate(socket: &UdpSocket, expected_peer: &str) -> SocketAddr {
+            let mut buf = [0u8; 1536];
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let (len, _) = socket.recv_from(&mut buf).await.unwrap();
+                    if let P2pPacket::Candidate {
+                        peer_id, endpoint, ..
+                    } = P2pPacket::decode(&buf[..len]).unwrap()
+                        && peer_id == expected_peer
+                    {
+                        return endpoint;
+                    }
+                }
+            })
             .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(P2pPacket::decode(&buf[..len_a]).unwrap(), P2pPacket::Candidate { peer_id, endpoint, .. } if peer_id == "b" && endpoint == b.local_addr().unwrap())
-        );
-        let (len_b, _) = tokio::time::timeout(Duration::from_secs(1), b.recv_from(&mut buf))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(P2pPacket::decode(&buf[..len_b]).unwrap(), P2pPacket::Candidate { peer_id, endpoint, .. } if peer_id == "a" && endpoint == a.local_addr().unwrap())
-        );
+            .expect("candidate deadline")
+        }
+        assert_eq!(recv_candidate(&a, "b").await, b.local_addr().unwrap());
+        assert_eq!(recv_candidate(&b, "a").await, a.local_addr().unwrap());
 
         let _ = cancel_tx.send(());
         server_task.await.unwrap().unwrap();
@@ -1210,6 +1720,210 @@ mod tests {
             task.await.unwrap().unwrap();
         }
         let _ = server_cancel_tx.send(());
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn nat_behavior_uses_multiple_rendezvous_observations() {
+        let r1: SocketAddr = "192.0.2.1:3478".parse().unwrap();
+        let r2: SocketAddr = "192.0.2.2:3478".parse().unwrap();
+        let mut observations = HashMap::new();
+        assert_eq!(
+            classify_nat_behavior(&observations),
+            P2pNatBehavior::Unknown
+        );
+        observations.insert(r1, "198.51.100.9:40000".parse().unwrap());
+        assert_eq!(
+            classify_nat_behavior(&observations),
+            P2pNatBehavior::Unknown
+        );
+        observations.insert(r2, "198.51.100.9:40000".parse().unwrap());
+        assert_eq!(
+            classify_nat_behavior(&observations),
+            P2pNatBehavior::EndpointIndependent
+        );
+        observations.insert(r2, "198.51.100.9:40002".parse().unwrap());
+        assert_eq!(
+            classify_nat_behavior(&observations),
+            P2pNatBehavior::PortVarying
+        );
+        observations.insert(r2, "203.0.113.9:40002".parse().unwrap());
+        assert_eq!(
+            classify_nat_behavior(&observations),
+            P2pNatBehavior::AddressAndPortVarying
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_candidate_builds_bounded_prediction_pool_and_rtt_selects_path() {
+        let route_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_endpoint = route_socket.local_addr().unwrap();
+        let (candidate_tx, _candidate_rx) = watch::channel("198.51.100.1:40000".parse().unwrap());
+        let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+        let dummy = tokio::spawn(async {});
+        let mut route = PeerRoute {
+            candidates: Vec::new(),
+            active_candidate: "198.51.100.1:40000".parse().unwrap(),
+            local_endpoint,
+            announcement: Vec::new(),
+            candidate_tx,
+            inbound_tx,
+            direct_ready: false,
+            last_seen: Instant::now(),
+            task: dummy,
+        };
+        let config = P2pTunnelConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:3478".parse().unwrap(),
+            "group",
+            "peer",
+            Vec::new(),
+        )
+        .unwrap()
+        .with_prediction(3, 8);
+        let first: SocketAddr = "198.51.100.1:40000".parse().unwrap();
+        add_candidate_set(&mut route, first, CandidateKind::Observed, &config);
+        assert!(route.candidates.len() <= 8);
+        assert!(route.candidates.iter().any(|candidate| {
+            candidate.kind == CandidateKind::Predicted && candidate.addr.port() == 40001
+        }));
+
+        let second: SocketAddr = "198.51.100.1:40003".parse().unwrap();
+        add_candidate_set(&mut route, second, CandidateKind::Observed, &config);
+        confirm_candidate(&mut route, first, Some(Duration::from_millis(30)), &config);
+        confirm_candidate(&mut route, second, Some(Duration::from_millis(8)), &config);
+        assert_eq!(route.active_candidate, second);
+        assert!(route.direct_ready);
+    }
+
+    #[tokio::test]
+    async fn multiple_rendezvous_observations_classify_endpoint_independent_mapping() {
+        let server_a = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        let server_b = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        let addr_a = server_a.local_addr().unwrap();
+        let addr_b = server_b.local_addr().unwrap();
+        let (server_cancel_tx, _) = broadcast::channel(2);
+        let task_a = tokio::spawn(server_a.run(server_cancel_tx.subscribe()));
+        let task_b = tokio::spawn(server_b.run(server_cancel_tx.subscribe()));
+
+        let tunnel = BoundP2pTunnel::bind(
+            P2pTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                addr_a,
+                "group",
+                "peer",
+                announcement("peer", 1),
+            )
+            .unwrap()
+            .with_rendezvous_addrs([addr_a, addr_b]),
+        )
+        .await
+        .unwrap();
+        let (cancel_tx, _) = broadcast::channel(1);
+        let (snapshot_tx, mut snapshot_rx) = watch::channel(P2pTunnelSnapshot::default());
+        let task = tokio::spawn(tunnel.run(cancel_tx.subscribe(), snapshot_tx));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if snapshot_rx.borrow().nat_behavior == P2pNatBehavior::EndpointIndependent {
+                    break;
+                }
+                snapshot_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("two rendezvous observations should classify NAT behavior");
+        assert_eq!(snapshot_rx.borrow().observed_endpoints.len(), 1);
+
+        let _ = cancel_tx.send(());
+        let _ = server_cancel_tx.send(());
+        task.await.unwrap().unwrap();
+        task_a.await.unwrap().unwrap();
+        task_b.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_path_expires_independently_from_rendezvous_registration() {
+        let server = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let (server_cancel_tx, _) = broadcast::channel(1);
+        let server_task = tokio::spawn(server.run(server_cancel_tx.subscribe()));
+
+        let local = BoundP2pTunnel::bind(
+            P2pTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                server_addr,
+                "group",
+                "local",
+                announcement("local", 1),
+            )
+            .unwrap()
+            .with_direct_timeout(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let remote = BoundP2pTunnel::bind(
+            P2pTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                server_addr,
+                "group",
+                "remote",
+                announcement("remote", 1),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let (local_cancel_tx, _) = broadcast::channel(1);
+        let (remote_cancel_tx, _) = broadcast::channel(1);
+        let (local_snapshot_tx, mut local_snapshot_rx) =
+            watch::channel(P2pTunnelSnapshot::default());
+        let (remote_snapshot_tx, _remote_snapshot_rx) =
+            watch::channel(P2pTunnelSnapshot::default());
+        let local_task = tokio::spawn(local.run(local_cancel_tx.subscribe(), local_snapshot_tx));
+        let remote_task =
+            tokio::spawn(remote.run(remote_cancel_tx.subscribe(), remote_snapshot_tx));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if local_snapshot_rx.borrow().direct_peer_count() == 1 {
+                    break;
+                }
+                local_snapshot_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("direct path should establish");
+
+        let _ = remote_cancel_tx.send(());
+        remote_task.await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let snapshot = local_snapshot_rx.borrow().clone();
+                if snapshot.direct_peer_count() == 0 && !snapshot.peers.is_empty() {
+                    break;
+                }
+                local_snapshot_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("direct path should expire while peer registration remains cached");
+
+        let _ = local_cancel_tx.send(());
+        let _ = server_cancel_tx.send(());
+        local_task.await.unwrap().unwrap();
         server_task.await.unwrap().unwrap();
     }
 }

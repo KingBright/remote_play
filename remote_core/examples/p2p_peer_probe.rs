@@ -1,4 +1,6 @@
-use remote_core::p2p::{BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot};
+use remote_core::p2p::{
+    BoundP2pTunnel, P2pTunnelConfig, P2pTunnelSnapshot, resolve_p2p_rendezvous_addrs,
+};
 use std::error::Error;
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,10 +11,8 @@ use tokio::sync::{broadcast, watch};
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let rendezvous_name = std::env::var("REMOTE_PLAY_P2P_RENDEZVOUS_ADDR")
         .unwrap_or_else(|_| "p.hackerlife.fun:3478".to_string());
-    let rendezvous = tokio::net::lookup_host(rendezvous_name.as_str())
-        .await?
-        .next()
-        .ok_or("rendezvous did not resolve")?;
+    let bind_addr = "0.0.0.0:0".parse::<SocketAddr>()?;
+    let rendezvous_addrs = resolve_p2p_rendezvous_addrs(&rendezvous_name, bind_addr).await?;
     let group_id = required_env("REMOTE_PLAY_P2P_GROUP_ID")?;
     let peer_id = required_env("REMOTE_PLAY_P2P_PEER_ID")?;
     let initiator = env_flag("REMOTE_PLAY_P2P_PROBE_INITIATOR");
@@ -22,12 +22,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let echo_addr = echo_socket.local_addr()?;
     let tunnel = BoundP2pTunnel::bind(
         P2pTunnelConfig::new(
-            "0.0.0.0:0".parse::<SocketAddr>()?,
-            rendezvous,
+            bind_addr,
+            rendezvous_addrs[0],
             group_id,
             peer_id.clone(),
             Vec::new(),
         )?
+        .with_rendezvous_addrs(rendezvous_addrs.clone())
         .with_local_target_addr(echo_addr),
     )
     .await?;
@@ -50,8 +51,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok::<(), std::io::Error>(())
     });
 
-    let peer = tokio::time::timeout(timeout, async {
-        let peer = loop {
+    let peer = match tokio::time::timeout(timeout, async {
+        loop {
             if let Some(peer) = snapshot_rx
                 .borrow()
                 .peers
@@ -59,21 +60,37 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 .find(|peer| peer.direct_ready)
                 .cloned()
             {
-                break peer;
+                break Ok::<_, Box<dyn Error + Send + Sync>>(peer);
             }
             snapshot_rx
                 .changed()
                 .await
                 .map_err(|_| "P2P snapshot closed")?;
-        };
-        Ok::<_, Box<dyn Error + Send + Sync>>(peer)
+        }
     })
     .await
-    .map_err(|_| "P2P direct-ready timeout")??;
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let snapshot = snapshot_rx.borrow().clone();
+            eprintln!(
+                "p2p_direct_ready=TIMEOUT nat={:?} observations={:?} peers={:?}",
+                snapshot.nat_behavior, snapshot.observed_endpoints, snapshot.peers
+            );
+            return Err("P2P direct-ready timeout".into());
+        }
+    };
 
     println!(
-        "p2p_direct_ready=PASS local_udp={} peer={} candidate={} route={}",
-        public_local, peer.peer_id, peer.candidate, peer.local_endpoint
+        "p2p_direct_ready=PASS local_udp={} peer={} candidate={} route={} candidates={} rtt_ms={:?} nat={:?} observations={:?}",
+        public_local,
+        peer.peer_id,
+        peer.candidate,
+        peer.local_endpoint,
+        peer.candidate_count,
+        peer.rtt_ms,
+        snapshot_rx.borrow().nat_behavior,
+        snapshot_rx.borrow().observed_endpoints
     );
 
     if initiator {
