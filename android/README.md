@@ -28,3 +28,21 @@ The default host port is 39271. An Android emulator reaches its development host
 `Decoded N FPS` counts codec output buffers released to the Surface during a monotonic 500 ms sampling window. It does not measure display scanout or end-to-end latency. Unsupported file, microphone and clipboard controls are marked unavailable, and unmeasured channel rates are not shown as zero.
 
 See `docs/reviews/2026-09-12/FOLLOWUP.md` in the repository root for verification evidence and remaining platform limits.
+
+## Signed Release APK
+
+Official NAS releases must be non-debuggable APKs signed with the persistent RemotePlay Android release identity. The signing key is kept outside Git under the user's application-support directory and its password is stored in macOS Keychain.
+
+One-time setup on the release Mac:
+
+```sh
+./scripts/setup_android_release_signing.sh
+```
+
+Build and verify the official APK:
+
+```sh
+./scripts/build_android_release.sh
+```
+
+The resulting file is `android/app/build/outputs/apk/release/app-release.apk`. Never replace the release keystore after users install a signed build: Android upgrades require future APKs to be signed by the same key.

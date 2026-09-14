@@ -7,7 +7,7 @@ NAS_HOST="${REMOTEPLAY_NAS_HOST:-root@hackerlife.fun}"
 NAS_PORT="${REMOTEPLAY_NAS_PORT:-222}"
 REMOTE_DIR="${REMOTEPLAY_NAS_DOWNLOAD_DIR:-/opt/remoteplay/downloads}"
 PUBLIC_BASE_URL="${REMOTEPLAY_DOWNLOAD_BASE_URL:-https://relay.hackerlife.fun:8443/download}"
-CHANNEL="${REMOTEPLAY_RELEASE_CHANNEL:-debug}"
+CHANNEL="${REMOTEPLAY_RELEASE_CHANNEL:-release}"
 RELEASE_NOTES="${REMOTEPLAY_RELEASE_NOTES:-RemotePlay Android release}"
 INDEX_TEMPLATE="$ROOT/deploy/nas/download/index.html"
 
@@ -110,7 +110,7 @@ try:
 except Exception:
     doc = {}
 releases = doc.get("releases", []) if isinstance(doc.get("releases", []), list) else []
-releases = [r for r in releases if r.get("file") != entry["file"] and r.get("commit") != entry["commit"]]
+releases = [r for r in releases if r.get("file") != entry["file"]]
 releases.insert(0, entry)
 new_doc = {
     "product": "RemotePlay",
