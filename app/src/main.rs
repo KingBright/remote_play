@@ -311,7 +311,7 @@ mod tests {
                 ("REMOTE_PLAY_DISPLAY_NAME", "Desk \"A\""),
                 (
                     "REMOTE_PLAY_MESH_DIR",
-                    "/Users/me/Library/Application Support/RemotePlay/Mesh",
+                    "/Users/me/Library/Application Support/RemotePlay/NativeMesh",
                 ),
                 (
                     REMOTE_PLAY_EASYTIER_BIN_ENV,
@@ -319,7 +319,7 @@ mod tests {
                 ),
             ],
             &PathBuf::from(
-                "/Users/me/Library/Application Support/RemotePlay/Mesh/remoteplay-mesh-daemon.log",
+                "/Users/me/Library/Application Support/RemotePlay/NativeMesh/remoteplay-mesh-daemon.log",
             ),
         );
 

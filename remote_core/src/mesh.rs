@@ -581,7 +581,7 @@ pub fn default_app_private_mesh_dir() -> PathBuf {
             .join("Library")
             .join("Application Support")
             .join("RemotePlay")
-            .join("Mesh");
+            .join("NativeMesh");
     }
 
     #[cfg(target_os = "windows")]
