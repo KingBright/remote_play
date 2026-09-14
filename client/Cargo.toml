@@ -12,9 +12,9 @@ async-trait = "0.1.89"
 cpal = "0.17.3"
 crossbeam-channel = "0.5.15"
 rand = "0.8"
-rfd = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+rfd = "0.15"
 opus = "0.3.1"
 wgpu = { version = "0.19", features = ["hal"] }
 metal = "0.27"
