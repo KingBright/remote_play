@@ -70,6 +70,7 @@ struct HostStatsExtra {
 
 /// Lock-free numeric telemetry with a mutex only for the occasional report/string fields.
 pub struct SharedHostStats {
+    pub media_pause: crate::media_pause::MediaPauseControl,
     fps: AtomicU32,
     latency: AtomicU32,
     jitter: AtomicU32,
@@ -87,6 +88,7 @@ pub struct SharedHostStats {
 impl Default for SharedHostStats {
     fn default() -> Self {
         Self {
+            media_pause: Default::default(),
             fps: AtomicU32::new(0),
             latency: AtomicU32::new(0),
             jitter: AtomicU32::new(0),
@@ -246,6 +248,7 @@ pub fn spawn_client_session_receiver(
         } = config;
 
         println!("Client listening on {}", bind_addr);
+        let recovery_sender = udp_receiver.sender();
         let mut media_handler = MediaPacketHandler::new(
             stats,
             active_session_id,
@@ -256,8 +259,33 @@ pub fn spawn_client_session_receiver(
         );
 
         loop {
-            let wait = media_handler.video_jitter_buffer.next_ready_in();
+            if let Some((message, target)) = host_stats.media_pause.take_request() {
+                let _ = recovery_sender.send_control(&message, target).await;
+            }
+            if !host_stats.media_pause.is_paused()
+                && let Some((target, session_id)) = media_handler.take_keyframe_request()
+            {
+                let _ = recovery_sender
+                    .send_control(
+                        &protocol::ControlMessage::RequestKeyframe { session_id },
+                        target,
+                    )
+                    .await;
+            }
+            let wait = [
+                media_handler.video_jitter_buffer.next_ready_in(),
+                if host_stats.media_pause.is_paused() {
+                    None
+                } else {
+                    media_handler.recovery_wait()
+                },
+                host_stats.media_pause.retry_wait(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let received = tokio::select! {
+                _ = host_stats.media_pause.changed.notified() => continue,
                 packet = udp_receiver.recv() => packet,
                 _ = async {
                     match wait {
@@ -270,11 +298,21 @@ pub fn spawn_client_session_receiver(
                 }
             };
             match received {
-                Ok(MultiplexedPacket::Rtp(packet, _addr)) => {
+                Ok(MultiplexedPacket::Rtp(packet, addr)) => {
+                    media_handler.remember_video_source(&packet, addr);
                     let packet_size = packet.payload.len() as u64 + 12;
                     media_handler.handle(packet, packet_size).await;
                 }
-                Ok(MultiplexedPacket::Control(msg, _addr)) => match msg {
+                Ok(MultiplexedPacket::Control(msg, addr)) => match msg {
+                    protocol::ControlMessage::MediaPauseState {
+                        session_id,
+                        revision,
+                        paused,
+                    } => {
+                        host_stats
+                            .media_pause
+                            .acknowledge(addr, session_id, revision, paused);
+                    }
                     protocol::ControlMessage::Pong {
                         client_send_ts,
                         host_recv_ts,
@@ -317,7 +355,7 @@ pub fn spawn_client_session_receiver(
                     }
                     _ => {}
                 },
-                Ok(MultiplexedPacket::Data(envelope, _addr)) => {
+                Ok(MultiplexedPacket::Data(envelope, addr)) => {
                     if route_reliable_envelope(
                         &envelope,
                         clipboard_control.as_deref(),
@@ -335,13 +373,16 @@ pub fn spawn_client_session_receiver(
                     let packet_size = envelope.payload.len() as u64
                         + protocol::COMPACT_REALTIME_HEADER_LEN as u64;
                     match realtime_data_to_rtp(envelope) {
-                        Ok(packet) => media_handler.handle(packet, packet_size).await,
+                        Ok(packet) => {
+                            media_handler.remember_video_source(&packet, addr);
+                            media_handler.handle(packet, packet_size).await;
+                        }
                         Err(e) => {
                             eprintln!("Ignoring unsupported data-plane media packet: {}", e);
                         }
                     }
                 }
-                Ok(MultiplexedPacket::DataWithTiming(envelope, timing, _addr)) => {
+                Ok(MultiplexedPacket::DataWithTiming(envelope, timing, addr)) => {
                     if route_reliable_envelope(
                         &envelope,
                         clipboard_control.as_deref(),
@@ -366,6 +407,7 @@ pub fn spawn_client_session_receiver(
                         + extra_len as u64;
                     match realtime_data_to_rtp(envelope) {
                         Ok(packet) => {
+                            media_handler.remember_video_source(&packet, addr);
                             if let Some(host_timing) = timing {
                                 media_handler
                                     .handle_with_host_timing(packet, packet_size, host_timing)
@@ -393,7 +435,7 @@ fn route_reliable_envelope(
     file_transfer_control: Option<&dyn EnvelopeIngress>,
 ) -> bool {
     match envelope.header.kind {
-        ContentKind::ClipboardBundle => {
+        ContentKind::ClipboardBundle | ContentKind::ClipboardControl => {
             if let Some(control) = clipboard_control {
                 control.route_inbound(envelope.clone());
             }
@@ -409,7 +451,7 @@ fn route_reliable_envelope(
     }
 }
 
-struct MediaPacketHandler {
+pub(crate) struct MediaPacketHandler {
     stats_net: Arc<Statistics>,
     receiver_session_id: Arc<AtomicU32>,
     host_stats: Arc<SharedHostStats>,
@@ -430,10 +472,14 @@ struct MediaPacketHandler {
     clock_offset_ms: f64,
     rtt_ms: f32,
     smooth_e2e_ms: f32,
+    video_source: Option<SocketAddr>,
+    needs_keyframe: bool,
+    last_keyframe_request: Option<Instant>,
+    observed_decode_errors: usize,
 }
 
 impl MediaPacketHandler {
-    fn new(
+    pub(crate) fn new(
         stats_net: Arc<Statistics>,
         receiver_session_id: Arc<AtomicU32>,
         host_stats: Arc<SharedHostStats>,
@@ -462,7 +508,47 @@ impl MediaPacketHandler {
             clock_offset_ms: 0.0,
             rtt_ms: 0.0,
             smooth_e2e_ms: 0.0,
+            video_source: None,
+            needs_keyframe: false,
+            last_keyframe_request: None,
+            observed_decode_errors: 0,
         }
+    }
+
+    pub(crate) fn remember_video_source(&mut self, packet: &RtpPacket, addr: SocketAddr) {
+        let session = self.receiver_session_id.load(Relaxed);
+        if packet.header.payload_type == PayloadType::VideoH265 as u8
+            && session != 0
+            && packet.header.ssrc == session
+        {
+            self.video_source = Some(addr);
+        }
+    }
+
+    fn recovery_wait(&self) -> Option<Duration> {
+        (self.needs_keyframe && self.video_source.is_some()).then(|| {
+            Duration::from_millis(250).saturating_sub(
+                self.last_keyframe_request
+                    .map_or(Duration::from_millis(250), |t| t.elapsed()),
+            )
+        })
+    }
+
+    pub(crate) fn take_keyframe_request(&mut self) -> Option<(SocketAddr, u32)> {
+        let errors = self.stats_net.video_decode_errors.load(Relaxed);
+        if errors != self.observed_decode_errors {
+            self.observed_decode_errors = errors;
+            self.needs_keyframe = true;
+        }
+        if self.receiver_session_id.load(Relaxed) != self.last_video_ssrc {
+            self.needs_keyframe = false;
+            return None;
+        }
+        if self.recovery_wait()? != Duration::ZERO {
+            return None;
+        }
+        self.last_keyframe_request = Some(Instant::now());
+        Some((self.video_source?, self.last_video_ssrc))
     }
 
     pub fn update_clock_sync(&mut self, rtt: f32, offset: f64) {
@@ -516,6 +602,9 @@ impl MediaPacketHandler {
         current_session: u32,
     ) {
         self.sync_audio_session(current_session);
+        if self.host_stats.media_pause.is_paused() {
+            return;
+        }
         self.stats_net.udp_packets_recv.fetch_add(1, Relaxed);
         self.stats_net
             .udp_bytes_recv
@@ -633,9 +722,12 @@ impl MediaPacketHandler {
             self.loss_rate_pct = 0.0;
             self.smooth_e2e_ms = 0.0;
             self.last_loss_calc = Instant::now();
+            self.needs_keyframe = false;
+            self.last_keyframe_request = None;
         }
 
         if !self.video_expected_seq_init {
+            self.needs_keyframe = !crate::media_plane::is_hevc_keyframe(&packet.payload);
             self.video_jitter_buffer = JitterBuffer::new(packet.header.sequence_number);
             self.video_expected_seq_init = true;
         }
@@ -646,7 +738,7 @@ impl MediaPacketHandler {
         self.drain_video();
     }
 
-    fn drain_video(&mut self) {
+    pub(crate) fn drain_video(&mut self) {
         while let Some((ordered_pkt, timing)) = self.video_jitter_buffer.pop_with_timing() {
             let seq = ordered_pkt.header.sequence_number;
             let advance = self
@@ -654,6 +746,12 @@ impl MediaPacketHandler {
                 .map_or(1, |last| seq.wrapping_sub(last) as u64);
             self.packets_expected += advance;
             self.packets_lost += advance.saturating_sub(1);
+            if advance > 1 {
+                self.needs_keyframe = true;
+            }
+            if crate::media_plane::is_hevc_keyframe(&ordered_pkt.payload) {
+                self.needs_keyframe = false;
+            }
             self.last_seq = Some(seq);
             if self.last_loss_calc.elapsed() >= Duration::from_secs(1) {
                 let rate = self.packets_lost as f32 / self.packets_expected.max(1) as f32 * 100.0;
@@ -682,6 +780,7 @@ impl MediaPacketHandler {
 
             self.stats_net.video_jitter_buffer_pop.fetch_add(1, Relaxed);
             if self.decode_tx.try_send((ordered_pkt, timing)).is_err() {
+                self.needs_keyframe = true;
                 self.stats_net
                     .video_decode_queue_dropped
                     .fetch_add(1, Relaxed);
@@ -946,12 +1045,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn video_recovery_requests_are_throttled_and_stop_at_a_keyframe_or_session_end() {
+        let session = Arc::new(AtomicU32::new(7));
+        let (audio_tx, _audio_rx) = mpsc::channel(4);
+        let (decode_tx, _decode_rx) = mpsc::channel(8);
+        let mut handler = MediaPacketHandler::new(
+            Statistics::new(),
+            session.clone(),
+            Arc::new(SharedHostStats::default()),
+            audio_tx,
+            decode_tx,
+            None,
+        );
+        let host = "127.0.0.1:49373".parse().unwrap();
+        let mut packet = video_packet(7);
+        packet.header.sequence_number = 5; // Initial IDR was lost.
+        packet.payload = vec![0, 0, 1, 0x02, 1];
+        handler.remember_video_source(&packet, host);
+        handler.handle(packet.clone(), 16).await;
+        assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
+        assert_eq!(handler.take_keyframe_request(), None);
+        handler.last_keyframe_request = Some(Instant::now() - Duration::from_millis(251));
+        assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
+        packet.header.sequence_number = 6;
+        packet.payload = vec![0, 0, 1, 0x26, 1];
+        handler.handle(packet.clone(), 16).await;
+        assert_eq!(handler.recovery_wait(), None);
+        // Receiving an IDR does not prove it decoded. A decoder failure must
+        // rearm recovery even without a sequence gap.
+        handler.stats_net.video_decode_errors.fetch_add(1, Relaxed);
+        handler.last_keyframe_request = Some(Instant::now() - Duration::from_millis(251));
+        assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
+        assert_eq!(handler.take_keyframe_request(), None);
+        packet.header.sequence_number = 8;
+        packet.payload = vec![0, 0, 1, 0x02, 1];
+        handler.handle(packet, 16).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        handler.drain_video();
+        assert!(handler.needs_keyframe);
+        session.store(0, Relaxed);
+        assert_eq!(handler.take_keyframe_request(), None);
+        assert_eq!(handler.recovery_wait(), None);
+    }
+
+    #[tokio::test]
     async fn receiver_releases_a_gap_without_another_datagram() {
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let addr = mux.local_addr().unwrap();
         let (_, udp_receiver) = mux.split();
         let sender_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
-        let (sender, _) = sender_mux.split();
+        let (sender, sender_rx) = sender_mux.split();
         let (audio_tx, _audio_rx) = mpsc::channel(1);
         let (decode_tx, mut decode_rx) = mpsc::channel(4);
         let task = spawn_client_session_receiver(ClientSessionReceiverConfig {
@@ -978,6 +1121,10 @@ mod tests {
             }
             assert_eq!(packet.unwrap().unwrap().0.header.sequence_number, expected);
         }
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_millis(250), sender_rx.recv()).await.unwrap().unwrap(),
+            MultiplexedPacket::Control(protocol::ControlMessage::RequestKeyframe { session_id: 7 }, source) if source == addr)
+        );
         task.abort();
         let _ = task.await;
     }

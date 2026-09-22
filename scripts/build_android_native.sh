@@ -35,6 +35,10 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-andro
 export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$TOOLCHAIN/x86_64-linux-android${API}-clang"
 export CC_aarch64_linux_android="$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
 export CC_x86_64_linux_android="$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+export CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android${API}-clang++"
+export CXX_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android${API}-clang++"
+export CMAKE_TOOLCHAIN_FILE_aarch64_linux_android="$ROOT/scripts/cmake/android-arm64.cmake"
+export CMAKE_TOOLCHAIN_FILE_x86_64_linux_android="$ROOT/scripts/cmake/android-x86_64.cmake"
 
 mkdir -p "$OUT_DIR/arm64-v8a" "$OUT_DIR/x86_64"
 

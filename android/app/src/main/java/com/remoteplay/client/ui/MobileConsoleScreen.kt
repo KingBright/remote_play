@@ -1,4 +1,6 @@
 package com.remoteplay.client.ui
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.AlertDialog
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,8 +50,19 @@ fun MobileConsoleScreen(
     sessionState: SessionState = SessionState.DISCONNECTED,
     onCancelConnect: () -> Unit = {},
     onConnectHost: (String, String) -> Unit,
+    onConnectWorkspace: (String) -> Unit = {},
+    publishing: Boolean = false,
+    onShareScreen: (Boolean) -> Unit = {},
+    onStopSharing: () -> Unit = {},
+    onBrowseFiles: () -> Unit = {},
+    onJoinCode: (String) -> Unit = {},
     onScanQr: () -> Unit
 ) {
+    var pairingCode by remember { mutableStateOf("") }
+    var pairingCodeOpen by remember { mutableStateOf(false) }
+    if (pairingCodeOpen) AlertDialog(onDismissRequest = { pairingCodeOpen = false }, title = { Text("Pair with code") },
+        text = { OutlinedTextField(pairingCode, { pairingCode = it }, label = { Text("Device-group invitation") }) },
+        confirmButton = { TextButton(onClick = { onJoinCode(pairingCode.trim()); pairingCode = ""; pairingCodeOpen = false }, enabled = pairingCode.isNotBlank()) { Text("Join") } })
     var activeTab by remember { mutableStateOf("Devices") }
     var manualEndpoint by remember { mutableStateOf("") }
     Box(
@@ -190,6 +203,14 @@ fun MobileConsoleScreen(
                         enabled = nativeAvailable && manualEndpoint.isNotBlank() && sessionState != SessionState.CONNECTING,
                         onClick = { onConnectHost(manualEndpoint.trim(), manualEndpoint.trim()) }
                     ) { Text("Connect to address") }
+                    TextButton(onClick = { onConnectWorkspace(manualEndpoint.trim()) }, enabled = nativeAvailable && manualEndpoint.isNotBlank()) { Text("Open multi-window workspace") }
+                    TextButton(onClick = onBrowseFiles) { Text("Received files") }
+                    TextButton(onClick = { pairingCodeOpen = true }, enabled = nativeAvailable) { Text("Pair with code") }
+                    if (publishing) TextButton(onClick = onStopSharing) { Text("Stop sharing this phone") }
+                    else {
+                        TextButton(onClick = { onShareScreen(false) }, enabled = nativeAvailable) { Text("Share phone screen or app") }
+                        TextButton(onClick = { onShareScreen(true) }, enabled = nativeAvailable) { Text("Share with device playback audio") }
+                    }
                 }
                 item {
                     Text(
@@ -217,6 +238,7 @@ fun MobileConsoleScreen(
                             enabled = nativeAvailable && device.online && device.canStream && sessionState != SessionState.CONNECTING,
                             onConnect = { onConnectHost(device.id, device.endpoint) }
                         )
+                        TextButton(onClick = { onConnectWorkspace(device.endpoint) }, enabled = nativeAvailable && device.online) { Text("Open multi-window workspace") }
                     }
                 }
 

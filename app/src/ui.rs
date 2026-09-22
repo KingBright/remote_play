@@ -55,12 +55,13 @@ pub async fn run_unified_gui(
         };
 
         let mut runtime = Some(runtime);
-        cx.open_window(window_options, move |_, cx| {
+        cx.open_window(window_options, move |window, cx| {
             let view = cx.new(|cx| {
                 UnifiedDashboard::new(
                     runtime
                         .take()
                         .expect("runtime should be moved into window once"),
+                    window,
                     cx,
                 )
             });
@@ -70,6 +71,9 @@ pub async fn run_unified_gui(
                 async move |cx| {
                     loop {
                         let Ok(refresh_interval) = view.update(&mut *cx, |view, cx| {
+                            // Count all RemotePlay windows, including PiP, as foreground.
+                            view.window_active = cx.active_window().is_some();
+                            view.sync_media_pause();
                             cx.notify();
                             view.refresh_interval()
                         }) else {
@@ -172,11 +176,25 @@ struct UnifiedDashboard {
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
+    custom_fps: String,
+    custom_bitrate: String,
+    stream_settings_error: Option<String>,
+    manual_media_paused: bool,
+    pause_when_inactive: bool,
+    window_active: bool,
     telemetry_engine: remote_core::PipelineTelemetryEngine,
 }
 
 impl UnifiedDashboard {
-    fn new(runtime: UnifiedRuntimeHandle, cx: &mut Context<Self>) -> Self {
+    fn new(runtime: UnifiedRuntimeHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.window_active = true;
+                this.sync_media_pause();
+            }
+            cx.notify();
+        })
+        .detach();
         let app_runtime = runtime.owner.runtime();
         let viewer_frame = runtime.viewer_frame.clone();
         let host_stats = runtime.host_stats.clone();
@@ -207,6 +225,7 @@ impl UnifiedDashboard {
         let selected_resolution = (prefs.stream.width, prefs.stream.height);
         let selected_fps = prefs.stream.fps;
         let selected_bitrate_kbps = prefs.stream.bitrate_kbps;
+        let pause_when_inactive = prefs.ui.pause_when_inactive;
         let telemetry_hud_collapsed = prefs.ui.telemetry_hud_collapsed;
 
         Self {
@@ -234,6 +253,12 @@ impl UnifiedDashboard {
             selected_resolution,
             selected_fps,
             selected_bitrate_kbps,
+            custom_fps: selected_fps.to_string(),
+            custom_bitrate: selected_bitrate_kbps.to_string(),
+            stream_settings_error: None,
+            manual_media_paused: false,
+            pause_when_inactive,
+            window_active: window.is_window_active(),
             telemetry_engine: remote_core::PipelineTelemetryEngine::new(0, 300),
         }
     }
@@ -249,6 +274,7 @@ impl UnifiedDashboard {
                 ViewportScaleMode::Fill => "fill".to_string(),
             };
             prefs.ui.telemetry_hud_collapsed = self.telemetry_hud_collapsed;
+            prefs.ui.pause_when_inactive = self.pause_when_inactive;
         }) {
             eprintln!("Failed to persist user preferences: {err}");
         }
@@ -318,6 +344,13 @@ impl UnifiedDashboard {
     }
 
     fn refresh_interval(&self) -> Duration {
+        if self
+            .host_stats
+            .as_ref()
+            .is_some_and(|stats| stats.media_pause.is_paused())
+        {
+            return Duration::from_millis(200);
+        }
         let runtime = self.app_runtime.lock().expect("unified runtime lock");
         dashboard_refresh_interval(runtime.role_state().kind())
     }
@@ -389,10 +422,21 @@ impl UnifiedDashboard {
                 let view = view.clone();
                 async move |cx| {
                     loop {
-                        Timer::after(Duration::from_millis(16)).await;
-                        if view.update(&mut *cx, |_view, cx| cx.notify()).is_err() {
+                        let Ok(interval) = view.update(&mut *cx, |view, cx| {
+                            cx.notify();
+                            if view
+                                .host_stats
+                                .as_ref()
+                                .is_some_and(|stats| stats.media_pause.is_paused())
+                            {
+                                Duration::from_millis(200)
+                            } else {
+                                Duration::from_millis(16)
+                            }
+                        }) else {
                             break;
-                        }
+                        };
+                        Timer::after(interval).await;
                     }
                 }
             })
@@ -491,7 +535,7 @@ impl UnifiedDashboard {
     }
 
     fn queue_key(&mut self, keystroke: &Keystroke, pressed: bool) {
-        if self.input_locked {
+        if self.input_locked || self.drawer_open {
             return;
         }
         let Some(event) = protocol_key_event(keystroke, pressed) else {
@@ -507,7 +551,7 @@ impl UnifiedDashboard {
     }
 
     fn queue_modifiers(&mut self, event: &ModifiersChangedEvent) {
-        if self.input_locked {
+        if self.input_locked || self.drawer_open {
             return;
         }
         let mut modifiers = protocol_modifiers(event.modifiers);
@@ -521,6 +565,140 @@ impl UnifiedDashboard {
         {
             self.pointer_input.modifiers = modifiers;
         }
+    }
+
+    fn sync_media_pause(&mut self) {
+        let paused = self.manual_media_paused || (self.pause_when_inactive && !self.window_active);
+        if paused || self.drawer_open {
+            for event in self.pointer_input.release_events() {
+                self.runtime.owner.queue_viewing_input(event);
+            }
+        }
+        self.runtime.owner.set_media_paused(paused);
+    }
+
+    fn media_controls(&self, cx: &mut Context<Self>) -> Div {
+        let pending = self
+            .host_stats
+            .as_ref()
+            .is_some_and(|stats| stats.media_pause.is_pending());
+        let paused = self
+            .host_stats
+            .as_ref()
+            .is_some_and(|stats| stats.media_pause.is_paused());
+        let mut controls = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .child("Custom frame rate (FPS) and video bitrate (kbps)"),
+            )
+            .child(
+                component::text_input("custom_fps")
+                    .content(self.selected_fps.to_string())
+                    .on_change({
+                        let view = cx.weak_entity();
+                        move |text, _, cx| {
+                            let _ = view.update(cx, |this, _| this.custom_fps = text.to_string());
+                        }
+                    }),
+            )
+            .child(
+                component::text_input("custom_bitrate")
+                    .content(self.selected_bitrate_kbps.to_string())
+                    .on_change({
+                        let view = cx.weak_entity();
+                        move |text, _, cx| {
+                            let _ =
+                                view.update(cx, |this, _| this.custom_bitrate = text.to_string());
+                        }
+                    }),
+            )
+            .child(
+                command_button("apply_custom_stream", ActionVariantKind::Primary, cx)
+                    .child("Apply custom values")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let values = this
+                            .custom_fps
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                            .zip(this.custom_bitrate.trim().parse::<u32>().ok());
+                        let (width, height) = this.selected_resolution;
+                        let Some((fps, bitrate)) = values.filter(|&(fps, bitrate)| {
+                            protocol::validate_video_settings(width, height, fps, bitrate).is_ok()
+                        }) else {
+                            this.stream_settings_error =
+                                Some("Enter positive whole numbers for FPS and kbps.".into());
+                            cx.notify();
+                            return;
+                        };
+                        this.selected_fps = fps;
+                        this.selected_bitrate_kbps = bitrate;
+                        this.stream_settings_error = None;
+                        this.persist_preferences();
+                        let connected = matches!(
+                            this.snapshot().role,
+                            RoleState::Viewing(_) | RoleState::Connecting(_)
+                        );
+                        if connected {
+                            let owner = this.runtime.owner.clone();
+                            cx.spawn(async move |view, cx| {
+                                if let Err(err) = owner
+                                    .update_stream_settings(width, height, fps, bitrate)
+                                    .await
+                                {
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.stream_settings_error = Some(err.to_string());
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                            .detach();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                command_button("toggle_media_pause", ActionVariantKind::Neutral, cx)
+                    .child(if self.manual_media_paused {
+                        "Resume media"
+                    } else {
+                        "Pause media · keep connected"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.manual_media_paused = !this.manual_media_paused;
+                        this.sync_media_pause();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                command_button("pause_in_background", ActionVariantKind::Neutral, cx)
+                    .child(if self.pause_when_inactive {
+                        "Background pause: on"
+                    } else {
+                        "Background pause: off"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pause_when_inactive = !this.pause_when_inactive;
+                        this.persist_preferences();
+                        this.sync_media_pause();
+                        cx.notify();
+                    })),
+            )
+            .child(div().text_size(px(11.0)).child(if pending {
+                "Waiting for host confirmation…"
+            } else if paused {
+                "Media paused · connection retained"
+            } else {
+                "Media enabled"
+            }));
+        if let Some(error) = &self.stream_settings_error {
+            controls = controls.child(div().text_size(px(11.0)).child(error.clone()));
+        }
+        controls
     }
 
     fn set_input_locked(&mut self, locked: bool) {
@@ -866,6 +1044,12 @@ impl Render for UnifiedDashboard {
         self.drain_latest_frame();
         let snapshot = self.snapshot();
         let role = snapshot.role.clone();
+        if !matches!(role, RoleState::Viewing(_) | RoleState::Connecting(_)) {
+            self.manual_media_paused = false;
+        }
+        self.window_active = crate::workspace_ui::window_visible(window);
+        self.sync_media_pause();
+        let media_controls = self.media_controls(cx);
         self.sync_input_session(&role);
         let active_session = role.session().cloned();
         let theme = cx.theme().clone();
@@ -959,6 +1143,7 @@ impl Render for UnifiedDashboard {
                     self.selected_resolution,
                     self.selected_fps,
                     self.selected_bitrate_kbps,
+                    media_controls,
                     host_stats.as_ref(),
                     self.runtime.owner.clone(),
                     cx,
@@ -1622,6 +1807,7 @@ fn slide_over_management_drawer(
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
+    media_controls: Div,
     host_stats: Option<&HostStats>,
     owner: Arc<crate::UnifiedServiceOwner>,
     cx: &mut Context<UnifiedDashboard>,
@@ -1749,6 +1935,7 @@ fn slide_over_management_drawer(
                         selected_resolution,
                         selected_fps,
                         selected_bitrate_kbps,
+                        media_controls,
                         host_stats,
                         owner,
                         cx,
@@ -1964,7 +2151,21 @@ fn drawer_devices_tab(
                         } else {
                             "Connect Stream"
                         })
-                    })),
+                    }))
+                    .child({
+                        let target = device.endpoint;
+                        let name = device.display_name.clone();
+                        command_button(
+                            format!("workspace-{}", device.device_id),
+                            ActionVariantKind::Neutral,
+                            cx,
+                        )
+                        .child("Open multi-window workspace")
+                        .disabled(!device.online)
+                        .on_click(move |_, _, cx| {
+                            crate::workspace_ui::open(target, name.clone(), cx)
+                        })
+                    }),
             );
         }
     }
@@ -2088,8 +2289,8 @@ fn drawer_security_tab(
             cx,
         ))
         .child(security_toggle_row(
-            "Reliable File Transfer",
-            "Enable verified file transfer for the active session",
+            "File Transfer",
+            "Transfer files across the active session",
             file_transfer_enabled,
             side_services.file_transfer.available,
             {
@@ -2344,6 +2545,7 @@ fn drawer_network_telemetry_tab(
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
+    media_controls: Div,
     host_stats: Option<&HostStats>,
     owner: Arc<crate::UnifiedServiceOwner>,
     cx: &mut Context<UnifiedDashboard>,
@@ -2455,6 +2657,7 @@ fn drawer_network_telemetry_tab(
         ));
     }
 
+    content = content.child(media_controls);
     // Full Stream Tuning Controls (Resolution, FPS, Bitrate)
     let cur_res = selected_resolution;
     let cur_fps = selected_fps;
@@ -2567,6 +2770,7 @@ fn drawer_network_telemetry_tab(
                                 let view = view.clone();
                                 let _ = view.update(cx, |this, cx| {
                                     this.selected_fps = fps;
+                                    this.custom_fps = fps.to_string();
                                     this.persist_preferences();
                                     let (send_w, send_h) = this.selected_resolution;
                                     let send_fps = this.selected_fps;
@@ -2621,6 +2825,7 @@ fn drawer_network_telemetry_tab(
                                 let view = view.clone();
                                 let _ = view.update(cx, |this, cx| {
                                     this.selected_bitrate_kbps = kbps;
+                                    this.custom_bitrate = kbps.to_string();
                                     this.persist_preferences();
                                     let (send_w, send_h) = this.selected_resolution;
                                     let send_fps = this.selected_fps;
@@ -3329,7 +3534,7 @@ fn quantize_delta(delta: (f32, f32)) -> (i32, i32) {
     )
 }
 
-fn absolute_pointer_event(
+pub(crate) fn absolute_pointer_event(
     position: (f32, f32),
     surface: (f32, f32, f32, f32),
     frame: (u32, u32),
@@ -3374,7 +3579,7 @@ fn absolute_pointer_event(
     })
 }
 
-fn protocol_mouse_button(button: MouseButton) -> Option<u8> {
+pub(crate) fn protocol_mouse_button(button: MouseButton) -> Option<u8> {
     match button {
         MouseButton::Left => Some(0),
         MouseButton::Right => Some(1),
@@ -3383,7 +3588,7 @@ fn protocol_mouse_button(button: MouseButton) -> Option<u8> {
     }
 }
 
-fn protocol_modifiers(modifiers: Modifiers) -> u8 {
+pub(crate) fn protocol_modifiers(modifiers: Modifiers) -> u8 {
     use protocol::input_modifiers;
     let mut flags = 0;
     if modifiers.shift {
@@ -3404,7 +3609,10 @@ fn protocol_modifiers(modifiers: Modifiers) -> u8 {
     flags
 }
 
-fn protocol_key_event(keystroke: &Keystroke, pressed: bool) -> Option<protocol::InputEvent> {
+pub(crate) fn protocol_key_event(
+    keystroke: &Keystroke,
+    pressed: bool,
+) -> Option<protocol::InputEvent> {
     let key_code = macos_key_code(keystroke)?;
     let mut modifiers = protocol_modifiers(keystroke.modifiers);
     if is_shifted_macos_symbol(&keystroke.key) {

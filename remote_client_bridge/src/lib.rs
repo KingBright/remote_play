@@ -1,4 +1,6 @@
+pub mod publisher_bridge;
 pub mod touch_mapper;
+pub mod workspace_bridge;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;
@@ -32,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -42,6 +44,8 @@ use touch_mapper::{TouchMode, TouchStateTracker};
 const DEFAULT_P2P_RENDEZVOUS: &str = "p.hackerlife.fun:3478";
 const DEFAULT_RELAY_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
 static BRIDGE_DEVICE_GROUP_DIR: OnceLock<PathBuf> = OnceLock::new();
+pub(crate) static PUBLISHING_PORT: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(0);
 
 pub fn configure_device_group_dir(path: impl Into<PathBuf>) -> Result<(), PathBuf> {
     BRIDGE_DEVICE_GROUP_DIR.set(path.into())
@@ -176,7 +180,10 @@ pub struct RemoteBridgeClient {
     active_target: Arc<RwLock<Option<String>>>,
     active_session_id: Arc<AtomicU32>,
     next_session_id: AtomicU32,
+    stream_rates: Mutex<(u32, u32)>,
+    desired_media_paused: AtomicBool,
     network_reload_tx: mpsc::UnboundedSender<()>,
+    network_enabled: Arc<AtomicBool>,
 }
 
 impl Default for RemoteBridgeClient {
@@ -216,7 +223,10 @@ impl RemoteBridgeClient {
             active_target: Arc::new(RwLock::new(None)),
             active_session_id: Arc::new(AtomicU32::new(0)),
             next_session_id: AtomicU32::new(1),
+            stream_rates: Mutex::new((60, 20_000)),
+            desired_media_paused: AtomicBool::new(false),
             network_reload_tx,
+            network_enabled: Arc::new(AtomicBool::new(true)),
         };
         client.ensure_discovery(network_reload_rx);
         client
@@ -291,6 +301,9 @@ impl RemoteBridgeClient {
         let config = MeshConfig::from_invite_code(&payload.invite_code, "RemotePlay Android")
             .map_err(|err| err.to_string())?;
         store.save(&config).map_err(|err| err.to_string())?;
+        remote_core::session_crypto::refresh_paired_session_secret(
+            config.network_secret.expose_secret(),
+        );
         let _ = self.network_reload_tx.send(());
         Ok(format!(
             "Joined {} (control port {})",
@@ -300,8 +313,18 @@ impl RemoteBridgeClient {
 
     fn ensure_discovery(&self, network_reload_rx: mpsc::UnboundedReceiver<()>) {
         let devices_tx = self.devices_tx.clone();
-        self.runtime()
-            .spawn(run_bridge_network_supervisor(devices_tx, network_reload_rx));
+        self.runtime().spawn(run_bridge_network_supervisor(
+            devices_tx,
+            network_reload_rx,
+            self.network_enabled.clone(),
+        ));
+    }
+
+    /// Suspend discovery and route keepalives only after the live session has ended.
+    pub fn set_network_enabled(&self, enabled: bool) {
+        if self.network_enabled.swap(enabled, Relaxed) != enabled {
+            let _ = self.network_reload_tx.send(());
+        }
     }
 
     fn next_session(&self) -> u32 {
@@ -343,12 +366,16 @@ impl RemoteBridgeClient {
         *self.connected_at.lock().unwrap() = Some(Instant::now());
         let session_id = self.next_session();
         active_session_id.store(session_id, Relaxed);
+        let stream_rates = *self.stream_rates.lock().unwrap();
+        let paused = self.desired_media_paused.load(Relaxed);
 
         let audio_queue = self.audio_queue.clone();
         let result = self.runtime().block_on(async move {
             start_live_session(
                 parsed,
                 session_id,
+                stream_rates,
+                paused,
                 host_stats,
                 nalu_queue,
                 audio_queue,
@@ -372,6 +399,7 @@ impl RemoteBridgeClient {
     }
 
     pub fn disconnect(&self) {
+        self.desired_media_paused.store(false, Relaxed);
         let _lifecycle = self.lifecycle.lock().unwrap();
         self.stop_live();
         *self.last_connect.lock().unwrap() = None;
@@ -379,6 +407,7 @@ impl RemoteBridgeClient {
     }
 
     fn stop_live(&self) {
+        self.host_stats.media_pause.end_session();
         if let Some(live) = self.live.lock().unwrap().take() {
             self.runtime().block_on(live.stop());
         }
@@ -389,6 +418,43 @@ impl RemoteBridgeClient {
         self.telemetry_tx.send_replace(BridgeTelemetry::default());
         *self.active_target.write().unwrap() = None;
         *self.connected_at.lock().unwrap() = None;
+    }
+
+    pub fn update_stream_rates(&self, fps: u32, bitrate_kbps: u32) -> Result<(), String> {
+        protocol::validate_video_settings(1920, 1080, fps, bitrate_kbps).map_err(str::to_owned)?;
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        *self.stream_rates.lock().unwrap() = (fps, bitrate_kbps);
+        if let Some(live) = self.live.lock().unwrap().as_ref() {
+            live.control_tx
+                .send(ControlMessage::UpdateStreamSettings {
+                    width: 1920,
+                    height: 1080,
+                    fps,
+                    bitrate_kbps,
+                    session_id: self.active_session_id.load(Relaxed),
+                })
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn set_media_paused(&self, paused: bool) {
+        self.desired_media_paused.store(paused, Relaxed);
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        if self.host_stats.media_pause.is_paused() == paused {
+            return;
+        }
+        if !self.host_stats.media_pause.set_paused(paused) {
+            return;
+        }
+        self.nalu_queue.lock().unwrap().clear();
+        self.audio_queue.lock().unwrap().clear();
+        if !paused {
+            *self.connected_at.lock().unwrap() = Some(Instant::now());
+            if let Some(live) = self.live.lock().unwrap().as_ref() {
+                *live.video_activity.lock().unwrap() = None;
+            }
+        }
     }
 
     pub fn maybe_reconnect(&self) {
@@ -410,7 +476,7 @@ impl RemoteBridgeClient {
         let host = self.host_stats.snapshot();
         // Some capture backends emit no frames for a static desktop. Fresh zero-FPS
         // telemetry keeps that established session alive; startup still needs video.
-        if last_video.is_some()
+        if (last_video.is_some() || self.host_stats.media_pause.is_paused())
             && host.fps == 0.0
             && host
                 .updated_at
@@ -442,6 +508,9 @@ impl RemoteBridgeClient {
     }
 
     pub fn request_keyframe(&self) {
+        if self.host_stats.media_pause.is_paused() {
+            return;
+        }
         if let Some(live) = self.live.lock().unwrap().as_ref() {
             let _ = live.control_tx.send(ControlMessage::RequestKeyframe {
                 session_id: self.active_session_id.load(Relaxed),
@@ -482,6 +551,8 @@ impl RemoteBridgeClient {
 async fn start_live_session(
     target: SocketAddr,
     session_id: u32,
+    stream_rates: (u32, u32),
+    paused: bool,
     host_stats: Arc<SharedHostStats>,
     nalu_queue: Arc<Mutex<VecDeque<EncodedVideoNalu>>>,
     audio_queue: Arc<Mutex<VecDeque<EncodedAudioPacket>>>,
@@ -497,14 +568,16 @@ async fn start_live_session(
     let multiplexer = UdpMultiplexer::bind(bind_addr).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
     maybe_authenticate(&udp_sender, &udp_receiver, target).await?;
+    host_stats.media_pause.begin_session(target, session_id);
+    host_stats.media_pause.set_paused(paused);
 
     udp_sender
         .send_control(
             &ControlMessage::StartStream {
                 width: 1920,
                 height: 1080,
-                fps: 60,
-                bitrate_kbps: 20_000,
+                fps: stream_rates.0,
+                bitrate_kbps: stream_rates.1,
                 session_id,
             },
             target,
@@ -544,10 +617,15 @@ async fn start_live_session(
     let recovery_tx = control_tx.clone();
     let video_activity = Arc::new(Mutex::new(None));
     let activity = video_activity.clone();
+    let media_stats = host_stats.clone();
     let decode_pump = tokio::spawn(async move {
         let mut waiting_for_keyframe = true;
         let mut received_video = false;
         while let Some((packet, timing)) = decode_rx.recv().await {
+            if media_stats.media_pause.is_paused() {
+                waiting_for_keyframe = true;
+                continue;
+            }
             *activity.lock().unwrap() = Some(Instant::now());
             let keyframe = hevc_keyframe(&packet.payload);
             let nalu = EncodedVideoNalu {
@@ -574,6 +652,7 @@ async fn start_live_session(
         }
     });
 
+    let audio_media_stats = host_stats.clone();
     let audio_pump = tokio::spawn(async move {
         let mut sample_rate = 48_000u32;
         let mut channels = 2u16;
@@ -584,6 +663,9 @@ async fn start_live_session(
                     channels = config.channels;
                 }
                 AudioIngressEvent::Packet(packet) => {
+                    if audio_media_stats.media_pause.is_paused() {
+                        continue;
+                    }
                     let pkt = EncodedAudioPacket {
                         data: packet.payload,
                         sample_rate_hz: sample_rate,
@@ -602,11 +684,20 @@ async fn start_live_session(
     });
 
     let heartbeat_tx = control_tx.clone();
+    let heartbeat_stats = host_stats.clone();
     let heartbeat = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(if heartbeat_stats.media_pause.is_paused() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(500)
+            })
+            .await;
             if heartbeat_tx.send(ControlMessage::Heartbeat).is_err() {
                 break;
+            }
+            if heartbeat_stats.media_pause.is_paused() {
+                continue;
             }
             let now_ms = now_unix_ms();
             if heartbeat_tx
@@ -670,8 +761,15 @@ fn hevc_keyframe(data: &[u8]) -> bool {
 async fn run_bridge_network_supervisor(
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
     mut reload_rx: mpsc::UnboundedReceiver<()>,
+    enabled: Arc<AtomicBool>,
 ) {
     loop {
+        if !enabled.load(Relaxed) {
+            if reload_rx.recv().await.is_none() {
+                break;
+            }
+            continue;
+        }
         let (cancel_tx, _) = broadcast::channel(8);
         let network_devices_tx = devices_tx.clone();
         let network_cancel_tx = cancel_tx.clone();
@@ -714,18 +812,20 @@ async fn run_bridge_network(
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Subscribe before startup awaits so a background cancellation is not lost.
+    let mut cancel_rx = cancel_tx.subscribe();
     let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
     let identity = store.load_or_generate("RemotePlay Android")?;
     let announcement = DiscoveryAnnouncement {
         network_name: identity.network_name.clone(),
         device_id: identity.node_id.clone(),
         display_name: identity.display_name.clone(),
-        control_port: 0,
+        control_port: PUBLISHING_PORT.load(Relaxed),
         virtual_ip: None,
         capabilities: DiscoveryCapabilities {
             can_view: true,
-            can_stream: false,
-            file_transfer: false,
+            can_stream: PUBLISHING_PORT.load(Relaxed) != 0,
+            file_transfer: PUBLISHING_PORT.load(Relaxed) != 0,
             clipboard_sync: false,
             talkback: false,
         },
@@ -784,8 +884,6 @@ async fn run_bridge_network(
             }
         }
     });
-    let mut cancel_rx = cancel_tx.subscribe();
-
     loop {
         tokio::select! {
             _ = cancel_rx.recv() => break,
@@ -1003,6 +1101,35 @@ mod tests {
     }
 
     #[test]
+    fn custom_rates_and_pause_intent_survive_reconnection() {
+        let client = RemoteBridgeClient::new();
+        client.update_stream_rates(37, 3500).unwrap();
+        assert!(client.update_stream_rates(0, 3500).is_err());
+        let host = client
+            .runtime()
+            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
+            .unwrap();
+        client.connect("host".into(), host.local_addr().unwrap().to_string());
+        client.set_media_paused(true);
+        let original = client.active_session_id.load(Relaxed);
+        *client.connected_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(13));
+        client.host_stats.apply_host_telemetry(0.0, 0.0, 0.0, 0);
+        client.maybe_reconnect();
+        assert_eq!(
+            client.active_session_id.load(Relaxed),
+            original,
+            "paused before first frame stays connected with fresh telemetry"
+        );
+        client.host_stats.reset();
+        client.maybe_reconnect();
+        assert_ne!(client.active_session_id.load(Relaxed), original);
+        assert_eq!(*client.stream_rates.lock().unwrap(), (37, 3500));
+        assert!(client.host_stats.media_pause.is_paused());
+        client.disconnect();
+        assert!(!client.desired_media_paused.load(Relaxed));
+    }
+
+    #[test]
     fn telemetry_defaults_are_zero_not_marketing_numbers() {
         let telemetry = BridgeTelemetry::default();
         assert_eq!(telemetry.fps, 0.0);
@@ -1091,6 +1218,61 @@ mod tests {
         })
         .await
         .expect("control packet deadline")
+    }
+
+    #[test]
+    fn paused_session_reduces_keepalives_without_sending_latency_probes() {
+        let client = RemoteBridgeClient::new();
+        let host = client
+            .runtime()
+            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
+            .unwrap();
+        let (sender, receiver) = host.split();
+        client.connect("idle".into(), host.local_addr().unwrap().to_string());
+        client.set_media_paused(true);
+        client.runtime().block_on(async {
+            loop {
+                let (message, peer) = next_control(&receiver).await;
+                if let ControlMessage::SetMediaPaused {
+                    session_id,
+                    revision,
+                    paused,
+                } = message
+                {
+                    sender
+                        .send_control(
+                            &ControlMessage::MediaPauseState {
+                                session_id,
+                                revision,
+                                paused,
+                            },
+                            peer,
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+            let mut heartbeats = 0;
+            while let Ok(packet) = tokio::time::timeout_at(deadline, receiver.recv()).await {
+                if let remote_core::net::MultiplexedPacket::Control(message, _) = packet.unwrap() {
+                    match message {
+                        ControlMessage::Heartbeat => heartbeats += 1,
+                        ControlMessage::Ping { .. } => {
+                            panic!("paused sessions must not send latency probes")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(
+                (1..=3).contains(&heartbeats),
+                "six seconds must retain sparse keepalives: {heartbeats}"
+            );
+        });
+        assert!(!client.host_stats.media_pause.is_pending());
+        client.disconnect();
     }
 
     #[test]
@@ -1223,14 +1405,16 @@ mod tests {
         }
         client.runtime().block_on(async {
             tokio::time::timeout(Duration::from_secs(1), async {
-                let mut requests = 0;
-                while requests < 2 {
-                    // initial request and overflow recovery
+                loop {
+                    // Shared receiver recovery can also request the missing
+                    // initial IDR. Wait for the overflow state as well as a
+                    // request, rather than assuming exactly one startup request.
                     if matches!(
                         next_control(&receiver).await.0,
                         ControlMessage::RequestKeyframe { .. }
-                    ) {
-                        requests += 1;
+                    ) && client.nalu_queue.lock().unwrap().is_empty()
+                    {
+                        break;
                     }
                 }
             })

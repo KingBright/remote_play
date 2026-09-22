@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 
+pub mod session;
 pub mod timing;
 
 pub use timing::{
@@ -73,6 +74,7 @@ pub enum ContentKind {
     ClipboardBundle,
     FileControl,
     AudioStreamConfig,
+    ClipboardControl,
 }
 
 impl ContentKind {
@@ -88,7 +90,7 @@ impl ContentKind {
             | ContentKind::FileChunk
             | ContentKind::Arbitrary
             | ContentKind::ClipboardBundle => DataLane::Reliable,
-            ContentKind::FileControl => DataLane::Interactive,
+            ContentKind::FileControl | ContentKind::ClipboardControl => DataLane::Interactive,
         }
     }
 
@@ -105,6 +107,7 @@ impl ContentKind {
             ContentKind::ClipboardBundle => 9,
             ContentKind::FileControl => 10,
             ContentKind::AudioStreamConfig => 11,
+            ContentKind::ClipboardControl => 12,
         }
     }
 
@@ -121,6 +124,7 @@ impl ContentKind {
             9 => Ok(ContentKind::ClipboardBundle),
             10 => Ok(ContentKind::FileControl),
             11 => Ok(ContentKind::AudioStreamConfig),
+            12 => Ok(ContentKind::ClipboardControl),
             _ => Err(CompactRealtimeError::InvalidContentKind(id)),
         }
     }
@@ -309,6 +313,19 @@ pub enum FileTransferControl {
         file_object_id: u64,
     },
     CancelGroup {
+        group_id: u64,
+    },
+    /// A chunk has been accepted. The final chunk is acknowledged only after commit.
+    ChunkAccepted {
+        object_id: u64,
+        chunk_index: u32,
+    },
+    Rejected {
+        object_id: u64,
+        reason: String,
+    },
+    /// Ordinary downloads must never replace the clipboard.
+    ClipboardGroup {
         group_id: u64,
     },
 }
@@ -1050,6 +1067,38 @@ pub enum ControlMessage {
     },
     /// Full 8-stage pipeline telemetry (M2). Distinct from the coarse HostTelemetry snapshot.
     PipelineTelemetry(Box<PipelineTelemetryReport>),
+    /// Idempotent media-only suspension. Revisions reject delayed UDP commands.
+    SetMediaPaused {
+        session_id: u32,
+        revision: u64,
+        paused: bool,
+    },
+    /// Acknowledges the host's accepted media state; the session stays alive.
+    MediaPauseState {
+        session_id: u32,
+        revision: u64,
+        paused: bool,
+    },
+    Session(Box<session::SessionCommand>),
+}
+
+/// Validate integer custom settings without restricting users to preset tiers.
+pub fn validate_video_settings(
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+) -> Result<(), &'static str> {
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
+        return Err("Video dimensions must be positive and fit the capture API");
+    }
+    if fps == 0 || fps > i32::MAX as u32 / 10 {
+        return Err("Frame rate must be a positive integer within the encoder's numeric range");
+    }
+    if bitrate_kbps == 0 {
+        return Err("Bitrate must be a positive integer in kbps");
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1125,6 +1174,53 @@ impl ControlMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_rates_accept_non_presets_and_reject_numeric_overflow() {
+        assert!(validate_video_settings(1920, 1080, 37, 3500).is_ok());
+        for values in [
+            (0, 1080, 37, 3500),
+            (1920, 0, 37, 3500),
+            (1920, 1080, 0, 3500),
+            (1920, 1080, 37, 0),
+            (u32::MAX, 1080, 37, 3500),
+            (1920, 1080, u32::MAX, 3500),
+        ] {
+            assert!(validate_video_settings(values.0, values.1, values.2, values.3).is_err());
+        }
+    }
+
+    #[test]
+    fn media_pause_messages_append_to_the_existing_wire_protocol() {
+        for (tag, message) in [
+            (
+                17u32,
+                ControlMessage::SetMediaPaused {
+                    session_id: 42,
+                    revision: 7,
+                    paused: true,
+                },
+            ),
+            (
+                18u32,
+                ControlMessage::MediaPauseState {
+                    session_id: 42,
+                    revision: 7,
+                    paused: true,
+                },
+            ),
+        ] {
+            let mut expected = tag.to_le_bytes().to_vec();
+            expected.extend(42u32.to_le_bytes());
+            expected.extend(7u64.to_le_bytes());
+            expected.push(1);
+            assert_eq!(message.encode().unwrap(), expected);
+            assert_eq!(
+                ControlMessage::decode(&expected).unwrap().encode().unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn boxed_telemetry_preserves_legacy_wire_bytes_and_compact_control_messages() {

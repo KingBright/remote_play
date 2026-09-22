@@ -9,7 +9,10 @@ import android.view.Surface
 /**
  * Decodes the negotiated stream directly to a Surface. Device latency is measured at runtime.
  */
-class MediaCodecPlayer(private val surface: Surface) {
+class MediaCodecPlayer(
+    private val surface: Surface,
+    private val onVideoSizeChanged: (VideoDimensions) -> Unit = {}
+) {
     private var decoder: MediaCodec? = null
     var outputFrames: Long = 0
         private set
@@ -74,8 +77,24 @@ class MediaCodecPlayer(private val surface: Surface) {
                     if (render) outputFrames++
                 }
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val format = codec.outputFormat
+                    val width = format.getInteger(MediaFormat.KEY_WIDTH)
+                    val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                    fun dimension(key: String, fallback: Int) =
+                        if (format.containsKey(key)) format.getInteger(key) else fallback
+                    VideoDimensions.fromDecodedFrame(width, height,
+                        dimension("crop-left", 0), dimension("crop-top", 0),
+                        dimension("crop-right", width - 1), dimension("crop-bottom", height - 1))
+                        ?.let(onVideoSizeChanged)
+                }
             }
         }
+    }
+
+    @Synchronized
+    fun flush() {
+        decoder?.flush()
     }
 
     @Synchronized

@@ -26,6 +26,8 @@ pub struct Statistics {
     pub video_jitter_buffer_push: AtomicUsize,
     pub video_jitter_buffer_pop: AtomicUsize,
     pub video_frames_decoded: AtomicUsize,
+    /// Cumulative decoder failures, also observed by session keyframe recovery.
+    pub video_decode_errors: AtomicUsize,
     pub video_frames_rendered: AtomicUsize,
     pub video_decode_queue_dropped: AtomicUsize,
     pub audio_ingress_dropped: AtomicUsize,

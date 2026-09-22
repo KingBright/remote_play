@@ -128,6 +128,24 @@ impl AudioCapturer for MacAudioCapturer {
         Ok(())
     }
 
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = &self.stream {
+            stream.pause()?;
+        }
+        while self.rx.try_recv().is_ok() {}
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        while self.rx.try_recv().is_ok() {}
+        if let Some(stream) = &self.stream {
+            stream.play()?;
+        } else {
+            self.start().await?;
+        }
+        Ok(())
+    }
+
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
         if let Some(frame) = self.rx.recv().await {
             Ok(frame)
@@ -146,6 +164,7 @@ impl Default for MacAudioCapturer {
 pub struct MacSystemAudioCapturer {
     rx: mpsc::Receiver<MacAudioFrame>,
     stream: Option<SCStream>,
+    source: protocol::session::CaptureSource,
     tx_output: Option<mpsc::Sender<MacAudioFrame>>,
 }
 
@@ -155,8 +174,13 @@ impl MacSystemAudioCapturer {
         Self {
             rx,
             stream: None,
+            source: protocol::session::CaptureSource::MainDisplay,
             tx_output: Some(tx),
         }
+    }
+    pub fn for_source(mut self, source: protocol::session::CaptureSource) -> Self {
+        self.source = source;
+        self
     }
 }
 
@@ -197,7 +221,22 @@ impl AudioCapturer for MacSystemAudioCapturer {
             .into_iter()
             .next()
             .ok_or("No display found for system audio capture")?;
-        let filter = SCContentFilter::create().with_display(&display).build();
+        let filter = if let protocol::session::CaptureSource::Window(id) = self.source {
+            let window = content
+                .windows()
+                .into_iter()
+                .find(|window| window.window_id() == id)
+                .ok_or("audio source window is no longer available")?;
+            let application = window
+                .owning_application()
+                .ok_or("window has no capturable application audio")?;
+            SCContentFilter::create()
+                .with_display(&display)
+                .with_including_applications(&[&application], &[])
+                .build()
+        } else {
+            SCContentFilter::create().with_display(&display).build()
+        };
 
         let mut config = SCStreamConfiguration::new();
         config.set_width(2);
@@ -220,6 +259,24 @@ impl AudioCapturer for MacSystemAudioCapturer {
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let Some(stream) = self.stream.take() {
             stream.stop_capture()?;
+        }
+        Ok(())
+    }
+
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = &self.stream {
+            stream.stop_capture()?;
+        }
+        while self.rx.try_recv().is_ok() {}
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        while self.rx.try_recv().is_ok() {}
+        if let Some(stream) = &self.stream {
+            stream.start_capture()?;
+        } else {
+            self.start().await?;
         }
         Ok(())
     }

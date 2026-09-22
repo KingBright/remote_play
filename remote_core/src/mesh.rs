@@ -824,9 +824,14 @@ mod tests {
     #[test]
     fn invite_rejects_checksum_changes() {
         let config = MeshConfig::generate("Host");
-        let mut code = config.invite_code();
-        let last = code.pop().unwrap();
-        code.push(if last == 'A' { 'B' } else { 'A' });
+        let mut code = compact_copy_code(&config.invite_code());
+        // The last Base32 symbol may contain padding bits, so changing it
+        // does not necessarily change the checksum bytes. The penultimate
+        // symbol always contains five payload bits.
+        let tail = code.pop().unwrap();
+        let checksum_symbol = code.pop().unwrap();
+        code.push(if checksum_symbol == 'A' { 'B' } else { 'A' });
+        code.push(tail);
         assert_eq!(
             MeshInvite::decode(&code).unwrap_err(),
             MeshConfigError::InvalidInviteCode

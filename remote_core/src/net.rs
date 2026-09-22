@@ -2,7 +2,7 @@ use crate::session_crypto::{MULTIPLEX_ENCRYPTED, SessionCrypto};
 use protocol::{CompactRealtimeError, ControlMessage, DataEnvelope, RtpPacket};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 
@@ -44,15 +44,18 @@ impl UdpMultiplexer {
 
     pub fn split(&self) -> (UdpSender, UdpReceiver) {
         let crypto = Arc::new(OnceLock::new());
+        let peer_crypto = Arc::new(RwLock::new(HashMap::new()));
         (
             UdpSender {
                 socket: self.socket.clone(),
                 crypto: crypto.clone(),
+                peer_crypto: peer_crypto.clone(),
             },
             UdpReceiver {
                 socket: self.socket.clone(),
                 fragments: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 crypto,
+                peer_crypto,
             },
         )
     }
@@ -66,10 +69,22 @@ impl UdpMultiplexer {
 pub struct UdpSender {
     socket: Arc<UdpSocket>,
     crypto: Arc<OnceLock<SessionCrypto>>,
+    peer_crypto: Arc<RwLock<HashMap<SocketAddr, Arc<SessionCrypto>>>>,
 }
 impl UdpSender {
     pub fn install_crypto(&self, crypto: SessionCrypto) -> bool {
         self.crypto.set(crypto).is_ok()
+    }
+
+    pub fn install_peer_crypto(&self, peer: SocketAddr, crypto: SessionCrypto) {
+        self.peer_crypto
+            .write()
+            .unwrap()
+            .insert(peer, Arc::new(crypto));
+    }
+
+    pub fn remove_peer_crypto(&self, peer: SocketAddr) {
+        self.peer_crypto.write().unwrap().remove(&peer);
     }
 
     async fn send_multiplexed(
@@ -78,7 +93,8 @@ impl UdpSender {
         bytes: &[u8],
         target: SocketAddr,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(crypto) = self.crypto.get() {
+        let peer_key = self.peer_crypto.read().unwrap().get(&target).cloned();
+        if let Some(crypto) = peer_key.as_deref().or_else(|| self.crypto.get()) {
             let mut inner = Vec::with_capacity(1 + bytes.len());
             inner.push(header);
             inner.extend_from_slice(bytes);
@@ -220,6 +236,7 @@ pub struct UdpReceiver {
     socket: Arc<UdpSocket>,
     fragments: Arc<Mutex<FragmentMap>>,
     crypto: Arc<OnceLock<SessionCrypto>>,
+    peer_crypto: Arc<RwLock<HashMap<SocketAddr, Arc<SessionCrypto>>>>,
 }
 
 #[derive(Debug)]
@@ -235,6 +252,15 @@ pub enum MultiplexedPacket {
 }
 
 impl UdpReceiver {
+    /// Reply on the same route and with the same session encryption as ingress.
+    pub fn sender(&self) -> UdpSender {
+        UdpSender {
+            socket: self.socket.clone(),
+            crypto: self.crypto.clone(),
+            peer_crypto: self.peer_crypto.clone(),
+        }
+    }
+
     pub fn install_crypto(&self, crypto: SessionCrypto) -> bool {
         self.crypto.set(crypto).is_ok()
     }
@@ -245,16 +271,43 @@ impl UdpReceiver {
         len: usize,
         addr: SocketAddr,
     ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
+        self.decode_payload_inner(buf, len, addr, false)
+    }
+
+    fn decode_payload_inner(
+        &self,
+        buf: &[u8],
+        len: usize,
+        addr: SocketAddr,
+        authenticated: bool,
+    ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
         if len == 0 {
             return Ok(None);
         }
+        let peer_key = self.peer_crypto.read().unwrap().get(&addr).cloned();
+        let key = peer_key.as_deref().or_else(|| self.crypto.get());
+        if !authenticated && key.is_some() && buf[0] != MULTIPLEX_ENCRYPTED {
+            let handshake = buf[0] == 0x02
+                && matches!(
+                    ControlMessage::decode(&buf[1..len]),
+                    Ok(ControlMessage::SessionHello { .. }
+                        | ControlMessage::SessionAccept { .. }
+                        | ControlMessage::SessionReject { .. })
+                );
+            if !handshake {
+                return Err("plaintext packet rejected for encrypted peer".into());
+            }
+        }
         match buf[0] {
             MULTIPLEX_ENCRYPTED => {
-                let Some(crypto) = self.crypto.get() else {
+                if authenticated {
+                    return Err("nested encryption is not supported".into());
+                }
+                let Some(crypto) = key else {
                     return Err("encrypted packet received without session crypto".into());
                 };
                 let opened = crypto.open(&buf[1..len])?;
-                self.decode_payload(&opened, opened.len(), addr)
+                self.decode_payload_inner(&opened, opened.len(), addr, true)
             }
             0x01 => {
                 let rtp = RtpPacket::decode(&buf[1..len])?;
@@ -698,6 +751,59 @@ mod tests {
             MultiplexedPacket::Control(ControlMessage::Heartbeat, _) => {}
             other => panic!("unexpected packet: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn peer_keys_are_isolated_and_authenticated_peers_cannot_downgrade_to_plaintext() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let first = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let second = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let (server_tx, server_rx) = server.split();
+        let (first_tx, _) = first.split();
+        let (second_tx, _) = second.split();
+        for (peer, tx, salt) in [
+            (&first, &first_tx, b"first-salt-123456"),
+            (&second, &second_tx, b"second-salt-12345"),
+        ] {
+            server_tx.install_peer_crypto(
+                peer.local_addr().unwrap(),
+                SessionCrypto::from_psk(b"shared", salt).unwrap(),
+            );
+            tx.install_peer_crypto(addr, SessionCrypto::from_psk(b"shared", salt).unwrap());
+            tx.send_control(&ControlMessage::Heartbeat, addr)
+                .await
+                .unwrap();
+            assert!(
+                matches!(recv_with_timeout(&server_rx).await, MultiplexedPacket::Control(ControlMessage::Heartbeat, source) if source == peer.local_addr().unwrap())
+            );
+        }
+        first_tx
+            .send_control(&ControlMessage::Heartbeat, addr)
+            .await
+            .unwrap();
+        assert!(
+            matches!(recv_with_timeout(&server_rx).await, MultiplexedPacket::Control(ControlMessage::Heartbeat, source) if source == first.local_addr().unwrap())
+        );
+        let mut plain = vec![0x02];
+        plain.extend(ControlMessage::Heartbeat.encode().unwrap());
+        assert!(
+            server_rx
+                .decode_payload(&plain, plain.len(), first.local_addr().unwrap())
+                .is_err()
+        );
+        let mut wrong = vec![MULTIPLEX_ENCRYPTED];
+        wrong.extend(
+            SessionCrypto::from_psk(b"shared", b"second-salt-12345")
+                .unwrap()
+                .seal(&plain)
+                .unwrap(),
+        );
+        assert!(
+            server_rx
+                .decode_payload(&wrong, wrong.len(), first.local_addr().unwrap())
+                .is_err()
+        );
     }
 
     #[tokio::test]

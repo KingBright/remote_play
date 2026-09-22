@@ -1,24 +1,55 @@
-use protocol::InputEvent;
+use crate::windows_keymap::mac_key_to_vk;
+use protocol::{InputEvent, input_modifiers};
 use remote_core::InputInjector;
+use std::collections::BTreeSet;
 use std::error::Error;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-    SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 pub struct WindowsInputInjector {
     pressed: AtomicU8,
+    modifiers: AtomicU8,
+    pressed_keys: Mutex<BTreeSet<VIRTUAL_KEY>>,
 }
 
 impl WindowsInputInjector {
     pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         Ok(Self {
             pressed: AtomicU8::new(0),
+            modifiers: AtomicU8::new(0),
+            pressed_keys: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    fn post_key(&self, vk: VIRTUAL_KEY, pressed: bool) {
+        send_key(vk, pressed);
+        let mut keys = self.pressed_keys.lock().unwrap();
+        if pressed {
+            keys.insert(vk);
+        } else {
+            keys.remove(&vk);
+        }
+    }
+
+    fn set_modifiers(&self, modifiers: u8) {
+        let previous = self.modifiers.swap(modifiers, Ordering::Relaxed);
+        for (flag, vk) in [
+            (input_modifiers::SHIFT, 0xA0),
+            (input_modifiers::CONTROL, 0xA2),
+            (input_modifiers::ALT, 0xA4),
+            (input_modifiers::META, 0x5B),
+        ] {
+            if (previous ^ modifiers) & flag != 0 {
+                self.post_key(vk, modifiers & flag != 0);
+            }
+        }
     }
 }
 
@@ -42,13 +73,15 @@ fn send_mouse(flags: u32, dx: i32, dy: i32, data: u32) {
 }
 
 fn send_key(vk: VIRTUAL_KEY, pressed: bool) {
+    let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0xA3 | 0xA5);
     let mut input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
                 wScan: 0,
-                dwFlags: if pressed { 0 } else { KEYEVENTF_KEYUP },
+                dwFlags: (if pressed { 0 } else { KEYEVENTF_KEYUP })
+                    | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 },
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -56,27 +89,6 @@ fn send_key(vk: VIRTUAL_KEY, pressed: bool) {
     };
     unsafe {
         SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-fn mac_or_gpui_to_vk(code: u16) -> VIRTUAL_KEY {
-    match code {
-        53 => 0x1B,  // Esc
-        48 => 0x09,  // Tab
-        36 => 0x0D,  // Return
-        51 => 0x08,  // Delete/Backspace
-        123 => 0x25, // Left
-        124 => 0x27, // Right
-        125 => 0x28, // Down
-        126 => 0x26, // Up
-        59 => 0x11,  // Ctrl
-        58 => 0x12,  // Alt
-        55 => 0x5B,  // Cmd/Win
-        56 => 0x10,  // Shift
-        96 => 0x74,  // F5
-        103 => 0x7A, // F11
-        other if other < 0xFF => other as VIRTUAL_KEY,
-        _ => 0,
     }
 }
 
@@ -94,12 +106,12 @@ impl InputInjector for WindowsInputInjector {
             InputEvent::MouseDown(button) | InputEvent::MouseUp(button) => {
                 let down = matches!(event, InputEvent::MouseDown(_));
                 let flags = match (button, down) {
-                    (0 | 1, true) => MOUSEEVENTF_LEFTDOWN,
-                    (0 | 1, false) => MOUSEEVENTF_LEFTUP,
-                    (2, true) => MOUSEEVENTF_RIGHTDOWN,
-                    (2, false) => MOUSEEVENTF_RIGHTUP,
-                    (3, true) => MOUSEEVENTF_MIDDLEDOWN,
-                    (3, false) => MOUSEEVENTF_MIDDLEUP,
+                    (0, true) => MOUSEEVENTF_LEFTDOWN,
+                    (0, false) => MOUSEEVENTF_LEFTUP,
+                    (1, true) => MOUSEEVENTF_RIGHTDOWN,
+                    (1, false) => MOUSEEVENTF_RIGHTUP,
+                    (2, true) => MOUSEEVENTF_MIDDLEDOWN,
+                    (2, false) => MOUSEEVENTF_MIDDLEUP,
                     _ => 0,
                 };
                 if flags != 0 {
@@ -119,21 +131,28 @@ impl InputInjector for WindowsInputInjector {
                 send_mouse(MOUSEEVENTF_WHEEL, 0, 0, (delta_y * 120) as u32);
             }
             InputEvent::Key {
-                key_code, pressed, ..
+                key_code,
+                pressed,
+                modifiers,
             } => {
-                let vk = mac_or_gpui_to_vk(key_code);
-                if vk != 0 {
-                    send_key(vk, pressed);
+                self.set_modifiers(modifiers);
+                if let Some(vk) = mac_key_to_vk(key_code) {
+                    self.post_key(vk, pressed);
                 }
             }
-            InputEvent::KeyDown(code) => send_key(code as VIRTUAL_KEY, true),
-            InputEvent::KeyUp(code) => send_key(code as VIRTUAL_KEY, false),
-            InputEvent::ModifiersChanged(_) | InputEvent::Touch { .. } => {}
+            InputEvent::KeyDown(code) => self.post_key(code as VIRTUAL_KEY, true),
+            InputEvent::KeyUp(code) => self.post_key(code as VIRTUAL_KEY, false),
+            InputEvent::ModifiersChanged(modifiers) => self.set_modifiers(modifiers),
+            InputEvent::Touch { .. } => {}
         }
         Ok(())
     }
 
     fn release_all_input(&self) {
+        self.modifiers.store(0, Ordering::Relaxed);
+        for vk in std::mem::take(&mut *self.pressed_keys.lock().unwrap()) {
+            send_key(vk, false);
+        }
         self.pressed.store(0, Ordering::Relaxed);
         send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0);
         send_mouse(MOUSEEVENTF_RIGHTUP, 0, 0, 0);

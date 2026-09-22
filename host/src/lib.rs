@@ -3,6 +3,8 @@ mod audio_capture;
 mod audio_encode;
 #[cfg(target_os = "macos")]
 mod capture;
+pub mod capture_sources;
+mod connection_services;
 #[cfg(target_os = "macos")]
 mod display_power;
 #[cfg(target_os = "macos")]
@@ -29,6 +31,8 @@ pub mod linux_video_encode;
 mod windows_capture;
 #[cfg(target_os = "windows")]
 mod windows_input;
+#[cfg(any(target_os = "windows", test))]
+mod windows_keymap;
 #[cfg(target_os = "windows")]
 mod windows_video_encode;
 
@@ -48,7 +52,7 @@ use remote_core::file_transfer_runtime::{
 use remote_core::media_plane::{audio_stream_config_to_envelope, rtp_to_realtime_data};
 use remote_core::mesh::{AppPrivateMeshConfigStore, default_app_private_mesh_dir};
 use remote_core::net::DEFAULT_CONTROL_PORT;
-use remote_core::scheduled_sender::{ScheduledDataSender, ScheduledDataSenderConfig};
+use remote_core::scheduled_sender::ScheduledDataSender;
 use remote_core::stats::Statistics;
 use remote_core::{AudioCapturer, VideoCapturer, VideoEncoder};
 pub use service::{HostServiceConfig, run_host_service};
@@ -100,6 +104,9 @@ pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     run_host_service(HostServiceConfig {
         bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_CONTROL_PORT)),
         stats,
+        enable_clipboard_sync: env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC"),
+        enable_file_transfer: env_flag_enabled("REMOTE_PLAY_FILE_TRANSFER"),
+        enable_talkback: env_flag_enabled("REMOTE_PLAY_TALKBACK"),
     })
     .await
 }
@@ -218,6 +225,7 @@ fn now_ms() -> u64 {
 
 fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
     match event {
+        FileTransferEvent::IncomingClipboardReady { .. } => {}
         FileTransferEvent::OutgoingGroupStarted {
             group_id,
             file_count,
@@ -319,6 +327,7 @@ pub struct StreamSettings {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    pub paused: bool,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -332,15 +341,9 @@ struct StreamingRunConfig {
     udp_sender: UdpSender,
     stats: Arc<Statistics>,
     cancel_rx: broadcast::Receiver<()>,
-    clipboard_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
-    file_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
-    talkback_inbound_rx: Option<mpsc::Receiver<DataEnvelope>>,
-    #[cfg(target_os = "macos")]
-    talkback_settings_rx: Option<watch::Receiver<crate::talkback_player::TalkbackPlaybackSettings>>,
-    #[cfg(not(target_os = "macos"))]
-    talkback_settings_rx: Option<watch::Receiver<()>>,
+    scheduled_sender: ScheduledDataSender,
+    source: protocol::session::CaptureSource,
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
-    host_send_file: Option<PathBuf>,
     keyframe_requested: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -437,6 +440,7 @@ struct AudioCaptureTaskRuntime {
     client_addr: SocketAddr,
     use_data_plane_media: bool,
     scheduled_sender: Option<ScheduledDataSender>,
+    media_settings_rx: Option<watch::Receiver<StreamSettings>>,
 }
 
 fn spawn_audio_capture_task<C>(
@@ -460,6 +464,7 @@ where
             client_addr,
             use_data_plane_media,
             scheduled_sender,
+            mut media_settings_rx,
         } = runtime;
 
         if let Err(err) = audio_capturer.start().await {
@@ -539,12 +544,33 @@ where
             }
         }
 
+        let mut paused = false;
         loop {
             tokio::select! {
                 _ = cancel_rx.recv() => {
                     break;
                 }
-                frame_res = audio_capturer.capture_frame() => {
+                changed = async {
+                    if let Some(rx) = &mut media_settings_rx {
+                        rx.changed().await.map(|_| rx.borrow().paused)
+                    } else { std::future::pending().await }
+                } => {
+                    let Ok(next_paused) = changed else { break };
+                    if next_paused != paused {
+                        let result = if next_paused { audio_capturer.pause().await }
+                            else { audio_capturer.resume().await };
+                        if let Err(err) = result {
+                            eprintln!("{label} audio pause/resume failed: {err}");
+                            break;
+                        }
+                        // Discard a partial pre-pause packet, preserving stream/sequence IDs.
+                        if let Ok(encoder) = OpusAudioEncoder::new(sample_rate, channels) {
+                            audio_encoder = encoder;
+                        }
+                        paused = next_paused;
+                    }
+                }
+                frame_res = audio_capturer.capture_frame(), if !paused => {
                     let frame = match frame_res {
                         Ok(f) => f,
                         Err(_) => break,
@@ -679,6 +705,114 @@ fn start_scheduled_sender_reporter(
     ScheduledStatsReporterGuard { handle }
 }
 
+struct SubscriptionAudioConfig {
+    session_id: u32,
+    source: protocol::session::CaptureSource,
+    client_addr: SocketAddr,
+    udp_sender: UdpSender,
+    scheduled_sender: ScheduledDataSender,
+    stats: Arc<Statistics>,
+    cancel_rx: broadcast::Receiver<()>,
+    stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
+    include_audio: bool,
+    include_microphone: bool,
+}
+
+fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task::JoinHandle<()>> {
+    let SubscriptionAudioConfig {
+        session_id,
+        source,
+        client_addr,
+        udp_sender,
+        scheduled_sender,
+        stats,
+        cancel_rx,
+        stream_settings_rx,
+        include_audio,
+        include_microphone,
+    } = config;
+    let scheduled_media_sender = Some(scheduled_sender);
+    let use_data_plane_media = true;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (source, include_audio);
+    #[cfg(target_os = "macos")]
+    let microphone_audio_task = if include_microphone {
+        Some(spawn_audio_capture_task(
+            "Remote microphone",
+            crate::audio_capture::MacAudioCapturer::microphone(),
+            AudioCaptureTaskRuntime {
+                stream_id: remote_microphone_audio_stream_id(session_id),
+                udp_sender: udp_sender.clone(),
+                stats: stats.clone(),
+                cancel_rx: cancel_rx.resubscribe(),
+                client_addr,
+                use_data_plane_media,
+                scheduled_sender: scheduled_media_sender.clone(),
+                media_settings_rx: stream_settings_rx.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let microphone_audio_task = if include_microphone {
+        Some(spawn_audio_capture_task(
+            "Remote microphone",
+            crate::linux_audio::LinuxAudioCapturer::microphone(),
+            AudioCaptureTaskRuntime {
+                stream_id: remote_microphone_audio_stream_id(session_id),
+                udp_sender: udp_sender.clone(),
+                stats: stats.clone(),
+                cancel_rx: cancel_rx.resubscribe(),
+                client_addr,
+                use_data_plane_media,
+                scheduled_sender: scheduled_media_sender.clone(),
+                media_settings_rx: stream_settings_rx.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "macos")]
+    let system_audio_task = if include_audio {
+        if use_data_plane_media {
+            Some(spawn_audio_capture_task(
+                "Remote system",
+                crate::audio_capture::MacSystemAudioCapturer::new().for_source(source),
+                AudioCaptureTaskRuntime {
+                    stream_id: remote_system_audio_stream_id(session_id),
+                    udp_sender: udp_sender.clone(),
+                    stats: stats.clone(),
+                    cancel_rx: cancel_rx.resubscribe(),
+                    client_addr,
+                    use_data_plane_media,
+                    scheduled_sender: scheduled_media_sender.clone(),
+                    media_settings_rx: stream_settings_rx.clone(),
+                },
+            ))
+        } else {
+            eprintln!(
+                "REMOTE_PLAY_SYSTEM_AUDIO requires REMOTE_PLAY_DATA_PLANE_MEDIA=1 so the stream config can be delivered."
+            );
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut tasks = Vec::new();
+    if let Some(task) = microphone_audio_task {
+        tasks.push(task);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(task) = system_audio_task {
+        tasks.push(task);
+    }
+    tasks
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let StreamingRunConfig {
@@ -691,12 +825,9 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         udp_sender,
         stats,
         mut cancel_rx,
-        clipboard_inbound_rx,
-        file_inbound_rx,
-        talkback_inbound_rx,
-        talkback_settings_rx,
+        scheduled_sender,
+        source,
         mut stream_settings_rx,
-        host_send_file,
         keyframe_requested,
     } = config;
 
@@ -705,7 +836,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
 
     // 2. Setup A/V Pipeline
     #[cfg(target_os = "macos")]
-    let mut video_capturer = MacVideoCapturer::new(width, height, fps);
+    let mut video_capturer = MacVideoCapturer::new(width, height, fps).with_source(source);
     #[cfg(target_os = "macos")]
     let mut video_encoder = MacVideoEncoder::new(width, height, fps, bitrate_kbps)?;
 
@@ -726,201 +857,10 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         client_addr
     );
 
-    let use_data_plane_media = env_flag_or("REMOTE_PLAY_DATA_PLANE_MEDIA", true);
-    if use_data_plane_media {
-        println!("Media data-plane adapter enabled.");
-    }
-    let use_clipboard_sync = clipboard_inbound_rx.is_some();
-    if use_clipboard_sync {
-        println!("Clipboard data-plane sync enabled.");
-    }
-    let use_file_transfer = file_inbound_rx.is_some();
-    if use_file_transfer {
-        println!("File transfer data-plane runtime enabled.");
-    }
-    let use_talkback = talkback_inbound_rx.is_some();
-    if use_talkback {
-        println!("Viewer talkback playback enabled.");
-    }
-    let use_scheduled_sender = use_data_plane_media || use_clipboard_sync || use_file_transfer;
-    let (scheduled_media_sender, _scheduled_media_worker) = if use_scheduled_sender {
-        let (sender, worker) = ScheduledDataSender::spawn(
-            udp_sender.clone(),
-            client_addr,
-            ScheduledDataSenderConfig {
-                ..ScheduledDataSenderConfig::default()
-            },
-        );
-        (Some(sender), Some(worker))
-    } else {
-        (None, None)
-    };
-    let _scheduled_stats_reporter = scheduled_media_sender
-        .clone()
-        .map(|sender| start_scheduled_sender_reporter(sender, cancel_rx.resubscribe()));
-    let _clipboard_sync_task = if let (Some(inbound_rx), Some(sender)) =
-        (clipboard_inbound_rx, scheduled_media_sender.clone())
-    {
-        let clipboard_cancel_rx = cancel_rx.resubscribe();
-        Some(tokio::spawn(async move {
-            #[cfg(target_os = "macos")]
-            let provider = MacClipboardProvider::new();
-            #[cfg(target_os = "linux")]
-            let provider = LinuxClipboardProvider::new();
-            #[cfg(target_os = "windows")]
-            let provider = WindowsClipboardProvider::new();
-
-            if let Err(err) = run_clipboard_sync(
-                provider,
-                sender,
-                inbound_rx,
-                clipboard_cancel_rx,
-                ClipboardSyncRunnerConfig::default(),
-            )
-            .await
-            {
-                eprintln!("Clipboard sync task error: {}", err);
-            }
-        }))
-    } else {
-        None
-    };
-    let (_file_command_tx_guard, _file_transfer_task, _file_event_logger) =
-        if let (Some(inbound_rx), Some(sender)) = (file_inbound_rx, scheduled_media_sender.clone())
-        {
-            let (command_tx, command_rx) = mpsc::channel(16);
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-            let _file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
-            let receive_dir = env_path_or_temp(
-                "REMOTE_PLAY_FILE_RECEIVE_DIR",
-                "remote-play-host-received-files",
-            );
-            let runtime_cancel_rx = cancel_rx.resubscribe();
-            let runtime_task = tokio::spawn(async move {
-                if let Err(err) = run_file_transfer_runtime(
-                    sender,
-                    command_rx,
-                    inbound_rx,
-                    event_tx,
-                    runtime_cancel_rx,
-                    FileTransferRuntimeConfig {
-                        receive_dir,
-                        ..FileTransferRuntimeConfig::default()
-                    },
-                )
-                .await
-                {
-                    eprintln!("File transfer task error: {}", err);
-                }
-            });
-            let logger_cancel_rx = cancel_rx.resubscribe();
-            let event_logger = tokio::spawn(async move {
-                let mut cancel_rx = logger_cancel_rx;
-                loop {
-                    tokio::select! {
-                        _ = cancel_rx.recv() => break,
-                        event = event_rx.recv() => {
-                            let Some(event) = event else { break };
-                            log_file_transfer_event("Host", event);
-                        }
-                    }
-                }
-            });
-            if let Some(send_file) = host_send_file {
-                let auto_send_tx = command_tx.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    println!(
-                        "Host auto-enqueueing send file on session startup: {}",
-                        send_file.display()
-                    );
-                    if let Err(err) = auto_send_tx
-                        .send(FileTransferCommand::SendFile {
-                            path: send_file,
-                            mime_type: None,
-                        })
-                        .await
-                    {
-                        eprintln!("Failed to enqueue initial host send file: {}", err);
-                    }
-                });
-            }
-            let command_tx_guard = Some(command_tx);
-            (command_tx_guard, Some(runtime_task), Some(event_logger))
-        } else {
-            (None, None, None)
-        };
-
-    #[cfg(target_os = "macos")]
-    let _talkback_player = if let (Some(inbound_rx), Some(settings_rx)) =
-        (talkback_inbound_rx, talkback_settings_rx)
-    {
-        match crate::talkback_player::TalkbackPlayer::new(session_id, inbound_rx, settings_rx) {
-            Ok(player) => Some(player),
-            Err(err) => {
-                eprintln!("Failed to initialize viewer talkback playback: {}", err);
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    #[cfg(target_os = "macos")]
-    let _microphone_audio_task = spawn_audio_capture_task(
-        "Remote microphone",
-        crate::audio_capture::MacAudioCapturer::microphone(),
-        AudioCaptureTaskRuntime {
-            stream_id: remote_microphone_audio_stream_id(session_id),
-            udp_sender: udp_sender.clone(),
-            stats: stats.clone(),
-            cancel_rx: cancel_rx.resubscribe(),
-            client_addr,
-            use_data_plane_media,
-            scheduled_sender: scheduled_media_sender.clone(),
-        },
-    );
-
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    let _microphone_audio_task = spawn_audio_capture_task(
-        "Remote microphone",
-        crate::linux_audio::LinuxAudioCapturer::microphone(),
-        AudioCaptureTaskRuntime {
-            stream_id: remote_microphone_audio_stream_id(session_id),
-            udp_sender: udp_sender.clone(),
-            stats: stats.clone(),
-            cancel_rx: cancel_rx.resubscribe(),
-            client_addr,
-            use_data_plane_media,
-            scheduled_sender: scheduled_media_sender.clone(),
-        },
-    );
-
-    #[cfg(target_os = "macos")]
-    let _system_audio_task = if env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") {
-        if use_data_plane_media {
-            Some(spawn_audio_capture_task(
-                "Remote system",
-                crate::audio_capture::MacSystemAudioCapturer::new(),
-                AudioCaptureTaskRuntime {
-                    stream_id: remote_system_audio_stream_id(session_id),
-                    udp_sender: udp_sender.clone(),
-                    stats: stats.clone(),
-                    cancel_rx: cancel_rx.resubscribe(),
-                    client_addr,
-                    use_data_plane_media,
-                    scheduled_sender: scheduled_media_sender.clone(),
-                },
-            ))
-        } else {
-            eprintln!(
-                "REMOTE_PLAY_SYSTEM_AUDIO requires REMOTE_PLAY_DATA_PLANE_MEDIA=1 so the stream config can be delivered."
-            );
-            None
-        }
-    } else {
-        None
-    };
+    let use_data_plane_media = true;
+    let scheduled_media_sender = Some(scheduled_sender);
+    #[cfg(not(target_os = "macos"))]
+    let _ = source;
 
     let mut seq_num: u16 = 0;
     let stats_video = stats.clone();
@@ -932,11 +872,19 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     let mut current_jitter_ms = 0.0_f32;
 
     let telemetry_udp_sender = udp_sender.clone();
+    let mut paused = false;
+    let mut paused_telemetry = tokio::time::interval(Duration::from_secs(5));
+    paused_telemetry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             _ = cancel_rx.recv() => {
                 break;
+            }
+            _ = paused_telemetry.tick(), if paused => {
+                let _ = telemetry_udp_sender.send_control(&protocol::ControlMessage::HostTelemetry {
+                    fps: 0.0, encode_latency_ms: 0.0, jitter_ms: 0.0, bitrate_kbps: 0,
+                }, client_addr).await;
             }
             settings_changed = async {
                 if let Some(rx) = &mut stream_settings_rx {
@@ -946,12 +894,33 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                 }
             } => {
                 if let Ok(new_settings) = settings_changed {
+                    if new_settings.paused != paused {
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        video_encoder.set_paused(new_settings.paused)?;
+                        if new_settings.paused { video_capturer.pause().await?; }
+                        else {
+                            video_capturer.resume().await?;
+                            video_encoder.request_keyframe();
+                        }
+                        paused = new_settings.paused;
+                        last_fps_update = std::time::Instant::now();
+                        frames_since_update = 0;
+                        bytes_since_update = 0;
+                    }
                     println!("Applying updated stream settings: {}x{}@{}fps ({} kbps)", new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
-                    let _ = video_capturer.update_resolution_and_fps(new_settings.height, new_settings.fps);
-                    video_encoder.update_settings(new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
+                    #[cfg(target_os = "macos")]
+                    {
+                        video_capturer.update_resolution_and_fps(new_settings.width, new_settings.height, new_settings.fps)?;
+                        video_encoder.update_rate_settings(new_settings.fps, new_settings.bitrate_kbps);
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        video_capturer.update_resolution_and_fps(new_settings.height, new_settings.fps)?;
+                        video_encoder.update_settings(new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
+                    }
                 }
             }
-            frame_res = video_capturer.capture_frame() => {
+            frame_res = video_capturer.capture_frame(), if !paused => {
                 let frame = frame_res?;
                 stats_video.video_frames_captured.fetch_add(1, Relaxed);
                 if keyframe_requested.swap(false, Relaxed) {
@@ -961,7 +930,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             }
             chunk_res = video_encoder.pull_encoded_chunk() => {
                 let chunk = chunk_res?;
-                if chunk.nalu.is_empty() {
+                if paused || chunk.nalu.is_empty() {
                     continue;
                 }
                 stats_video.video_frames_encoded.fetch_add(1, Relaxed);

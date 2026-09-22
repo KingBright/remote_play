@@ -8,10 +8,13 @@ pub mod clipboard_sync;
 pub mod clock;
 pub mod data_plane;
 pub mod discovery;
+mod file_delivery;
 pub mod file_transfer;
 pub mod file_transfer_runtime;
+pub mod frame_pacer;
 pub mod jitter_buffer;
 pub mod latest_frame;
+pub mod media_pause;
 pub mod media_plane;
 pub mod mesh;
 pub mod net;
@@ -26,6 +29,7 @@ pub mod telemetry;
 pub mod timing;
 pub mod trace;
 pub mod traits;
+pub mod workspace_session;
 
 // Re-export traits for convenience
 pub use client_session::{

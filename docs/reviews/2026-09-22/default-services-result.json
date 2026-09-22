@@ -1,0 +1,8 @@
+{
+  "client_exit": 0,
+  "default_file_transfer_env_unset": true,
+  "bytes": 1048576,
+  "source_sha256": "c1568ef846c82e2a1df7c900581a5a6edb26b947a051ec405fbf8af090385057",
+  "received_sha256": "c1568ef846c82e2a1df7c900581a5a6edb26b947a051ec405fbf8af090385057",
+  "file_equal": true
+}

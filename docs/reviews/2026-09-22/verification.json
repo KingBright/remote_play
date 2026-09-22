@@ -1,0 +1,12 @@
+{
+  "base_commit": "969ca10",
+  "working_tree_fixes": true,
+  "rust_tests_passed": 362,
+  "rust_tests_failed": 0,
+  "web_tests_passed": 11,
+  "clippy_macos": "passed with -D warnings",
+  "windows_gnu_cargo_check": "passed with existing platform warnings",
+  "linux_candidate_check": "not completed: Remote Hosts source transfer paused at source_dns_or_connection; cancelled and cleanup confirmed",
+  "runtime_media": "loopback packet reception; no decoded display or audible output acceptance",
+  "remote_services_updated": false
+}

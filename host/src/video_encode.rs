@@ -18,7 +18,8 @@ use video_toolbox_sys::compression::{
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
     kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kVTCompressionPropertyKey_ProfileLevel,
-    kVTCompressionPropertyKey_RealTime, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTCompressionPropertyKey_RealTime, kVTEncodeFrameOptionKey_ForceKeyFrame,
+    kVTProfileLevel_HEVC_Main_AutoLevel,
 };
 use video_toolbox_sys::session::VTSessionSetProperty;
 
@@ -55,7 +56,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CFArrayGetCount(theArray: *mut c_void) -> isize;
     fn CFArrayGetValueAtIndex(theArray: *mut c_void, idx: isize) -> *mut c_void;
-    fn CFDictionaryContainsKey(theDict: *mut c_void, key: *const c_void) -> bool;
+    fn CFDictionaryGetValue(theDict: *mut c_void, key: *const c_void) -> *const c_void;
 }
 
 #[link(name = "CoreMedia", kind = "framework")]
@@ -149,9 +150,9 @@ extern "C" fn compression_callback(
         let attachments = CMSampleBufferGetSampleAttachmentsArray(sample_buffer, false);
         if !attachments.is_null() && CFArrayGetCount(attachments) > 0 {
             let dict = CFArrayGetValueAtIndex(attachments, 0);
-            if CFDictionaryContainsKey(dict, kCMSampleAttachmentKey_NotSync) {
-                is_keyframe = false;
-            }
+            let not_sync = CFDictionaryGetValue(dict, kCMSampleAttachmentKey_NotSync);
+            is_keyframe =
+                not_sync.is_null() || !bool::from(CFBoolean::wrap_under_get_rule(not_sync as _));
         }
 
         // Extract VPS, SPS, PPS if keyframe
@@ -330,7 +331,7 @@ impl MacVideoEncoder {
             );
 
             // Fast single-pass CBR rate limit (eliminates multi-pass RDO lag)
-            let bytes_per_sec = (final_bitrate / 8) as i32;
+            let bytes_per_sec = final_bitrate / 8;
             let one_sec = 1_i32;
             let num_bytes = CFNumber::from(bytes_per_sec);
             let num_sec = CFNumber::from(one_sec);
@@ -385,8 +386,10 @@ impl MacVideoEncoder {
         bitrate_kbps: u32,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel(60);
-        let tx_box = Box::new(tx.clone());
-        let ref_con = Box::into_raw(tx_box.clone()) as *mut c_void;
+        let mut tx_box = Box::new(tx.clone());
+        // The Box address stays stable when the encoder moves. Keep one owned
+        // allocation through session invalidation, including the initial session.
+        let ref_con = tx_box.as_mut() as *mut _ as *mut c_void;
 
         let session = unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con)? };
 
@@ -407,7 +410,16 @@ impl MacVideoEncoder {
         self.force_keyframe = true;
     }
 
+    pub fn update_rate_settings(&mut self, fps: u32, bitrate_kbps: u32) {
+        self.update_settings(self.width, self.height, fps, bitrate_kbps);
+    }
+
     pub fn update_settings(&mut self, width: u32, height: u32, fps: u32, bitrate_kbps: u32) {
+        if (self.width, self.height, self.fps, self.bitrate_kbps)
+            == (width, height, fps, bitrate_kbps)
+        {
+            return;
+        }
         if self.width == width && self.height == height {
             self.fps = fps;
             self.bitrate_kbps = bitrate_kbps;
@@ -424,7 +436,7 @@ impl MacVideoEncoder {
                         bitrate_value.as_concrete_TypeRef() as _,
                     );
 
-                    let bytes_per_sec = (final_bitrate / 8) as i32;
+                    let bytes_per_sec = final_bitrate / 8;
                     let one_sec = 1_i32;
                     let num_bytes = CFNumber::from(bytes_per_sec);
                     let num_sec = CFNumber::from(one_sec);
@@ -498,6 +510,14 @@ impl VideoEncoder for MacVideoEncoder {
             Some(buf) => buf,
             None => return Ok(()),
         };
+        let (width, height) = (
+            cv_pixel_buffer.width() as u32,
+            cv_pixel_buffer.height() as u32,
+        );
+        if (self.width, self.height) != (width, height) {
+            self.update_settings(width, height, self.fps, self.bitrate_kbps);
+            self.request_keyframe();
+        }
         let pts = frame.sample_buffer.presentation_timestamp();
         let duration = frame.sample_buffer.duration();
 
@@ -521,7 +541,11 @@ impl VideoEncoder for MacVideoEncoder {
 
         let frame_props_dict = if self.force_keyframe {
             self.force_keyframe = false;
-            let force_key = CFString::from_static_string("ForceKeyFrame");
+            // The SDK value is "EncoderForceKeyframe", not "ForceKeyFrame".
+            // An invented key is silently ignored, delaying recovery until the GOP ends.
+            let force_key = unsafe {
+                CFString::wrap_under_get_rule(kVTEncodeFrameOptionKey_ForceKeyFrame as _)
+            };
             let dict = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
                 force_key.as_CFType(),
                 CFBoolean::true_value().as_CFType(),

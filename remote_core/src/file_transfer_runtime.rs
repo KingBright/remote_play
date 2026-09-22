@@ -5,11 +5,11 @@ use crate::file_transfer::{
 };
 use crate::scheduled_sender::{ScheduledDataSendError, ScheduledDataSender};
 use protocol::{ContentKind, DataEnvelope, FileTransferControl, FileTransferGroup};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
@@ -24,6 +24,8 @@ pub struct FileTransferRuntimeConfig {
     pub send_policy: FileTransferPolicy,
     pub receive_policy: FileReceivePolicy,
     pub receive_dir: PathBuf,
+    /// True while queued sends or incomplete incoming objects need the connection.
+    pub active: Arc<AtomicBool>,
 }
 
 impl Default for FileTransferRuntimeConfig {
@@ -37,6 +39,7 @@ impl Default for FileTransferRuntimeConfig {
             send_policy: FileTransferPolicy::default(),
             receive_policy: FileReceivePolicy::default(),
             receive_dir: std::env::temp_dir().join("remote-play-received-files"),
+            active: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -48,6 +51,9 @@ pub enum FileTransferCommand {
         mime_type: Option<String>,
     },
     SendFileGroup {
+        files: Vec<FileTransferGroupFile>,
+    },
+    SendClipboardFiles {
         files: Vec<FileTransferGroupFile>,
     },
     CancelTransfer {
@@ -70,6 +76,10 @@ pub struct FileTransferGroupFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileTransferEvent {
+    IncomingClipboardReady {
+        group_id: u64,
+        paths: Vec<PathBuf>,
+    },
     OutgoingGroupStarted {
         group_id: u64,
         file_count: u32,
@@ -156,11 +166,15 @@ pub enum FileTransferEvent {
 pub enum FileTransferRuntimeError {
     Send(ScheduledDataSendError),
     Transfer(FileTransferError),
+    Delivery(String),
 }
 
 impl fmt::Display for FileTransferRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            FileTransferRuntimeError::Delivery(reason) => {
+                write!(f, "file delivery failed: {reason}")
+            }
             FileTransferRuntimeError::Send(err) => {
                 write!(f, "file transfer sender failed: {err}")
             }
@@ -174,6 +188,7 @@ impl fmt::Display for FileTransferRuntimeError {
 impl Error for FileTransferRuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            FileTransferRuntimeError::Delivery(_) => None,
             FileTransferRuntimeError::Send(err) => Some(err),
             FileTransferRuntimeError::Transfer(err) => Some(err),
         }
@@ -197,6 +212,7 @@ struct FileTransferIdAllocator {
     next_transfer_id: Arc<AtomicU64>,
     next_object_id: Arc<AtomicU64>,
     next_sequence_number: Arc<AtomicU64>,
+    delivery: crate::file_delivery::FileDeliveryTracker,
 }
 
 impl FileTransferIdAllocator {
@@ -205,6 +221,7 @@ impl FileTransferIdAllocator {
             next_transfer_id: Arc::new(AtomicU64::new(config.next_transfer_id)),
             next_object_id: Arc::new(AtomicU64::new(config.next_object_id)),
             next_sequence_number: Arc::new(AtomicU64::new(config.next_sequence_number)),
+            delivery: crate::file_delivery::FileDeliveryTracker::default(),
         }
     }
 
@@ -282,16 +299,39 @@ pub async fn run_file_transfer_runtime(
     let allocator = FileTransferIdAllocator::new(&config);
     let cancel_state = FileTransferCancelState::default();
     let mut inbound = InboundFileTransfers::new(config.receive_dir.clone(), config.receive_policy);
+    let mut send_tasks = tokio::task::JoinSet::new();
+    struct ClearActivity(Arc<AtomicBool>);
+    impl Drop for ClearActivity {
+        fn drop(&mut self) {
+            self.0.store(false, Relaxed);
+        }
+    }
+    let _clear_activity = ClearActivity(config.active.clone());
 
     loop {
+        config.active.store(
+            !send_tasks.is_empty()
+                || !command_rx.is_empty()
+                || !inbound.incoming_files.is_empty()
+                || !inbound.manifest_assemblers.is_empty()
+                || !inbound.incoming_groups.is_empty(),
+            Relaxed,
+        );
         tokio::select! {
             _ = cancel_rx.recv() => {
                 return Ok(());
             }
+            _ = send_tasks.join_next(), if !send_tasks.is_empty() => {}
             maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else {
                     return Ok(());
                 };
+                if send_tasks.len() >= 4 && matches!(&command, FileTransferCommand::SendFile { .. } | FileTransferCommand::SendFileGroup { .. } | FileTransferCommand::SendClipboardFiles { .. }) {
+                    emit_event(&event_tx, FileTransferEvent::Error { transfer_id: None,
+                        message: "Four file transfers are already active; wait for one to finish".into() });
+                    continue;
+                }
+                let clipboard = matches!(&command, FileTransferCommand::SendClipboardFiles { .. });
                 match command {
                     FileTransferCommand::SendFile { path, mime_type } => {
                         let spec = next_file_transfer_spec(&config, &allocator);
@@ -307,11 +347,12 @@ pub async fn run_file_transfer_runtime(
                             cancel_state: cancel_state.clone(),
                             stream_id: config.stream_id,
                         }
-                        .spawn();
+                        .spawn(&mut send_tasks);
                     }
-                    FileTransferCommand::SendFileGroup { files } => {
+                    FileTransferCommand::SendFileGroup { files } | FileTransferCommand::SendClipboardFiles { files } => {
                         let group_id = allocator.next_group_id();
                         SendFileGroupTask {
+                            clipboard,
                             group_id,
                             files,
                             config: config.clone(),
@@ -321,7 +362,7 @@ pub async fn run_file_transfer_runtime(
                             allocator: allocator.clone(),
                             cancel_state: cancel_state.clone(),
                         }
-                        .spawn();
+                        .spawn(&mut send_tasks);
                     }
                     FileTransferCommand::CancelTransfer { transfer_id } => {
                         cancel_state.cancel_transfer(transfer_id);
@@ -341,7 +382,15 @@ pub async fn run_file_transfer_runtime(
                 let Some(envelope) = maybe_envelope else {
                     return Ok(());
                 };
-                inbound.handle_envelope(envelope, &event_tx).await;
+                if envelope.header.kind == ContentKind::FileControl
+                    && let Ok(control @ (FileTransferControl::ChunkAccepted { .. } | FileTransferControl::Rejected { .. })) = control_from_envelope(&envelope)
+                {
+                    allocator.delivery.route(control);
+                    continue;
+                }
+                if let Some(reply) = inbound.handle_envelope(envelope, &event_tx).await {
+                    send_file_control(reply, config.stream_id, &data_sender, &allocator).await?;
+                }
             }
         }
     }
@@ -379,6 +428,7 @@ struct SendFileTask {
 }
 
 struct SendFileGroupTask {
+    clipboard: bool,
     group_id: u64,
     files: Vec<FileTransferGroupFile>,
     config: FileTransferRuntimeConfig,
@@ -396,8 +446,8 @@ struct PreparedGroupFile {
 }
 
 impl SendFileGroupTask {
-    fn spawn(self) {
-        tokio::spawn(async move {
+    fn spawn(self, tasks: &mut tokio::task::JoinSet<()>) {
+        tasks.spawn(async move {
             let group_id = self.group_id;
             let event_tx = self.event_tx.clone();
             if let Err(err) = self.run().await {
@@ -444,6 +494,32 @@ impl SendFileGroupTask {
             .sum::<u64>();
         let group_checksum_crc32 = file_group_checksum_crc32(&readers);
         let file_count = u32::try_from(readers.len()).unwrap_or(u32::MAX);
+
+        if self.clipboard {
+            let (object_id, spare) = self.allocator.next_object_id_pair();
+            let mut delivery = self.allocator.delivery.window([object_id, spare]);
+            let envelope = control_to_envelope(
+                &FileTransferControl::ClipboardGroup {
+                    group_id: self.group_id,
+                },
+                object_id,
+                self.config.stream_id,
+                self.allocator.next_sequence_number(),
+                now_ms(),
+            )?;
+            let cancelled = || self.cancel_state.is_group_cancelled(self.group_id);
+            delivery
+                .send(envelope, &self.data_sender, cancelled)
+                .await
+                .map_err(FileTransferRuntimeError::Delivery)?;
+            if !delivery
+                .flush(&self.data_sender, cancelled)
+                .await
+                .map_err(FileTransferRuntimeError::Delivery)?
+            {
+                return Ok(());
+            }
+        }
 
         emit_event(
             &self.event_tx,
@@ -619,8 +695,8 @@ fn nested_relative_path(root_name: &str, child: &Path) -> Result<String, FileTra
 }
 
 impl SendFileTask {
-    fn spawn(self) {
-        tokio::spawn(async move {
+    fn spawn(self, tasks: &mut tokio::task::JoinSet<()>) {
+        tasks.spawn(async move {
             let transfer_id = self.spec.transfer_id;
             let event_tx = self.event_tx.clone();
             if let Err(err) = self.run().await {
@@ -664,6 +740,16 @@ async fn send_reader(
 ) -> Result<SendReaderOutcome, FileTransferRuntimeError> {
     let manifest = reader.manifest().clone();
     let total_chunks = reader.total_chunks();
+    let mut delivery = allocator
+        .delivery
+        .window([reader.manifest_object_id(), manifest.file_object_id]);
+    let cancelled = || {
+        cancel_state.is_transfer_cancelled(manifest.transfer_id)
+            || manifest
+                .group
+                .as_ref()
+                .is_some_and(|group| cancel_state.is_group_cancelled(group.group_id))
+    };
     emit_event(
         event_tx,
         FileTransferEvent::OutgoingStarted {
@@ -716,6 +802,13 @@ async fn send_reader(
         }
 
         let Some(mut envelope) = maybe_envelope else {
+            let confirmed = tokio::select! {
+                _ = cancel_rx.recv() => return Ok(SendReaderOutcome::TransferCancelled),
+                result = delivery.flush(data_sender, cancelled) => result.map_err(FileTransferRuntimeError::Delivery)?,
+            };
+            if !confirmed {
+                continue;
+            }
             emit_event(
                 event_tx,
                 FileTransferEvent::OutgoingCompleted {
@@ -733,7 +826,18 @@ async fn send_reader(
             sent_file_bytes = sent_file_bytes.saturating_add(envelope.payload.len() as u64);
         }
 
-        data_sender.send(envelope).await?;
+        let is_manifest = envelope.header.kind == ContentKind::FileManifest;
+        let confirmed = tokio::select! {
+            _ = cancel_rx.recv() => return Ok(SendReaderOutcome::TransferCancelled),
+            result = async {
+                if !delivery.send(envelope, data_sender, cancelled).await? { return Ok(false); }
+                // Do not send data until the receiver has accepted the manifest.
+                if is_manifest { delivery.flush(data_sender, cancelled).await } else { Ok(true) }
+            } => result.map_err(FileTransferRuntimeError::Delivery)?,
+        };
+        if !confirmed {
+            continue;
+        }
 
         if sent_file_chunks > 0 {
             emit_event(
@@ -843,6 +947,7 @@ fn assign_sequence_number(envelope: &mut DataEnvelope, sequence_number: u64) {
 }
 
 struct InboundFileTransfers {
+    clipboard_groups: HashSet<u64>,
     receive_dir: PathBuf,
     receive_policy: FileReceivePolicy,
     manifest_assemblers: HashMap<u64, FileManifestAssembler>,
@@ -851,11 +956,14 @@ struct InboundFileTransfers {
     cancelled_file_objects: HashSet<u64>,
     cancelled_groups: HashSet<u64>,
     pending_receive_config: Option<(PathBuf, FileReceivePolicy)>,
+    completed_files: HashMap<u64, protocol::FileTransferManifest>,
+    completed_order: VecDeque<u64>,
 }
 
 impl InboundFileTransfers {
     fn new(receive_dir: PathBuf, receive_policy: FileReceivePolicy) -> Self {
         Self {
+            clipboard_groups: HashSet::new(),
             receive_dir,
             receive_policy,
             manifest_assemblers: HashMap::new(),
@@ -864,6 +972,8 @@ impl InboundFileTransfers {
             cancelled_file_objects: HashSet::new(),
             cancelled_groups: HashSet::new(),
             pending_receive_config: None,
+            completed_files: HashMap::new(),
+            completed_order: VecDeque::new(),
         }
     }
 
@@ -898,7 +1008,16 @@ impl InboundFileTransfers {
         &mut self,
         envelope: DataEnvelope,
         event_tx: &mpsc::UnboundedSender<FileTransferEvent>,
-    ) {
+    ) -> Option<FileTransferControl> {
+        let identity = envelope
+            .header
+            .chunk
+            .as_ref()
+            .map(|chunk| (chunk.object_id, chunk.chunk_index));
+        let acknowledge = matches!(
+            envelope.header.kind,
+            ContentKind::FileManifest | ContentKind::FileChunk | ContentKind::FileControl
+        );
         let result = match envelope.header.kind {
             ContentKind::FileManifest => self.handle_manifest(envelope, event_tx).await,
             ContentKind::FileChunk => self.handle_file_chunk(envelope, event_tx).await,
@@ -906,17 +1025,31 @@ impl InboundFileTransfers {
             other => Err(FileTransferError::UnexpectedContentKind(other)),
         };
 
-        if let Err(err) = result {
-            emit_event(
-                event_tx,
-                FileTransferEvent::Error {
-                    transfer_id: None,
-                    message: err.to_string(),
-                },
-            );
-        }
+        let reply = match result {
+            Ok(()) if acknowledge => {
+                identity.map(
+                    |(object_id, chunk_index)| FileTransferControl::ChunkAccepted {
+                        object_id,
+                        chunk_index,
+                    },
+                )
+            }
+            Ok(()) => None,
+            Err(err) => {
+                let reason = err.to_string();
+                emit_event(
+                    event_tx,
+                    FileTransferEvent::Error {
+                        transfer_id: None,
+                        message: reason.clone(),
+                    },
+                );
+                identity.map(|(object_id, _)| FileTransferControl::Rejected { object_id, reason })
+            }
+        };
 
         self.apply_pending_receive_config_if_idle();
+        reply
     }
 
     async fn handle_manifest(
@@ -930,6 +1063,14 @@ impl InboundFileTransfers {
             .as_ref()
             .map(|chunk| chunk.object_id)
             .ok_or(FileTransferError::MissingChunkMetadata)?;
+
+        if self.manifest_assemblers.len() >= 32
+            && !self.manifest_assemblers.contains_key(&object_id)
+        {
+            return Err(FileTransferError::InvalidChunk {
+                reason: "too many incomplete file manifests",
+            });
+        }
 
         let assembler = match self.manifest_assemblers.entry(object_id) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -948,7 +1089,46 @@ impl InboundFileTransfers {
             .expect("complete manifest assembler should still be present");
         let manifest = assembler.finish(self.receive_policy)?;
         if self.is_manifest_cancelled(&manifest) {
-            return Ok(());
+            return Err(FileTransferError::InvalidChunk {
+                reason: "transfer was cancelled",
+            });
+        }
+        if let Some(existing) = self
+            .incoming_files
+            .get(&manifest.file_object_id)
+            .map(|incoming| incoming.manifest())
+            .or_else(|| self.completed_files.get(&manifest.file_object_id))
+        {
+            return if existing == &manifest {
+                Ok(())
+            } else {
+                Err(FileTransferError::InvalidChunk {
+                    reason: "conflicting duplicate manifest",
+                })
+            };
+        }
+        if self.incoming_files.len() >= 16 {
+            return Err(FileTransferError::InvalidChunk {
+                reason: "too many incoming files",
+            });
+        }
+        if let Some(group) = &manifest.group {
+            if self.incoming_groups.len() >= 32
+                && !self.incoming_groups.contains_key(&group.group_id)
+            {
+                return Err(FileTransferError::InvalidChunk {
+                    reason: "too many incoming groups",
+                });
+            }
+            if let Some(existing) = self.incoming_groups.get(&group.group_id)
+                && (existing.file_count != group.file_count
+                    || existing.total_size != group.group_total_size_bytes
+                    || existing.checksum != group.group_checksum_crc32)
+            {
+                return Err(FileTransferError::InvalidChunk {
+                    reason: "inconsistent file group metadata",
+                });
+            }
         }
         let incoming =
             IncomingFileTransfer::start(manifest.clone(), &self.receive_dir, self.receive_policy)
@@ -969,8 +1149,9 @@ impl InboundFileTransfers {
         );
         if incoming.progress().is_complete {
             let received = incoming.finish().await?;
+            self.record_group_completion(&received.manifest, received.path.clone(), event_tx)?;
+            self.remember_completed(received.manifest.clone());
             let group = received.manifest.group.clone();
-            let path = received.path.clone();
             emit_event(
                 event_tx,
                 FileTransferEvent::IncomingCompleted {
@@ -981,7 +1162,6 @@ impl InboundFileTransfers {
                     size_bytes: received.manifest.size_bytes,
                 },
             );
-            self.record_group_completion(group, path, event_tx)?;
         } else {
             self.incoming_files.insert(file_object_id, incoming);
         }
@@ -994,6 +1174,14 @@ impl InboundFileTransfers {
         event_tx: &mpsc::UnboundedSender<FileTransferEvent>,
     ) -> Result<(), FileTransferError> {
         match control_from_envelope(&envelope)? {
+            FileTransferControl::ClipboardGroup { group_id } => {
+                if self.clipboard_groups.len() >= 32 && !self.clipboard_groups.contains(&group_id) {
+                    return Err(FileTransferError::InvalidChunk {
+                        reason: "too many pending clipboard groups",
+                    });
+                }
+                self.clipboard_groups.insert(group_id);
+            }
             FileTransferControl::CancelTransfer {
                 transfer_id,
                 file_object_id,
@@ -1006,6 +1194,7 @@ impl InboundFileTransfers {
                 self.cancelled_groups.insert(group_id);
                 self.cancel_incoming_group(group_id, event_tx).await?;
             }
+            FileTransferControl::ChunkAccepted { .. } | FileTransferControl::Rejected { .. } => {}
         }
         Ok(())
     }
@@ -1021,6 +1210,25 @@ impl InboundFileTransfers {
             .as_ref()
             .map(|chunk| chunk.object_id)
             .ok_or(FileTransferError::MissingChunkMetadata)?;
+        if let Some(manifest) = self.completed_files.get(&object_id) {
+            let chunk = envelope.header.chunk.as_ref().unwrap();
+            let offset = u64::from(chunk.chunk_index) * u64::from(manifest.chunk_payload_len);
+            let total_chunks = manifest
+                .size_bytes
+                .div_ceil(u64::from(manifest.chunk_payload_len));
+            if chunk.total_size == manifest.size_bytes
+                && u64::from(chunk.total_chunks) == total_chunks
+                && u64::from(chunk.chunk_index) < total_chunks
+                && chunk.offset == offset
+                && envelope.payload.len() as u64
+                    == (manifest.size_bytes - offset).min(u64::from(manifest.chunk_payload_len))
+            {
+                return Ok(());
+            }
+            return Err(FileTransferError::InvalidChunk {
+                reason: "conflicting completed file chunk",
+            });
+        }
         let incoming =
             self.incoming_files
                 .get_mut(&object_id)
@@ -1047,8 +1255,9 @@ impl InboundFileTransfers {
                 .remove(&object_id)
                 .expect("complete incoming transfer should still be present");
             let received = incoming.finish().await?;
+            self.record_group_completion(&received.manifest, received.path.clone(), event_tx)?;
+            self.remember_completed(received.manifest.clone());
             let group = received.manifest.group.clone();
-            let path = received.path.clone();
             emit_event(
                 event_tx,
                 FileTransferEvent::IncomingCompleted {
@@ -1059,19 +1268,29 @@ impl InboundFileTransfers {
                     size_bytes: received.manifest.size_bytes,
                 },
             );
-            self.record_group_completion(group, path, event_tx)?;
         }
 
         Ok(())
     }
 
+    fn remember_completed(&mut self, manifest: protocol::FileTransferManifest) {
+        self.completed_order.push_back(manifest.file_object_id);
+        self.completed_files
+            .insert(manifest.file_object_id, manifest);
+        while self.completed_order.len() > 4096 {
+            if let Some(old) = self.completed_order.pop_front() {
+                self.completed_files.remove(&old);
+            }
+        }
+    }
+
     fn record_group_completion(
         &mut self,
-        group: Option<FileTransferGroup>,
+        manifest: &protocol::FileTransferManifest,
         path: PathBuf,
         event_tx: &mpsc::UnboundedSender<FileTransferEvent>,
     ) -> Result<(), FileTransferError> {
-        let Some(group) = group else {
+        let Some(group) = manifest.group.as_ref() else {
             return Ok(());
         };
 
@@ -1079,19 +1298,41 @@ impl InboundFileTransfers {
         let entry = self
             .incoming_groups
             .entry(group.group_id)
-            .or_insert_with(|| IncomingFileGroup::new(&group));
-        entry.record(&group, path, publish_path)?;
+            .or_insert_with(|| IncomingFileGroup::new(group));
+        entry.record(
+            group,
+            path,
+            publish_path,
+            manifest.size_bytes,
+            manifest.checksum_crc32,
+        )?;
 
         if entry.is_complete() {
             let completed = self
                 .incoming_groups
                 .remove(&group.group_id)
                 .expect("complete incoming group should still be present");
+            if !completed.valid_checksum() {
+                self.clipboard_groups.remove(&group.group_id);
+                return Err(FileTransferError::InvalidChunk {
+                    reason: "file group checksum or size mismatch",
+                });
+            }
+            let paths = completed.paths();
+            if self.clipboard_groups.remove(&group.group_id) {
+                emit_event(
+                    event_tx,
+                    FileTransferEvent::IncomingClipboardReady {
+                        group_id: group.group_id,
+                        paths: paths.clone(),
+                    },
+                );
+            }
             emit_event(
                 event_tx,
                 FileTransferEvent::IncomingGroupCompleted {
                     group_id: group.group_id,
-                    paths: completed.paths(),
+                    paths,
                     total_size_bytes: group.group_total_size_bytes,
                 },
             );
@@ -1185,8 +1426,11 @@ impl InboundFileTransfers {
 }
 
 struct IncomingFileGroup {
+    total_size: u64,
+    checksum: u32,
     file_count: u32,
     completed_files: Vec<Option<PathBuf>>,
+    completed_metadata: Vec<Option<(String, u64, u32)>>,
     publish_paths: Vec<PathBuf>,
     completed_count: u32,
 }
@@ -1194,8 +1438,11 @@ struct IncomingFileGroup {
 impl IncomingFileGroup {
     fn new(group: &FileTransferGroup) -> Self {
         Self {
+            total_size: group.group_total_size_bytes,
+            checksum: group.group_checksum_crc32,
             file_count: group.file_count,
             completed_files: vec![None; group.file_count as usize],
+            completed_metadata: vec![None; group.file_count as usize],
             publish_paths: Vec::new(),
             completed_count: 0,
         }
@@ -1206,8 +1453,14 @@ impl IncomingFileGroup {
         group: &FileTransferGroup,
         path: PathBuf,
         publish_path: PathBuf,
+        size: u64,
+        checksum: u32,
     ) -> Result<(), FileTransferError> {
-        if group.file_count != self.file_count || group.file_index >= self.file_count {
+        if group.file_count != self.file_count
+            || group.file_index >= self.file_count
+            || group.group_total_size_bytes != self.total_size
+            || group.group_checksum_crc32 != self.checksum
+        {
             return Err(FileTransferError::InvalidChunk {
                 reason: "file group completion metadata is inconsistent",
             });
@@ -1220,7 +1473,28 @@ impl IncomingFileGroup {
             }
         }
         *slot = Some(path);
+        self.completed_metadata[group.file_index as usize] =
+            Some((group.relative_path.clone(), size, checksum));
         Ok(())
+    }
+
+    fn valid_checksum(&self) -> bool {
+        let mut bytes = Vec::new();
+        let mut total = 0u64;
+        for metadata in &self.completed_metadata {
+            let Some((path, size, checksum)) = metadata else {
+                return false;
+            };
+            let Some(next_total) = total.checked_add(*size) else {
+                return false;
+            };
+            total = next_total;
+            bytes.extend_from_slice(path.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&size.to_be_bytes());
+            bytes.extend_from_slice(&checksum.to_be_bytes());
+        }
+        total == self.total_size && crate::data_plane::checksum_crc32(&bytes) == self.checksum
     }
 
     fn is_complete(&self) -> bool {
@@ -1396,6 +1670,15 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_sends_file_over_scheduled_udp_path_and_receiver_materializes_it() {
+        udp_file_roundtrip(false).await;
+    }
+
+    #[tokio::test]
+    async fn retransmits_lost_manifest_data_and_final_ack_without_duplicate_completion() {
+        udp_file_roundtrip(true).await;
+    }
+
+    async fn udp_file_roundtrip(inject_faults: bool) {
         let base = unique_temp_dir("remote-play-file-runtime");
         let source_dir = base.join("source");
         let receive_dir = base.join("received");
@@ -1411,7 +1694,7 @@ mod tests {
         let source_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("source bind should succeed");
-        let source_sender = source_mux.split().0;
+        let (source_sender, source_udp_receiver) = source_mux.split();
         let target_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("target bind should succeed");
@@ -1432,12 +1715,14 @@ mod tests {
         );
 
         let (source_command_tx, source_command_rx) = mpsc::channel(8);
-        let (_source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
+        let (source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
         let (source_event_tx, mut source_event_rx) = mpsc::unbounded_channel();
         let (_target_command_tx, target_command_rx) = mpsc::channel(8);
         let (target_inbound_tx, target_inbound_rx) = mpsc::channel(128);
         let (target_event_tx, mut target_event_rx) = mpsc::unbounded_channel();
         let (cancel_tx, _) = broadcast::channel(4);
+        let source_active = Arc::new(AtomicBool::new(false));
+        let target_active = Arc::new(AtomicBool::new(false));
 
         let source_runtime = tokio::spawn(run_file_transfer_runtime(
             source_scheduled_sender,
@@ -1447,6 +1732,7 @@ mod tests {
             cancel_tx.subscribe(),
             FileTransferRuntimeConfig {
                 chunk_payload_len: 4096,
+                active: source_active.clone(),
                 ..FileTransferRuntimeConfig::default()
             },
         ));
@@ -1459,6 +1745,7 @@ mod tests {
             FileTransferRuntimeConfig {
                 chunk_payload_len: 4096,
                 receive_dir: receive_dir.clone(),
+                active: target_active.clone(),
                 receive_policy: FileReceivePolicy {
                     allow_overwrite: true,
                     ..FileReceivePolicy::default()
@@ -1467,16 +1754,67 @@ mod tests {
             },
         ));
 
+        let reply_router = tokio::spawn(async move {
+            let mut lost_final_ack = false;
+            while let Ok(packet) = source_udp_receiver.recv().await {
+                if let MultiplexedPacket::Data(envelope, _) = packet {
+                    if inject_faults
+                        && !lost_final_ack
+                        && matches!(
+                            control_from_envelope(&envelope),
+                            Ok(FileTransferControl::ChunkAccepted { chunk_index: 2, .. })
+                        )
+                    {
+                        lost_final_ack = true;
+                        continue;
+                    }
+                    if source_inbound_tx.send(envelope).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
         let udp_router = tokio::spawn(async move {
+            let mut lost_manifest = false;
+            let mut lost_chunk = false;
             loop {
                 let packet = match target_udp_receiver.recv().await {
                     Ok(packet) => packet,
                     Err(_) => break,
                 };
-                if let MultiplexedPacket::Data(envelope, _) = packet
-                    && target_inbound_tx.send(envelope).await.is_err()
-                {
-                    break;
+                if let MultiplexedPacket::Data(envelope, _) = packet {
+                    if inject_faults
+                        && !lost_manifest
+                        && envelope.header.kind == ContentKind::FileManifest
+                    {
+                        lost_manifest = true;
+                        continue;
+                    }
+                    if inject_faults
+                        && !lost_chunk
+                        && envelope.header.kind == ContentKind::FileChunk
+                        && envelope
+                            .header
+                            .chunk
+                            .as_ref()
+                            .is_some_and(|chunk| chunk.chunk_index == 2)
+                    {
+                        lost_chunk = true;
+                        continue;
+                    }
+                    if target_inbound_tx.send(envelope.clone()).await.is_err() {
+                        break;
+                    }
+                    if inject_faults
+                        && !(envelope.header.kind == ContentKind::FileChunk
+                            && envelope
+                                .header
+                                .chunk
+                                .as_ref()
+                                .is_some_and(|chunk| chunk.chunk_index == 2))
+                    {
+                        let _ = target_inbound_tx.send(envelope).await;
+                    }
                 }
             }
         });
@@ -1495,6 +1833,12 @@ mod tests {
                 .await
                 .expect("source event should arrive")
                 .expect("source event channel should remain open");
+            if inject_faults && matches!(event, FileTransferEvent::OutgoingStarted { .. }) {
+                assert!(
+                    source_active.load(Relaxed),
+                    "retrying transfer must retain the connection"
+                );
+            }
             if matches!(event, FileTransferEvent::OutgoingCompleted { .. }) {
                 outgoing_completed = true;
             }
@@ -1510,6 +1854,19 @@ mod tests {
             }
         };
 
+        while let Ok(event) = target_event_rx.try_recv() {
+            assert!(!matches!(
+                event,
+                FileTransferEvent::IncomingCompleted { .. }
+            ));
+        }
+        timeout(Duration::from_secs(2), async {
+            while source_active.load(Relaxed) || target_active.load(Relaxed) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finished transfers must release idle connection retention");
         let received_bytes = tokio::fs::read(&received_path)
             .await
             .expect("received file should read");
@@ -1517,6 +1874,7 @@ mod tests {
 
         let _ = cancel_tx.send(());
         udp_router.abort();
+        reply_router.abort();
         source_runtime
             .await
             .expect("source runtime should join")
@@ -1545,7 +1903,7 @@ mod tests {
         let source_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("source bind should succeed");
-        let source_sender = source_mux.split().0;
+        let (source_sender, source_udp_receiver) = source_mux.split();
         let target_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("target bind should succeed");
@@ -1571,7 +1929,7 @@ mod tests {
         );
 
         let (source_command_tx, source_command_rx) = mpsc::channel(8);
-        let (_source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
+        let (source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
         let (source_event_tx, mut source_event_rx) = mpsc::unbounded_channel();
         let (_target_command_tx, target_command_rx) = mpsc::channel(8);
         let (target_inbound_tx, target_inbound_rx) = mpsc::channel(128);
@@ -1607,6 +1965,15 @@ mod tests {
             },
         ));
 
+        let reply_router = tokio::spawn(async move {
+            while let Ok(packet) = source_udp_receiver.recv().await {
+                if let MultiplexedPacket::Data(envelope, _) = packet
+                    && source_inbound_tx.send(envelope).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
         let udp_router = tokio::spawn(async move {
             loop {
                 let packet = match target_udp_receiver.recv().await {
@@ -1706,6 +2073,7 @@ mod tests {
 
         let _ = cancel_tx.send(());
         udp_router.abort();
+        reply_router.abort();
         source_runtime
             .await
             .expect("source runtime should join")
@@ -1737,7 +2105,7 @@ mod tests {
         let source_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("source bind should succeed");
-        let source_sender = source_mux.split().0;
+        let (source_sender, source_udp_receiver) = source_mux.split();
         let target_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("target bind should succeed");
@@ -1758,7 +2126,7 @@ mod tests {
         );
 
         let (source_command_tx, source_command_rx) = mpsc::channel(8);
-        let (_source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
+        let (source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
         let (source_event_tx, mut source_event_rx) = mpsc::unbounded_channel();
         let (_target_command_tx, target_command_rx) = mpsc::channel(8);
         let (target_inbound_tx, target_inbound_rx) = mpsc::channel(128);
@@ -1793,6 +2161,15 @@ mod tests {
             },
         ));
 
+        let reply_router = tokio::spawn(async move {
+            while let Ok(packet) = source_udp_receiver.recv().await {
+                if let MultiplexedPacket::Data(envelope, _) = packet
+                    && source_inbound_tx.send(envelope).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
         let udp_router = tokio::spawn(async move {
             loop {
                 let packet = match target_udp_receiver.recv().await {
@@ -1860,6 +2237,7 @@ mod tests {
 
         let _ = cancel_tx.send(());
         udp_router.abort();
+        reply_router.abort();
         source_runtime
             .await
             .expect("source runtime should join")
@@ -1891,7 +2269,7 @@ mod tests {
         let source_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("source bind should succeed");
-        let source_sender = source_mux.split().0;
+        let (source_sender, source_udp_receiver) = source_mux.split();
         let target_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("target bind should succeed");
@@ -1912,7 +2290,7 @@ mod tests {
         );
 
         let (source_command_tx, source_command_rx) = mpsc::channel(8);
-        let (_source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
+        let (source_inbound_tx, source_inbound_rx) = mpsc::channel(8);
         let (source_event_tx, mut source_event_rx) = mpsc::unbounded_channel();
         let (_target_command_tx, target_command_rx) = mpsc::channel(8);
         let (target_inbound_tx, target_inbound_rx) = mpsc::channel(128);
@@ -1947,6 +2325,15 @@ mod tests {
             },
         ));
 
+        let reply_router = tokio::spawn(async move {
+            while let Ok(packet) = source_udp_receiver.recv().await {
+                if let MultiplexedPacket::Data(envelope, _) = packet
+                    && source_inbound_tx.send(envelope).await.is_err()
+                {
+                    break;
+                }
+            }
+        });
         let udp_router = tokio::spawn(async move {
             loop {
                 let packet = match target_udp_receiver.recv().await {
@@ -2009,6 +2396,7 @@ mod tests {
 
         let _ = cancel_tx.send(());
         udp_router.abort();
+        reply_router.abort();
         source_runtime
             .await
             .expect("source runtime should join")
@@ -2053,8 +2441,8 @@ mod tests {
             event => panic!("unexpected event: {event:?}"),
         };
         assert!(
-            tokio::fs::metadata(&partial_path).await.is_ok(),
-            "partial file should exist before cancellation"
+            tokio::fs::metadata(&partial_path).await.is_err(),
+            "uncommitted file must not be visible at its final name"
         );
 
         let cancel = FileTransferControl::CancelTransfer {
@@ -2259,8 +2647,8 @@ mod tests {
             event => panic!("unexpected event: {event:?}"),
         };
         assert!(
-            tokio::fs::metadata(&second_path).await.is_ok(),
-            "partial group file should exist before group cancellation"
+            tokio::fs::metadata(&second_path).await.is_err(),
+            "uncommitted group member must not be published"
         );
 
         inbound

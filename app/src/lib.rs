@@ -3,6 +3,8 @@ mod design_system;
 pub mod preferences;
 #[cfg(target_os = "macos")]
 mod ui;
+#[cfg(target_os = "macos")]
+mod workspace_ui;
 
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveredPeer, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
@@ -839,10 +841,7 @@ pub async fn start_unified_runtime(
     }
 
     if config.enable_passive_host {
-        owner_config.passive_host = Some(HostServiceConfig {
-            bind_addr: config.host_bind_addr,
-            stats: stats.clone(),
-        });
+        owner_config.passive_host = Some(build_passive_host_config(&config, stats.clone()));
     }
 
     let mut host_stats = None;
@@ -972,6 +971,19 @@ fn spawn_viewer_media_sinks(
     (audio_tx, decode_tx)
 }
 
+fn build_passive_host_config(
+    config: &UnifiedRuntimeConfig,
+    stats: Arc<Statistics>,
+) -> HostServiceConfig {
+    HostServiceConfig {
+        bind_addr: config.host_bind_addr,
+        stats,
+        enable_clipboard_sync: config.enable_clipboard_sync,
+        enable_file_transfer: config.enable_file_transfer,
+        enable_talkback: config.enable_talkback && cfg!(target_os = "macos"),
+    }
+}
+
 fn build_client_side_services(
     config: &UnifiedRuntimeConfig,
     client_sender: UdpSender,
@@ -983,8 +995,7 @@ fn build_client_side_services(
         config
             .enable_file_transfer
             .then(|| start_file_transfer_runtime_control(client_sender.clone())),
-        config
-            .enable_talkback
+        (config.enable_talkback && cfg!(target_os = "macos"))
             .then(|| start_talkback_runtime_control(client_sender)),
     )
 }
@@ -1001,10 +1012,12 @@ fn build_unified_discovery_config(
     };
     let capabilities = DiscoveryCapabilities {
         can_stream: config.enable_passive_host,
-        can_view: config.enable_client_receiver,
+        can_view: config.enable_client_receiver
+            && config.enable_viewer_media
+            && cfg!(target_os = "macos"),
         file_transfer: config.enable_file_transfer,
         clipboard_sync: config.enable_clipboard_sync,
-        talkback: config.enable_talkback,
+        talkback: config.enable_talkback && cfg!(target_os = "macos"),
     };
     let announcement = DiscoveryAnnouncement {
         network_name: mesh_config.network_name,
@@ -1233,6 +1246,7 @@ pub struct UnifiedServiceOwner {
     client_control_sender: Option<UdpSender>,
     client_input_tx: Option<mpsc::UnboundedSender<(SocketAddr, protocol::InputEvent)>>,
     client_active_session_id: Option<Arc<AtomicU32>>,
+    client_host_stats: Option<Arc<SharedHostStats>>,
     side_services: UnifiedSideServiceControls,
     tasks: Vec<AbortOnDropTask>,
 }
@@ -1247,6 +1261,10 @@ impl UnifiedServiceOwner {
             .client_receiver
             .as_ref()
             .map(|receiver| receiver.active_session_id.clone());
+        let client_host_stats = config
+            .client_receiver
+            .as_ref()
+            .map(|receiver| receiver.host_stats.clone());
 
         let p2p_runtime = match config.p2p {
             Some(p2p_config) => {
@@ -1344,6 +1362,7 @@ impl UnifiedServiceOwner {
                 runtime.clone(),
                 config.side_services.clone(),
                 client_active_session_id.clone(),
+                client_host_stats.clone(),
                 config.client_control_sender.clone(),
                 timeout_config,
             ));
@@ -1385,6 +1404,7 @@ impl UnifiedServiceOwner {
             client_control_sender: config.client_control_sender,
             client_input_tx,
             client_active_session_id,
+            client_host_stats,
             side_services: config.side_services,
             tasks,
         })
@@ -1497,6 +1517,13 @@ impl UnifiedServiceOwner {
         options: StreamStartOptions,
         now_ms: u64,
     ) -> Result<ViewingRequest, UnifiedAppError> {
+        protocol::validate_video_settings(
+            options.width,
+            options.height,
+            options.fps,
+            options.bitrate_kbps,
+        )
+        .map_err(|err| UnifiedAppError::ControlSend(err.into()))?;
         let sender = self
             .client_control_sender
             .clone()
@@ -1511,9 +1538,17 @@ impl UnifiedServiceOwner {
         if let Some(active_session_id) = &self.client_active_session_id {
             active_session_id.store(request.session_id, Relaxed);
         }
+        if let Some(stats) = &self.client_host_stats {
+            stats
+                .media_pause
+                .begin_session(request.target, request.session_id);
+        }
 
         let message = options.start_message(request.session_id);
         if let Err(err) = sender.send_control(&message, request.target).await {
+            if let Some(stats) = &self.client_host_stats {
+                stats.media_pause.end_session();
+            }
             if let Some(active_session_id) = &self.client_active_session_id {
                 active_session_id.store(0, Relaxed);
             }
@@ -1537,6 +1572,8 @@ impl UnifiedServiceOwner {
         fps: u32,
         bitrate_kbps: u32,
     ) -> Result<(), UnifiedAppError> {
+        protocol::validate_video_settings(width, height, fps, bitrate_kbps)
+            .map_err(|err| UnifiedAppError::ControlSend(err.into()))?;
         let (target, session_id) = {
             let runtime = self.runtime.lock().expect("unified runtime lock");
             match runtime.role_state() {
@@ -1718,7 +1755,16 @@ impl UnifiedServiceOwner {
         })
     }
 
+    pub fn set_media_paused(&self, paused: bool) -> bool {
+        self.client_host_stats
+            .as_ref()
+            .is_some_and(|stats| stats.media_pause.set_paused(paused))
+    }
+
     fn clear_client_active_session(&self) {
+        if let Some(stats) = &self.client_host_stats {
+            stats.media_pause.end_session();
+        }
         if let Some(active_session_id) = &self.client_active_session_id {
             active_session_id.store(0, Relaxed);
         }
@@ -2125,6 +2171,7 @@ fn spawn_session_timeout_monitor(
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
     side_services: UnifiedSideServiceControls,
     client_active_session_id: Option<Arc<AtomicU32>>,
+    client_host_stats: Option<Arc<SharedHostStats>>,
     sender: Option<UdpSender>,
     config: UnifiedSessionTimeoutMonitorConfig,
 ) -> AbortOnDropTask {
@@ -2147,6 +2194,12 @@ fn spawn_session_timeout_monitor(
                 continue;
             };
             side_services.stop_all();
+            let was_paused = client_host_stats
+                .as_ref()
+                .is_some_and(|stats| stats.media_pause.is_paused());
+            if let Some(stats) = &client_host_stats {
+                stats.media_pause.end_session();
+            }
             if let Some(active_session_id) = &client_active_session_id {
                 active_session_id.store(0, Relaxed);
             }
@@ -2187,6 +2240,12 @@ fn spawn_session_timeout_monitor(
             };
             if let Some(active_session_id) = &client_active_session_id {
                 active_session_id.store(request.session_id, Relaxed);
+            }
+            if let Some(stats) = &client_host_stats {
+                stats
+                    .media_pause
+                    .begin_session(request.target, request.session_id);
+                stats.media_pause.set_paused(was_paused);
             }
             let options = StreamStartOptions::default();
             let start = options.start_message(request.session_id);
@@ -2519,7 +2578,35 @@ mod tests {
     }
 
     #[test]
-    fn unified_discovery_config_advertises_dual_role_capabilities() {
+    fn passive_host_uses_unified_side_service_settings() {
+        let mut config = UnifiedRuntimeConfig::app_defaults();
+        for enabled in [true, false] {
+            config.enable_clipboard_sync = enabled;
+            config.enable_file_transfer = enabled;
+            config.enable_talkback = enabled;
+            let host = build_passive_host_config(&config, Statistics::new());
+            assert_eq!(host.bind_addr, config.host_bind_addr);
+            assert_eq!(host.enable_clipboard_sync, enabled);
+            assert_eq!(host.enable_file_transfer, enabled);
+            assert_eq!(host.enable_talkback, enabled && cfg!(target_os = "macos"));
+        }
+    }
+
+    #[test]
+    fn headless_discovery_does_not_advertise_viewer_support() {
+        let mesh_dir = temp_mesh_dir("headless-capabilities");
+        let config = UnifiedRuntimeConfig {
+            mesh_dir: mesh_dir.clone(),
+            enable_viewer_media: false,
+            ..UnifiedRuntimeConfig::app_defaults()
+        };
+        let discovery = build_unified_discovery_config(&config).unwrap();
+        assert!(!discovery.announcement.capabilities.can_view);
+        let _ = std::fs::remove_dir_all(mesh_dir);
+    }
+
+    #[test]
+    fn unified_discovery_config_advertises_implemented_capabilities() {
         let mesh_dir = temp_mesh_dir("dual-role-discovery");
         let config = UnifiedRuntimeConfig {
             display_name: "Unified Test".to_string(),
@@ -2553,10 +2640,16 @@ mod tests {
         assert_eq!(discovery.announcement.virtual_ip, None);
         assert_eq!(discovery.announcement.scope, DiscoveryScope::Lan);
         assert!(discovery.announcement.capabilities.can_stream);
-        assert!(discovery.announcement.capabilities.can_view);
+        assert_eq!(
+            discovery.announcement.capabilities.can_view,
+            cfg!(target_os = "macos")
+        );
         assert!(discovery.announcement.capabilities.clipboard_sync);
         assert!(discovery.announcement.capabilities.file_transfer);
-        assert!(discovery.announcement.capabilities.talkback);
+        assert_eq!(
+            discovery.announcement.capabilities.talkback,
+            cfg!(target_os = "macos")
+        );
 
         let _ = std::fs::remove_dir_all(mesh_dir);
     }
@@ -3538,14 +3631,14 @@ mod tests {
 
         assert!(owner.supports_clipboard_sync());
         assert!(owner.supports_file_transfer());
-        assert!(owner.supports_talkback());
+        assert_eq!(owner.supports_talkback(), cfg!(target_os = "macos"));
         assert!(owner.clipboard_sync_enabled());
         assert!(owner.file_transfer_enabled());
-        assert!(owner.talkback_enabled());
+        assert_eq!(owner.talkback_enabled(), cfg!(target_os = "macos"));
 
         assert!(owner.set_clipboard_sync_enabled(false));
         assert!(owner.set_file_transfer_enabled(false));
-        assert!(owner.set_talkback_enabled(false));
+        assert_eq!(owner.set_talkback_enabled(false), cfg!(target_os = "macos"));
         assert!(!owner.clipboard_sync_enabled());
         assert!(!owner.file_transfer_enabled());
         assert!(!owner.talkback_enabled());

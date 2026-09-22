@@ -14,6 +14,7 @@ pub struct EncodedChunk {
 }
 
 pub struct WindowsVideoEncoder {
+    settings: (u32, u32, u32, u32),
     source: Option<FfmpegHevcSource>,
     force_keyframe: bool,
 }
@@ -25,19 +26,12 @@ impl WindowsVideoEncoder {
         fps: u32,
         bitrate_kbps: u32,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        match FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
-            Ok(source) => Ok(Self {
-                source: Some(source),
-                force_keyframe: false,
-            }),
-            Err(err) => {
-                eprintln!("[WindowsEncoder] ffmpeg HEVC unavailable ({err})");
-                Ok(Self {
-                    source: None,
-                    force_keyframe: true,
-                })
-            }
-        }
+        let source = FfmpegHevcSource::start(width, height, fps, bitrate_kbps)?;
+        Ok(Self {
+            settings: (width, height, fps, bitrate_kbps),
+            source: Some(source),
+            force_keyframe: false,
+        })
     }
 
     pub fn request_keyframe(&mut self) {
@@ -45,9 +39,26 @@ impl WindowsVideoEncoder {
     }
 
     pub fn update_settings(&mut self, width: u32, height: u32, fps: u32, bitrate_kbps: u32) {
+        if self.settings == (width, height, fps, bitrate_kbps) {
+            return;
+        }
+        self.settings = (width, height, fps, bitrate_kbps);
+        if self.source.is_none() {
+            return;
+        }
         if let Ok(source) = FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
             self.source = Some(source);
         }
+    }
+
+    pub fn set_paused(&mut self, paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if paused {
+            self.source = None;
+        } else if self.source.is_none() {
+            let (width, height, fps, bitrate) = self.settings;
+            self.source = Some(FfmpegHevcSource::start(width, height, fps, bitrate)?);
+        }
+        Ok(())
     }
 
     pub async fn pull_encoded_chunk(
@@ -67,15 +78,7 @@ impl WindowsVideoEncoder {
                 timing,
             });
         }
-        let _ = self.force_keyframe;
-        let capture_ts_us = remote_core::timing::quanta_now_us();
-        Ok(EncodedChunk {
-            nalu: Vec::new(),
-            capture_time_ms: (capture_ts_us / 1000) as u32,
-            is_keyframe: false,
-            encode_cost_ms: 0.0,
-            timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
-        })
+        std::future::pending().await
     }
 }
 

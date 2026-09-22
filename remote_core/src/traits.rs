@@ -77,6 +77,18 @@ pub trait VideoCapturer {
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        Self: Send,
+    {
+        self.stop().await
+    }
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        Self: Send,
+    {
+        self.start().await
+    }
 
     /// Capture the next available frame.
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>>;
@@ -142,6 +154,18 @@ pub trait AudioCapturer {
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        Self: Send,
+    {
+        self.stop().await
+    }
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>>
+    where
+        Self: Send,
+    {
+        self.start().await
+    }
 
     /// Capture the next available audio frame.
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>>;

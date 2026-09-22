@@ -2,6 +2,10 @@ package com.remoteplay.client.ui
 
 import android.view.SurfaceView
 import android.util.Log
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -29,7 +33,13 @@ import com.remoteplay.client.MediaCodecPlayer
 import com.remoteplay.client.RemotePlayClient
 import com.remoteplay.client.SessionState
 import com.remoteplay.client.TouchMode
+import com.remoteplay.client.VideoDimensions
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -41,6 +51,43 @@ fun MobileViewportScreen(
     val sessionState by RemotePlayClient.sessionState.collectAsState()
     var playbackError by remember { mutableStateOf<String?>(null) }
     var decodedFps by remember { mutableStateOf<Int?>(null) }
+    var videoDimensions by remember { mutableStateOf(VideoDimensions(1920, 1080)) }
+    val mediaPaused by RemotePlayClient.mediaPaused.collectAsState()
+    val pausePending by RemotePlayClient.mediaPausePending.collectAsState()
+    var showStreamSettings by remember { mutableStateOf(false) }
+    var fpsText by remember { mutableStateOf(RemotePlayClient.streamFps.toString()) }
+    var bitrateText by remember { mutableStateOf(RemotePlayClient.streamBitrateKbps.toString()) }
+    var keepAliveText by remember { mutableStateOf(RemotePlayClient.backgroundKeepAliveSeconds.toString()) }
+    var settingsError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    if (showStreamSettings) {
+        AlertDialog(onDismissRequest = { showStreamSettings = false },
+            title = { Text("Stream settings") },
+            text = { Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(value = fpsText, onValueChange = { fpsText = it },
+                    label = { Text("Frame rate (FPS)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(value = bitrateText, onValueChange = { bitrateText = it },
+                    label = { Text("Video bitrate (kbps)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                OutlinedTextField(value = keepAliveText, onValueChange = { keepAliveText = it },
+                    label = { Text("Background keepalive (seconds)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                Text("0 keeps the connection. After the limit, disconnect to save power and reconnect on return.")
+                settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            } },
+            confirmButton = { TextButton(onClick = {
+                val fps = fpsText.toIntOrNull()
+                val bitrate = bitrateText.toIntOrNull()
+                val keepAlive = keepAliveText.toIntOrNull()
+                if (fps == null || bitrate == null || fps <= 0 || bitrate <= 0 || keepAlive == null || keepAlive !in 0..86400) {
+                    settingsError = "Use positive FPS/kbps and 0–86400 keepalive seconds"
+                } else scope.launch {
+                    settingsError = withContext(Dispatchers.IO) { RemotePlayClient.updateStreamRates(fps, bitrate) }
+                    if (settingsError == null) settingsError = RemotePlayClient.updateBackgroundKeepAlive(keepAlive)
+                    if (settingsError == null) showStreamSettings = false
+                }
+            }) { Text("Apply") } },
+            dismissButton = { TextButton(onClick = { showStreamSettings = false }) { Text("Cancel") } })
+    }
 
     BoxWithConstraints(
         modifier = Modifier
@@ -48,13 +95,13 @@ fun MobileViewportScreen(
             .background(Color.Black)
             .safeDrawingPadding()
     ) {
-        // Keep the negotiated 1920x1080 stream and its input region at the same aspect ratio.
+        // Video and input share the actual visible decoded rectangle, excluding padding.
         AndroidView(
             modifier = Modifier
                 .align(Alignment.Center)
-                .width(minOf(maxWidth, maxHeight * (16f / 9f)))
-                .aspectRatio(16f / 9f)
-                .pointerInput(Unit) {
+                .width(minOf(maxWidth, maxHeight * videoDimensions.aspectRatio))
+                .aspectRatio(videoDimensions.aspectRatio)
+                .pointerInput(videoDimensions) {
                     // 拦截手势并转化为 RemotePlay 统一触控协议
                     awaitEachGesture {
                         val down = awaitFirstDown()
@@ -96,7 +143,14 @@ fun MobileViewportScreen(
                             playbackError = null
                             decodedFps = null
                             feeder = Thread {
-                                val codec = MediaCodecPlayer(holder.surface)
+                                val codec = MediaCodecPlayer(holder.surface) { dimensions ->
+                                    post {
+                                        if (active.get()) {
+                                            videoDimensions = dimensions
+                                            RemotePlayClient.setScreenBounds(dimensions.width, dimensions.height)
+                                        }
+                                    }
+                                }
                                 val audioPlayer = AudioOpusPlayer()
                                 var audioEnabled = true
                                 fun report(message: String, error: Exception) {
@@ -105,15 +159,33 @@ fun MobileViewportScreen(
                                 }
                                 try {
                                     codec.start(1920, 1080)
+                                    if (active.get()) RemotePlayClient.setViewerSurfaceReady(true)
                                     var waitingForKeyframe = true
                                     var pending: com.remoteplay.client.EncodedVideoFrame? = null
                                     var pendingSince = 0L
                                     var lastKeyframeRequest = System.nanoTime()
                                     var sampleTime = lastKeyframeRequest
                                     var sampleFrames = 0L
+                                    var pauseHandled = false
                                     RemotePlayClient.requestKeyframe()
                                     while (active.get() && !Thread.currentThread().isInterrupted) {
+                                        if (RemotePlayClient.mediaPaused.value) {
+                                            if (!pauseHandled) {
+                                                pending = null
+                                                waitingForKeyframe = true
+                                                codec.flush()
+                                                audioPlayer.stop()
+                                                pauseHandled = true
+                                            }
+                                            Thread.sleep(50)
+                                            continue
+                                        }
                                         val now = System.nanoTime()
+                                        if (pauseHandled) {
+                                            sampleTime = now
+                                            sampleFrames = codec.outputFrames
+                                            pauseHandled = false
+                                        }
                                         if (pending == null) {
                                             val frame = RemotePlayClient.pollVideoFrame()
                                             if (frame != null && (!waitingForKeyframe || frame.keyframe)) {
@@ -166,10 +238,11 @@ fun MobileViewportScreen(
                             }.apply { name = "remote-play-media"; start() }
                         }
                         override fun surfaceChanged(holder: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
-                            RemotePlayClient.setScreenBounds(1920, 1080)
+                            RemotePlayClient.setScreenBounds(videoDimensions.width, videoDimensions.height)
                         }
                         override fun surfaceDestroyed(holder: android.view.SurfaceHolder) {
                             running.set(false)
+                            RemotePlayClient.setViewerSurfaceReady(false)
                             feeder?.interrupt()
                             feeder = null
                         }
@@ -197,6 +270,15 @@ fun MobileViewportScreen(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // 左侧：主机名与实时核心指标
+            TextButton(onClick = {
+                RemotePlayClient.setManualMediaPaused(!RemotePlayClient.manualMediaPaused)
+            }) { Text(if (RemotePlayClient.manualMediaPaused) "Resume" else "Pause") }
+            TextButton(onClick = {
+                fpsText = RemotePlayClient.streamFps.toString()
+                bitrateText = RemotePlayClient.streamBitrateKbps.toString()
+                settingsError = null
+                showStreamSettings = true
+            }) { Text("Stream settings") }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -217,6 +299,8 @@ fun MobileViewportScreen(
                 ) {
                     Text(
                         text = if (sessionState == SessionState.RECONNECTING) "Reconnecting…"
+                            else if (pausePending) "Waiting for host…"
+                            else if (mediaPaused) "Paused · connected"
                             else decodedFps?.let { "Decoded $it FPS" } ?: "Waiting for video",
                         color = ColorAccentCyan,
                         fontSize = 9.sp,

@@ -80,6 +80,8 @@ impl Default for SideServicePreferences {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiPreferences {
+    #[serde(default = "default_true")]
+    pub pause_when_inactive: bool,
     #[serde(default = "default_scale_mode")]
     pub scale_mode: String,
     #[serde(default = "default_false")]
@@ -89,6 +91,7 @@ pub struct UiPreferences {
 impl Default for UiPreferences {
     fn default() -> Self {
         Self {
+            pause_when_inactive: true,
             scale_mode: default_scale_mode(),
             telemetry_hud_collapsed: default_false(),
         }

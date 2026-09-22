@@ -47,7 +47,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
 use tokio::spawn;
 use tokio::sync::{broadcast, mpsc, watch};
-use transfer_center::TransferCenterState;
+pub use transfer_center::TransferCenterState;
 
 #[cfg(target_os = "linux")]
 use remote_platform::LinuxClipboardProvider;
@@ -94,15 +94,22 @@ pub struct ClipboardRuntimeControl {
     inbound_tx: Arc<Mutex<Option<mpsc::Sender<DataEnvelope>>>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum ClipboardRuntimeCommand {
-    Start(SocketAddr),
+    Start(SocketAddr, Option<Arc<std::sync::atomic::AtomicBool>>),
     Stop,
 }
 
 impl ClipboardRuntimeControl {
     pub fn start(&self, target: SocketAddr) {
-        let _ = self.command_tx.send(ClipboardRuntimeCommand::Start(target));
+        let _ = self
+            .command_tx
+            .send(ClipboardRuntimeCommand::Start(target, None));
+    }
+    pub fn start_workspace(&self, target: SocketAddr, gate: Arc<std::sync::atomic::AtomicBool>) {
+        let _ = self
+            .command_tx
+            .send(ClipboardRuntimeCommand::Start(target, Some(gate)));
     }
 
     pub fn stop(&self) {
@@ -332,21 +339,38 @@ pub struct ClientMediaRuntime {
 
 impl ClientMediaRuntime {
     pub fn start(stats: Arc<Statistics>) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::start_with_audio(stats, true)
+    }
+
+    pub fn start_video_only(stats: Arc<Statistics>) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::start_with_audio(stats, false)
+    }
+
+    fn start_with_audio(
+        stats: Arc<Statistics>,
+        enable_audio: bool,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (audio_tx, audio_rx) = mpsc::channel(100);
         let audio_playback = AudioPlaybackControl {
             audio_tx: audio_tx.clone(),
         };
-        let (audio_player, status) = match audio_player::AudioPlayer::new(audio_rx) {
-            Ok(player) => (Some(player), ClientMediaRuntimeStatus::Ready),
-            Err(err) => {
-                let reason = err.to_string();
-                eprintln!("Audio output unavailable; remote audio playback is disabled: {reason}");
-                (None, ClientMediaRuntimeStatus::AudioUnavailable { reason })
+        let (audio_player, status) = if !enable_audio {
+            (None, ClientMediaRuntimeStatus::Ready)
+        } else {
+            match audio_player::AudioPlayer::new(audio_rx) {
+                Ok(player) => (Some(player), ClientMediaRuntimeStatus::Ready),
+                Err(err) => {
+                    let reason = err.to_string();
+                    eprintln!(
+                        "Audio output unavailable; remote audio playback is disabled: {reason}"
+                    );
+                    (None, ClientMediaRuntimeStatus::AudioUnavailable { reason })
+                }
             }
         };
         let shared_frame = Arc::new(Mutex::new(None));
         let (decode_tx, mut decode_rx) =
-            mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(200);
+            mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(8);
 
         #[cfg(target_os = "macos")]
         let decode_task = {
@@ -361,7 +385,24 @@ impl ClientMediaRuntime {
                     }
                 };
 
+                let mut waiting_for_keyframe = true;
+                let mut previous_packet = None;
                 while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
+                    let current = (ordered_pkt.header.ssrc, ordered_pkt.header.sequence_number);
+                    if previous_packet.is_some_and(|(ssrc, seq): (u32, u16)| {
+                        ssrc != current.0 || seq.wrapping_add(1) != current.1
+                    }) {
+                        waiting_for_keyframe = true;
+                    }
+                    previous_packet = Some(current);
+                    if waiting_for_keyframe
+                        && !remote_core::media_plane::is_hevc_keyframe(&ordered_pkt.payload)
+                    {
+                        stats_decode
+                            .video_decode_queue_dropped
+                            .fetch_add(1, Relaxed);
+                        continue;
+                    }
                     use remote_core::VideoDecoder;
                     let decode_start = std::time::Instant::now();
                     if timing.capture_ts_us > 0 {
@@ -369,6 +410,7 @@ impl ClientMediaRuntime {
                     }
                     match video_decoder.decode(&ordered_pkt.payload).await {
                         Ok(mut frame) => {
+                            waiting_for_keyframe = false;
                             if timing.capture_ts_us > 0 {
                                 timing.decode_done_ts_us =
                                     remote_core::timing::advance_client_stage(
@@ -382,9 +424,12 @@ impl ClientMediaRuntime {
                             frame.decoded_at = std::time::Instant::now();
                             frame.timing = timing;
                             stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
-                            *decode_shared_frame.lock().unwrap() = Some(frame);
+                            let previous = decode_shared_frame.lock().unwrap().replace(frame);
+                            drop(previous);
                         }
                         Err(err) => {
+                            waiting_for_keyframe = true;
+                            stats_decode.video_decode_errors.fetch_add(1, Relaxed);
                             if err.to_string() != "No frame data or session not ready" {
                                 eprintln!("Decode error: {}", err);
                             }
@@ -412,6 +457,12 @@ impl ClientMediaRuntime {
 
     pub fn shared_frame(&self) -> Arc<Mutex<Option<MacDecodedVideoFrame>>> {
         self.shared_frame.clone()
+    }
+}
+
+impl Drop for ClientMediaRuntime {
+    fn drop(&mut self) {
+        self._decode_task.abort();
     }
 }
 
@@ -549,7 +600,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Decouple decoding from receiving
     let (decode_tx, mut decode_rx) =
-        tokio::sync::mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(200);
+        tokio::sync::mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(8);
 
     // Decode Task
     spawn(async move {
@@ -561,7 +612,24 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         };
 
+        let mut waiting_for_keyframe = true;
+        let mut previous_packet = None;
         while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
+            let current = (ordered_pkt.header.ssrc, ordered_pkt.header.sequence_number);
+            if previous_packet.is_some_and(|(ssrc, seq): (u32, u16)| {
+                ssrc != current.0 || seq.wrapping_add(1) != current.1
+            }) {
+                waiting_for_keyframe = true;
+            }
+            previous_packet = Some(current);
+            if waiting_for_keyframe
+                && !remote_core::media_plane::is_hevc_keyframe(&ordered_pkt.payload)
+            {
+                stats_decode
+                    .video_decode_queue_dropped
+                    .fetch_add(1, Relaxed);
+                continue;
+            }
             use remote_core::VideoDecoder;
             let decode_start = std::time::Instant::now();
             if timing.capture_ts_us > 0 {
@@ -569,6 +637,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
             match video_decoder.decode(&ordered_pkt.payload).await {
                 Ok(mut frame) => {
+                    waiting_for_keyframe = false;
                     if timing.capture_ts_us > 0 {
                         timing.decode_done_ts_us = remote_core::timing::advance_client_stage(
                             timing.decode_enter_ts_us.max(timing.recv_ts_us),
@@ -581,9 +650,12 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
                     frame.decoded_at = std::time::Instant::now();
                     frame.timing = timing;
                     stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
-                    *shared_frame.lock().unwrap() = Some(frame);
+                    let previous = shared_frame.lock().unwrap().replace(frame);
+                    drop(previous);
                 }
                 Err(e) => {
+                    waiting_for_keyframe = true;
+                    stats_decode.video_decode_errors.fetch_add(1, Relaxed);
                     if e.to_string() != "No frame data or session not ready" {
                         eprintln!("Decode error: {}", e);
                     }
@@ -753,6 +825,7 @@ fn env_path_or_temp(name: &str, fallback_dir_name: &str) -> PathBuf {
 
 fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
     match event {
+        FileTransferEvent::IncomingClipboardReady { .. } => {}
         FileTransferEvent::OutgoingGroupStarted {
             group_id,
             file_count,
@@ -922,6 +995,11 @@ fn start_talkback_runtime_controller(
 fn start_clipboard_runtime_controller(
     udp_sender: remote_core::net::UdpSender,
 ) -> ClipboardRuntimeControl {
+    type ClipboardOwner = (
+        broadcast::Sender<()>,
+        Option<Arc<std::sync::atomic::AtomicBool>>,
+    );
+    static OWNER: Mutex<Option<ClipboardOwner>> = Mutex::new(None);
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let inbound_tx: Arc<Mutex<Option<mpsc::Sender<DataEnvelope>>>> = Arc::new(Mutex::new(None));
     let controller_inbound_tx = inbound_tx.clone();
@@ -929,11 +1007,12 @@ fn start_clipboard_runtime_controller(
     spawn(async move {
         let mut active_addr: Option<SocketAddr> = None;
         let mut active_cancel_tx: Option<broadcast::Sender<()>> = None;
+        let mut active_gate: Option<Arc<std::sync::atomic::AtomicBool>> = None;
 
         while let Some(command) = command_rx.recv().await {
             match command {
-                ClipboardRuntimeCommand::Start(target) if active_addr == Some(target) => {}
-                ClipboardRuntimeCommand::Start(target) => {
+                ClipboardRuntimeCommand::Start(target, _) if active_addr == Some(target) => {}
+                ClipboardRuntimeCommand::Start(target, gate) => {
                     if let Some(cancel_tx) = active_cancel_tx.take() {
                         let _ = cancel_tx.send(());
                     }
@@ -943,6 +1022,20 @@ fn start_clipboard_runtime_controller(
                     *controller_inbound_tx.lock().unwrap() = Some(inbound_tx);
 
                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
+                    if let Some((previous, previous_gate)) = OWNER
+                        .lock()
+                        .unwrap()
+                        .replace((cancel_tx.clone(), gate.clone()))
+                    {
+                        let _ = previous.send(());
+                        if let Some(gate) = previous_gate {
+                            gate.store(false, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    if let Some(gate) = &gate {
+                        gate.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    active_gate = gate;
                     active_cancel_tx = Some(cancel_tx);
                     active_addr = Some(target);
 
@@ -976,6 +1069,9 @@ fn start_clipboard_runtime_controller(
                     });
                 }
                 ClipboardRuntimeCommand::Stop => {
+                    if let Some(gate) = active_gate.take() {
+                        gate.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
                     if let Some(cancel_tx) = active_cancel_tx.take() {
                         let _ = cancel_tx.send(());
                     }

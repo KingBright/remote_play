@@ -136,6 +136,9 @@ impl MeshPairingControl {
         let store = AppPrivateMeshConfigStore::new(&self.config_dir);
         match store.save(&config) {
             Ok(()) => {
+                remote_core::session_crypto::refresh_paired_session_secret(
+                    config.network_secret.expose_secret(),
+                );
                 let (message, restart_required) =
                     self.request_mesh_reload_after_save(message.into(), restart_required);
                 let snapshot = snapshot_from_config(

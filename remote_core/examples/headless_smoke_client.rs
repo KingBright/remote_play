@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let expect_audio = env_flag_enabled("REMOTE_PLAY_EXPECT_AUDIO");
     let expect_system_audio = env_flag_enabled("REMOTE_PLAY_EXPECT_SYSTEM_AUDIO");
     let expect_file_name = std::env::var("REMOTE_PLAY_EXPECT_FILE_NAME").ok();
+    let mut send_file = std::env::var_os("REMOTE_PLAY_SMOKE_SEND_FILE").map(PathBuf::from);
 
     tokio::fs::create_dir_all(&receive_dir).await?;
 
@@ -53,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         host_addr,
         ScheduledDataSenderConfig::default(),
     );
-    let (_file_command_tx, file_command_rx) = mpsc::channel::<FileTransferCommand>(4);
+    let (file_command_tx, file_command_rx) = mpsc::channel::<FileTransferCommand>(4);
     let (file_inbound_tx, file_inbound_rx) = mpsc::channel(1024);
     let (file_event_tx, mut file_event_rx) = mpsc::unbounded_channel();
     let (cancel_tx, _) = broadcast::channel(4);
@@ -111,7 +112,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             _ = tokio::time::sleep_until(deadline) => break,
             packet = udp_receiver.recv() => {
                 match packet {
-                    Ok(packet) => handle_packet(packet, &file_inbound_tx, &mut stats).await?,
+                    Ok(packet) => {
+                        handle_packet(packet, &file_inbound_tx, &mut stats).await?;
+                        // Wait for media to prove the host has created its session channels.
+                        // Receipt must be verified independently in the host's receive directory.
+                        if stats.data_video + stats.legacy_video > 0
+                            && let Some(path) = send_file.take()
+                        {
+                                file_command_tx.send(FileTransferCommand::SendFile {
+                                    path,
+                                    mime_type: None,
+                                }).await?;
+                        }
+                    }
                     Err(err) => eprintln!("Smoke client receive error: {err}"),
                 }
             }

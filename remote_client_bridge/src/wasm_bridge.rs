@@ -1,5 +1,5 @@
 #[cfg(feature = "wasm")]
-use crate::{BridgeSessionState, BridgeTelemetry, RemoteBridgeClient, touch_mapper::TouchMode};
+use crate::{BridgeSessionState, RemoteBridgeClient, touch_mapper::TouchMode};
 #[cfg(feature = "wasm")]
 use protocol::TouchAction;
 #[cfg(feature = "wasm")]
@@ -31,6 +31,18 @@ impl RemotePlayWasmClient {
     #[wasm_bindgen(js_name = disconnect)]
     pub fn disconnect(&self) {
         self.inner.disconnect();
+    }
+
+    #[wasm_bindgen(js_name = setMediaPaused)]
+    pub fn set_media_paused(&self, paused: bool) {
+        self.inner.set_media_paused(paused);
+    }
+
+    #[wasm_bindgen(js_name = updateStreamRates)]
+    pub fn update_stream_rates(&self, fps: u32, bitrate_kbps: u32) -> Result<(), JsValue> {
+        self.inner
+            .update_stream_rates(fps, bitrate_kbps)
+            .map_err(|err| JsValue::from_str(&err))
     }
 
     #[wasm_bindgen(js_name = sendTouch)]

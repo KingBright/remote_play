@@ -92,6 +92,7 @@ pub struct ClipboardSyncEndpoint<P> {
     inbound: HashMap<u64, ClipboardBundleAssembler>,
     last_sent_content_crc32: Option<u32>,
     last_applied_content_crc32: Option<u32>,
+    completed: std::collections::VecDeque<(u64, u32, u64, Option<u32>)>,
 }
 
 impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
@@ -102,6 +103,7 @@ impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
             inbound: HashMap::new(),
             last_sent_content_crc32: None,
             last_applied_content_crc32: None,
+            completed: std::collections::VecDeque::new(),
         }
     }
 
@@ -119,6 +121,9 @@ impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
 
     pub fn last_sent_content_crc32(&self) -> Option<u32> {
         self.last_sent_content_crc32
+    }
+    pub fn retry_outgoing(&mut self) {
+        self.last_sent_content_crc32 = None;
     }
 
     pub fn last_applied_content_crc32(&self) -> Option<u32> {
@@ -186,6 +191,28 @@ impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
             .map(|chunk| chunk.object_id)
             .ok_or(ClipboardSyncError::MissingChunkMetadata)?;
 
+        let chunk = envelope.header.chunk.as_ref().unwrap();
+        let identity = (
+            object_id,
+            chunk.total_chunks,
+            chunk.total_size,
+            envelope
+                .header
+                .reliability_info
+                .as_ref()
+                .and_then(|r| r.checksum_crc32),
+        );
+        if self.completed.contains(&identity) {
+            return Ok(None);
+        }
+        if chunk.total_size > self.config.policy.max_bundle_bytes as u64
+            || chunk.total_chunks > 131_072
+            || (self.inbound.len() >= 2 && !self.inbound.contains_key(&object_id))
+        {
+            return Err(ClipboardSyncError::Provider(
+                "clipboard receive resource limit exceeded".into(),
+            ));
+        }
         let assembler = match self.inbound.entry(object_id) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
@@ -207,6 +234,7 @@ impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
         if Some(content_crc32) == self.last_sent_content_crc32
             || Some(content_crc32) == self.last_applied_content_crc32
         {
+            self.remember_completed(identity);
             return Ok(None);
         }
 
@@ -215,7 +243,14 @@ impl<P: ClipboardProvider> ClipboardSyncEndpoint<P> {
             .await
             .map_err(ClipboardSyncError::Provider)?;
         self.last_applied_content_crc32 = Some(content_crc32);
+        self.remember_completed(identity);
         Ok(Some(bundle))
+    }
+    fn remember_completed(&mut self, identity: (u64, u32, u64, Option<u32>)) {
+        self.completed.push_back(identity);
+        if self.completed.len() > 64 {
+            self.completed.pop_front();
+        }
     }
 }
 

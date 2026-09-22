@@ -7,6 +7,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const VIDEO_DEADLINE_DELTA_MS: u64 = 16;
 
+/// Inspect the first HEVC VCL NAL; normal P frames return after their header.
+pub fn is_hevc_keyframe(data: &[u8]) -> bool {
+    data.windows(5)
+        .find_map(|w| {
+            if w[..3] != [0, 0, 1] || w[3] & 0x80 != 0 || w[4] & 7 == 0 {
+                return None;
+            }
+            let kind = (w[3] >> 1) & 0x3f;
+            (kind < 32).then_some((16..=21).contains(&kind))
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaPlaneError {
     UnsupportedPayloadType(u8),
@@ -78,7 +91,12 @@ pub fn rtp_to_realtime_data_at(
                 stream_id,
                 sequence_number,
                 timestamp_ms,
-                timestamp_ms.wrapping_add(VIDEO_DEADLINE_DELTA_MS),
+                // This is a transport queue budget. Encoder startup and a
+                // costly IDR must not expire before they even enter the queue.
+                now_ms
+                    .max(timestamp_ms)
+                    .saturating_add(VIDEO_DEADLINE_DELTA_MS)
+                    .min(timestamp_ms.saturating_add(u16::MAX as u64)),
                 packet.payload.clone(),
             ))
         }
@@ -200,7 +218,7 @@ mod tests {
             rtp.header.sequence_number as u64
         );
         assert_eq!(envelope.header.timestamp_ms as u32, rtp.header.timestamp);
-        assert_eq!(envelope.header.deadline_ms, Some(1_016));
+        assert_eq!(envelope.header.deadline_ms, Some(10_016));
 
         let decoded = realtime_data_to_rtp(envelope).expect("video data should adapt back");
         assert_eq!(decoded, rtp);
@@ -303,6 +321,25 @@ mod tests {
     }
 
     #[test]
+    fn video_queue_deadline_survives_encoder_startup_and_stays_wire_representable() {
+        for (capture, now) in [(1000u32, 1500u64), (2000, 1900), (1000, 90000)] {
+            let rtp = packet(PayloadType::VideoH265 as u8, 7, capture, 77);
+            let envelope = rtp_to_realtime_data_at(&rtp, now).unwrap();
+            assert!(protocol::CompactRealtimeHeader::from_data_header(&envelope.header).is_ok());
+            if now.saturating_sub(u64::from(capture)) < 65519 {
+                assert!(envelope.header.deadline_ms.unwrap() > now);
+            }
+        }
+    }
+
+    #[test]
+    fn hevc_keyframe_detection_requires_an_irap_vcl_header() {
+        assert!(is_hevc_keyframe(&[0, 0, 0, 1, 0x40, 1, 0, 0, 1, 0x26, 1]));
+        assert!(!is_hevc_keyframe(&[0, 0, 1, 0x02, 1, 0, 0, 1, 0x26, 1]));
+        assert!(!is_hevc_keyframe(&[0, 0, 1, 0x26]));
+    }
+
+    #[test]
     fn video_timestamp_unwraps_near_current_time_across_u32_wrap() {
         let now_ms = u32::MAX as u64 + 20;
         let rtp = packet(PayloadType::VideoH265 as u8, 7, 10, 77);
@@ -311,7 +348,7 @@ mod tests {
 
         assert_eq!(envelope.header.timestamp_ms, u32::MAX as u64 + 11);
         assert_eq!(envelope.header.timestamp_ms as u32, rtp.header.timestamp);
-        assert_eq!(envelope.header.deadline_ms, Some(u32::MAX as u64 + 27));
+        assert_eq!(envelope.header.deadline_ms, Some(now_ms + 16));
         assert_eq!(realtime_data_to_rtp(envelope).unwrap(), rtp);
     }
 }

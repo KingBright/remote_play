@@ -18,6 +18,12 @@ class AudioOpusPlayer {
     private var sampleRate = 48000
     private var channels = 2
     private var configured = false
+    private var volume = 1f
+
+    @Synchronized fun setVolume(value: Float) {
+        volume = value.coerceIn(0f, 1f)
+        track?.setVolume(volume)
+    }
 
     @Synchronized
     fun feed(packed: ByteArray) {
@@ -138,6 +144,7 @@ class AudioOpusPlayer {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             check(track?.state == AudioTrack.STATE_INITIALIZED) { "Audio output unavailable" }
+            track?.setVolume(volume)
             track?.play()
     }
 

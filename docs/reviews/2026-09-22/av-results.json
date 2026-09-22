@@ -1,0 +1,343 @@
+{
+  "date": "2026-09-22",
+  "base_commit": "969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+  "source_status": "uncommitted on main; no unmerged registered worktree or branch",
+  "hardware": {
+    "cpu": "Apple M2 Max",
+    "model": "Mac14,6",
+    "os": "macOS 26.5 (25F71)",
+    "rustc": "1.94.1"
+  },
+  "requested_video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "bitrate_kbps": 8000
+  },
+  "measurement_limits": [
+    "same-host desktop capture and native decode; no GUI scanout",
+    "audio muted; no audible or AV-sync acceptance",
+    "baseline debug direct loopback; later runs add local UDP proxy",
+    "steady-state excludes first two seconds",
+    "release-loss-1/2/3 predate final audio chunker adjustment; accepted runs include it"
+  ],
+  "checks": {
+    "rust_passed": 370,
+    "rust_failed": 0,
+    "clippy": "passed -D warnings",
+    "windows_workspace": "passed, existing warnings",
+    "bridge_android_wasm_features": "passed, existing warning",
+    "fmt_diff": "passed"
+  },
+  "runs": {
+    "before": {
+      "video": {
+        "decoded": 262,
+        "observed": 260,
+        "size": "1920x1080",
+        "first_frame_ms": 10608.338,
+        "decoded_fps": 17.467,
+        "decode_p50_ms": 2.291,
+        "decode_p95_ms": 3.177,
+        "decode_p99_ms": 5.345,
+        "decode_queue_dropped": 0,
+        "audio_ingress_dropped": 0
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.771,
+        "p95_ms": 15.257,
+        "p99_ms": 113.341
+      },
+      "profile": "debug",
+      "duration_seconds": 15
+    },
+    "final-debug": {
+      "host_last_sample": {
+        "latest_host_fps": 57.294,
+        "latest_host_encode_ms": 8.603,
+        "latest_host_bitrate_kbps": 4728
+      },
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 782,
+        "observed": 782,
+        "size": "1920x1080",
+        "first_frame_ms": 1105.821,
+        "decoded_fps": 52.133,
+        "decode_p50_ms": 2.444,
+        "decode_p95_ms": 3.301,
+        "decode_p99_ms": 5.83,
+        "decode_queue_dropped": 19,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 56.154,
+        "steady_gap_p99_ms": 27.645,
+        "steady_gap_max_ms": 57.719,
+        "steady_gaps_over_100ms": 0
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.799,
+        "p95_ms": 14.004,
+        "p99_ms": 273.194
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.82,
+        "p95_ms": 13.841,
+        "p99_ms": 18.837
+      },
+      "injected_loss": {
+        "frames": 0,
+        "datagrams": 0
+      },
+      "profile": "debug",
+      "duration_seconds": 15
+    },
+    "release-60s-v2": {
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 3312,
+        "observed": 3310,
+        "size": "1920x1080",
+        "first_frame_ms": 992.594,
+        "decoded_fps": 55.2,
+        "decode_p50_ms": 2.35,
+        "decode_p95_ms": 4.843,
+        "decode_p99_ms": 8.671,
+        "decode_queue_dropped": 10,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 55.948,
+        "steady_gap_p99_ms": 28.552,
+        "steady_gap_max_ms": 84.572,
+        "steady_gaps_over_100ms": 0
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.675,
+        "p95_ms": 16.496,
+        "p99_ms": 26.343
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.692,
+        "p95_ms": 16.375,
+        "p99_ms": 24.534
+      },
+      "injected_loss": {
+        "frames": 0,
+        "datagrams": 0
+      },
+      "profile": "release",
+      "duration_seconds": 60
+    },
+    "release-loss-1": {
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 806,
+        "observed": 804,
+        "size": "1920x1080",
+        "first_frame_ms": 1059.379,
+        "decoded_fps": 53.733,
+        "decode_p50_ms": 2.314,
+        "decode_p95_ms": 3.031,
+        "decode_p99_ms": 4.355,
+        "decode_queue_dropped": 11,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 57.0,
+        "steady_gap_p99_ms": 24.525,
+        "steady_gap_max_ms": 141.317,
+        "steady_gaps_over_100ms": 1
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.619,
+        "p95_ms": 13.965,
+        "p99_ms": 194.737
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.698,
+        "p95_ms": 13.703,
+        "p99_ms": 16.949
+      },
+      "injected_loss": {
+        "frames": 5,
+        "datagrams": 5
+      },
+      "profile": "release",
+      "duration_seconds": 15
+    },
+    "release-loss-2": {
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 812,
+        "observed": 808,
+        "size": "1920x1080",
+        "first_frame_ms": 917.357,
+        "decoded_fps": 54.133,
+        "decode_p50_ms": 2.343,
+        "decode_p95_ms": 3.946,
+        "decode_p99_ms": 9.088,
+        "decode_queue_dropped": 10,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 56.538,
+        "steady_gap_p99_ms": 31.5,
+        "steady_gap_max_ms": 159.683,
+        "steady_gaps_over_100ms": 2
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.788,
+        "p95_ms": 16.574,
+        "p99_ms": 179.16
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.879,
+        "p95_ms": 15.601,
+        "p99_ms": 28.291
+      },
+      "injected_loss": {
+        "frames": 6,
+        "datagrams": 8
+      },
+      "profile": "release",
+      "duration_seconds": 15
+    },
+    "release-loss-3": {
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 809,
+        "observed": 809,
+        "size": "1920x1080",
+        "first_frame_ms": 907.578,
+        "decoded_fps": 53.933,
+        "decode_p50_ms": 2.321,
+        "decode_p95_ms": 3.7,
+        "decode_p99_ms": 4.888,
+        "decode_queue_dropped": 20,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 57.385,
+        "steady_gap_p99_ms": 21.952,
+        "steady_gap_max_ms": 161.276,
+        "steady_gaps_over_100ms": 1
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 12.052,
+        "p95_ms": 15.36,
+        "p99_ms": 23.103
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 12.103,
+        "p95_ms": 15.128,
+        "p99_ms": 16.875
+      },
+      "injected_loss": {
+        "frames": 6,
+        "datagrams": 11
+      },
+      "profile": "release",
+      "duration_seconds": 15
+    },
+    "accepted-60s": {
+      "host_last_sample": {
+        "latest_host_fps": 52.997,
+        "latest_host_encode_ms": 8.81,
+        "latest_host_bitrate_kbps": 390
+      },
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 3230,
+        "observed": 3230,
+        "size": "1920x1080",
+        "first_frame_ms": 1100.519,
+        "decoded_fps": 53.833,
+        "decode_p50_ms": 2.344,
+        "decode_p95_ms": 2.608,
+        "decode_p99_ms": 3.25,
+        "decode_queue_dropped": 13,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 54.81,
+        "steady_gap_p99_ms": 32.342,
+        "steady_gap_max_ms": 66.338,
+        "steady_gaps_over_100ms": 0
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.66,
+        "p95_ms": 13.488,
+        "p99_ms": 16.861
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.668,
+        "p95_ms": 13.449,
+        "p99_ms": 14.817
+      },
+      "injected_loss": {
+        "frames": 0,
+        "datagrams": 0
+      },
+      "profile": "release",
+      "duration_seconds": 60
+    },
+    "accepted-loss": {
+      "host_last_sample": {
+        "latest_host_fps": 53.147,
+        "latest_host_encode_ms": 8.453,
+        "latest_host_bitrate_kbps": 1517
+      },
+      "decode_errors": {
+        "decode_errors": 0
+      },
+      "video": {
+        "decoded": 725,
+        "observed": 722,
+        "size": "1920x1080",
+        "first_frame_ms": 1114.917,
+        "decoded_fps": 48.333,
+        "decode_p50_ms": 2.364,
+        "decode_p95_ms": 2.682,
+        "decode_p99_ms": 3.524,
+        "decode_queue_dropped": 9,
+        "audio_ingress_dropped": 0
+      },
+      "steady_playback": {
+        "steady_observed_fps": 51.154,
+        "steady_gap_p99_ms": 35.361,
+        "steady_gap_max_ms": 173.854,
+        "steady_gaps_over_100ms": 2
+      },
+      "latency_all_frames": {
+        "same_host_capture_to_decode_p50_ms": 11.493,
+        "p95_ms": 13.919,
+        "p99_ms": 205.687
+      },
+      "latency_after_2s": {
+        "steady_same_host_capture_to_decode_p50_ms": 11.551,
+        "p95_ms": 13.621,
+        "p99_ms": 16.856
+      },
+      "injected_loss": {
+        "frames": 5,
+        "datagrams": 41
+      },
+      "profile": "release",
+      "duration_seconds": 15
+    }
+  }
+}

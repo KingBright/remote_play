@@ -13,6 +13,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
 
     let mut config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
+    let identity =
+        AppPrivateMeshConfigStore::new(&config.mesh_dir).load_or_generate(&config.display_name)?;
+    remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
     let headless = headless_enabled();
     if headless {
         config.enable_viewer_media = false;

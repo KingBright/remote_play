@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone)]
 pub struct ClipboardFileSyncConfig {
+    pub enabled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub poll_interval: Duration,
     pub max_files_per_poll: usize,
 }
@@ -15,6 +16,7 @@ pub struct ClipboardFileSyncConfig {
 impl Default for ClipboardFileSyncConfig {
     fn default() -> Self {
         Self {
+            enabled: None,
             poll_interval: Duration::from_millis(500),
             max_files_per_poll: 16,
         }
@@ -72,6 +74,7 @@ where
                 return Ok(());
             }
             _ = poll_interval.tick() => {
+                if config.enabled.as_ref().is_some_and(|enabled| !enabled.load(std::sync::atomic::Ordering::Relaxed)) { continue; }
                 let references = provider
                     .read_clipboard_file_references()
                     .await
@@ -96,7 +99,7 @@ where
                     })
                     .collect();
                 file_command_tx
-                    .send(FileTransferCommand::SendFileGroup { files })
+                    .send(FileTransferCommand::SendClipboardFiles { files })
                     .await
                     .map_err(|_| ClipboardFileSyncError::CommandClosed)?;
                 last_sent_refs_crc32 = Some(refs_crc32);
@@ -110,18 +113,9 @@ where
                     let _ = tx.send(event.clone());
                 }
 
-                match event {
-                    FileTransferEvent::IncomingCompleted {
-                        path, group: None, ..
-                    } => {
-                        let references = vec![ClipboardFileReference::new(path)];
-                        provider
-                            .write_clipboard_file_references(&references)
-                            .await
-                            .map_err(ClipboardFileSyncError::Provider)?;
-                        last_applied_refs_crc32 = Some(file_references_crc32(&references));
-                    }
-                    FileTransferEvent::IncomingGroupCompleted { paths, .. } => {
+                if config.enabled.as_ref().is_some_and(|enabled| !enabled.load(std::sync::atomic::Ordering::Relaxed)) { continue; }
+
+                if let FileTransferEvent::IncomingClipboardReady { paths, .. } = event {
                         let references = paths
                             .into_iter()
                             .map(ClipboardFileReference::new)
@@ -131,8 +125,6 @@ where
                             .await
                             .map_err(ClipboardFileSyncError::Provider)?;
                         last_applied_refs_crc32 = Some(file_references_crc32(&references));
-                    }
-                    _ => {}
                 }
             }
         }
@@ -186,6 +178,7 @@ mod tests {
             ClipboardFileSyncConfig {
                 poll_interval: Duration::from_millis(1),
                 max_files_per_poll: 1,
+                ..Default::default()
             },
         ));
 
@@ -195,7 +188,7 @@ mod tests {
             .expect("file command channel should remain open");
         assert_eq!(
             command,
-            FileTransferCommand::SendFileGroup {
+            FileTransferCommand::SendClipboardFiles {
                 files: vec![FileTransferGroupFile {
                     path: PathBuf::from("/tmp/a.txt"),
                     mime_type: None
@@ -279,10 +272,9 @@ mod tests {
         ));
 
         event_tx
-            .send(FileTransferEvent::IncomingGroupCompleted {
+            .send(FileTransferEvent::IncomingClipboardReady {
                 group_id: 9,
                 paths: vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")],
-                total_size_bytes: 10,
             })
             .expect("group event should send");
 

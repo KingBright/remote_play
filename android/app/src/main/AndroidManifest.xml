@@ -7,6 +7,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
@@ -16,6 +20,13 @@
         android:roundIcon="@android:drawable/sym_def_app_icon"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files"
+            android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/shared_files" />
+        </provider>
+        <service android:name=".SessionConnectionService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <service android:name=".ProjectionService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -12,6 +12,21 @@ const KEY_CONTEXT: &[u8] = b"remote-play-session-v1";
 const HELLO_CONTEXT: &[u8] = b"hello";
 const ACCEPT_CONTEXT: &[u8] = b"accept";
 const MAX_HELLO_SKEW_MS: u64 = 60_000;
+static PAIRED_PSK: std::sync::RwLock<Option<Vec<u8>>> = std::sync::RwLock::new(None);
+
+/// Called by application entrypoints after loading or changing the paired group.
+/// No process-environment mutation is needed while transport threads are running.
+pub fn use_paired_session_secret(secret: &str) {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
+    mac.update(b"remote-play/paired-media/v2");
+    *PAIRED_PSK.write().unwrap() = Some(mac.finalize().into_bytes().to_vec());
+}
+pub fn refresh_paired_session_secret(secret: &str) {
+    let configured = PAIRED_PSK.read().unwrap().is_some();
+    if configured {
+        use_paired_session_secret(secret);
+    }
+}
 pub const MULTIPLEX_ENCRYPTED: u8 = 0x07;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +138,7 @@ pub fn load_session_psk() -> Option<Vec<u8>> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(String::into_bytes)
+        .or_else(|| PAIRED_PSK.read().unwrap().clone())
 }
 
 pub fn require_session_auth() -> bool {

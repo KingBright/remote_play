@@ -1,0 +1,90 @@
+{
+  "date": "2026-09-22",
+  "base_commit": "969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+  "source_status": "uncommitted on main",
+  "native_runs": [
+    {
+      "scenario": "release-paced-37",
+      "log": "/tmp/remote-play-av-20260922/release-paced-37-result.log",
+      "raw_result": "Client listening on 127.0.0.1:55259\nlatest_host_fps=31.527 latest_host_encode_ms=8.496 latest_host_bitrate_kbps=1769\ndecode_errors=0\ndecoded=676 observed=673 size=1920x1080 first_frame_ms=1324.294 decoded_fps=33.800 decode_p50_ms=2.386 decode_p95_ms=2.610 decode_p99_ms=3.567 decode_queue_dropped=2 audio_ingress_dropped=0\nsteady_observed_fps=35.611 steady_gap_p99_ms=54.430 steady_gap_max_ms=86.918 steady_gaps_over_100ms=0\nsame_host_capture_to_decode_p50_ms=11.676 p95_ms=13.422 p99_ms=183.301\nsteady_same_host_capture_to_decode_p50_ms=11.644 p95_ms=13.076 p99_ms=16.540\n\ninjected_loss={'frames': 0, 'datagrams': 0}\nstart_streams=1 pause_faults={'request_dropped': 0, 'ack_dropped': 0, 'stale_replayed': 0}\n",
+      "steady_observed_fps": 35.611,
+      "decode_errors": 0.0,
+      "first_frame_ms": 1324.294,
+      "start_streams": 1.0
+    },
+    {
+      "scenario": "release-paced-60",
+      "log": "/tmp/remote-play-av-20260922/release-paced-60-result.log",
+      "raw_result": "Client listening on 127.0.0.1:57106\nlatest_host_fps=52.938 latest_host_encode_ms=8.980 latest_host_bitrate_kbps=394\ndecode_errors=0\ndecoded=996 observed=996 size=1920x1080 first_frame_ms=1345.902 decoded_fps=49.800 decode_p50_ms=2.346 decode_p95_ms=2.537 decode_p99_ms=2.942 decode_queue_dropped=11 audio_ingress_dropped=0\nsteady_observed_fps=53.222 steady_gap_p99_ms=46.462 steady_gap_max_ms=55.932 steady_gaps_over_100ms=0\nsame_host_capture_to_decode_p50_ms=11.378 p95_ms=12.785 p99_ms=20.365\nsteady_same_host_capture_to_decode_p50_ms=11.388 p95_ms=12.697 p99_ms=15.169\n\ninjected_loss={'frames': 0, 'datagrams': 0}\nstart_streams=1 pause_faults={'request_dropped': 0, 'ack_dropped': 0, 'stale_replayed': 0}\n",
+      "steady_observed_fps": 53.222,
+      "decode_errors": 0.0,
+      "first_frame_ms": 1345.902,
+      "start_streams": 1.0
+    },
+    {
+      "scenario": "release-pause-faults",
+      "log": "/tmp/remote-play-av-20260922/release-pause-faults-result.log",
+      "raw_result": "Client listening on 127.0.0.1:63665\nlatest_host_fps=36.369 latest_host_encode_ms=8.905 latest_host_bitrate_kbps=462\ndecode_errors=0\ndecoded=399 observed=396 size=1920x1080 first_frame_ms=1982.391 decoded_fps=12.469 decode_p50_ms=2.366 decode_p95_ms=4.686 decode_p99_ms=8.544 decode_queue_dropped=7 audio_ingress_dropped=0\nsteady_observed_fps=13.067 steady_gap_p99_ms=49.926 steady_gap_max_ms=20396.246 steady_gaps_over_100ms=1\nsame_host_capture_to_decode_p50_ms=11.557 p95_ms=21.909 p99_ms=422.290\nsteady_same_host_capture_to_decode_p50_ms=11.542 p95_ms=19.823 p99_ms=344.683\npause_ack_ms=402.764 resume_ack_ms=11.974 resume_first_frame_ms=389.027 decoded_while_paused_after_grace=0\n\ninjected_loss={'frames': 0, 'datagrams': 0}\nstart_streams=1 pause_faults={'request_dropped': 1, 'ack_dropped': 1, 'stale_replayed': 1}\nhost_media_datagrams_by_second={1: 288, 2: 286, 3: 157, 4: 30, 24: 313, 25: 184, 26: 173, 27: 134, 28: 136, 29: 144, 30: 164, 31: 158, 32: 1}\n",
+      "steady_observed_fps": 13.067,
+      "decode_errors": 0.0,
+      "first_frame_ms": 1982.391,
+      "pause_ack_ms": 402.764,
+      "resume_ack_ms": 11.974,
+      "resume_first_frame_ms": 389.027,
+      "decoded_while_paused_after_grace": 0.0,
+      "start_streams": 1.0
+    }
+  ],
+  "android_warm": {
+    "emulator": "Pixel_7_API_35 arm64",
+    "pause_seconds": 25.087000000000018,
+    "session_count": 1,
+    "sample_window_seconds": 22,
+    "client_packets": 4,
+    "host_packets": 4,
+    "udp_payload_bytes": 104,
+    "media_datagrams": 0,
+    "decoded_fps_after_resume_ui": 15,
+    "wire_log": "/tmp/remote-play-av-20260922/android-low-power-warm-wire.json"
+  },
+  "android_cold": {
+    "configured_timeout_seconds": 10,
+    "pause_request_at": 219.47,
+    "stop_stream_at": 229.942,
+    "foreground_new_start_at": 278.79,
+    "session_id_before": 1,
+    "session_id_after": 2,
+    "session_datagrams_in_46_seconds_after_stop": 0,
+    "foreground_service_after_stop": "absent via dumpsys",
+    "decoded_fps_after_resume_ui": 19,
+    "restored_default_timeout_seconds": 300,
+    "wire_log": "/tmp/remote-play-av-20260922/android-idle-expiry-wire.json"
+  },
+  "checks": {
+    "rust_tests_passed": 377,
+    "workspace_clippy_deny_warnings": "passed",
+    "windows_cross_check": "passed with existing cfg warnings",
+    "bridge_android_wasm_features": "passed",
+    "android_arm64_native_build": "passed",
+    "android_debug_apk_and_lint": "passed",
+    "android_x86_64_native": "not built; target not installed"
+  },
+  "artifacts": {
+    "host": {
+      "path": "/tmp/remote-play-review-target/release/remote_play",
+      "sha256": "1807cb405934a7ed78f56fde814c7142dd885cc434ac2227d75f598cd58b55bc"
+    },
+    "android_debug_apk": {
+      "path": "/Users/jinliang/remote_play/android/app/build/outputs/apk/debug/app-debug.apk",
+      "sha256": "f72438ae7dd7d6ebd375c8830bbe46a8c9a86095ae7be0faa04fe0ced330a0cc"
+    }
+  },
+  "limits": [
+    "Native latency is same-host capture to decode, not two-device display latency. Audio was muted.",
+    "Android emulator FPS and traffic do not establish physical-device power, thermal, audio or cellular behavior.",
+    "Warm packet counts cover the media-session proxy only; discovery and public relay background traffic are outside this counter.",
+    "Initial emulator trials saw heartbeat timeouts; later fresh sessions passed. The early cause is unresolved.",
+    "Desktop custom FPS is integer-only; requested rates are bounded by source/display/encoder/network. Bitrate is a target, not fixed wire traffic.",
+    "FCM and OEM push are documented architecture, not implemented."
+  ]
+}

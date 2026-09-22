@@ -1,5 +1,10 @@
 package com.remoteplay.client
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import android.os.SystemClock
+
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,6 +60,27 @@ object RemotePlayClient {
     val devices: StateFlow<List<HostDevice>> = _devices.asStateFlow()
 
     private var isNativeLoaded = false
+    private var appContext: Context? = null
+    private val pauseExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    @Volatile var backgrounded = false
+        private set
+    private var surfaceUnavailable = false
+    private var backgroundSinceMs = 0L
+    private var lastConnection: Pair<String, String>? = null
+    private var resumeAfterIdle: Pair<String, String>? = null
+    private var connectionGeneration = 0L
+    var backgroundKeepAliveSeconds = 300
+        private set
+    var manualMediaPaused = false
+        private set
+    var streamFps = 60
+        private set
+    var streamBitrateKbps = 20_000
+        private set
+    private val _mediaPaused = MutableStateFlow(false)
+    val mediaPaused: StateFlow<Boolean> = _mediaPaused.asStateFlow()
+    private val _mediaPausePending = MutableStateFlow(false)
+    val mediaPausePending: StateFlow<Boolean> = _mediaPausePending.asStateFlow()
 
     init {
         try {
@@ -68,17 +94,44 @@ object RemotePlayClient {
     val nativeAvailable: Boolean
         get() = isNativeLoaded
 
-    fun initialize(storageDir: String): Boolean {
+    fun initialize(context: Context): Boolean {
+        appContext = context.applicationContext
         if (!isNativeLoaded) return false
-        val initialized = nativeInit(storageDir)
+        val initialized = nativeInit(context.filesDir.absolutePath)
         isNativeLoaded = initialized
+        if (initialized) {
+            val prefs = context.getSharedPreferences("stream", Context.MODE_PRIVATE)
+            streamFps = prefs.getInt("fps", 60)
+            streamBitrateKbps = prefs.getInt("bitrate_kbps", 20_000)
+            backgroundKeepAliveSeconds = prefs.getInt("background_keepalive_seconds", 300).coerceIn(0, 86400)
+            nativeUpdateStreamRates(streamFps, streamBitrateKbps)
+        }
         return initialized
     }
 
-    fun connect(deviceId: String, endpoint: String) {
+    @Synchronized fun connect(deviceId: String, endpoint: String) {
+        manualMediaPaused = false
+        surfaceUnavailable = false
+        resumeAfterIdle = null
+        lastConnection = deviceId to endpoint
+        val generation = ++connectionGeneration
         _sessionState.value = SessionState.CONNECTING
+        pauseExecutor.execute {
+            if (synchronized(this) { generation == connectionGeneration }) connectNow(deviceId, endpoint)
+        }
+    }
+
+    private fun connectNow(deviceId: String, endpoint: String) {
         if (isNativeLoaded) {
+            nativeSetNetworkEnabled(true)
+            _sessionState.value = SessionState.CONNECTING
+            appContext?.let { context ->
+                val intent = Intent(context, SessionConnectionService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+                else context.startService(intent)
+            }
             nativeConnect(deviceId, endpoint)
+            synchronized(this) { updateMediaPause() }
             _sessionState.value = when (nativeGetSessionState()) {
                 2 -> SessionState.STREAMING
                 4 -> SessionState.ERROR
@@ -90,11 +143,98 @@ object RemotePlayClient {
         }
     }
 
-    fun disconnect() {
+    @Synchronized fun disconnect() {
+        ++connectionGeneration
+        resumeAfterIdle = null
+        lastConnection = null
+        pauseExecutor.execute { disconnectNow() }
+    }
+
+    private fun disconnectNow() {
         if (isNativeLoaded) {
             nativeDisconnect()
+            if (backgrounded) nativeSetNetworkEnabled(false)
         }
         _sessionState.value = SessionState.DISCONNECTED
+        appContext?.let { it.stopService(Intent(it, SessionConnectionService::class.java)) }
+    }
+
+    @Synchronized fun setBackgrounded(value: Boolean) {
+        if (value && !backgrounded) backgroundSinceMs = SystemClock.elapsedRealtime()
+        backgrounded = value
+        if (!value) {
+            val resume = resumeAfterIdle
+            resumeAfterIdle = null
+            val generation = connectionGeneration
+            if (resume != null) {
+                lastConnection = resume
+                manualMediaPaused = false
+                surfaceUnavailable = false
+                _sessionState.value = SessionState.CONNECTING
+            }
+            updateMediaPause()
+            pauseExecutor.execute {
+                if (isNativeLoaded) nativeSetNetworkEnabled(true)
+                if (resume != null && synchronized(this) { generation == connectionGeneration }) {
+                    connectNow(resume.first, resume.second)
+                }
+            }
+        } else {
+            updateMediaPause()
+            if (lastConnection == null) {
+                pauseExecutor.execute { if (isNativeLoaded) nativeSetNetworkEnabled(false) }
+            }
+        }
+    }
+
+    @Synchronized fun updateBackgroundKeepAlive(seconds: Int): String? {
+        if (seconds !in 0..86400) return "Enter 0 (always keep) or up to 86400 seconds"
+        backgroundKeepAliveSeconds = seconds
+        appContext?.getSharedPreferences("stream", Context.MODE_PRIVATE)?.edit()
+            ?.putInt("background_keepalive_seconds", seconds)?.apply()
+        return null
+    }
+
+    /** Called by the foreground service; no alarm or wake lock is needed after expiry. */
+    @Synchronized fun maintainBackgroundConnection(): Boolean {
+        val seconds = appContext?.let { BackgroundConnectionPolicy.currentSeconds(it) } ?: backgroundKeepAliveSeconds
+        if (!backgrounded || seconds == 0 || lastConnection == null ||
+            SystemClock.elapsedRealtime() - backgroundSinceMs < seconds * 1000L) return false
+        resumeAfterIdle = lastConnection
+        lastConnection = null
+        ++connectionGeneration
+        pauseExecutor.execute { disconnectNow() }
+        return true
+    }
+
+    @Synchronized fun setViewerSurfaceReady(ready: Boolean) {
+        surfaceUnavailable = !ready
+        updateMediaPause()
+    }
+
+    @Synchronized fun setManualMediaPaused(paused: Boolean) {
+        manualMediaPaused = paused
+        updateMediaPause()
+    }
+
+    @Synchronized private fun updateMediaPause() {
+        val paused = manualMediaPaused || backgrounded || surfaceUnavailable
+        _mediaPaused.value = paused
+        // Ordered calls keep a delayed background callback from winning over resume.
+        pauseExecutor.execute { if (isNativeLoaded) nativeSetMediaPaused(paused) }
+    }
+
+    fun updateStreamRates(fps: Int, bitrateKbps: Int): String? {
+        if (fps <= 0 || bitrateKbps <= 0) return "FPS and kbps must be positive whole numbers"
+        if (!isNativeLoaded) return "Native connection is unavailable"
+        val error = nativeUpdateStreamRates(fps, bitrateKbps)
+        if (error == null) {
+            streamFps = fps
+            streamBitrateKbps = bitrateKbps
+            appContext?.getSharedPreferences("stream", Context.MODE_PRIVATE)?.edit()
+                ?.putInt("fps", fps)?.putInt("bitrate_kbps", bitrateKbps)?.apply()
+        }
+        return error
     }
 
     fun sendTouchEvent(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float) {
@@ -170,6 +310,7 @@ object RemotePlayClient {
 
     fun pollTelemetry(): TelemetrySnapshot {
         if (isNativeLoaded) {
+            _mediaPausePending.value = nativeMediaPausePending()
             _sessionState.value = when (nativeGetSessionState()) {
                 0 -> SessionState.DISCONNECTED
                 1 -> SessionState.CONNECTING
@@ -203,6 +344,10 @@ object RemotePlayClient {
     private external fun nativeInit(storageDir: String): Boolean
     private external fun nativeConnect(deviceId: String, endpoint: String)
     private external fun nativeDisconnect()
+    private external fun nativeSetNetworkEnabled(enabled: Boolean)
+    private external fun nativeSetMediaPaused(paused: Boolean)
+    private external fun nativeMediaPausePending(): Boolean
+    private external fun nativeUpdateStreamRates(fps: Int, bitrateKbps: Int): String?
     private external fun nativeSendTouch(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float)
     private external fun nativeSendVirtualKey(keyName: String, pressed: Boolean)
     private external fun nativeSetTouchMode(modeCode: Int)

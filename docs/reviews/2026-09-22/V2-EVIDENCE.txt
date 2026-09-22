@@ -1,0 +1,37 @@
+V2 acceptance evidence, 2026-09-22. Test groups and invitations are excluded.
+Main before changes: 969ca10922eb17e705877b7ca4cf5ce3bec836c1
+
+workspace-native-probe
+FILE_ONLY_CONFIRMED bytes=1048576 capture_subscriptions=0
+HOST_PIPELINE captured=179 encoded=179
+VISIBLE id=256 decoded=84 dimensions=648x1080 source=760x1264 errors=0
+VISIBLE id=512 decoded=93 dimensions=1280x660 source=1440x744 errors=0
+CUSTOM_RATES_AND_RESIZE fps=37 bitrate_kbps=3500 stale_subscribe_ignored=true
+INDEPENDENT_PAUSE hidden_delta=0 visible_delta=53
+RESUME_FIRST_DECODE_MS 238
+UNSUBSCRIBE_ISOLATED true
+
+android-publisher-files
+AUTHENTICATED max_subscriptions=1 files=true
+FILE_RECEIVER_CONFIRMED capture_subscriptions=0
+
+android-publisher-video
+AUTHENTICATED max_subscriptions=1 files=true
+Error: "No hardware HEVC encoder supports this resolution, frame rate and bitrate"
+
+Rust workspace/all-targets: 384 passed; 0 failed; test-threads=4.
+Initial unconstrained concurrent run had one P2P loopback timeout; targeted retry and final workspace run passed.
+Clippy: Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.86s
+APK + Kotlin tests + Lint: BUILD SUCCESSFUL in 35s
+Android Lint: 0 errors, 14 warnings.
+Android unit tests: 5
+Debug APK SHA-256: c29faff84d7d4116ed1ae4a6ebaff0a83d55311dc6223fcc687ef2709ee5ecf0
+
+Android SAF export: 53,248 bytes; exported copy SHA-256 matches source.
+Android -> macOS file: 53,248 bytes; receive SHA-256 matches source.
+macOS -> Android file: 53,248 bytes; receive SHA-256 matches source.
+Android publisher unsupported encoder: receiving client got explicit failure; system MediaProjection=null and no active app services after shutdown.
+
+Android two simultaneous subscriptions: native decoded-frame logs for IDs 256 and 512.
+Android cold idle test: configured 1-second timeout using UI; background service became absent; foreground returned Connected and both subscriptions decoded again. This exercises the timeout path, not a long-duration power measurement.
+Final installed APK: both subscription IDs produced decoded frames; both close buttons visible; closing the first left one pane and Connected state.

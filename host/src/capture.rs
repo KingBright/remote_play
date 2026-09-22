@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use core_graphics::display::CGDisplay;
 use remote_core::{VideoCapturer, VideoFrame, VideoFrameHandleKind};
 use screencapturekit::prelude::*;
 use std::error::Error;
@@ -30,8 +29,6 @@ impl VideoFrame for MacVideoFrame {
 
 struct StreamOutput {
     slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
-    width: u32,
-    height: u32,
 }
 
 impl SCStreamOutputTrait for StreamOutput {
@@ -46,9 +43,12 @@ impl SCStreamOutputTrait for StreamOutput {
             .unwrap_or_default()
             .as_millis()
             & 0xFFFFFFFF) as u32;
+        let Some(buffer) = sample.image_buffer() else {
+            return;
+        };
         let frame = MacVideoFrame {
-            width: self.width,
-            height: self.height,
+            width: buffer.width() as u32,
+            height: buffer.height() as u32,
             sample_buffer: sample,
             capture_time_ms: now_ms,
             timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
@@ -61,9 +61,13 @@ impl SCStreamOutputTrait for StreamOutput {
 pub struct MacVideoCapturer {
     slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
     stream: Option<SCStream>,
-    _target_width: u32,
+    target_width: u32,
+    source: protocol::session::CaptureSource,
+    source_size: (u32, u32),
+    geometry_checked: std::time::Instant,
     target_height: u32,
     target_fps: u32,
+    pacer: remote_core::frame_pacer::FramePacer,
 }
 
 impl MacVideoCapturer {
@@ -71,45 +75,66 @@ impl MacVideoCapturer {
         Self {
             slot: Arc::new(remote_core::LatestFrameSlot::new()),
             stream: None,
-            _target_width: target_width,
+            target_width,
+            source: protocol::session::CaptureSource::MainDisplay,
+            source_size: (0, 0),
+            geometry_checked: std::time::Instant::now(),
             target_height,
             target_fps,
+            pacer: remote_core::frame_pacer::FramePacer::new(target_fps),
         }
+    }
+
+    pub fn with_source(mut self, source: protocol::session::CaptureSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    fn configuration(&self, size: (u32, u32)) -> SCStreamConfiguration {
+        let (width, height) =
+            protocol::session::fit_capture_size(size, (self.target_width, self.target_height));
+        let mut config = SCStreamConfiguration::new();
+        config.set_width(width);
+        config.set_height(height);
+        config.set_minimum_frame_interval(&CMTime::new(
+            1,
+            self.target_fps.saturating_mul(2).min(i32::MAX as u32) as i32,
+        ));
+        config.set_queue_depth(3);
+        config.set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
+        config.set_shows_cursor(false);
+        config
     }
 
     pub fn update_resolution_and_fps(
         &mut self,
+        width: u32,
         height: u32,
         fps: u32,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if (self.target_width, self.target_height, self.target_fps) == (width, height, fps) {
+            return Ok(());
+        }
+        self.target_width = width;
         self.target_height = height;
         self.target_fps = fps;
+        self.pacer.reset(fps);
         if let Some(stream) = &self.stream {
-            let content = SCShareableContent::get()?;
-            let main_display_id = CGDisplay::main().id;
-            let display = content
-                .displays()
-                .into_iter()
-                .min_by_key(|display| u8::from(display.display_id() != main_display_id))
-                .ok_or("No display found")?;
-
-            let display_width = display.width();
-            let display_height = display.height();
-
-            let target_height = self.target_height.min(display_height);
-            let scale = target_height as f32 / display_height as f32;
-            let target_width = (display_width as f32 * scale) as u32;
-
-            let mut config = SCStreamConfiguration::new();
-            config.set_width(target_width);
-            config.set_height(target_height);
-            config.set_minimum_frame_interval(&CMTime::new(1, self.target_fps as i32));
-            config.set_queue_depth(5);
-            config
-                .set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
-            config.set_shows_cursor(false);
-
-            stream.update_configuration(&config)?;
+            stream.update_configuration(&self.configuration(self.source_size))?;
+        }
+        Ok(())
+    }
+    fn refresh_geometry(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.geometry_checked.elapsed() < std::time::Duration::from_secs(1) {
+            return Ok(());
+        }
+        self.geometry_checked = std::time::Instant::now();
+        let (_, size) = crate::capture_sources::filter(self.source)?;
+        if size != self.source_size {
+            self.source_size = size;
+            if let Some(stream) = &self.stream {
+                stream.update_configuration(&self.configuration(size))?;
+            }
         }
         Ok(())
     }
@@ -120,35 +145,11 @@ impl VideoCapturer for MacVideoCapturer {
     type Frame = MacVideoFrame;
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let content = SCShareableContent::get()?;
-        let main_display_id = CGDisplay::main().id;
-        let display = content
-            .displays()
-            .into_iter()
-            .min_by_key(|display| u8::from(display.display_id() != main_display_id))
-            .ok_or("No display found")?;
-
-        let filter = SCContentFilter::create().with_display(&display).build();
-
-        let mut config = SCStreamConfiguration::new();
-        let display_width = display.width();
-        let display_height = display.height();
-
-        let target_height = self.target_height.min(display_height);
-        let scale = target_height as f32 / display_height as f32;
-        let target_width = (display_width as f32 * scale) as u32;
-
-        config.set_width(target_width);
-        config.set_height(target_height);
-        config.set_minimum_frame_interval(&CMTime::new(1, self.target_fps as i32));
-        config.set_queue_depth(5);
-        config.set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
-        config.set_shows_cursor(false);
-
+        let (filter, size) = crate::capture_sources::filter(self.source)?;
+        self.source_size = size;
+        let config = self.configuration(size);
         let output = StreamOutput {
             slot: self.slot.clone(),
-            width: target_width,
-            height: target_height,
         };
 
         let mut stream = SCStream::new(&filter, &config);
@@ -166,15 +167,36 @@ impl VideoCapturer for MacVideoCapturer {
         Ok(())
     }
 
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = &self.stream {
+            stream.stop_capture()?;
+        }
+        drop(self.slot.take());
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        drop(self.slot.take());
+        self.pacer.reset(self.target_fps);
+        if let Some(stream) = &self.stream {
+            stream.start_capture()?;
+        } else {
+            self.start().await?;
+        }
+        Ok(())
+    }
+
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
         loop {
+            self.refresh_geometry()?;
             match tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 self.slot.take_async(),
             )
             .await
             {
-                Ok(frame) => return Ok(frame),
+                Ok(frame) if self.pacer.admit(frame.timing.capture_ts_us) => return Ok(frame),
+                Ok(_) => continue,
                 Err(_) => {
                     // Check if stream is still active
                     if self.stream.is_none() {

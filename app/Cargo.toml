@@ -1,9 +1,10 @@
 [package]
 name = "remote_play_app"
-version = "0.1.0"
+version = "2.0.0-alpha.1"
 edition = "2024"
 
 [dependencies]
+remote_platform = { path = "../remote_platform" }
 client = { path = "../client" }
 host = { path = "../host" }
 protocol = { path = "../protocol" }
@@ -18,6 +19,7 @@ rustls = { version = "0.23", features = ["ring"] }
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
 yororen_ui = "0.2"
 rfd = "0.15"
+raw-window-handle = "0.6"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAppearance"] }
 

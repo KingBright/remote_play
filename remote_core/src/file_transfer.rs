@@ -5,7 +5,6 @@ use protocol::{
     ChunkInfo, ContentKind, DataEnvelope, DataLane, DataPriority, FileTransferControl,
     FileTransferGroup, FileTransferManifest,
 };
-use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -282,6 +281,10 @@ impl FileTransferReader {
         self.total_chunks
     }
 
+    pub fn manifest_object_id(&self) -> u64 {
+        self.spec.manifest_object_id
+    }
+
     pub async fn next_envelope(&mut self) -> Result<Option<DataEnvelope>, FileTransferError> {
         if !self.manifest_sent {
             self.manifest_sent = true;
@@ -428,6 +431,11 @@ impl FileManifestAssembler {
             .chunk
             .as_ref()
             .ok_or(FileTransferError::MissingChunkMetadata)?;
+        if chunk.total_chunks > 64 || chunk.total_size > 64 * 1024 {
+            return Err(FileTransferError::InvalidChunk {
+                reason: "file manifest exceeds resource limit",
+            });
+        }
         let expected_checksum = envelope
             .header
             .reliability_info
@@ -468,10 +476,22 @@ impl FileManifestAssembler {
 pub struct IncomingFileTransfer {
     manifest: FileTransferManifest,
     path: PathBuf,
+    temporary_path: PathBuf,
+    allow_overwrite: bool,
     file: File,
-    received_indices: HashSet<u32>,
+    received_indices: Vec<u64>,
+    received_chunks: u32,
     received_bytes: u64,
     total_chunks: u32,
+    _cleanup: PartialFileCleanup,
+}
+
+#[derive(Debug)]
+struct PartialFileCleanup(PathBuf);
+impl Drop for PartialFileCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 impl IncomingFileTransfer {
@@ -487,27 +507,49 @@ impl IncomingFileTransfer {
             .as_ref()
             .map(|group| group.relative_path.as_str())
             .unwrap_or(&manifest.name);
+        tokio::fs::create_dir_all(target_dir.as_ref()).await?;
+        let root = tokio::fs::canonicalize(target_dir.as_ref()).await?;
         let path = target_dir.as_ref().join(relative_path);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        let mut directory = root.clone();
+        if let Some(parent) = Path::new(relative_path).parent() {
+            for component in parent.components() {
+                directory.push(component);
+                match tokio::fs::symlink_metadata(&directory).await {
+                    Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+                        return Err(FileTransferError::InvalidFileName);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::fs::create_dir(&directory).await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
-        let mut options = OpenOptions::new();
-        options.write(true).create(true);
-        if policy.allow_overwrite {
-            options.truncate(true);
-        } else {
-            options.create_new(true);
+        if !policy.allow_overwrite && tokio::fs::try_exists(&path).await? {
+            return Err(
+                io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists").into(),
+            );
         }
-
-        let file = options.open(&path).await?;
+        let temporary_path =
+            path.with_file_name(format!(".remote-play-{:016x}.part", rand::random::<u64>()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .await?;
         file.set_len(manifest.size_bytes).await?;
         let total_chunks = chunk_count(manifest.size_bytes, manifest.chunk_payload_len as usize)?;
 
         Ok(Self {
             manifest,
             path,
+            _cleanup: PartialFileCleanup(temporary_path.clone()),
+            temporary_path,
+            allow_overwrite: policy.allow_overwrite,
             file,
-            received_indices: HashSet::new(),
+            received_indices: vec![0; (total_chunks as usize).div_ceil(64)],
+            received_chunks: 0,
             received_bytes: 0,
             total_chunks,
         })
@@ -533,9 +575,13 @@ impl IncomingFileTransfer {
             .ok_or(FileTransferError::MissingChunkMetadata)?;
         self.validate_chunk(chunk, envelope.payload.len())?;
 
-        if self.received_indices.insert(chunk.chunk_index) {
+        let index = chunk.chunk_index as usize / 64;
+        let bit = 1u64 << (chunk.chunk_index % 64);
+        if self.received_indices[index] & bit == 0 {
             self.file.seek(SeekFrom::Start(chunk.offset)).await?;
             self.file.write_all(&envelope.payload).await?;
+            self.received_indices[index] |= bit;
+            self.received_chunks += 1;
             self.received_bytes += envelope.payload.len() as u64;
         }
 
@@ -546,32 +592,76 @@ impl IncomingFileTransfer {
         FileTransferProgress {
             transfer_id: self.manifest.transfer_id,
             file_object_id: self.manifest.file_object_id,
-            received_chunks: self.received_indices.len() as u32,
+            received_chunks: self.received_chunks,
             total_chunks: self.total_chunks,
             received_bytes: self.received_bytes,
             total_size: self.manifest.size_bytes,
-            is_complete: self.received_indices.len() as u32 == self.total_chunks,
+            is_complete: self.received_chunks == self.total_chunks,
         }
     }
 
     pub async fn finish(mut self) -> Result<ReceivedFile, FileTransferError> {
-        if self.received_indices.len() as u32 != self.total_chunks {
+        if self.received_chunks != self.total_chunks {
             return Err(FileTransferError::IncompleteTransfer {
-                received_chunks: self.received_indices.len() as u32,
+                received_chunks: self.received_chunks,
                 total_chunks: self.total_chunks,
             });
         }
 
         self.file.flush().await?;
+        self.file.sync_all().await?;
         drop(self.file);
 
-        let actual =
-            checksum_file_crc32(&self.path, self.manifest.chunk_payload_len as usize).await?;
+        let actual = checksum_file_crc32(
+            &self.temporary_path,
+            self.manifest.chunk_payload_len as usize,
+        )
+        .await?;
         if actual != self.manifest.checksum_crc32 {
+            let _ = tokio::fs::remove_file(&self.temporary_path).await;
             return Err(FileTransferError::ChecksumMismatch {
                 expected: self.manifest.checksum_crc32,
                 actual,
             });
+        }
+
+        if self.allow_overwrite {
+            tokio::fs::rename(&self.temporary_path, &self.path).await?;
+        } else {
+            #[cfg(target_os = "android")]
+            {
+                use std::{ffi::CString, os::unix::ffi::OsStrExt};
+                let source = CString::new(self.temporary_path.as_os_str().as_bytes())
+                    .map_err(|_| FileTransferError::InvalidFileName)?;
+                let target = CString::new(self.path.as_os_str().as_bytes())
+                    .map_err(|_| FileTransferError::InvalidFileName)?;
+                // Android SELinux forbids app-data hard links. renameat2 preserves
+                // the same atomic no-overwrite contract without needing one.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        libc::AT_FDCWD,
+                        source.as_ptr(),
+                        libc::AT_FDCWD,
+                        target.as_ptr(),
+                        libc::RENAME_NOREPLACE,
+                    )
+                };
+                if result != 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                // Same-directory hard link publishes atomically without overwriting a
+                // destination created since start(). Never expose a partial final file.
+                tokio::fs::hard_link(&self.temporary_path, &self.path).await?;
+                tokio::fs::remove_file(&self.temporary_path).await?;
+            }
+        }
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            File::open(parent).await?.sync_all().await?;
         }
 
         Ok(ReceivedFile {
@@ -583,7 +673,7 @@ impl IncomingFileTransfer {
     pub async fn cancel(self) -> Result<PathBuf, FileTransferError> {
         let path = self.path.clone();
         drop(self.file);
-        match tokio::fs::remove_file(&path).await {
+        match tokio::fs::remove_file(&self.temporary_path).await {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(FileTransferError::Io(err)),
@@ -675,7 +765,7 @@ fn validate_manifest(
 }
 
 fn validate_chunk_payload_len(chunk_payload_len: usize) -> Result<(), FileTransferError> {
-    if chunk_payload_len == 0 || chunk_payload_len > u32::MAX as usize {
+    if chunk_payload_len == 0 || chunk_payload_len > 8 * 1024 * 1024 {
         return Err(FileTransferError::InvalidChunkPayloadLen);
     }
     Ok(())
@@ -685,7 +775,7 @@ fn validate_group_metadata(
     group: &FileTransferGroup,
     manifest: &FileTransferManifest,
 ) -> Result<(), FileTransferError> {
-    if group.file_count == 0 || group.file_index >= group.file_count {
+    if group.file_count == 0 || group.file_count > 100_000 || group.file_index >= group.file_count {
         return Err(FileTransferError::InvalidChunk {
             reason: "file group index or count is invalid",
         });
@@ -716,11 +806,15 @@ fn chunk_count(size_bytes: u64, chunk_payload_len: usize) -> Result<u32, FileTra
     }
 
     let count = size_bytes.div_ceil(chunk_payload_len as u64);
+    if count > 16_777_216 {
+        return Err(FileTransferError::TooManyChunks { chunk_count: count });
+    }
     u32::try_from(count).map_err(|_| FileTransferError::TooManyChunks { chunk_count: count })
 }
 
 fn is_safe_file_name(name: &str) -> bool {
     !name.is_empty()
+        && !name.contains(['/', '\\', ':'])
         && Path::new(name)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
@@ -791,6 +885,73 @@ mod tests {
             .as_nanos();
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Relaxed);
         std::env::temp_dir().join(format!("{prefix}-{nanos}-{counter}"))
+    }
+
+    #[tokio::test]
+    async fn interrupted_receive_removes_only_its_partial_file() {
+        let base = unique_temp_dir("remote-play-partial-cleanup");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        let source = base.join("source.bin");
+        tokio::fs::write(&source, b"preserved source")
+            .await
+            .unwrap();
+        let reader = FileTransferReader::from_path(
+            &source,
+            transfer_spec(4096),
+            None,
+            FileTransferPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let target = base.join("target");
+        let receiver = IncomingFileTransfer::start(
+            reader.manifest().clone(),
+            &target,
+            FileReceivePolicy::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+        drop(receiver);
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"preserved source");
+        tokio::fs::remove_dir_all(base).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incoming_group_rejects_symlink_parent() {
+        let base = unique_temp_dir("remote-play-symlink-parent");
+        let target = base.join("target");
+        let outside = base.join("outside");
+        tokio::fs::create_dir_all(&target).await.unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        let source = base.join("source.bin");
+        tokio::fs::write(&source, b"test").await.unwrap();
+        let reader = FileTransferReader::from_path(
+            &source,
+            transfer_spec(4096),
+            None,
+            FileTransferPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let mut manifest = reader.manifest().clone();
+        manifest.group = Some(protocol::FileTransferGroup {
+            group_id: 99,
+            file_index: 0,
+            file_count: 1,
+            relative_path: "linked/source.bin".into(),
+            group_total_size_bytes: manifest.size_bytes,
+            group_checksum_crc32: 0,
+        });
+        std::os::unix::fs::symlink(&outside, target.join("linked")).unwrap();
+        assert!(matches!(
+            IncomingFileTransfer::start(manifest, &target, FileReceivePolicy::default()).await,
+            Err(FileTransferError::InvalidFileName)
+        ));
+        assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+        tokio::fs::remove_dir_all(base).await.unwrap();
     }
 
     #[tokio::test]

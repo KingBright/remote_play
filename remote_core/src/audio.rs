@@ -78,21 +78,140 @@ impl InterleavedAudioFrameChunker {
         self.buffered_samples.extend_from_slice(samples);
 
         let complete_frames = self.buffered_samples.len() / self.samples_per_frame;
+        let consumed = complete_frames * self.samples_per_frame;
         let mut frames = Vec::with_capacity(complete_frames);
-        for _ in 0..complete_frames {
-            frames.push(
-                self.buffered_samples
-                    .drain(..self.samples_per_frame)
-                    .collect::<Vec<_>>(),
-            );
+        {
+            let mut samples = self.buffered_samples.drain(..consumed);
+            for _ in 0..complete_frames {
+                frames.push(samples.by_ref().take(self.samples_per_frame).collect());
+            }
         }
+        // Dropping the single drain shifts only the incomplete tail, once.
+        // Draining per frame made capture bursts quadratic in their size.
         frames
+    }
+}
+
+/// Callback-owned PCM queues. Independent sources advance on the same output
+/// clock instead of being concatenated. Storage is allocated before playback.
+pub struct AudioMixer {
+    channels: usize,
+    capacity_samples: usize,
+    lanes: Vec<AudioMixLane>,
+}
+
+struct AudioMixLane {
+    stream_id: Option<u32>,
+    samples: std::collections::VecDeque<f32>,
+}
+
+impl AudioMixer {
+    pub fn new(channels: usize, capacity_frames: usize, lanes: usize) -> Self {
+        assert!(channels > 0 && capacity_frames > 0 && lanes > 0);
+        let capacity_samples = channels * capacity_frames;
+        Self {
+            channels,
+            capacity_samples,
+            lanes: (0..lanes)
+                .map(|_| AudioMixLane {
+                    stream_id: None,
+                    samples: std::collections::VecDeque::with_capacity(capacity_samples),
+                })
+                .collect(),
+        }
+    }
+
+    /// Returns the number of stale samples discarded. Overflow keeps the
+    /// newest complete channel frames; a new session clears that source's tail.
+    pub fn push(&mut self, lane: usize, stream_id: u32, samples: &[f32]) -> usize {
+        let lane = &mut self.lanes[lane];
+        let mut dropped = 0;
+        if lane.stream_id != Some(stream_id) {
+            dropped += lane.samples.len();
+            lane.samples.clear();
+            lane.stream_id = Some(stream_id);
+        }
+        let samples = &samples[..samples.len() / self.channels * self.channels];
+        let keep = samples.len().min(self.capacity_samples);
+        dropped += samples.len() - keep;
+        let samples = &samples[samples.len() - keep..];
+        let excess = (lane.samples.len() + keep).saturating_sub(self.capacity_samples);
+        let excess = excess.div_ceil(self.channels) * self.channels;
+        let excess = excess.min(lane.samples.len());
+        lane.samples.drain(..excess);
+        dropped += excess;
+        lane.samples.extend(samples.iter().copied());
+        dropped
+    }
+
+    pub fn clear_stream(&mut self, stream_id: u32) {
+        for lane in &mut self.lanes {
+            if lane.stream_id == Some(stream_id) {
+                lane.samples.clear();
+            }
+        }
+    }
+
+    /// No mutex, allocation, per-sample channel receive, or tail memmove.
+    pub fn render<T>(&mut self, output: &mut [T], map: impl Fn(f32) -> T) {
+        for sample in output {
+            let mixed: f32 = self
+                .lanes
+                .iter_mut()
+                .map(|lane| lane.samples.pop_front().unwrap_or(0.0))
+                .sum();
+            *sample = map(mixed.clamp(-1.0, 1.0));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simultaneous_audio_sources_mix_without_doubling_playback_duration() {
+        let mut mixer = AudioMixer::new(2, 2880, 2);
+        mixer.push(0, 10, &vec![0.2; 1920]);
+        mixer.push(1, 11, &vec![0.3; 1920]);
+        let mut output = vec![0.0; 1920];
+        mixer.render(&mut output, |v| v);
+        assert!(output.iter().all(|v| (*v - 0.5).abs() < 1e-6));
+        mixer.render(&mut output, |v| v);
+        assert!(output.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn audio_overload_keeps_recent_frames_and_preserves_stereo_alignment() {
+        let mut mixer = AudioMixer::new(2, 3, 1);
+        mixer.push(0, 10, &[0.1, -0.1, 0.2, -0.2]);
+        assert_eq!(mixer.push(0, 10, &[0.3, -0.3, 0.4, -0.4, 0.5, -0.5]), 4);
+        let mut out = [0.0; 6];
+        mixer.render(&mut out, |v| v);
+        assert_eq!(out, [0.3, -0.3, 0.4, -0.4, 0.5, -0.5]);
+    }
+
+    #[test]
+    fn new_audio_session_discards_old_samples_and_mixed_output_is_clamped() {
+        let mut mixer = AudioMixer::new(1, 3, 2);
+        mixer.push(0, 10, &[0.1, 0.2, 0.3]);
+        assert_eq!(mixer.push(0, 12, &[0.8, -0.8]), 3);
+        mixer.push(1, 13, &[0.8, -0.8]);
+        let mut out = [0.0; 3];
+        mixer.render(&mut out, |v| v);
+        assert_eq!(out, [1.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn chunking_a_burst_preserves_order_and_the_partial_tail() {
+        let input: Vec<f32> = (0..20003).map(|v| v as f32).collect();
+        let mut chunker = InterleavedAudioFrameChunker::new(48000, 2, 20).unwrap();
+        let mut result: Vec<f32> = chunker.push(&input).into_iter().flatten().collect();
+        result.extend(chunker.push(&vec![-1.0; 1920 - 803]).into_iter().flatten());
+        assert_eq!(&result[..input.len()], input);
+        assert!(result[input.len()..].iter().all(|v| *v == -1.0));
+        assert_eq!(chunker.buffered_samples(), 0);
+    }
 
     #[test]
     fn chunks_variable_input_into_fixed_interleaved_frames() {

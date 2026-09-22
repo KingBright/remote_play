@@ -76,7 +76,7 @@ impl AudioCapturer for LinuxAudioCapturer {
                         channels,
                         source,
                     };
-                    let _ = tx.blocking_send(frame);
+                    let _ = tx.try_send(frame);
                 },
                 err_fn,
                 None,
@@ -92,7 +92,7 @@ impl AudioCapturer for LinuxAudioCapturer {
                         channels,
                         source,
                     };
-                    let _ = tx.blocking_send(frame);
+                    let _ = tx.try_send(frame);
                 },
                 err_fn,
                 None,
@@ -107,6 +107,24 @@ impl AudioCapturer for LinuxAudioCapturer {
 
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.stream = None;
+        Ok(())
+    }
+
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = &self.stream {
+            stream.pause()?;
+        }
+        while self.rx.try_recv().is_ok() {}
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        while self.rx.try_recv().is_ok() {}
+        if let Some(stream) = &self.stream {
+            stream.play()?;
+        } else {
+            self.start().await?;
+        }
         Ok(())
     }
 

@@ -34,7 +34,7 @@ pub struct TransferEntrySnapshot {
 impl TransferEntrySnapshot {
     pub fn progress(&self) -> f32 {
         if self.total_bytes == 0 {
-            return if self.status == TransferStatus::Completed {
+            return if matches!(self.status, TransferStatus::Completed) {
                 1.0
             } else {
                 0.0
@@ -86,6 +86,7 @@ pub struct TransferCenterState {
 impl TransferCenterState {
     pub fn apply_event(&mut self, event: &FileTransferEvent) {
         match event {
+            FileTransferEvent::IncomingClipboardReady { .. } => {}
             FileTransferEvent::OutgoingGroupStarted {
                 group_id,
                 file_count,
@@ -141,13 +142,8 @@ impl TransferCenterState {
             FileTransferEvent::OutgoingCompleted {
                 transfer_id, group, ..
             } => {
-                if let Some(group) = group {
-                    self.mark_group_if_known(
-                        TransferDirection::Outgoing,
-                        group.group_id,
-                        TransferStatus::Completed,
-                    );
-                } else {
+                // A child finishing must not finish the entire folder/group.
+                if group.is_none() {
                     self.mark_transfer(
                         TransferDirection::Outgoing,
                         *transfer_id,
@@ -455,7 +451,7 @@ impl TransferCenterState {
         if let Some(entry) = self.find_transfer_mut(direction, transfer_id) {
             entry.snapshot.status = status;
             entry.snapshot.cancel_target = None;
-            if status == TransferStatus::Completed {
+            if matches!(status, TransferStatus::Completed) {
                 entry.snapshot.transferred_bytes = entry.snapshot.total_bytes;
             }
             entry.updated_seq = updated_seq;
@@ -472,7 +468,7 @@ impl TransferCenterState {
         if let Some(entry) = self.find_group_mut(direction, group_id) {
             entry.snapshot.status = status;
             entry.snapshot.cancel_target = None;
-            if status == TransferStatus::Completed {
+            if matches!(status, TransferStatus::Completed) {
                 entry.snapshot.transferred_bytes = entry.snapshot.total_bytes;
             }
             entry.updated_seq = updated_seq;
@@ -534,7 +530,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn tracks_single_file_progress_and_completion() {
+    fn receiver_confirmed_delivery_completes_the_send() {
         let mut state = TransferCenterState::default();
         state.apply_event(&FileTransferEvent::OutgoingStarted {
             transfer_id: 1,
@@ -598,6 +594,18 @@ mod tests {
             sent_bytes: 100,
             total_size: 100,
         });
+        state.apply_event(&FileTransferEvent::OutgoingCompleted {
+            transfer_id: 10,
+            file_object_id: 11,
+            group: Some(group),
+        });
+        let partial = state.snapshots();
+        assert_eq!(partial[0].status, TransferStatus::Running);
+        assert_eq!(partial[0].transferred_bytes, 100);
+        assert_eq!(
+            partial[0].cancel_target,
+            Some(TransferCancelTarget::Group(7))
+        );
         state.apply_event(&FileTransferEvent::OutgoingGroupCancelled { group_id: 7 });
 
         let entries = state.snapshots();

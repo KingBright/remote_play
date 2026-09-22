@@ -1,0 +1,132 @@
+{
+  "baseline_ref": "969ca10",
+  "optimized_rustc": true,
+  "channels": 2,
+  "sample_rate": 48000,
+  "output_frame_ms": 20,
+  "iterations_per_sample": 5000,
+  "rounds": [
+    {
+      "round": 1,
+      "version": "before",
+      "samples_ns": {
+        "10": 170.1,
+        "20": 347.3,
+        "200": 8731.3,
+        "1000": 203868.3
+      }
+    },
+    {
+      "round": 1,
+      "version": "after",
+      "samples_ns": {
+        "10": 148.6,
+        "20": 234.3,
+        "200": 4039.7,
+        "1000": 18699.4
+      }
+    },
+    {
+      "round": 2,
+      "version": "after",
+      "samples_ns": {
+        "10": 167.3,
+        "20": 310.9,
+        "200": 4004.8,
+        "1000": 17691.3
+      }
+    },
+    {
+      "round": 2,
+      "version": "before",
+      "samples_ns": {
+        "10": 176.2,
+        "20": 297.1,
+        "200": 8265.9,
+        "1000": 202579.2
+      }
+    },
+    {
+      "round": 3,
+      "version": "before",
+      "samples_ns": {
+        "10": 164.3,
+        "20": 305.7,
+        "200": 8057.6,
+        "1000": 195763.7
+      }
+    },
+    {
+      "round": 3,
+      "version": "after",
+      "samples_ns": {
+        "10": 161.4,
+        "20": 319.6,
+        "200": 4059.5,
+        "1000": 17557.7
+      }
+    },
+    {
+      "round": 4,
+      "version": "after",
+      "samples_ns": {
+        "10": 208.1,
+        "20": 376.4,
+        "200": 5638.4,
+        "1000": 25345.2
+      }
+    },
+    {
+      "round": 4,
+      "version": "before",
+      "samples_ns": {
+        "10": 281.9,
+        "20": 374.7,
+        "200": 9417.3,
+        "1000": 223047.3
+      }
+    },
+    {
+      "round": 5,
+      "version": "before",
+      "samples_ns": {
+        "10": 160.9,
+        "20": 314.2,
+        "200": 8868.8,
+        "1000": 276909.7
+      }
+    },
+    {
+      "round": 5,
+      "version": "after",
+      "samples_ns": {
+        "10": 162.8,
+        "20": 311.0,
+        "200": 3861.1,
+        "1000": 19631.5
+      }
+    }
+  ],
+  "median_ns_per_push": {
+    "10": {
+      "before": 170.1,
+      "after": 162.8,
+      "reduction_pct": 4.29
+    },
+    "20": {
+      "before": 314.2,
+      "after": 311.0,
+      "reduction_pct": 1.02
+    },
+    "200": {
+      "before": 8731.3,
+      "after": 4039.7,
+      "reduction_pct": 53.73
+    },
+    "1000": {
+      "before": 203868.3,
+      "after": 18699.4,
+      "reduction_pct": 90.83
+    }
+  }
+}
