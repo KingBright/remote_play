@@ -40,6 +40,9 @@ class InstallerFixture(unittest.TestCase):
                                              'ProgramArguments': [str(self.executable)]}))
         self.state = {'loaded': True, 'running': True, 'pid': 100, 'program': str(self.executable)}
         self.commands = []
+        self.system_states = []
+        self.system = {'status': 'not_loaded', 'loaded': False, 'running': False,
+                       'pid': None, 'domain': 'system', 'label': 'com.remoteplay.mesh'}
         self.states = []
         self.verify_count = 0
         self.verify_hook = None
@@ -50,9 +53,10 @@ class InstallerFixture(unittest.TestCase):
                                  (installer, 'verify_app', self.verify),
                                  (installer, 'verified_archive', self.archive_view),
                                  (installer, 'service_state', self.service_state),
+                                 (installer, 'system_mesh_state', self.system_mesh_state),
                                  (installer, 'run', self.command_run),
                                  (installer, 'wait_running', self.health)]:
-            p = patch.object(obj, name, value)
+            p = patch.object(obj, name, value, create=name == 'system_mesh_state')
             p.start(); self.addCleanup(p.stop)
 
     def make_app(self, path, info):
@@ -75,6 +79,11 @@ class InstallerFixture(unittest.TestCase):
     def service_state(self, domain, **kwargs):
         if self.states: return self.states.pop(0)
         return dict(self.state)
+
+    def system_mesh_state(self, *, deadline=None):
+        if deadline: deadline.check()
+        if self.system_states: return self.system_states.pop(0)
+        return dict(self.system)
 
     def command_run(self, args, timeout=45):
         self.commands.append(args)
@@ -342,3 +351,174 @@ class CommandBudgets(unittest.TestCase):
                 with self.assertRaisesRegex(ReleaseRejected, 'deadline'):
                     deadline.run(['/fixture/mutation'])
                 command.assert_not_called()
+
+
+class SystemServiceGaps(InstallerFixture):
+    def loaded_root_service(self):
+        return {'status': 'observed', 'loaded': True, 'running': True, 'pid': 18849,
+                'domain': 'system', 'label': 'com.remoteplay.mesh',
+                'program': '/fixture/Old RemotePlay.app/Contents/MacOS/remote_play'}
+
+    def test_dry_plan_classifies_root_service_without_private_hashes(self):
+        self.system = self.loaded_root_service()
+        with patch.object(installer, 'preserve_hashes', side_effect=AssertionError('private preflight read')):
+            plan = installer.install(self.archive, False)
+        self.assertTrue(plan['system_mesh']['loaded'])
+        self.assertEqual(plan['apply_blockers'], ['system_mesh_loaded'])
+        self.assertFalse(plan['will_restart_only_remoteplay'])
+        self.assertFalse(self.commands)
+
+    def test_quit_ineffective_root_service_blocks_apply_without_signals(self):
+        # A GUI Quit acknowledgement does not unload a launchd system service.
+        self.system = self.loaded_root_service()
+        with patch.object(installer, 'preserve_hashes', side_effect=AssertionError('private preflight read')):
+            with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+                installer.install(self.archive, True)
+        self.assertEqual(self.target_info(), self.old)
+        self.assertFalse(self.commands)
+        self.assertFalse((self.applications / '.remoteplay-install-journal.json').exists())
+
+    def test_unknown_system_state_blocks_apply(self):
+        self.system = {'status': 'unavailable', 'loaded': None, 'reason': 'timeout',
+                       'domain': 'system', 'label': 'com.remoteplay.mesh'}
+        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/com.remoteplay.mesh'):
+            installer.install(self.archive, True)
+        self.assertFalse(self.commands)
+
+    def test_system_service_appearing_under_lock_blocks_apply(self):
+        self.system_states = [dict(self.system), self.loaded_root_service()]
+        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+            installer.install(self.archive, True)
+        self.assertFalse(self.mutations())
+        self.assertEqual(self.target_info(), self.old)
+
+    def test_same_version_is_noop_even_with_external_root_service(self):
+        self.system = self.loaded_root_service()
+        (self.target / '.fixture-info.json').write_text(json.dumps(self.new))
+        plan = installer.install(self.archive, True)
+        self.assertEqual(plan['action'], 'already_installed')
+        self.assertTrue(plan['system_mesh']['loaded'])
+        self.assertFalse(self.commands)
+
+    def test_pending_recovery_refuses_active_root_service(self):
+        self.crash_after_phase('old_moved')
+        self.system = self.loaded_root_service()
+        commands = len(self.commands)
+        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+            installer.recover_interrupted()
+        self.assertEqual(len(self.commands), commands)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.journal()['phase'], 'recovery_required')
+
+    def test_quit_ineffective_duplicate_user_process_is_not_retried(self):
+        original = self.command_run
+        def observe(args, timeout=45):
+            if args[0] == '/bin/ps':
+                self.commands.append(args)
+                return f'100 {self.executable}\n999 {self.executable}\n'
+            return original(args, timeout)
+        with patch.object(installer, 'run', observe):
+            with self.assertRaisesRegex(ReleaseRejected, 'duplicate RemotePlay'):
+                installer.install(self.archive, True)
+        self.assertFalse(self.mutations())
+        self.assertEqual(sum(a[0] == '/bin/ps' for a in self.commands), 1)
+
+
+class SystemMeshObservation(unittest.TestCase):
+    def result(self, returncode=0, stdout='', stderr=''):
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_loaded_system_service_is_external_and_raw_arguments_are_not_echoed(self):
+        output = 'system/com.remoteplay.mesh = {\n state = running\n pid = 18849\n program = /fixture/old-wrapper\n arguments = { synthetic-private-marker }\n environment = { synthetic-env-marker }\n}'
+        with patch.object(installer.subprocess, 'run', return_value=self.result(stdout=output)) as command:
+            state = installer.system_mesh_state()
+        self.assertEqual(command.call_args.args[0], ['/bin/launchctl', 'print', 'system/com.remoteplay.mesh'])
+        self.assertTrue(state['loaded'])
+        self.assertTrue(state['running'])
+        self.assertEqual(state['management'], 'not_managed_by_user_installer')
+        self.assertEqual(state['pid'], 18849)
+        self.assertNotIn('synthetic-private-marker', json.dumps(state))
+        self.assertNotIn('synthetic-env-marker', json.dumps(state))
+
+    def test_documented_not_found_is_absence(self):
+        output = self.result(113, stderr='Could not find service "com.remoteplay.mesh" in domain for system')
+        with patch.object(installer.subprocess, 'run', return_value=output):
+            state = installer.system_mesh_state()
+        self.assertEqual(state['status'], 'not_loaded')
+        self.assertIsNone(installer.system_mesh_blocker(state))
+
+    def test_permission_denied_is_unknown_not_absent(self):
+        output = self.result(1, stderr='Operation not permitted; synthetic-private-marker')
+        with patch.object(installer.subprocess, 'run', return_value=output):
+            state = installer.system_mesh_state()
+        self.assertIsNone(state['loaded'])
+        self.assertEqual(installer.system_mesh_blocker(state), 'system_mesh_unknown')
+        self.assertNotIn('synthetic-private-marker', json.dumps(state))
+
+    def test_query_timeout_has_shared_budget_and_is_unknown(self):
+        import subprocess
+        with patch.object(installer.time, 'monotonic', side_effect=[10.0, 10.25]):
+            deadline = installer.Deadline(1)
+            with patch.object(installer.subprocess, 'run', side_effect=subprocess.TimeoutExpired('launchctl', .75)) as command:
+                state = installer.system_mesh_state(deadline=deadline)
+        self.assertAlmostEqual(command.call_args.kwargs['timeout'], .75)
+        self.assertEqual(state['reason'], 'timeout')
+        self.assertEqual(installer.system_mesh_blocker(state), 'system_mesh_unknown')
+        self.assertEqual(command.call_count, 1)
+
+    def test_expired_budget_does_not_issue_system_query(self):
+        with patch.object(installer.time, 'monotonic', side_effect=[10.0, 12.0]):
+            deadline = installer.Deadline(1)
+            with patch.object(installer.subprocess, 'run') as command:
+                with self.assertRaisesRegex(ReleaseRejected, 'deadline'):
+                    installer.system_mesh_state(deadline=deadline)
+                command.assert_not_called()
+
+    def test_empty_success_is_unknown(self):
+        with patch.object(installer.subprocess, 'run', return_value=self.result()):
+            state = installer.system_mesh_state()
+        self.assertEqual(state['reason'], 'empty_response')
+        self.assertEqual(installer.system_mesh_blocker(state), 'system_mesh_unknown')
+
+
+class SystemMeshRecoveryBoundaries(InstallerFixture):
+    loaded_root_service = SystemServiceGaps.loaded_root_service
+    def test_loaded_nonrunning_service_blocks_because_it_can_restart(self):
+        self.system = dict(self.loaded_root_service(), running=False, pid=None)
+        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+            installer.install(self.archive, True)
+        self.assertFalse(self.commands)
+
+    def test_late_root_service_before_stop_keeps_old_app_and_no_journal(self):
+        self.system_states = [dict(self.system), dict(self.system), self.loaded_root_service()]
+        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+            installer.install(self.archive, True)
+        self.assertEqual(self.target_info(), self.old)
+        self.assertFalse(self.mutations())
+        self.assertFalse((self.applications / '.remoteplay-install-journal.json').exists())
+        self.assertFalse(list(self.applications.glob('.remoteplay-update-*')))
+
+    def test_unknown_system_state_blocks_recovery_without_renames(self):
+        self.crash_after_phase('old_moved')
+        self.system = {'status': 'unavailable', 'loaded': None, 'reason': 'query_failed'}
+        before = len(self.commands)
+        backup = Path(self.journal()['backup'])
+        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/com.remoteplay.mesh'):
+            installer.recover_interrupted()
+        self.assertFalse(self.target.exists())
+        self.assertTrue(backup.exists())
+        self.assertEqual(len(self.commands), before)
+
+    def test_unknown_external_outcome_keeps_no_replay_priority(self):
+        def fail(args):
+            if args[0] == '/bin/launchctl' and args[1] == 'bootout':
+                raise ReleaseRejected('synthetic stop outcome unknown')
+        self.command_hook = fail
+        with self.assertRaises(ReleaseRejected): installer.install(self.archive, True)
+        self.system = self.loaded_root_service()
+        before = len(self.commands)
+        with self.assertRaisesRegex(ReleaseRejected, 'External service command outcome unknown'):
+            installer.recover_interrupted()
+        self.assertEqual(len(self.commands), before)
+        self.assertEqual(self.journal()['uncertain_external_phase'], 'stop_requested')

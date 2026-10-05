@@ -34,3 +34,14 @@
 61 项测试完成，55 项通过；6 项原生签名集成测试按原规则跳过，未申请访问签名私钥。覆盖锁并发与 inode、旧预检、同版本 no-op、锁内服务变化、unknown journal、共同命令预算、apply 预算到期后的有限回退、bootout/bootstrap 结果未知不重放、首次/第二次 rename 后恢复、回退再次中断、恢复幂等、篡改备份拒绝、符号链接 journal 拒绝和正常健康失败回退。
 
 集成前必须确认旧升级 turn 实际终止，并对 baseline-manifest.json 的原文件 hash 做 CAS；另核对仓库 HEAD、外来 staged 变动与既有 dirty 状态。补丁只改变 installer/guard、新 fixture 和本文档；测试依赖脚本及签名策略只是原样复制。当前没有集成、commit、push、安装或权限修复。
+
+
+## system mesh 服务预检补充
+
+安装器现在用固定的只读 `launchctl print system/com.remoteplay.mesh` 分类外部系统服务，最多使用共同 deadline 的剩余 15 秒。只返回 domain、label、loaded/running、PID、program 等限定字段，不回传原始 arguments、environment 或 stderr。只有明确的 not-found 响应代表不存在；超时、权限拒绝、无法执行及空成功响应均是 unknown。
+
+兼容版本关系与当前可执行性分别表示：plan 保留原 action，增加 system_mesh 和 apply_blockers；系统服务已加载或状态未知时，不声称将重启，并拒绝会修改应用的 apply。锁内和暂存候选完成后再次核对，显式中断恢复也先确认系统服务不存在。已安装同版本的 no-op 可以返回分类结果而不执行服务或应用变更。已加载但暂时未运行的系统服务也会阻止修改，因为它可能自动重启。
+
+GUI Quit 不会卸载 launchd 系统服务，因此该情况不会再被描述为需要反复退出 GUI。安装器没有获得系统服务控制能力：不 bootout/bootstrap system domain、不发送退出信号、不修改 owner、网络权限或管理员配置。系统服务的处理需要独立诊断和适当权限；unknown-noReplay 仍优先拒绝重放，未增加强制清除或管理员常驻 helper。
+
+新增 fixture 覆盖 GUI Quit 无效且系统服务仍加载、用户重复进程仍活跃、系统服务在锁内/暂存后出现、查询权限拒绝/超时/空响应、deadline 已过而不发查询、同版本 no-op、根服务阻止 rename 中断恢复，以及未知服务命令结果优先拒绝重放。所有系统查询和服务操作均由合成 runner 替代，未查询或控制真实系统服务。

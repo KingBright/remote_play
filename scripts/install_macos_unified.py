@@ -24,6 +24,7 @@ import uuid
 from macos_release_guard import ReleaseRejected, check_upgrade, load_policy, run, sha256, verified_archive, verify_app
 
 LABEL = 'com.remoteplay.host'
+SYSTEM_MESH = 'system/com.remoteplay.mesh'
 
 
 def service_state(domain: str, *, deadline=None) -> dict:
@@ -39,6 +40,51 @@ def service_state(domain: str, *, deadline=None) -> dict:
     return {'loaded': True, 'running': running, 'pid': int(pid[1]) if pid else None,
             'program': program[1].strip() if program else None}
 
+
+
+def system_mesh_state(*, deadline=None) -> dict:
+    """Observe one external system service; never manage it or echo raw output."""
+    base = {'domain': 'system', 'label': 'com.remoteplay.mesh',
+            'management': 'not_managed_by_user_installer'}
+    unknown = dict(base, status='unavailable', loaded=None, running=None, pid=None)
+    try:
+        result = subprocess.run(['/bin/launchctl', 'print', SYSTEM_MESH],
+                                capture_output=True, text=True,
+                                timeout=deadline.timeout(15) if deadline else 15)
+    except subprocess.TimeoutExpired:
+        return dict(unknown, reason='timeout')
+    except OSError:
+        return dict(unknown, reason='command_unavailable')
+    if result.returncode:
+        if 'Could not find service' in result.stderr:
+            return dict(base, status='not_loaded', loaded=False, running=False, pid=None)
+        return dict(unknown, reason='query_failed', exit_code=result.returncode)
+    if not result.stdout.strip():
+        return dict(unknown, reason='empty_response')
+    pid = re.search(r'^\s*pid = (\d+)\s*$', result.stdout, re.M)
+    program = re.search(r'^\s*program = (.+)$', result.stdout, re.M)
+    return dict(base, status='observed', loaded=True,
+                running=bool(re.search(r'^\s*state = running\s*$', result.stdout, re.M)),
+                pid=int(pid[1]) if pid else None,
+                program=program[1].strip() if program else None)
+
+
+def system_mesh_blocker(observation: dict) -> str | None:
+    if observation.get('status') == 'not_loaded' and observation.get('loaded') is False:
+        return None
+    if observation.get('status') == 'observed' and observation.get('loaded') is True:
+        return 'system_mesh_loaded'
+    return 'system_mesh_unknown'
+
+
+def require_system_mesh_absent(deadline, observation=None) -> dict:
+    current = observation if observation is not None else system_mesh_state(deadline=deadline)
+    blocker = system_mesh_blocker(current)
+    if blocker == 'system_mesh_loaded':
+        raise ReleaseRejected(SYSTEM_MESH + ' is loaded; the user installer cannot stop or upgrade this system service')
+    if blocker:
+        raise ReleaseRejected('Cannot determine ' + SYSTEM_MESH + ' absence; refusing application mutation')
+    return current
 
 def preserve_hashes(home: Path, plist: Path, *, deadline=None) -> dict:
     paths = [plist] if plist.is_file() else []
@@ -306,6 +352,7 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
     phase = document['phase']
     if phase in UNCERTAIN_PHASES or document.get('uncertain_external_phase'):
         raise ReleaseRejected('External service command outcome unknown; recovery requires diagnosis, not replay')
+    require_system_mesh_absent(deadline)
     observed = {}
     for name, path in [('target', target), ('backup', backup), ('staging', candidate)]:
         observed[name] = identity(verify_with_budget(path, policy, deadline)) if path.exists() else None
@@ -403,10 +450,14 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
         action = check_upgrade(previous, candidate_info)
         state = service_state(domain, deadline=deadline)
         validate_service(plist, executable, state)
+        system = system_mesh_state(deadline=deadline)
+        blocker = system_mesh_blocker(system) if action != 'already_installed' else None
         plan = {'action': action, 'target': str(target), 'previous': previous, 'candidate': candidate_info,
-                'will_restart_only_remoteplay': state['loaded'] and action != 'already_installed', 'permissions_modified': False,
-                'capture_health': 'not_tested_by_installer', 'applied': False}
+                'will_restart_only_remoteplay': state['loaded'] and action != 'already_installed' and not blocker, 'permissions_modified': False,
+                'capture_health': 'not_tested_by_installer', 'applied': False,
+                'system_mesh': system, 'apply_blockers': [blocker] if blocker else []}
         if not apply: return plan
+        if action != 'already_installed': require_system_mesh_absent(deadline, system)
         with installation_lock(applications):
             pending = read_journal(journal)
             if pending is not None: journal_paths(pending, target)
@@ -418,6 +469,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             validate_service(plist, executable, current)
             if current != state: raise ReleaseRejected('Service changed during preflight')
             if action == 'already_installed': return plan
+            require_system_mesh_absent(deadline)
             validate_processes(executable, current, deadline)
             preserved = preserve_hashes(home, plist, deadline=deadline)
             tag = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
@@ -433,6 +485,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 shutil.copytree(source, candidate, copy_function=copy_file)
                 if identity(verify_with_budget(candidate, policy, deadline)) != identity(candidate_info):
                     raise ReleaseRejected('Staged candidate changed')
+                require_system_mesh_absent(deadline)
             except Exception:
                 shutil.rmtree(staging_root)
                 raise
