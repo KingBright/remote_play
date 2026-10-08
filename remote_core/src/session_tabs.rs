@@ -67,6 +67,11 @@ impl SessionTabsState {
     pub fn selected_index(&self) -> usize {
         self.selected
     }
+    /// Resource routing and UI controls share this gate; a fallback tab is hidden
+    /// until the pending foreground connect completes or is cancelled.
+    pub fn active_index(&self, sessions: usize) -> Option<usize> {
+        (self.connecting.is_none() && self.selected < sessions).then_some(self.selected)
+    }
     pub fn connecting(&self) -> Option<&ConnectingSession> {
         self.connecting.as_ref()
     }
@@ -159,9 +164,10 @@ impl SessionTabsState {
         if completion == Completion::Selected {
             self.selected = sessions - 1;
         } else if self.selected >= sessions - 1 {
-            // Appending a background result must preserve an empty selection,
-            // especially after the newest foreground connection has failed.
-            self.selected = if sessions == 1 && self.intent.is_none() {
+            // Keep the first available tab as a cancellation fallback while
+            // connecting; a failed foreground intent must still stay empty.
+            self.selected = if sessions == 1 && (self.intent.is_none() || self.connecting.is_some())
+            {
                 0
             } else {
                 sessions
@@ -230,7 +236,7 @@ impl SessionTabsState {
                 },
             })
             .collect();
-        let active = self.connecting.is_none() && self.selected < tabs.len();
+        let active = self.active_index(tabs.len()).is_some();
         SessionTabsViewModel {
             tabs,
             can_disconnect: active || self.connecting.is_some(),
@@ -544,6 +550,46 @@ mod tests {
         assert!(!state.is_current(selection));
         assert!(state.is_current(reconnect));
     }
+    #[test]
+    fn cancelling_pending_connect_restores_first_background_arrival_without_routing_it_early() {
+        let mut state = SessionTabsState::default();
+        let a = start(&mut state, "a", 0);
+        let b = start(&mut state, "b", 0);
+        assert_eq!(state.complete("a", a, true, 0), Completion::Background);
+        state.attached(Completion::Background, 1);
+        assert_eq!(state.active_index(1), None);
+        assert!(!state.project([facts(11, "a", true)]).can_reconnect);
+        assert_eq!(state.disconnect(1), None);
+        assert_eq!(state.active_index(1), Some(0));
+        assert!(state.project([facts(11, "a", true)]).can_reconnect);
+        assert_eq!(state.complete("b", b, true, 1), Completion::Cancelled);
+        assert_eq!(state.active_index(1), Some(0));
+    }
+
+    #[test]
+    fn resource_routing_and_reconnect_projection_share_transition_and_empty_selection_gate() {
+        let mut state = SessionTabsState::default();
+        assert_eq!(state.active_index(0), None);
+        state.select(0, "existing", 1);
+        assert_eq!(state.active_index(1), Some(0));
+        let attempt = start(&mut state, "new", 1);
+        assert_eq!(state.active_index(1), None);
+        assert!(!state.project([facts(1, "existing", true)]).can_reconnect);
+        assert_eq!(
+            state.complete("new", attempt, false, 1),
+            Completion::Selected
+        );
+        assert_eq!(state.active_index(1), None);
+        assert!(!state.project([facts(1, "existing", true)]).can_reconnect);
+        state.select(0, "existing", 1);
+        assert_eq!(state.active_index(1), Some(0));
+        assert!(state.project([facts(1, "existing", true)]).can_reconnect);
+        state.close_index(0, 1);
+        assert_eq!(state.active_index(0), None);
+        state.clear();
+        assert_eq!(state.active_index(0), None);
+    }
+
     #[test]
     fn late_background_attach_preserves_empty_selection_after_foreground_failure() {
         for count in [0, 1] {

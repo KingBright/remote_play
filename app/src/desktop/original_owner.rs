@@ -69,18 +69,12 @@ struct Pool {
 }
 impl Pool {
     fn active(&self) -> Option<&ViewSession> {
-        if self.tabs.connecting().is_some() {
-            None
-        } else {
-            self.sessions.get(self.tabs.selected_index())
-        }
+        let index = self.tabs.active_index(self.sessions.len())?;
+        self.sessions.get(index)
     }
     fn active_mut(&mut self) -> Option<&mut ViewSession> {
-        if self.tabs.connecting().is_some() {
-            None
-        } else {
-            self.sessions.get_mut(self.tabs.selected_index())
-        }
+        let index = self.tabs.active_index(self.sessions.len())?;
+        self.sessions.get_mut(index)
     }
 }
 
@@ -518,11 +512,7 @@ impl OriginalOwner {
     pub async fn reconnect_active(&self) -> Result<(), Error> {
         let (key, opts) = {
             let p = self.pool.lock().unwrap();
-            let s = &p
-                .sessions
-                .get(p.tabs.selected_index())
-                .ok_or("No selected device")?
-                .session;
+            let s = &p.active().ok_or("No selected device")?.session;
             (
                 s.key.clone(),
                 StreamStartOptions {
