@@ -1,0 +1,31 @@
+{
+  "schema": "rust.project_adoption.v1",
+  "project_root": "/Users/jinliang/remote_play",
+  "authority_inventory": {
+    "path": "/Users/jinliang/remote_play/docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json",
+    "sha256": "55224a4b7fde1e3977aca0a65f0b05f82515fcb725806517cdee47af741981cd"
+  },
+  "selected_artifact_refs": [
+    "/Users/jinliang/rust-target"
+  ],
+  "owned_budget_refs": [],
+  "owner_marker_sha256": {},
+  "source_storage": {
+    "classification": "unknown",
+    "confirmed_path": null,
+    "evidence": null
+  },
+  "contract_sha256": {
+    "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+    "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+    ".cargo/config": null,
+    ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c"
+  },
+  "budgets": null,
+  "coverage": {
+    "build_lock": false,
+    "closure": false,
+    "exact_apply": false,
+    "ide": false
+  }
+}

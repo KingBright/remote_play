@@ -1,13 +1,13 @@
 {
   "schema": "remoteplay.lifecycle.adoption-plan.v1",
   "project": "RemotePlay",
-  "state": "blocked-before-mechanical-wiring",
+  "state": "observe-check-connected-build-and-cleanup-not-integrated",
   "native_helper_policy": false,
   "product_source_baseline": "9f2f80dd636acb77065c18a8335535788b8d6a43",
   "priority": "host-maintenance-before-project-builds",
   "observed": {
     "cargo_version": "1.94.1",
-    "helper_source_sha256": "393fb23fb47b7f52ed0af381afc9f40240e5f21e59a0afa934a6f442a0c09806",
+    "helper_source_sha256": "97ec51682246b7649e2a45c3e12a82a096d62e86daeb782568a22f7b7bdf83d4",
     "target_locator": "cargo.metadata.target_directory",
     "build_locator": "cargo.metadata.build_directory",
     "target_and_build_same": true,
@@ -15,7 +15,81 @@
     "target_ownership": "shared-multiple-projects",
     "explicit_root_profiles": [],
     "profile_action": "preserve existing Cargo defaults and overrides",
-    "size_scan_performed": false
+    "size_scan_performed": false,
+    "helper_version": "1.1.0",
+    "workspace_intake": {
+      "agents_sha256": "65c780f1382780a8fc133225a35cfda920dbc147b79ae833b2d04cd091708ce6",
+      "ancestor_agents_present": false,
+      "toolchain_files_present": [],
+      "active_toolchain": "stable-aarch64-apple-darwin (default)",
+      "rustc_release": "1.94.1",
+      "rustc_commit": "e408947bfd200af42db322daf0fadfe7e26d3bd1",
+      "host_triple": "aarch64-apple-darwin",
+      "members": {
+        "remote_core": {
+          "manifest": "remote_core/Cargo.toml",
+          "sha256": "e264e1d67d52dd356574182f721ae96aa6baef32e26ffccf294427b82d0dfa0c",
+          "package": "remote_core",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        },
+        "host": {
+          "manifest": "host/Cargo.toml",
+          "sha256": "d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a",
+          "package": "host",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        },
+        "client": {
+          "manifest": "client/Cargo.toml",
+          "sha256": "c2928c039015b2073d1a1eda65dc7fa6a8dc515c55ac64b4678c0bdf322b4682",
+          "package": "client",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        },
+        "protocol": {
+          "manifest": "protocol/Cargo.toml",
+          "sha256": "7399522f23c48ce4137a7e3a5ca68b2f751207d62a904b71d45a2cf507a04e0a",
+          "package": "protocol",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        },
+        "remote_platform": {
+          "manifest": "remote_platform/Cargo.toml",
+          "sha256": "d45d6497b2e406ef16711cf2411857941b815eb2da2e0c85bed71a6bd1e7cc49",
+          "package": "remote_platform",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        },
+        "app": {
+          "manifest": "app/Cargo.toml",
+          "sha256": "761ca4ab21298950752230127dd3e7b7676b9ae3d00ba083084fb0e34afc8637",
+          "package": "remote_play_app",
+          "version": "2.0.0-alpha.8",
+          "edition": "2024"
+        },
+        "remote_client_bridge": {
+          "manifest": "remote_client_bridge/Cargo.toml",
+          "sha256": "4769edbcd0595e74f89bc1d39ddf0da76a2421eebbcf43086e8932237d0ec919",
+          "package": "remote_client_bridge",
+          "version": "2.0.0-alpha.6",
+          "edition": "2024"
+        }
+      },
+      "automatic_adopt_check_covers_agents": false,
+      "automatic_adopt_check_covers_effective_toolchain": false,
+      "automatic_adopt_check_covers_member_manifest_contents": false,
+      "root_workspace_members_declaration": "indirectly covered by root Cargo.toml digest",
+      "global_config_flags_wrapper_and_incremental_closure": "not covered by adopt-check",
+      "observed_override_variables": {
+        "CARGO_TARGET_DIR": "unset",
+        "CARGO_BUILD_TARGET_DIR": "unset",
+        "CARGO_BUILD_BUILD_DIR": "unset",
+        "RUSTC_WRAPPER": "unset",
+        "CARGO_INCREMENTAL": "unset",
+        "RUSTFLAGS": "unset"
+      }
+    }
   },
   "policy": {
     "existing_target_action": "preserve; register reference only",
@@ -27,7 +101,13 @@
       "latest_hash_variants_per_name_extension": 2,
       "hash_retention_executor": "existing cleaner, not reimplemented here",
       "latest_history_per_artifact_family": 2,
-      "artifact_family_dimensions": ["component", "platform", "architecture", "environment", "purpose"],
+      "artifact_family_dimensions": [
+        "component",
+        "platform",
+        "architecture",
+        "environment",
+        "purpose"
+      ],
       "current_always_protected": true,
       "necessary_rollback_always_protected": true,
       "active_always_protected": true,
@@ -47,20 +127,54 @@
       "budget_check_ready": false
     }
   },
-  "resource_references": [
+  "entrypoints": {
+    "check": {
+      "project_entry": "scripts/check_artifact_lifecycle.py check",
+      "backend": "installed rust_storage.py adopt-check",
+      "wired": true
+    },
+    "dry_run": {
+      "project_entry": "scripts/check_artifact_lifecycle.py dry-run",
+      "backend": "adopt-check then installed rust_storage.py adopt --dry-run",
+      "wired": true
+    },
+    "build": {
+      "existing_stream_test": "scripts/test_stream_settings_model.py",
+      "native_helper_wired": false
+    },
+    "init_existing_project": "forbidden",
+    "rotate_shared_target": "forbidden"
+  },
+  "inventory_role": "sole project authority; binding contains references and digests only",
+  "owner": "RemotePlay",
+  "artifacts": [
     {
       "id": "host-shared-cargo-target-and-build",
-      "scope": "shared-dependency",
-      "path_locator": "cargo.metadata.target_directory and build_directory",
-      "owned_by_this_project": false,
-      "known_consumer": "RemotePlay",
-      "other_consumers": "not enumerated by this project task",
-      "activity": "unknown-protected",
-      "logical_bytes": null,
-      "reclaim_bytes": null,
+      "path": "/Users/jinliang/rust-target",
+      "canonical_path": "/Users/jinliang/rust-target",
+      "kind": "shared_cargo_cache",
+      "owner": "shared-multiple-projects; RemotePlay is a consumer",
+      "purpose": "Existing Cargo target/build reference only; preserve current effective Cargo paths and arguments",
+      "shared": true,
+      "exclusive_owner": false,
+      "generated": true,
+      "role": "unknown-protected",
+      "activity": "not-verified",
+      "recent_contained_change": "not-scanned",
       "delete_now": false,
-      "dry_run_candidate": false
-    },
+      "reproducible": false,
+      "backed_up": false,
+      "retire_conditions": [
+        "all consumers and active uses inventoried",
+        "latest two hash variants/current/rollback/unique deliveries protected",
+        "separate exact cleanup authorization and executor integration"
+      ],
+      "single_project_clean_allowed": false,
+      "logical_bytes": null,
+      "reclaim_bytes": null
+    }
+  ],
+  "unresolved_protected_references": [
     {
       "id": "signed-deliverables-current-and-rollback",
       "scope": "existing release and per-device installation receipts",
@@ -87,18 +201,18 @@
       "dry_run_candidate": false
     }
   ],
-  "entrypoints": {
-    "check": {"backend": "rust-project-lifecycle/scripts/rust_storage.py check", "wired": false},
-    "dry_run": {"backend": "rust-project-lifecycle/scripts/rust_storage.py dry-run", "wired": false},
-    "build": {"existing_stream_test": "scripts/test_stream_settings_model.py", "native_helper_wired": false},
-    "init_existing_project": "forbidden",
-    "rotate_shared_target": "forbidden"
+  "coverage": {
+    "build_lock": false,
+    "closure": false,
+    "exact_apply": false,
+    "ide": false
   },
-  "interface_gaps": [
-    "no non-overwriting existing-project adoption command",
-    "native load/registry accept only project/.rust-artifacts, not shared references or external releases",
-    "native run forces new target/build roots instead of preserving existing target and protected test entry",
-    "project budget and growth cannot be attributed from shared hash filenames",
-    "existing cleaner lacks exact registry-plan apply interface; direct Cargo/IDE/CI coordination remains unverified"
+  "build_ready": false,
+  "remaining_gaps": [
+    "AGENTS, effective toolchain and member manifest changes require separate manual reassessment",
+    "build-lock, build closure, success/failure/cancel lifecycle and direct Cargo/IDE/CI are not integrated",
+    "shared target has no project-owned budget scopes; project attribution and long-term headroom remain unknown",
+    "actual signed current/rollback/unique delivery and verified backups remain unresolved protected references",
+    "only the existing cleaner may perform separately reviewed exact apply; no automatic cleanup integration"
   ]
 }
