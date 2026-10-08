@@ -11,6 +11,7 @@ pub mod discovery;
 mod file_delivery;
 pub mod file_transfer;
 pub mod file_transfer_runtime;
+pub mod shared_files;
 pub mod frame_pacer;
 pub mod jitter_buffer;
 pub mod latest_frame;
@@ -63,3 +64,5 @@ pub use traits::*;
 pub fn init_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
+
+pub mod routed_relay;

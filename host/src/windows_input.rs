@@ -11,7 +11,6 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
 pub struct WindowsInputInjector {
     pressed: AtomicU8,
@@ -96,13 +95,15 @@ impl InputInjector for WindowsInputInjector {
     fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
         match event {
             InputEvent::MouseMove { dx, dy } => send_mouse(MOUSEEVENTF_MOVE, dx, dy, 0),
-            InputEvent::MouseMoveAbsolute { x, y } => unsafe {
-                let screen_w = GetSystemMetrics(SM_CXSCREEN).max(1);
-                let screen_h = GetSystemMetrics(SM_CYSCREEN).max(1);
-                let abs_x = (i32::from(x) * 65535) / screen_w;
-                let abs_y = (i32::from(y) * 65535) / screen_h;
-                send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, abs_x, abs_y, 0);
-            },
+            InputEvent::MouseMoveAbsolute { x, y } => {
+                // The wire already uses SendInput's 0..65535 absolute range.
+                send_mouse(
+                    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    i32::from(x),
+                    i32::from(y),
+                    0,
+                );
+            }
             InputEvent::MouseDown(button) | InputEvent::MouseUp(button) => {
                 let down = matches!(event, InputEvent::MouseDown(_));
                 let flags = match (button, down) {

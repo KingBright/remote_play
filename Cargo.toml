@@ -9,3 +9,8 @@ members = [
     "remote_client_bridge",
 ]
 resolver = "2"
+
+[patch.crates-io]
+gpui-ce = { path = "third_party/gpui-ce" }
+blade-graphics = { path = "third_party/blade-graphics" }
+screencapturekit = { path = "third_party/screencapturekit" }

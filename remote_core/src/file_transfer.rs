@@ -265,6 +265,61 @@ impl FileTransferReader {
         })
     }
 
+    /// Use the exact local selection handle; do not resolve a remote path.
+    pub async fn from_open_file(
+        mut file: File,
+        name: String,
+        spec: FileTransferSpec,
+        policy: FileTransferPolicy,
+    ) -> Result<Self, FileTransferError> {
+        validate_chunk_payload_len(spec.chunk_payload_len)?;
+        if !is_safe_file_name(&name) {
+            return Err(FileTransferError::InvalidFileName);
+        }
+        let metadata = file.metadata().await?;
+        if !metadata.is_file() {
+            return Err(FileTransferError::InvalidFileName);
+        }
+        let size_bytes = metadata.len();
+        if size_bytes > policy.max_file_bytes {
+            return Err(FileTransferError::FileTooLarge {
+                actual_bytes: size_bytes,
+                limit_bytes: policy.max_file_bytes,
+            });
+        }
+        let total_chunks = chunk_count(size_bytes, spec.chunk_payload_len)?;
+        file.seek(SeekFrom::Start(0)).await?;
+        let mut remaining = size_bytes;
+        let mut crc = StreamingCrc32::new();
+        let mut buffer = vec![0u8; spec.chunk_payload_len];
+        while remaining > 0 {
+            let n = (remaining.min(buffer.len() as u64)) as usize;
+            file.read_exact(&mut buffer[..n]).await?;
+            crc.update(&buffer[..n]);
+            remaining -= n as u64;
+        }
+        file.seek(SeekFrom::Start(0)).await?;
+        let manifest = FileTransferManifest {
+            transfer_id: spec.transfer_id,
+            file_object_id: spec.file_object_id,
+            name,
+            group: spec.group.clone(),
+            mime_type: None,
+            size_bytes,
+            chunk_payload_len: spec.chunk_payload_len as u32,
+            checksum_crc32: crc.finalize(),
+        };
+        Ok(Self {
+            file,
+            spec,
+            manifest,
+            manifest_sent: false,
+            next_chunk_index: 0,
+            offset: 0,
+            total_chunks,
+        })
+    }
+
     pub fn manifest(&self) -> &FileTransferManifest {
         &self.manifest
     }

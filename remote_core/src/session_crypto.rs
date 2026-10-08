@@ -19,7 +19,12 @@ static PAIRED_PSK: std::sync::RwLock<Option<Vec<u8>>> = std::sync::RwLock::new(N
 pub fn use_paired_session_secret(secret: &str) {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("hmac key");
     mac.update(b"remote-play/paired-media/v2");
-    *PAIRED_PSK.write().unwrap() = Some(mac.finalize().into_bytes().to_vec());
+    let next = mac.finalize().into_bytes().to_vec();
+    let mut current = PAIRED_PSK.write().unwrap();
+    if current.as_ref() != Some(&next) {
+        crate::shared_files::shared_file_catalog().clear();
+    }
+    *current = Some(next);
 }
 pub fn refresh_paired_session_secret(secret: &str) {
     let configured = PAIRED_PSK.read().unwrap().is_some();

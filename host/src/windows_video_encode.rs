@@ -1,4 +1,4 @@
-use crate::ffmpeg_hevc::FfmpegHevcSource;
+use crate::ffmpeg_hevc::{FfmpegHevcSource, replace_capture_source};
 use crate::windows_capture::WindowsVideoFrame;
 use async_trait::async_trait;
 use remote_core::VideoEncoder;
@@ -38,17 +38,25 @@ impl WindowsVideoEncoder {
         self.force_keyframe = true;
     }
 
-    pub fn update_settings(&mut self, width: u32, height: u32, fps: u32, bitrate_kbps: u32) {
-        if self.settings == (width, height, fps, bitrate_kbps) {
-            return;
+    pub fn update_settings(
+        &mut self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let settings = (width, height, fps, bitrate_kbps);
+        if self.settings == settings {
+            return Ok(());
         }
-        self.settings = (width, height, fps, bitrate_kbps);
-        if self.source.is_none() {
-            return;
+        if self.source.is_some() {
+            replace_capture_source(&mut self.source, || {
+                FfmpegHevcSource::start(width, height, fps, bitrate_kbps)
+            })?;
+            self.force_keyframe = true;
         }
-        if let Ok(source) = FfmpegHevcSource::start(width, height, fps, bitrate_kbps) {
-            self.source = Some(source);
-        }
+        self.settings = settings;
+        Ok(())
     }
 
     pub fn set_paused(&mut self, paused: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -57,6 +65,7 @@ impl WindowsVideoEncoder {
         } else if self.source.is_none() {
             let (width, height, fps, bitrate) = self.settings;
             self.source = Some(FfmpegHevcSource::start(width, height, fps, bitrate)?);
+            self.force_keyframe = true;
         }
         Ok(())
     }
@@ -65,18 +74,26 @@ impl WindowsVideoEncoder {
         &mut self,
     ) -> Result<EncodedChunk, Box<dyn Error + Send + Sync>> {
         if let Some(source) = &self.source {
-            let started = std::time::Instant::now();
-            let (nalu, is_keyframe) = tokio::task::block_in_place(|| source.pull_access_unit())?;
-            let capture_ts_us = remote_core::timing::quanta_now_us();
-            let mut timing = protocol::FrameTimingCheckpoints::new(capture_ts_us);
-            timing.encode_done_ts_us = started.elapsed().as_micros() as u32;
-            return Ok(EncodedChunk {
-                nalu,
-                capture_time_ms: (capture_ts_us / 1000) as u32,
-                is_keyframe,
-                encode_cost_ms: started.elapsed().as_secs_f32() * 1000.0,
-                timing,
-            });
+            loop {
+                let started = std::time::Instant::now();
+                let (nalu, is_keyframe) = source.pull_access_unit().await?;
+                if self.force_keyframe && !is_keyframe {
+                    continue;
+                }
+                if is_keyframe {
+                    self.force_keyframe = false;
+                }
+                let capture_ts_us = remote_core::timing::quanta_now_us();
+                let mut timing = protocol::FrameTimingCheckpoints::new(capture_ts_us);
+                timing.encode_done_ts_us = started.elapsed().as_micros() as u32;
+                return Ok(EncodedChunk {
+                    nalu,
+                    capture_time_ms: (capture_ts_us / 1000) as u32,
+                    is_keyframe,
+                    encode_cost_ms: started.elapsed().as_secs_f32() * 1000.0,
+                    timing,
+                });
+            }
         }
         std::future::pending().await
     }
@@ -95,5 +112,21 @@ impl VideoEncoder for WindowsVideoEncoder {
 
     async fn pull_encoded(&mut self) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
         Ok(self.pull_encoded_chunk().await?.nalu)
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn paused_settings_update_never_starts_ffmpeg() {
+        let mut encoder = WindowsVideoEncoder {
+            settings: (1920, 1080, 60, 8000),
+            source: None,
+            force_keyframe: false,
+        };
+        encoder.update_settings(1280, 720, 30, 4000).unwrap();
+        assert!(encoder.source.is_none());
+        assert_eq!(encoder.settings, (1280, 720, 30, 4000));
     }
 }

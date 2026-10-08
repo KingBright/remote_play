@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 use tokio::time;
 
@@ -30,6 +30,13 @@ pub struct Statistics {
     pub video_decode_errors: AtomicUsize,
     pub video_frames_rendered: AtomicUsize,
     pub video_decode_queue_dropped: AtomicUsize,
+    /// Decoder-side reference loss is not a codec error. Keep recovery armed
+    /// until a valid output frame is produced, not merely until an IDR arrives.
+    pub video_decoder_needs_keyframe: AtomicBool,
+    /// Cumulative diagnostics; never reset by the periodic throughput reporter.
+    pub video_decoder_reference_gaps: AtomicUsize,
+    pub video_decoder_reference_skipped: AtomicUsize,
+    pub video_keyframe_requests: AtomicUsize,
     pub audio_ingress_dropped: AtomicUsize,
 }
 

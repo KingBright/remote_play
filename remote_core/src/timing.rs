@@ -398,9 +398,12 @@ mod tests {
         assert!(tracker.checkpoints.capture_ts_us > 0);
 
         tracker.mark_encode_queue();
-        assert!(tracker.checkpoints.encode_queue_ts_us <= tracker.checkpoints.encode_done_ts_us);
+        // Encoding has not completed yet: its checkpoint must still be unset.
+        // Comparing against it here only passed when the queue offset rounded to zero.
+        assert_eq!(tracker.checkpoints.encode_done_ts_us, 0);
 
         tracker.mark_encode_done();
+        assert!(tracker.checkpoints.encode_queue_ts_us <= tracker.checkpoints.encode_done_ts_us);
         tracker.mark_packetize();
         tracker.mark_send();
 

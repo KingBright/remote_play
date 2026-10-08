@@ -232,6 +232,34 @@ impl FragmentEntry {
     }
 }
 
+/// A rejected datagram is not an authenticated application command and not a
+/// socket failure. Exposing it as SessionCommand::Error would let invalid input
+/// influence an otherwise valid session's user-visible state.
+#[derive(Debug)]
+pub struct UdpPacketRejection {
+    pub peer: SocketAddr,
+    cause: Box<dyn Error + Send + Sync>,
+}
+impl std::fmt::Display for UdpPacketRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(f)
+    }
+}
+impl Error for UdpPacketRejection {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+fn rejected_packet(
+    peer: SocketAddr,
+    cause: impl Into<Box<dyn Error + Send + Sync>>,
+) -> Box<dyn Error + Send + Sync> {
+    Box::new(UdpPacketRejection {
+        peer,
+        cause: cause.into(),
+    })
+}
+
 pub struct UdpReceiver {
     socket: Arc<UdpSocket>,
     fragments: Arc<Mutex<FragmentMap>>,
@@ -272,6 +300,7 @@ impl UdpReceiver {
         addr: SocketAddr,
     ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
         self.decode_payload_inner(buf, len, addr, false)
+            .map_err(|error| rejected_packet(addr, error))
     }
 
     fn decode_payload_inner(
@@ -366,12 +395,14 @@ impl UdpReceiver {
                 continue;
             }
             if len > MAX_FRAGMENT_PAYLOAD + 10 {
-                return Err(if buf[0] == 0x03 {
-                    "Invalid UDP fragment payload size"
-                } else {
-                    "UDP datagram exceeds size limit"
-                }
-                .into());
+                return Err(rejected_packet(
+                    addr,
+                    if buf[0] == 0x03 {
+                        "Invalid UDP fragment payload size"
+                    } else {
+                        "UDP datagram exceeds size limit"
+                    },
+                ));
             }
             match buf[0] {
                 0x03 => {
@@ -385,17 +416,23 @@ impl UdpReceiver {
                     let fragment_key = (addr, header, fragment_id);
 
                     if total_chunks == 0 || total_chunks as usize > MAX_FRAGMENT_CHUNKS {
-                        return Err("Invalid UDP fragment total chunk count".into());
+                        return Err(rejected_packet(
+                            addr,
+                            "Invalid UDP fragment total chunk count",
+                        ));
                     }
 
                     if chunk_idx >= total_chunks {
-                        return Err("Invalid UDP fragment index".into());
+                        return Err(rejected_packet(addr, "Invalid UDP fragment index"));
                     }
                     if len == 10 || len - 10 > MAX_FRAGMENT_PAYLOAD {
-                        return Err("Invalid UDP fragment payload size".into());
+                        return Err(rejected_packet(addr, "Invalid UDP fragment payload size"));
                     }
                     if !matches!(header, 0x01 | 0x02 | 0x04 | 0x05 | MULTIPLEX_ENCRYPTED) {
-                        return Err("Invalid UDP fragment multiplexing header".into());
+                        return Err(rejected_packet(
+                            addr,
+                            "Invalid UDP fragment multiplexing header",
+                        ));
                     }
 
                     let mut fragments = self.fragments.lock().await;
@@ -405,7 +442,10 @@ impl UdpReceiver {
                     let entry = match fragments.entry(fragment_key) {
                         Entry::Occupied(entry) => {
                             if entry.get().chunks.len() != total_chunks as usize {
-                                return Err("Mismatched UDP fragment total chunk count".into());
+                                return Err(rejected_packet(
+                                    addr,
+                                    "Mismatched UDP fragment total chunk count",
+                                ));
                             }
                             entry.into_mut()
                         }

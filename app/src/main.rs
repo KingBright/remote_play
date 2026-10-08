@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 use remote_core::mesh::AppPrivateMeshConfigStore;
 use std::error::Error;
 
@@ -20,11 +21,24 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if headless {
         config.enable_viewer_media = false;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     if !headless {
-        return remote_play_app::run_unified_gui(config).await;
+        #[cfg(target_os = "macos")]
+        if std::env::var("REMOTE_PLAY_LEGACY_MAC_GUI").as_deref() == Ok("1") {
+            return remote_play_app::run_unified_gui(config).await;
+        }
+        #[cfg(feature = "gpui-restoration")]
+        return remote_play_app::restored_ui::run_restored_gui(config).await;
+        #[cfg(not(feature = "gpui-restoration"))]
+        return Err("GPUI desktop GUI was not compiled; no alternate interface was started".into());
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let Some(_runtime_instance) =
+        remote_play_app::desktop::claim_headless_runtime(&config.mesh_dir)?
+    else {
+        return Ok(());
+    };
     let runtime = remote_play_app::start_unified_runtime(config).await?;
     remote_core::stats::Statistics::start_reporter(runtime.stats.clone(), "Unified", 1);
     println!(
@@ -47,6 +61,17 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
     };
 
     match command.as_str() {
+        "--product-info-json" => {
+            if args.next().is_some() {
+                return Err("--product-info-json takes no extra arguments".into());
+            }
+            // Runs before creating/reading a device profile or opening a window.
+            println!(
+                "{}",
+                serde_json::to_string(&remote_play_app::gui_backend::product_info())?
+            );
+            Ok(true)
+        }
         DEVICE_GROUP_ENSURE_ARG => {
             let config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
             let store = AppPrivateMeshConfigStore::new(&config.mesh_dir);

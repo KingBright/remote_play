@@ -86,7 +86,8 @@ pub struct TransferCenterState {
 impl TransferCenterState {
     pub fn apply_event(&mut self, event: &FileTransferEvent) {
         match event {
-            FileTransferEvent::IncomingClipboardReady { .. } => {}
+            FileTransferEvent::IncomingClipboardReady { .. }
+            | FileTransferEvent::SharedResponse { .. } => {}
             FileTransferEvent::OutgoingGroupStarted {
                 group_id,
                 file_count,
@@ -296,6 +297,27 @@ impl TransferCenterState {
             }
             FileTransferEvent::Error { .. } => {}
         }
+    }
+
+    /// Keep active work and a bounded recent history when a GUI stays open for days.
+    pub fn compact_history(&mut self, max_completed: usize) {
+        let mut completed: Vec<u64> = self
+            .entries
+            .iter()
+            .filter(|e| !e.snapshot.is_running())
+            .map(|e| e.updated_seq)
+            .collect();
+        if completed.len() <= max_completed {
+            return;
+        }
+        completed.sort_unstable_by(|a, b| b.cmp(a));
+        let cutoff = completed
+            .get(max_completed.saturating_sub(1))
+            .copied()
+            .unwrap_or(u64::MAX);
+        self.entries
+            .retain(|e| e.snapshot.is_running() || (max_completed > 0 && e.updated_seq >= cutoff));
+        self.child_progress.retain(|child| child.group_id.is_some_and(|id| self.entries.iter().any(|e| matches!(e.key, TransferKey::Group { direction, group_id } if direction == child.direction && group_id == id))));
     }
 
     pub fn snapshots(&self) -> Vec<TransferEntrySnapshot> {

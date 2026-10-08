@@ -734,8 +734,6 @@ dependencies = [
 [[package]]
 name = "blade-graphics"
 version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e71cfb73b98eb9f58ee84048aa1bdf4e7497fd20c141b57523499fa066b48fed"
 dependencies = [
  "ash 0.38.0+1.3.281",
  "ash-window",
@@ -1107,8 +1105,9 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
+ "anyhow",
  "async-trait",
  "core-foundation 0.10.0",
  "core-media-sys",
@@ -1117,6 +1116,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "gpui-ce",
+ "libc",
  "metal 0.27.0",
  "objc",
  "opus",
@@ -1128,6 +1128,7 @@ dependencies = [
  "tokio",
  "video-toolbox-sys",
  "wgpu",
+ "windows 0.61.3",
  "winit",
  "yororen_ui",
 ]
@@ -2660,8 +2661,6 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e44a107ce223acf01c69a901edfa5bb7d233e3f226aaefe017d2268e9cfe11ca"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -3062,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "host"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
  "async-trait",
  "core-foundation 0.10.0",
@@ -4907,7 +4906,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
  "bincode",
  "serde",
@@ -5352,7 +5351,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "remote_client_bridge"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5370,7 +5369,7 @@ dependencies = [
 
 [[package]]
 name = "remote_core"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
  "async-trait",
  "bincode",
@@ -5394,7 +5393,7 @@ dependencies = [
 
 [[package]]
 name = "remote_platform"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 dependencies = [
  "arboard",
  "async-trait",
@@ -5409,15 +5408,17 @@ dependencies = [
 
 [[package]]
 name = "remote_play_app"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.8"
 dependencies = [
  "client",
  "gpui-ce",
  "host",
+ "image",
  "objc2 0.6.4",
  "objc2-app-kit",
  "protocol",
  "raw-window-handle",
+ "remote_client_bridge",
  "remote_core",
  "remote_platform",
  "rfd",
@@ -5764,8 +5765,6 @@ dependencies = [
 [[package]]
 name = "screencapturekit"
 version = "1.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99b732b2db50b25cfbcb171e1b7abda06e77873aeef493e635eb209482fdd149"
 
 [[package]]
 name = "screencapturekit-sys"

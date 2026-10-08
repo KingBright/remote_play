@@ -101,6 +101,20 @@ fn accessible_window_size(pid: i32, title: &str) -> Option<(f64, f64)> {
 }
 
 pub fn list() -> Result<Vec<CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::capture_readiness::ffmpeg_program()?;
+        let display = crate::capture_readiness::capture_display_rect()?;
+        return Ok(vec![CaptureSourceInfo {
+            source: CaptureSource::MainDisplay,
+            title: format!("Physical display ({})", display.adapter),
+            application: String::new(),
+            process_id: None,
+            width: display.width,
+            height: display.height,
+            supports_input: true,
+        }]);
+    }
     #[cfg(target_os = "macos")]
     {
         use screencapturekit::prelude::*;
@@ -141,13 +155,14 @@ pub fn list() -> Result<Vec<CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
                 process_id: Some(app.process_id()),
                 width: size.0,
                 height: size.1,
-                // Screen capture permission never implies window-scoped input injection.
-                supports_input: false,
+                // Independent window input is routed to its verified process/window,
+                // and still requires the user's existing Accessibility grant.
+                supports_input: crate::window_input::permission_available(),
             });
         }
         Ok(sources)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     Ok(vec![CaptureSourceInfo {
         source: CaptureSource::MainDisplay,
         title: "Desktop".into(),

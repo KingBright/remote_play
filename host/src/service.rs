@@ -37,6 +37,70 @@ enum AudioGroupKey {
     Application(i32),
 }
 
+#[cfg(target_os = "windows")]
+static WINDOWS_VIDEO_CAPTURE_RESERVED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+struct WindowsVideoCaptureReservation;
+
+#[cfg(target_os = "windows")]
+impl WindowsVideoCaptureReservation {
+    fn acquire() -> Result<Self, String> {
+        WINDOWS_VIDEO_CAPTURE_RESERVED
+            .compare_exchange(false, true, Relaxed, Relaxed)
+            .map(|_| Self)
+            .map_err(|_| {
+                "Windows capture is already in use. This safe build allows one video capture session at a time."
+                    .to_string()
+            })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsVideoCaptureReservation {
+    fn drop(&mut self) {
+        WINDOWS_VIDEO_CAPTURE_RESERVED.store(false, Relaxed);
+    }
+}
+
+fn validate_host_video_settings(
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+) -> Result<(), &'static str> {
+    protocol::validate_video_settings(width, height, fps, bitrate_kbps)?;
+    #[cfg(target_os = "windows")]
+    {
+        const MAX_PIXELS: u64 = 2560 * 1440;
+        if u64::from(width) * u64::from(height) > MAX_PIXELS || fps > 60 || bitrate_kbps > 20_000 {
+            return Err("Windows safe capture budget is 2560x1440 pixels, 60 fps, and 20000 kbps");
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputTarget {
+    Desktop,
+    Window { id: u32, pid: i32 },
+}
+fn input_target_for(
+    source: CaptureSource,
+    pid: Option<i32>,
+    supported: bool,
+) -> Option<InputTarget> {
+    if !supported {
+        return None;
+    }
+    match source {
+        CaptureSource::MainDisplay | CaptureSource::Display(_) => Some(InputTarget::Desktop),
+        CaptureSource::Window(id) => pid
+            .filter(|pid| *pid > 0)
+            .map(|pid| InputTarget::Window { id, pid }),
+    }
+}
+
 struct Subscription {
     settings_revision: u64,
     request: SubscriptionRequest,
@@ -48,6 +112,12 @@ struct Subscription {
     audio_group: Option<AudioGroupKey>,
     audio_active: bool,
     supports_input: bool,
+    input_target: Option<InputTarget>,
+    last_input_error: Option<Instant>,
+    source_revision: u32,
+    video_sequence: Arc<std::sync::atomic::AtomicU16>,
+    #[cfg(target_os = "windows")]
+    _capture_reservation: Arc<WindowsVideoCaptureReservation>,
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
@@ -195,7 +265,7 @@ impl Connection {
         });
     }
 
-    fn subscribe(
+    async fn subscribe(
         &mut self,
         request: SubscriptionRequest,
         addr: SocketAddr,
@@ -203,7 +273,24 @@ impl Connection {
         stats: Arc<Statistics>,
         legacy: bool,
     ) -> Result<SessionCommand, String> {
-        protocol::validate_video_settings(
+        self.subscribe_with_preflight(request, addr, udp, stats, legacy, || {
+            #[cfg(target_os = "windows")]
+            crate::capture_readiness::ffmpeg_program()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn subscribe_with_preflight(
+        &mut self,
+        request: SubscriptionRequest,
+        addr: SocketAddr,
+        udp: UdpSender,
+        stats: Arc<Statistics>,
+        legacy: bool,
+        preflight: impl FnOnce() -> Result<(), String>,
+    ) -> Result<SessionCommand, String> {
+        validate_host_video_settings(
             request.width,
             request.height,
             request.fps,
@@ -222,10 +309,22 @@ impl Connection {
         if request.id == 0 || request.id >= 0x1000_0000 {
             return Err("subscription ID outside supported range".into());
         }
-        if let Some(existing) = self.subscriptions.get(&request.id) {
-            if existing.request.source != request.source || existing.request.audio != request.audio
-            {
-                return Err("subscription ID already has a different source/settings".into());
+        if let Some(existing) = self.subscriptions.get_mut(&request.id)
+            && existing.request.source == request.source
+            && existing.request.audio == request.audio
+            && !existing.task.is_finished()
+        {
+            // Updating rates on an unchanged source must not restart capture,
+            // reset the packet sequence or unpause an inactive subscription.
+            if existing.request != request {
+                existing.request = request.clone();
+                existing.settings.send_modify(|v| {
+                    v.width = request.width;
+                    v.height = request.height;
+                    v.fps = request.fps;
+                    v.bitrate_kbps = request.bitrate_kbps;
+                });
+                existing.keyframe.store(true, Relaxed);
             }
             return Ok(SessionCommand::Subscribed {
                 id: request.id,
@@ -235,8 +334,19 @@ impl Connection {
                 supports_input: existing.supports_input,
             });
         }
-        if self.subscriptions.len() >= MAX_SUBSCRIPTIONS {
+        if self.subscriptions.len() >= MAX_SUBSCRIPTIONS
+            && !self.subscriptions.contains_key(&request.id)
+        {
             return Err("subscription limit reached".into());
+        }
+        // Check the capture dependency before acquiring microphones, audio groups,
+        // or subscription tasks. A permanent packaging failure must remain inert.
+        if let Err(reason) = preflight() {
+            eprintln!(
+                "Capture preflight rejected subscription {}: {reason}",
+                request.id
+            );
+            return Err(reason);
         }
         let sources = if request.source == CaptureSource::MainDisplay {
             Vec::new()
@@ -250,7 +360,49 @@ impl Connection {
         let supports_input = selected.map_or(request.source == CaptureSource::MainDisplay, |s| {
             s.supports_input
         });
-        let audio_key = if request.audio || legacy {
+        let input_target = input_target_for(
+            request.source,
+            selected.and_then(|s| s.process_id),
+            supports_input,
+        );
+        let supports_input = supports_input && input_target.is_some();
+        let mut initial_settings = stream_settings(&request);
+        let mut activity_revision = 0;
+        let mut settings_revision = 0;
+        let mut source_revision = 0;
+        let mut audio_active = true;
+        let mut video_sequence = Arc::new(std::sync::atomic::AtomicU16::new(0));
+        if let Some(existing) = self.subscriptions.get_mut(&request.id) {
+            initial_settings.paused = existing.settings.borrow().paused;
+            activity_revision = existing.revision;
+            settings_revision = existing.settings_revision;
+            source_revision = existing.source_revision;
+            audio_active = existing.audio_active;
+            video_sequence = existing.video_sequence.clone();
+            // abort() alone only requests cancellation. Wait for actual teardown
+            // before a replacement can touch capture/encoder resources.
+            let _ = existing.cancel.send(());
+            existing.task.abort();
+            if tokio::time::timeout(Duration::from_secs(2), &mut existing.task)
+                .await
+                .is_err()
+            {
+                return Err("previous capture did not stop; replacement was not started".into());
+            }
+        }
+        self.subscriptions.remove(&request.id);
+        // Replacement subscriptions must release the previous Windows capture
+        // reservation before acquiring the next one. Otherwise same-session
+        // display/source switches fail against their own reservation.
+        #[cfg(target_os = "windows")]
+        let capture_reservation = Arc::new(WindowsVideoCaptureReservation::acquire()?);
+        #[cfg(target_os = "windows")]
+        let task_reservation = capture_reservation.clone();
+        #[cfg(target_os = "windows")]
+        let wants_audio_group = legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE");
+        #[cfg(not(target_os = "windows"))]
+        let wants_audio_group = request.audio || legacy;
+        let audio_key = if wants_audio_group {
             Some(
                 selected
                     .and_then(|s| s.process_id)
@@ -273,7 +425,9 @@ impl Connection {
                     cancel_rx,
                     stream_settings_rx: Some(rx),
                     include_audio: request.audio,
-                    include_microphone: legacy,
+                    // Legacy screen viewing is not consent to capture the host microphone.
+                    include_microphone: legacy
+                        && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"),
                 });
                 AudioGroup {
                     owner: request.id,
@@ -284,7 +438,7 @@ impl Connection {
             });
         }
         let (cancel, cancel_rx) = broadcast::channel(4);
-        let (settings, rx) = watch::channel(stream_settings(&request));
+        let (settings, rx) = watch::channel(initial_settings);
         let keyframe = Arc::new(AtomicBool::new(true));
         let stream_config = StreamingRunConfig {
             session_id: request.id,
@@ -300,10 +454,16 @@ impl Connection {
             source: request.source,
             stream_settings_rx: Some(rx),
             keyframe_requested: keyframe.clone(),
+            video_sequence: video_sequence.clone(),
         };
         let id = request.id;
         let task = tokio::spawn(async move {
+            // Stop/drop cannot release the global Windows slot until FFmpeg's
+            // destructor has actually completed, even if the task is aborted.
+            #[cfg(target_os = "windows")]
+            let _reservation = task_reservation;
             if let Err(error) = run_streaming(stream_config).await {
+                eprintln!("Capture subscription {id} failed: {error}");
                 send_session(
                     &udp,
                     addr,
@@ -321,14 +481,20 @@ impl Connection {
             Subscription {
                 request,
                 settings,
-                revision: 0,
-                settings_revision: 0,
+                revision: activity_revision,
+                settings_revision,
                 keyframe,
                 cancel,
                 task,
                 audio_group: audio_key,
-                audio_active: true,
+                audio_active,
                 supports_input,
+                input_target,
+                last_input_error: None,
+                source_revision,
+                video_sequence,
+                #[cfg(target_os = "windows")]
+                _capture_reservation: capture_reservation,
             },
         );
         self.refresh_audio();
@@ -336,6 +502,49 @@ impl Connection {
             id,
             audio_owner,
             supports_input,
+        })
+    }
+
+    async fn switch_source(
+        &mut self,
+        id: u32,
+        request_id: u32,
+        source: CaptureSource,
+        addr: SocketAddr,
+        udp: UdpSender,
+        stats: Arc<Statistics>,
+    ) -> Result<SessionCommand, String> {
+        let current = self
+            .subscriptions
+            .get(&id)
+            .ok_or("subscription is unavailable")?;
+        if request_id == 0 || request_id < current.source_revision {
+            return Err("stale capture-source request".into());
+        }
+        if request_id == current.source_revision {
+            if source != current.request.source {
+                return Err("source request ID reused".into());
+            }
+            return Ok(SessionCommand::SourceSwitched {
+                id,
+                request_id,
+                source,
+                supports_input: current.supports_input,
+            });
+        }
+        let mut request = current.request.clone();
+        request.source = source;
+        self.subscribe(request, addr, udp, stats, false).await?;
+        let current = self
+            .subscriptions
+            .get_mut(&id)
+            .ok_or("subscription disappeared")?;
+        current.source_revision = request_id;
+        Ok(SessionCommand::SourceSwitched {
+            id,
+            request_id,
+            source,
+            supports_input: current.supports_input,
         })
     }
 
@@ -365,10 +574,28 @@ impl Connection {
         Some(reply)
     }
 
+    fn can_legacy_input(&self, id: u32) -> bool {
+        self.can_input(id)
+            && self
+                .subscriptions
+                .get(&id)
+                .is_some_and(|s| s.input_target == Some(InputTarget::Desktop))
+    }
+    fn can_scoped_input(&self, id: u32, revision: u32) -> bool {
+        self.can_input(id)
+            && self
+                .subscriptions
+                .get(&id)
+                .is_some_and(|s| s.source_revision == revision)
+    }
+
     fn can_input(&self, id: u32) -> bool {
-        self.subscriptions
-            .get(&id)
-            .is_some_and(|s| s.supports_input && !s.settings.borrow().paused)
+        self.subscriptions.get(&id).is_some_and(|s| {
+            s.supports_input
+                && s.input_target.is_some()
+                && !s.task.is_finished()
+                && !s.settings.borrow().paused
+        })
     }
 }
 
@@ -390,51 +617,109 @@ async fn send_session(sender: &UdpSender, addr: SocketAddr, command: SessionComm
         .send_control(&ControlMessage::Session(Box::new(command)), addr)
         .await;
 }
-fn inject(
-    injector: &dyn InputInjector,
+async fn inject(
+    injector: &LazyInputInjector,
     owner: &mut Option<(SocketAddr, u32)>,
+    peer: &mut Connection,
+    udp: &UdpSender,
     addr: SocketAddr,
     id: u32,
     event: InputEvent,
 ) {
+    if !peer.can_input(id) {
+        return;
+    }
+    let Some(target) = peer.subscriptions.get(&id).and_then(|s| s.input_target) else {
+        return;
+    };
     if *owner != Some((addr, id)) {
         injector.release_all_input();
         *owner = Some((addr, id));
     }
-    let _ = injector.inject_input(event);
+    if let Err(error) = injector.inject_target(target, event) {
+        injector.release_all_input();
+        *owner = None;
+        if let Some(s) = peer.subscriptions.get_mut(&id)
+            && s.last_input_error
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
+        {
+            s.last_input_error = Some(Instant::now());
+            send_session(
+                udp,
+                addr,
+                SessionCommand::Error {
+                    request_id: id,
+                    reason: format!("INPUT_UNAVAILABLE: {error}"),
+                },
+            )
+            .await;
+        }
+    }
 }
 
+type BoundInjector = (InputTarget, Box<dyn InputInjector + Send + Sync>);
 #[derive(Default)]
-struct LazyInputInjector(std::sync::OnceLock<Option<Box<dyn InputInjector + Send + Sync>>>);
-impl InputInjector for LazyInputInjector {
-    fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let injector = self.0.get_or_init(|| {
-            let make =
-                || -> Result<Box<dyn InputInjector + Send + Sync>, Box<dyn Error + Send + Sync>> {
+struct LazyInputInjector(std::sync::Mutex<Option<BoundInjector>>);
+impl LazyInputInjector {
+    fn inject_target(
+        &self,
+        target: InputTarget,
+        event: InputEvent,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut current = self.0.lock().map_err(|_| "Input scope lock poisoned")?;
+        if current
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != target)
+        {
+            if let Some((_, previous)) = current.take() {
+                previous.release_all_input();
+            }
+            let created: Box<dyn InputInjector + Send + Sync> = match target {
+                InputTarget::Desktop => {
                     #[cfg(target_os = "macos")]
                     {
-                        Ok(Box::new(crate::input_injector::MacInputInjector::new()?))
+                        Box::new(crate::input_injector::MacInputInjector::new()?)
                     }
                     #[cfg(target_os = "linux")]
                     {
-                        Ok(Box::new(crate::linux_input::LinuxUinputInjector::new()?))
+                        Box::new(crate::linux_input::LinuxUinputInjector::new()?)
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        Ok(Box::new(crate::windows_input::WindowsInputInjector::new()?))
+                        Box::new(crate::windows_input::WindowsInputInjector::new()?)
                     }
-                };
-            make()
-                .map_err(|e| eprintln!("Input control unavailable: {e}"))
-                .ok()
-        });
-        injector
+                }
+                InputTarget::Window { id, pid } => {
+                    #[cfg(target_os = "macos")]
+                    {
+                        Box::new(crate::input_injector::MacInputInjector::for_window(
+                            id, pid,
+                        )?)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = (id, pid);
+                        return Err("This host does not implement window-scoped input; no desktop fallback was used".into());
+                    }
+                }
+            };
+            *current = Some((target, created));
+        }
+        current
             .as_ref()
-            .ok_or("input control is unavailable")?
+            .ok_or("Input injector unavailable")?
+            .1
             .inject_input(event)
     }
+}
+impl InputInjector for LazyInputInjector {
+    fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.inject_target(InputTarget::Desktop, event)
+    }
     fn release_all_input(&self) {
-        if let Some(Some(injector)) = self.0.get() {
+        if let Ok(current) = self.0.lock()
+            && let Some((_, injector)) = current.as_ref()
+        {
             injector.release_all_input();
         }
     }
@@ -502,12 +787,12 @@ pub async fn run_host_service(
                         if let Some(peer) = peers.get_mut(&addr) { peer.last_seen = Instant::now(); }
                         match message {
                             ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
-                                if protocol::validate_video_settings(width, height, fps, bitrate_kbps).is_err() { continue; }
+                                if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() { continue; }
                                 if peers.len() >= 8 && !peers.contains_key(&addr) { continue; }
                                 let peer = peers.entry(addr).or_insert_with(|| Connection::new(session_id, addr, udp_sender.clone(), &config));
                                 peer.set_clipboard(config.enable_clipboard_sync);
                                 if !peer.subscriptions.contains_key(&session_id) { peer.subscriptions.clear(); peer.refresh_audio(); }
-                                if let Err(reason) = peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true) {
+                                if let Err(reason) = peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true).await {
                                     send_session(&udp_sender, addr, SessionCommand::Error { request_id: session_id, reason }).await;
                                 }
                             }
@@ -517,7 +802,7 @@ pub async fn run_host_service(
                                     send_session(&udp_sender,addr,SessionCommand::InputReleased {id}).await;
                                 }
                                 SessionCommand::Configure { id, revision, width, height, fps, bitrate_kbps } => {
-                                    let reply = if protocol::validate_video_settings(width, height, fps, bitrate_kbps).is_err() || width > 8192 || height > 8192 || u64::from(width) * u64::from(height) > 33_554_432 {
+                                    let reply = if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() || width > 8192 || height > 8192 || u64::from(width) * u64::from(height) > 33_554_432 {
                                         SessionCommand::Error { request_id:id, reason:"unsupported capture settings".into() }
                                     } else if let Some(s) = peers.get_mut(&addr).and_then(|p| p.subscriptions.get_mut(&id)) {
                                         if revision > s.settings_revision {
@@ -548,14 +833,36 @@ pub async fn run_host_service(
                                 }
                                 SessionCommand::Subscribe(request) => {
                                     let id = request.id;
-                                    let reply = peers.get_mut(&addr).ok_or_else(|| "open a connection first".to_owned()).and_then(|p| p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false)).unwrap_or_else(|reason| SessionCommand::Error { request_id: id, reason });
+                                    let result = match peers.get_mut(&addr) {
+                                        Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
+                                        None => Err("open a connection first".to_owned()),
+                                    };
+                                    let reply = result.unwrap_or_else(|reason| SessionCommand::Error { request_id: id, reason });
                                     send_session(&udp_sender, addr, reply).await;
+                                }
+                                SessionCommand::SwitchSource { id, request_id, source } => {
+                                    // Never carry a held button/key across capture sources.
+                                    if input_owner == Some((addr, id)) { injector.release_all_input(); input_owner=None; }
+                                    let result = match peers.get_mut(&addr) {
+                                        Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
+                                        None => Err("open a connection first".to_owned()),
+                                    };
+                                    send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason })).await;
                                 }
                                 SessionCommand::Unsubscribe { id } => {
                                     if let Some(peer) = peers.get_mut(&addr) { peer.subscriptions.remove(&id); peer.retired.insert(id); peer.refresh_audio(); send_session(&udp_sender, addr, SessionCommand::Unsubscribed { id }).await; }
                                 }
-                                SessionCommand::Close { connection_id } => { if peers.get(&addr).is_some_and(|p| p.id == connection_id) { peers.remove(&addr); } }
-                                SessionCommand::Input { id, event } => { if peers.get(&addr).is_some_and(|p| p.can_input(id)) { inject(&injector, &mut input_owner, addr, id, event); } }
+                                SessionCommand::Close { connection_id } if peers.get(&addr).is_some_and(|p| p.id == connection_id) => { peers.remove(&addr); }
+                                SessionCommand::Input { id, event } => {
+                                    if let Some(peer)=peers.get_mut(&addr) && peer.can_legacy_input(id) {
+                                        inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await;
+                                    }
+                                }
+                                SessionCommand::SourceInput { id, source_revision, event } => {
+                                    if let Some(peer)=peers.get_mut(&addr) && peer.can_scoped_input(id,source_revision) {
+                                        inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await;
+                                    }
+                                }
                                 SessionCommand::SetActivity { id, revision, video, audio } => {
                                     if let Some(reply) = peers.get_mut(&addr).and_then(|p| p.set_activity(id, revision, video, audio)) { send_session(&udp_sender, addr, reply).await; }
                                 }
@@ -563,8 +870,8 @@ pub async fn run_host_service(
                             },
                             ControlMessage::StopStream => { peers.remove(&addr); }
                             ControlMessage::Input(event) => {
-                                if let Some(peer) = peers.get(&addr) && peer.subscriptions.len() == 1
-                                    && let Some(&id) = peer.subscriptions.keys().next() && peer.can_input(id) { inject(&injector, &mut input_owner, addr, id, event); }
+                                if let Some(peer) = peers.get_mut(&addr) && peer.subscriptions.len() == 1
+                                    && let Some(&id) = peer.subscriptions.keys().next() && peer.can_legacy_input(id) { inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await; }
                             }
                             ControlMessage::Ping { client_send_ts } if peers.contains_key(&addr) => { let now = now_unix_ms(); let _ = udp_sender.send_control(&ControlMessage::Pong { client_send_ts, host_recv_ts: now, host_send_ts: now }, addr).await; }
                             ControlMessage::SetMediaPaused { session_id, revision, paused } => {
@@ -577,7 +884,7 @@ pub async fn run_host_service(
                                 }
                             }
                             ControlMessage::UpdateStreamSettings { width, height, fps, bitrate_kbps, session_id } => {
-                                if protocol::validate_video_settings(width, height, fps, bitrate_kbps).is_ok()
+                                if validate_host_video_settings(width, height, fps, bitrate_kbps).is_ok()
                                     && let Some(s) = peers.get_mut(&addr).and_then(|p| p.subscriptions.get_mut(&session_id)) {
                                     s.settings.send_modify(|value| { value.width = width; value.height = height; value.fps = fps; value.bitrate_kbps = bitrate_kbps; });
                                 }
@@ -608,5 +915,434 @@ pub async fn run_host_service(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_admission_tests {
+    use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_reservation_is_exclusive_and_released() {
+        WINDOWS_VIDEO_CAPTURE_RESERVED.store(false, Relaxed);
+        let first = WindowsVideoCaptureReservation::acquire().unwrap();
+        assert!(WindowsVideoCaptureReservation::acquire().is_err());
+        drop(first);
+        let second = WindowsVideoCaptureReservation::acquire().unwrap();
+        drop(second);
+        assert!(!WINDOWS_VIDEO_CAPTURE_RESERVED.load(Relaxed));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_safe_capture_budget_rejects_resource_spikes() {
+        assert!(validate_host_video_settings(2560, 1440, 60, 20_000).is_ok());
+        assert!(validate_host_video_settings(3840, 2160, 30, 12_000).is_err());
+        assert!(validate_host_video_settings(1920, 1080, 120, 12_000).is_err());
+        assert!(validate_host_video_settings(1920, 1080, 60, 40_000).is_err());
+    }
+
+    #[tokio::test]
+    async fn repeated_preflight_failure_never_acquires_audio_or_capture() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let addr = "127.0.0.1:39571".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        for id in 1..=16 {
+            let request = SubscriptionRequest {
+                id,
+                source: CaptureSource::MainDisplay,
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 4000,
+                audio: true,
+            };
+            let result = peer
+                .subscribe_with_preflight(
+                    request,
+                    addr,
+                    sender.clone(),
+                    config.stats.clone(),
+                    true,
+                    || Err("missing capture dependency".into()),
+                )
+                .await;
+            assert!(matches!(result, Err(ref error) if error == "missing capture dependency"));
+            assert!(peer.audio_groups.is_empty());
+            assert!(peer.subscriptions.is_empty());
+            assert!(!peer.can_input(id));
+            assert_eq!(peer.id, 1);
+        }
+    }
+
+    struct StopProbe(Arc<AtomicBool>);
+    impl Drop for StopProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Relaxed);
+        }
+    }
+
+    fn mock_subscription(source: CaptureSource) -> (Subscription, Arc<AtomicBool>) {
+        let request = SubscriptionRequest {
+            id: 100,
+            source,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            audio: false,
+        };
+        let mut initial = stream_settings(&request);
+        initial.paused = true;
+        let (settings, _) = watch::channel(initial);
+        let (cancel, _) = broadcast::channel(4);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let probe = StopProbe(stopped.clone());
+        let task = tokio::spawn(async move {
+            let _probe = probe;
+            std::future::pending::<()>().await;
+        });
+        (
+            Subscription {
+                request,
+                settings,
+                revision: 7,
+                settings_revision: 11,
+                keyframe: Arc::new(AtomicBool::new(false)),
+                cancel,
+                task,
+                audio_group: None,
+                audio_active: false,
+                supports_input: true,
+                input_target: Some(InputTarget::Desktop),
+                last_input_error: None,
+                source_revision: 10,
+                video_sequence: Arc::new(std::sync::atomic::AtomicU16::new(37)),
+                #[cfg(target_os = "windows")]
+                _capture_reservation: Arc::new(WindowsVideoCaptureReservation::acquire().unwrap()),
+            },
+            stopped,
+        )
+    }
+
+    #[tokio::test]
+    async fn window_input_requires_current_source_revision_and_rejects_legacy() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let addr = "127.0.0.1:39577".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender, &config);
+        let (mut sub, _) = mock_subscription(CaptureSource::Window(77));
+        sub.input_target = Some(InputTarget::Window { id: 77, pid: 123 });
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        assert!(peer.can_scoped_input(100, 10));
+        assert!(!peer.can_scoped_input(100, 9));
+        assert!(!peer.can_scoped_input(100, 11));
+        assert!(!peer.can_legacy_input(100));
+        assert!(!peer.can_scoped_input(999, 10));
+        peer.subscriptions.get_mut(&100).unwrap().source_revision = 11;
+        assert!(!peer.can_scoped_input(100, 10));
+        assert!(peer.can_scoped_input(100, 11));
+        peer.subscriptions
+            .get_mut(&100)
+            .unwrap()
+            .settings
+            .send_modify(|s| s.paused = true);
+        assert!(!peer.can_scoped_input(100, 11));
+    }
+
+    #[tokio::test]
+    async fn replacing_source_awaits_teardown_and_keeps_activity_and_packet_sequence() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _rx) = mux.split();
+        let addr = "127.0.0.1:39574".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        let (old, stopped) = mock_subscription(CaptureSource::Display(77));
+        peer.subscriptions.insert(100, old);
+        let request = SubscriptionRequest {
+            id: 100,
+            source: CaptureSource::MainDisplay,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            audio: false,
+        };
+        peer.subscribe_with_preflight(
+            request,
+            addr,
+            sender,
+            config.stats.clone(),
+            false,
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            stopped.load(Relaxed),
+            "old capture must finish before replacement admission"
+        );
+        let new = peer.subscriptions.get(&100).unwrap();
+        assert_eq!(new.request.source, CaptureSource::MainDisplay);
+        assert_eq!(new.revision, 7);
+        assert_eq!(new.settings_revision, 11);
+        assert!(new.settings.borrow().paused);
+        assert!(!new.audio_active);
+        assert_eq!(new.video_sequence.load(Relaxed), 37);
+        // The current-thread test never polls the replacement capture future.
+        drop(peer);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn source_switch_request_ids_are_monotonic_and_duplicate_safe() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _rx) = mux.split();
+        let addr = "127.0.0.1:39575".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        let (old, stopped) = mock_subscription(CaptureSource::MainDisplay);
+        peer.subscriptions.insert(100, old);
+        for request_id in [11, 11] {
+            let result = peer
+                .switch_source(
+                    100,
+                    request_id,
+                    CaptureSource::MainDisplay,
+                    addr,
+                    sender.clone(),
+                    config.stats.clone(),
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                result,
+                SessionCommand::SourceSwitched { request_id: 11, .. }
+            ));
+            assert!(
+                !stopped.load(Relaxed),
+                "duplicate/same-source requests must not restart capture"
+            );
+        }
+        assert!(
+            peer.switch_source(
+                100,
+                9,
+                CaptureSource::Display(77),
+                addr,
+                sender,
+                config.stats
+            )
+            .await
+            .is_err()
+        );
+        drop(peer);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn resubscribe_allows_capture_source_switch() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let addr = "127.0.0.1:39572".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        let first_request = SubscriptionRequest {
+            id: 100,
+            source: CaptureSource::MainDisplay,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            audio: false,
+        };
+        let res1 = peer
+            .subscribe_with_preflight(
+                first_request,
+                addr,
+                sender.clone(),
+                config.stats.clone(),
+                false,
+                || Ok(()),
+            )
+            .await;
+        assert!(res1.is_ok());
+        assert!(peer.subscriptions.contains_key(&100));
+
+        // Re-subscribing with same settings is idempotent
+        let res1_repeat = peer
+            .subscribe_with_preflight(
+                SubscriptionRequest {
+                    id: 100,
+                    source: CaptureSource::MainDisplay,
+                    width: 1280,
+                    height: 720,
+                    fps: 30,
+                    bitrate_kbps: 4000,
+                    audio: false,
+                },
+                addr,
+                sender.clone(),
+                config.stats.clone(),
+                false,
+                || Ok(()),
+            )
+            .await;
+        assert!(res1_repeat.is_ok());
+
+        // Re-subscribing with updated settings/audio cleanly switches the active stream
+        let res2 = peer
+            .subscribe_with_preflight(
+                SubscriptionRequest {
+                    id: 100,
+                    source: CaptureSource::MainDisplay,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    bitrate_kbps: 8000,
+                    audio: true,
+                },
+                addr,
+                sender.clone(),
+                config.stats.clone(),
+                false,
+                || Ok(()),
+            )
+            .await;
+        assert!(res2.is_ok());
+        let active = peer
+            .subscriptions
+            .get(&100)
+            .expect("replacement subscription");
+        assert_eq!(active.request.width, 1920);
+        assert_eq!(active.request.height, 1080);
+        assert_eq!(active.request.fps, 60);
+        assert_eq!(active.request.bitrate_kbps, 8000);
+        assert!(active.request.audio);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_resubscribe_releases_previous_capture_reservation_first() {
+        WINDOWS_VIDEO_CAPTURE_RESERVED.store(false, Relaxed);
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let addr = "127.0.0.1:39573".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        let first = SubscriptionRequest {
+            id: 101,
+            source: CaptureSource::MainDisplay,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            audio: false,
+        };
+        peer.subscribe_with_preflight(
+            first,
+            addr,
+            sender.clone(),
+            config.stats.clone(),
+            false,
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+
+        let replacement = peer
+            .subscribe_with_preflight(
+                SubscriptionRequest {
+                    id: 101,
+                    source: CaptureSource::MainDisplay,
+                    width: 1920,
+                    height: 1080,
+                    fps: 60,
+                    bitrate_kbps: 8000,
+                    audio: true,
+                },
+                addr,
+                sender,
+                config.stats.clone(),
+                false,
+                || Ok(()),
+            )
+            .await;
+        assert!(replacement.is_ok());
+        assert!(WINDOWS_VIDEO_CAPTURE_RESERVED.load(Relaxed));
+        drop(peer);
+        tokio::task::yield_now().await;
+        assert!(!WINDOWS_VIDEO_CAPTURE_RESERVED.load(Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod input_target_tests {
+    use super::*;
+    #[test]
+    fn windows_are_bound_to_server_selected_owner() {
+        assert_eq!(
+            input_target_for(CaptureSource::Window(42), Some(123), true),
+            Some(InputTarget::Window { id: 42, pid: 123 })
+        );
+        for pid in [None, Some(0), Some(-1)] {
+            assert_eq!(input_target_for(CaptureSource::Window(42), pid, true), None);
+        }
+    }
+    #[test]
+    fn readonly_never_falls_back_to_desktop() {
+        assert_eq!(
+            input_target_for(CaptureSource::Window(42), Some(123), false),
+            None
+        );
+        assert_eq!(
+            input_target_for(CaptureSource::Display(77), None, false),
+            None
+        );
+        assert_eq!(
+            input_target_for(CaptureSource::MainDisplay, None, true),
+            Some(InputTarget::Desktop)
+        );
     }
 }

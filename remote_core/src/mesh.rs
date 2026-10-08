@@ -510,6 +510,25 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
         self.save(&config)?;
         Ok(config)
     }
+    /// Validate an invitation without writing it. Membership changes never replace
+    /// this installation's identity. The boolean reports whether a save/reload is needed.
+    pub fn prepare_join(
+        &self,
+        invite_code: &str,
+        display_name: impl Into<String>,
+    ) -> Result<(MeshConfig, bool), MeshStoreError> {
+        let mut joined = MeshConfig::from_invite_code(invite_code, display_name)
+            .map_err(MeshStoreError::InvalidMeshConfig)?;
+        if let Some(current) = self.load()? {
+            joined.node_id.clone_from(&current.node_id);
+            joined.display_name.clone_from(&current.display_name);
+            let changed = joined != current;
+            Ok((joined, changed))
+        } else {
+            Ok((joined, true))
+        }
+    }
+
     pub fn save(&self, config: &MeshConfig) -> Result<(), MeshStoreError> {
         config
             .validate()
@@ -836,6 +855,74 @@ mod tests {
             MeshInvite::decode(&code).unwrap_err(),
             MeshConfigError::InvalidInviteCode
         );
+    }
+
+    #[test]
+    fn joining_network_preserves_installation_identity() {
+        let temp = TempTree::new("join-identity");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let local = MeshConfig::generate("My phone");
+        let remote = MeshConfig::generate("Desktop");
+        store.save(&local).unwrap();
+        let (joined, changed) = store
+            .prepare_join(&remote.invite_code(), "Default name")
+            .unwrap();
+        assert!(changed);
+        assert_eq!(joined.node_id, local.node_id);
+        assert_ne!(joined.node_id, remote.node_id);
+        assert_eq!(joined.display_name, local.display_name);
+        assert_eq!(joined.network_name, remote.network_name);
+        assert_eq!(joined.network_secret, remote.network_secret);
+        assert_eq!(
+            store.load().unwrap().unwrap(),
+            local,
+            "prepare must not write"
+        );
+        store.save(&joined).unwrap();
+        let (repeated, changed) = store
+            .prepare_join(&remote.invite_code(), "Ignored")
+            .unwrap();
+        assert!(!changed, "repeat scan must not restart the network");
+        assert_eq!(repeated, joined);
+        assert_eq!(store.load().unwrap().unwrap(), joined);
+    }
+
+    #[test]
+    fn invalid_join_keeps_existing_membership() {
+        let temp = TempTree::new("join-invalid");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let local = MeshConfig::generate("Local");
+        store.save(&local).unwrap();
+        assert!(store.prepare_join("invalid invite", "Ignored").is_err());
+        assert_eq!(store.load().unwrap().unwrap(), local);
+    }
+
+    #[test]
+    fn joining_rotated_credentials_is_not_a_noop() {
+        let temp = TempTree::new("join-rotation");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let local = MeshConfig::generate("Local");
+        let mut rotated = MeshConfig::generate("Other device");
+        rotated.network_name.clone_from(&local.network_name);
+        store.save(&local).unwrap();
+        let (joined, changed) = store
+            .prepare_join(&rotated.invite_code(), "Ignored")
+            .unwrap();
+        assert!(changed);
+        assert_eq!(joined.node_id, local.node_id);
+        assert_eq!(joined.network_secret, rotated.network_secret);
+    }
+
+    #[test]
+    fn first_join_is_prepared_without_creating_files() {
+        let temp = TempTree::new("join-first");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let remote = MeshConfig::generate("Desktop");
+        let (joined, changed) = store.prepare_join(&remote.invite_code(), "Phone").unwrap();
+        assert!(changed);
+        assert_eq!(joined.display_name, "Phone");
+        assert_ne!(joined.node_id, remote.node_id);
+        assert!(store.load().unwrap().is_none());
     }
 
     #[test]

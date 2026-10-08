@@ -1,3 +1,4 @@
+mod shared_exchange;
 use crate::file_transfer::{
     FileManifestAssembler, FileReceivePolicy, FileTransferError, FileTransferPolicy,
     FileTransferReader, FileTransferSpec, IncomingFileTransfer, control_from_envelope,
@@ -16,6 +17,8 @@ use tokio::sync::{broadcast, mpsc};
 
 #[derive(Debug, Clone)]
 pub struct FileTransferRuntimeConfig {
+    pub share_catalog: Arc<crate::shared_files::SharedFileCatalog>,
+    pub share_scope: crate::shared_files::ShareScope,
     pub stream_id: u32,
     pub next_transfer_id: u64,
     pub next_object_id: u64,
@@ -31,6 +34,8 @@ pub struct FileTransferRuntimeConfig {
 impl Default for FileTransferRuntimeConfig {
     fn default() -> Self {
         Self {
+            share_catalog: crate::shared_files::shared_file_catalog(),
+            share_scope: crate::shared_files::current_share_scope(),
             stream_id: 2,
             next_transfer_id: 1,
             next_object_id: 10_000,
@@ -46,6 +51,10 @@ impl Default for FileTransferRuntimeConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileTransferCommand {
+    SharedRequest {
+        request_id: u64,
+        request: protocol::shared_files::SharedFileRequest,
+    },
     SendFile {
         path: PathBuf,
         mime_type: Option<String>,
@@ -76,6 +85,10 @@ pub struct FileTransferGroupFile {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileTransferEvent {
+    SharedResponse {
+        request_id: u64,
+        response: protocol::shared_files::SharedFileResponse,
+    },
     IncomingClipboardReady {
         group_id: u64,
         paths: Vec<PathBuf>,
@@ -307,10 +320,21 @@ pub async fn run_file_transfer_runtime(
         }
     }
     let _clear_activity = ClearActivity(config.active.clone());
+    let mut exchange = shared_exchange::SharedExchange::new(
+        config.clone(),
+        allocator.clone(),
+        data_sender.clone(),
+        event_tx.clone(),
+        cancel_rx.resubscribe(),
+        cancel_state.clone(),
+    );
+    let mut share_retry = tokio::time::interval(std::time::Duration::from_millis(500));
+    share_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         config.active.store(
             !send_tasks.is_empty()
+                || exchange.pending()
                 || !command_rx.is_empty()
                 || !inbound.incoming_files.is_empty()
                 || !inbound.manifest_assemblers.is_empty()
@@ -322,6 +346,7 @@ pub async fn run_file_transfer_runtime(
                 return Ok(());
             }
             _ = send_tasks.join_next(), if !send_tasks.is_empty() => {}
+            _ = share_retry.tick(), if exchange.pending() => { exchange.tick().await?; }
             maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else {
                     return Ok(());
@@ -333,6 +358,7 @@ pub async fn run_file_transfer_runtime(
                 }
                 let clipboard = matches!(&command, FileTransferCommand::SendClipboardFiles { .. });
                 match command {
+                    FileTransferCommand::SharedRequest { request_id, request } => { exchange.request(request_id, request).await?; }
                     FileTransferCommand::SendFile { path, mime_type } => {
                         let spec = next_file_transfer_spec(&config, &allocator);
                         SendFileTask {
@@ -382,6 +408,7 @@ pub async fn run_file_transfer_runtime(
                 let Some(envelope) = maybe_envelope else {
                     return Ok(());
                 };
+                if exchange.handle(&envelope, &mut send_tasks).await? { continue; }
                 if envelope.header.kind == ContentKind::FileControl
                     && let Ok(control @ (FileTransferControl::ChunkAccepted { .. } | FileTransferControl::Rejected { .. })) = control_from_envelope(&envelope)
                 {
@@ -1194,7 +1221,10 @@ impl InboundFileTransfers {
                 self.cancelled_groups.insert(group_id);
                 self.cancel_incoming_group(group_id, event_tx).await?;
             }
-            FileTransferControl::ChunkAccepted { .. } | FileTransferControl::Rejected { .. } => {}
+            FileTransferControl::ChunkAccepted { .. }
+            | FileTransferControl::Rejected { .. }
+            | FileTransferControl::SharedRequest { .. }
+            | FileTransferControl::SharedResponse { .. } => {}
         }
         Ok(())
     }

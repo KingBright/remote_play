@@ -2,6 +2,7 @@ use crate::design_system::{
     color_accent_amber, color_accent_cyan, color_accent_emerald, color_accent_purple,
     color_border_fine, color_glass_card, remote_play_themes,
 };
+use crate::original_design::{full_idle_canvas_stage, stream_status_capsule_card};
 use crate::{
     AppDevice, HostStats, MacDecodedVideoFrame, MeshPairingControl, MeshPairingMessageKind,
     MeshPairingSnapshot, RoleState, SharedHostStats, StreamStartOptions, UnifiedRuntimeConfig,
@@ -74,6 +75,7 @@ pub async fn run_unified_gui(
                             // Count all RemotePlay windows, including PiP, as foreground.
                             view.window_active = cx.active_window().is_some();
                             view.sync_media_pause();
+                            view.check_toolbar_auto_hide(cx);
                             cx.notify();
                             view.refresh_interval()
                         }) else {
@@ -151,6 +153,23 @@ struct SideServiceUiState {
     file_transfer: FeatureToggleState,
 }
 
+pub const TOOLBAR_TRIGGER_ZONE_HEIGHT_PX: f32 = 16.0;
+pub const TOOLBAR_AUTO_HIDE_DELAY: Duration = Duration::from_millis(1800);
+
+pub fn should_reveal_toolbar(cursor_y: f32) -> bool {
+    (0.0..=TOOLBAR_TRIGGER_ZONE_HEIGHT_PX).contains(&cursor_y)
+}
+
+pub fn should_auto_hide_toolbar(
+    toolbar_hovered: bool,
+    menu_open: bool,
+    last_activity: Instant,
+    now: Instant,
+    hide_delay: Duration,
+) -> bool {
+    !toolbar_hovered && !menu_open && now.saturating_duration_since(last_activity) >= hide_delay
+}
+
 struct UnifiedDashboard {
     runtime: UnifiedRuntimeHandle,
     app_runtime: Arc<Mutex<crate::UnifiedAppRuntime>>,
@@ -173,6 +192,7 @@ struct UnifiedDashboard {
     scale_mode: ViewportScaleMode,
     telemetry_hud_collapsed: bool,
     input_locked: bool,
+    capture_supports_input: bool,
     selected_resolution: (u32, u32),
     selected_fps: u32,
     selected_bitrate_kbps: u32,
@@ -183,6 +203,12 @@ struct UnifiedDashboard {
     pause_when_inactive: bool,
     window_active: bool,
     telemetry_engine: remote_core::PipelineTelemetryEngine,
+
+    show_apps_menu: bool,
+    toolbar_revealed: bool,
+    toolbar_hovered: bool,
+    last_toolbar_activity: Instant,
+    capture_error_seen: Option<String>,
 }
 
 impl UnifiedDashboard {
@@ -250,6 +276,7 @@ impl UnifiedDashboard {
             scale_mode,
             telemetry_hud_collapsed,
             input_locked: false,
+            capture_supports_input: true,
             selected_resolution,
             selected_fps,
             selected_bitrate_kbps,
@@ -260,6 +287,28 @@ impl UnifiedDashboard {
             pause_when_inactive,
             window_active: window.is_window_active(),
             telemetry_engine: remote_core::PipelineTelemetryEngine::new(0, 300),
+
+            show_apps_menu: false,
+            toolbar_revealed: false,
+            toolbar_hovered: false,
+            last_toolbar_activity: Instant::now(),
+            capture_error_seen: None,
+        }
+    }
+
+    fn check_toolbar_auto_hide(&mut self, cx: &mut Context<Self>) {
+        if self.toolbar_revealed
+            && should_auto_hide_toolbar(
+                self.toolbar_hovered,
+                self.show_apps_menu,
+                self.last_toolbar_activity,
+                Instant::now(),
+                TOOLBAR_AUTO_HIDE_DELAY,
+            )
+        {
+            self.toolbar_revealed = false;
+            self.show_apps_menu = false;
+            cx.notify();
         }
     }
 
@@ -285,6 +334,11 @@ impl UnifiedDashboard {
         DashboardSnapshot {
             role: runtime.role_state().clone(),
             devices: runtime.devices(),
+            capture_sources: runtime.capture_sources_snapshot(),
+            active_capture_source: runtime.active_capture_source(),
+            pending_capture_source: runtime.pending_capture_source(),
+            active_capture_supports_input: runtime.active_capture_supports_input(),
+            capture_source_error: runtime.capture_source_error(),
         }
     }
 
@@ -449,7 +503,53 @@ impl UnifiedDashboard {
         };
     }
 
-    fn sync_input_session(&mut self, role: &RoleState) {
+    fn request_capture_sources(&mut self, cx: &mut Context<Self>) {
+        let owner = self.runtime.owner.clone();
+        let view = cx.weak_entity();
+        cx.spawn(async move |_this, cx| {
+            if let Err(err) = owner.request_capture_sources().await {
+                let _ = view.update(cx, |this, cx| {
+                    this.status = format!("Source discovery failed: {err}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn start_capture_source_switch(
+        &mut self,
+        source: protocol::session::CaptureSource,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
+        for event in self.pointer_input.release_events() {
+            self.runtime.owner.queue_viewing_input(event);
+        }
+        self.show_apps_menu = false;
+        self.toolbar_revealed = true;
+        self.toolbar_hovered = false;
+        self.last_toolbar_activity = Instant::now();
+        let owner = self.runtime.owner.clone();
+        let (width, height) = self.selected_resolution;
+        let fps = self.selected_fps;
+        let bitrate = self.selected_bitrate_kbps;
+        let view = cx.weak_entity();
+        cx.spawn(async move |_this, cx| {
+            if let Err(err) = owner
+                .switch_capture_source(source, width, height, fps, bitrate)
+                .await
+            {
+                let _ = view.update(cx, |this, cx| {
+                    this.status = format!("Switch to {label} failed: {err}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn sync_input_session(&mut self, role: &RoleState, cx: &mut Context<Self>) {
         let input_session_id = match role {
             RoleState::Viewing(session) => Some(session.session_id),
             RoleState::Idle | RoleState::Connecting(_) | RoleState::Serving(_) => None,
@@ -458,6 +558,7 @@ impl UnifiedDashboard {
             if self.input_session_id.is_none() && input_session_id.is_some() {
                 self.drawer_open = false;
                 self.status = "Connected".to_string();
+                self.request_capture_sources(cx);
             } else if self.input_session_id.is_some() && input_session_id.is_none() {
                 self.drawer_open = true;
                 self.status = "Ready".to_string();
@@ -476,7 +577,14 @@ impl UnifiedDashboard {
     }
 
     fn queue_pointer_move(&mut self, position: Point<Pixels>) {
-        if self.input_locked {
+        let cursor_y = f32::from(position.y);
+        if should_reveal_toolbar(cursor_y) {
+            self.last_toolbar_activity = Instant::now();
+            if !self.toolbar_revealed {
+                self.toolbar_revealed = true;
+            }
+        }
+        if self.input_locked || !self.capture_supports_input {
             return;
         }
         let Some(frame) = self.current_frame.as_ref() else {
@@ -505,12 +613,15 @@ impl UnifiedDashboard {
     }
 
     fn queue_pointer_button(&mut self, button: MouseButton, pressed: bool) {
-        if self.input_locked {
+        if self.input_locked || !self.capture_supports_input {
             return;
         }
         let Some(button) = protocol_mouse_button(button) else {
             return;
         };
+        if !pressed && !self.pointer_input.pressed_buttons.contains(&button) {
+            return;
+        }
         let event = if pressed {
             protocol::InputEvent::MouseDown(button)
         } else {
@@ -522,7 +633,7 @@ impl UnifiedDashboard {
     }
 
     fn queue_pointer_scroll(&mut self, delta: ScrollDelta) {
-        if self.input_locked {
+        if self.input_locked || !self.capture_supports_input {
             return;
         }
         let delta = delta.pixel_delta(px(40.0));
@@ -535,7 +646,7 @@ impl UnifiedDashboard {
     }
 
     fn queue_key(&mut self, keystroke: &Keystroke, pressed: bool) {
-        if self.input_locked || self.drawer_open {
+        if self.input_locked || !self.capture_supports_input || self.drawer_open {
             return;
         }
         let Some(event) = protocol_key_event(keystroke, pressed) else {
@@ -551,7 +662,7 @@ impl UnifiedDashboard {
     }
 
     fn queue_modifiers(&mut self, event: &ModifiersChangedEvent) {
-        if self.input_locked || self.drawer_open {
+        if self.input_locked || !self.capture_supports_input || self.drawer_open {
             return;
         }
         let mut modifiers = protocol_modifiers(event.modifiers);
@@ -785,65 +896,6 @@ fn stream_video_canvas_surface(
     }
 }
 
-fn stream_status_capsule_card(
-    title: String,
-    is_live: bool,
-    compact_stats: String,
-    compact: bool,
-    theme: &Theme,
-    action_slot: Option<AnyElement>,
-) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_3()
-        .px_4()
-        .py_2()
-        .bg(color_glass_card())
-        .border_1()
-        .border_color(color_border_fine())
-        .rounded_full()
-        .shadow_lg()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_1()
-                .child(
-                    div()
-                        .size(px(8.0))
-                        .flex_none()
-                        .rounded_full()
-                        .bg(if is_live {
-                            Hsla::from(color_accent_emerald())
-                        } else {
-                            theme.content.disabled
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.content.primary)
-                        .whitespace_nowrap()
-                        .max_w(if compact { px(120.0) } else { px(220.0) })
-                        .truncate()
-                        .child(title),
-                ),
-        )
-        .child(div().w(px(1.0)).h(px(16.0)).bg(theme.border.divider))
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_family("monospace")
-                .text_color(theme.content.secondary)
-                .whitespace_nowrap()
-                .child(compact_stats),
-        )
-        .when_some(action_slot, |this, slot| this.child(slot))
-}
-
 struct PopoutStreamView {
     presentation_frame: Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>,
     host_stats: Option<Arc<SharedHostStats>>,
@@ -1044,13 +1096,22 @@ impl Render for UnifiedDashboard {
         self.drain_latest_frame();
         let snapshot = self.snapshot();
         let role = snapshot.role.clone();
+        self.capture_supports_input = snapshot.active_capture_supports_input;
+        if self.capture_error_seen != snapshot.capture_source_error {
+            self.capture_error_seen = snapshot.capture_source_error.clone();
+            if self.capture_error_seen.is_some() {
+                self.toolbar_revealed = true;
+                self.show_apps_menu = true;
+                self.last_toolbar_activity = Instant::now();
+            }
+        }
         if !matches!(role, RoleState::Viewing(_) | RoleState::Connecting(_)) {
             self.manual_media_paused = false;
         }
         self.window_active = crate::workspace_ui::window_visible(window);
         self.sync_media_pause();
         let media_controls = self.media_controls(cx);
-        self.sync_input_session(&role);
+        self.sync_input_session(&role, cx);
         let active_session = role.session().cloned();
         let theme = cx.theme().clone();
         let show_drawer = self.drawer_open;
@@ -1111,20 +1172,33 @@ impl Render for UnifiedDashboard {
                     cx,
                 ),
             ))
-            .child(floating_control_island(
-                &role,
-                active_session.as_ref(),
-                &self.viewer_media_status,
-                &self.status,
-                self.input_locked,
-                side_services,
-                self.scale_mode,
-                is_fullscreen,
-                compact,
-                host_stats.as_ref(),
-                self.runtime.owner.clone(),
-                cx,
-            ))
+            .when(
+                !matches!(role, RoleState::Viewing(_) | RoleState::Connecting(_))
+                    || self.toolbar_revealed
+                    || self.toolbar_hovered,
+                |this| {
+                    this.child(floating_control_island(
+                        &role,
+                        active_session.as_ref(),
+                        &self.viewer_media_status,
+                        &self.status,
+                        self.input_locked,
+                        snapshot.active_capture_supports_input,
+                        side_services,
+                        self.scale_mode,
+                        is_fullscreen,
+                        compact,
+                        host_stats.as_ref(),
+                        self.runtime.owner.clone(),
+                        &snapshot.capture_sources,
+                        snapshot.active_capture_source,
+                        snapshot.pending_capture_source,
+                        snapshot.capture_source_error.as_deref(),
+                        self.show_apps_menu,
+                        cx,
+                    ))
+                },
+            )
             .child(drawer_trigger_capsule(
                 &snapshot.devices,
                 show_drawer,
@@ -1233,10 +1307,20 @@ fn full_video_surface(
                 this.pointer_input.reset_pointer();
             }
         }))
-        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, _cx| {
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+            let was_revealed = this.toolbar_revealed;
             this.queue_pointer_move(event.position);
+            if !was_revealed && this.toolbar_revealed {
+                cx.notify();
+            }
         }))
         .on_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+            if this.show_apps_menu {
+                this.show_apps_menu = false;
+                this.toolbar_hovered = false;
+                this.last_toolbar_activity = Instant::now();
+                cx.notify();
+            }
             window.focus(&this.input_focus);
             this.queue_pointer_move(event.position);
             this.queue_pointer_button(event.button, true);
@@ -1273,59 +1357,6 @@ fn full_video_surface(
         .child(content)
         .child(input_bounds_probe)
         .into_any_element()
-}
-
-fn full_idle_canvas_stage(cx: &mut Context<UnifiedDashboard>) -> Div {
-    let theme = cx.theme().clone();
-    div()
-        .w_full()
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(0x0e0f12))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_4()
-                .p_8()
-                .rounded(px(8.0))
-                .bg(color_glass_card())
-                .border_1()
-                .border_color(color_border_fine())
-                .shadow_lg()
-                .child(
-                    div()
-                        .size(px(60.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(rgb(0x12151c))
-                        .border_1()
-                        .border_color(color_accent_cyan())
-                        .child(
-                            icon(IconName::Server)
-                                .size(px(26.0))
-                                .color(color_accent_cyan()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(18.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.content.primary)
-                        .child("RemotePlay"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.content.tertiary)
-                        .child("Ready for incoming and outgoing sessions"),
-                ),
-        )
 }
 
 fn full_serving_stage(peer_name: &str, cx: &mut Context<UnifiedDashboard>) -> Div {
@@ -1417,14 +1448,20 @@ fn floating_control_island(
     _viewer_media_status: &UnifiedViewerMediaStatus,
     status: &str,
     input_locked: bool,
+    capture_supports_input: bool,
     side_services: SideServiceUiState,
     scale_mode: ViewportScaleMode,
     is_fullscreen: bool,
     compact: bool,
     _host_stats: Option<&HostStats>,
     owner: Arc<crate::UnifiedServiceOwner>,
+    capture_sources: &[protocol::session::CaptureSourceInfo],
+    active_capture_source: protocol::session::CaptureSource,
+    pending_capture_source: Option<protocol::session::CaptureSource>,
+    capture_source_error: Option<&str>,
+    show_apps_menu: bool,
     cx: &mut Context<UnifiedDashboard>,
-) -> Div {
+) -> Stateful<Div> {
     let theme = cx.theme().clone();
     let view = cx.weak_entity();
     let visibility = control_island_visibility(role.kind());
@@ -1444,17 +1481,19 @@ fn floating_control_island(
         });
 
     div()
+        .id("floating_auto_hide_toolbar_container")
         .absolute()
         .top(px(12.0))
         .left_0()
         .right_0()
         .flex()
-        .justify_center()
-        .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
-            cx.stop_propagation();
-        }))
+        .flex_col()
+        .items_center()
+        .gap_2()
         .child(
             div()
+                .id("floating_toolbar_pill")
+                .occlude()
                 .flex()
                 .items_center()
                 .gap_3()
@@ -1465,6 +1504,17 @@ fn floating_control_island(
                 .border_color(color_border_fine())
                 .rounded_full()
                 .shadow_lg()
+                .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                    this.toolbar_hovered = *hovered;
+                    this.last_toolbar_activity = Instant::now();
+                    cx.notify();
+                }))
+                .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, _window, _cx| {
+                    this.last_toolbar_activity = Instant::now();
+                }))
+                .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
+                    cx.stop_propagation();
+                }))
                 .child(
                     div()
                         .flex()
@@ -1495,6 +1545,19 @@ fn floating_control_island(
                 )
                 .when(visibility.show_viewer_controls, |this| {
                     this.child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(16.0))
+                            .bg(theme.border.divider),
+                    )
+                    .child(display_switcher_control(
+                        capture_sources,
+                        active_capture_source,
+                        pending_capture_source,
+                        show_apps_menu,
+                        cx,
+                    ))
+                    .child(
                         div()
                             .w(px(1.0))
                             .h(px(16.0))
@@ -1576,16 +1639,22 @@ fn floating_control_island(
                                 },
                                 cx,
                             )
+                            .disabled(!capture_supports_input)
                             .h(px(26.0))
                             .px_2()
                             .text_size(px(10.0))
                             .on_click(move |_event, _window, cx| {
+                                if !capture_supports_input {
+                                    return;
+                                }
                                 let _ = view.update(cx, |this, cx| {
                                     this.set_input_locked(!input_locked);
                                     cx.notify();
                                 });
                             })
-                            .child(if compact {
+                            .child(if !capture_supports_input {
+                                if compact { "View" } else { "View Only" }
+                            } else if compact {
                                 if input_locked { "Locked" } else { "Input" }
                             } else if input_locked {
                                 "Input Locked"
@@ -1674,6 +1743,332 @@ fn floating_control_island(
                         }),
                 ),
         )
+        .when(show_apps_menu, |this: Stateful<Div>| {
+            this.child(capture_source_menu(
+                capture_sources,
+                active_capture_source,
+                pending_capture_source,
+                capture_source_error,
+                session,
+                cx,
+            ))
+        })
+}
+
+fn display_capture_sources(
+    sources: &[protocol::session::CaptureSourceInfo],
+) -> Vec<protocol::session::CaptureSourceInfo> {
+    let mut displays: Vec<_> = sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.source,
+                protocol::session::CaptureSource::MainDisplay
+                    | protocol::session::CaptureSource::Display(_)
+            )
+        })
+        .cloned()
+        .collect();
+    displays.sort_by_key(|source| {
+        let primary_rank = if matches!(source.source, protocol::session::CaptureSource::MainDisplay)
+            || source.supports_input
+        {
+            0
+        } else {
+            1
+        };
+        let id = match source.source {
+            protocol::session::CaptureSource::MainDisplay => 0,
+            protocol::session::CaptureSource::Display(id) => id,
+            protocol::session::CaptureSource::Window(_) => u32::MAX,
+        };
+        (primary_rank, id)
+    });
+    if displays.is_empty() {
+        displays.push(protocol::session::CaptureSourceInfo {
+            source: protocol::session::CaptureSource::MainDisplay,
+            title: "Main display".into(),
+            application: String::new(),
+            process_id: None,
+            width: 0,
+            height: 0,
+            supports_input: true,
+        });
+    }
+    displays
+}
+
+fn capture_source_is_selected(
+    selected: protocol::session::CaptureSource,
+    source: &protocol::session::CaptureSourceInfo,
+    display_index: usize,
+) -> bool {
+    selected == source.source
+        || (selected == protocol::session::CaptureSource::MainDisplay
+            && (matches!(source.source, protocol::session::CaptureSource::MainDisplay)
+                || source.supports_input
+                || display_index == 0))
+}
+
+fn display_switcher_control(
+    sources: &[protocol::session::CaptureSourceInfo],
+    active_source: protocol::session::CaptureSource,
+    pending_source: Option<protocol::session::CaptureSource>,
+    show_apps_menu: bool,
+    cx: &Context<UnifiedDashboard>,
+) -> Div {
+    let view = cx.weak_entity();
+    let selected = active_source;
+    let displays = display_capture_sources(sources);
+    let mut control = div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .p(px(2.0))
+        .rounded(px(6.0))
+        .bg(cx.theme().surface.sunken);
+
+    for (index, source) in displays.into_iter().enumerate() {
+        let view = view.clone();
+        let label = if source.supports_input {
+            format!("Display {}", index + 1)
+        } else {
+            format!("Display {} · view", index + 1)
+        };
+        let action_label = label.clone();
+        let source_id = source.source;
+        let is_selected = capture_source_is_selected(selected, &source, index);
+        control = control.child(
+            command_button(
+                format!("island_display_{}", index + 1),
+                if is_selected {
+                    ActionVariantKind::Primary
+                } else {
+                    ActionVariantKind::Neutral
+                },
+                cx,
+            )
+            .disabled(pending_source.is_some())
+            .h(px(22.0))
+            .px_2()
+            .text_size(px(9.0))
+            .on_click(move |_event, _window, cx| {
+                let label = action_label.clone();
+                let _ = view.update(cx, |this, cx| {
+                    this.start_capture_source_switch(source_id, label, cx);
+                    cx.notify();
+                });
+            })
+            .child(label),
+        );
+    }
+
+    let view = view.clone();
+    control.child(
+        command_button(
+            "island_display_apps",
+            if show_apps_menu || matches!(selected, protocol::session::CaptureSource::Window(_)) {
+                ActionVariantKind::Primary
+            } else {
+                ActionVariantKind::Neutral
+            },
+            cx,
+        )
+        .h(px(22.0))
+        .px_2()
+        .text_size(px(9.0))
+        .tooltip(tooltip("Switch displays or application windows").build())
+        .on_click(move |_event, _window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                this.show_apps_menu = !this.show_apps_menu;
+                this.toolbar_revealed = true;
+                this.last_toolbar_activity = Instant::now();
+                if this.show_apps_menu {
+                    this.request_capture_sources(cx);
+                }
+                cx.notify();
+            });
+        })
+        .child("Apps"),
+    )
+}
+
+fn capture_source_menu(
+    sources: &[protocol::session::CaptureSourceInfo],
+    active_source: protocol::session::CaptureSource,
+    pending_source: Option<protocol::session::CaptureSource>,
+    error: Option<&str>,
+    session: Option<&crate::RoleSession>,
+    cx: &mut Context<UnifiedDashboard>,
+) -> Stateful<Div> {
+    let theme = cx.theme().clone();
+    let view = cx.weak_entity();
+    let selected = active_source;
+    let displays = display_capture_sources(sources);
+    let windows: Vec<_> = sources
+        .iter()
+        .filter(|source| matches!(source.source, protocol::session::CaptureSource::Window(_)))
+        // The host already bounds its catalog. The scrollable menu must not
+        // silently hide every application after the first sixteen entries.
+        .cloned()
+        .collect();
+
+    let mut menu = div()
+        .id("floating_toolbar_apps_menu")
+        .occlude()
+        .max_h(px(440.0))
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .p_3()
+        .min_w(px(320.0))
+        .max_w(px(440.0))
+        .bg(color_glass_card())
+        .border_1()
+        .border_color(color_border_fine())
+        .rounded_xl()
+        .shadow_2xl()
+        .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+            this.toolbar_hovered = *hovered;
+            this.last_toolbar_activity = Instant::now();
+            cx.notify();
+        }))
+        .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, _window, _cx| {
+            this.last_toolbar_activity = Instant::now();
+        }))
+        .on_any_mouse_down(cx.listener(|_this, _event, _window, cx| {
+            cx.stop_propagation();
+        }))
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.content.primary)
+                .child("Displays & Apps"),
+        )
+        .child(div().w_full().h(px(1.0)).bg(theme.border.divider));
+
+    if let Some(error) = error {
+        menu = menu.child(
+            div()
+                .text_size(px(10.0))
+                .text_color(theme.status.error.bg)
+                .child(format!("Last switch failed: {error}")),
+        );
+    }
+
+    for (index, source) in displays.into_iter().enumerate() {
+        let view = view.clone();
+        let source_id = source.source;
+        let label = if source.supports_input {
+            format!("Display {}", index + 1)
+        } else {
+            format!("Display {} · view only", index + 1)
+        };
+        let detail = source.title.clone();
+        let action_label = label.clone();
+        let selected = capture_source_is_selected(selected, &source, index);
+        menu = menu.child(
+            command_button(
+                format!("island_menu_display_{}", index + 1),
+                if selected {
+                    ActionVariantKind::Primary
+                } else {
+                    ActionVariantKind::Neutral
+                },
+                cx,
+            )
+            .disabled(pending_source.is_some())
+            .h(px(28.0))
+            .px_2()
+            .text_size(px(10.0))
+            .on_click(move |_event, _window, cx| {
+                let label = action_label.clone();
+                let _ = view.update(cx, |this, cx| {
+                    this.start_capture_source_switch(source_id, label, cx);
+                    cx.notify();
+                });
+            })
+            .child(format!("{label} · {detail}")),
+        );
+    }
+
+    if !windows.is_empty() {
+        menu = menu.child(
+            div()
+                .pt_1()
+                .text_size(px(9.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.content.secondary)
+                .child("APPLICATION WINDOWS"),
+        );
+        for (index, source) in windows.into_iter().enumerate() {
+            let view = view.clone();
+            let source_id = source.source;
+            let title = source.title.clone();
+            let app = source.application.clone();
+            let action_label = if app.is_empty() {
+                title.clone()
+            } else {
+                format!("{app} — {title}")
+            };
+            let button_label = action_label.clone();
+            let is_selected = selected == source_id;
+            menu = menu.child(
+                command_button(
+                    format!("island_window_{index}"),
+                    if is_selected {
+                        ActionVariantKind::Primary
+                    } else {
+                        ActionVariantKind::Neutral
+                    },
+                    cx,
+                )
+                .disabled(pending_source.is_some())
+                .h(px(28.0))
+                .px_2()
+                .text_size(px(10.0))
+                .on_click(move |_event, _window, cx| {
+                    let label = action_label.clone();
+                    let _ = view.update(cx, |this, cx| {
+                        this.start_capture_source_switch(source_id, label, cx);
+                        cx.notify();
+                    });
+                })
+                .child(button_label),
+            );
+        }
+    } else {
+        menu = menu.child(
+            div()
+                .text_size(px(10.0))
+                .text_color(theme.content.secondary)
+                .child("No application-window capture sources are available on this host."),
+        );
+    }
+
+    if let Some((target, name)) = session.map(|s| (s.peer.endpoint, s.peer.display_name.clone())) {
+        let view = view.clone();
+        menu = menu
+            .child(div().w_full().h(px(1.0)).bg(theme.border.divider))
+            .child(
+                command_button("island_open_workspace", ActionVariantKind::Neutral, cx)
+                    .h(px(28.0))
+                    .px_2()
+                    .text_size(px(10.0))
+                    .on_click(move |_event, _window, cx| {
+                        crate::workspace_ui::open(target, name.clone(), cx);
+                        let _ = view.update(cx, |this, cx| {
+                            this.show_apps_menu = false;
+                            cx.notify();
+                        });
+                    })
+                    .child("Open multi-window workspace"),
+            );
+    }
+
+    menu
 }
 
 fn scale_mode_control(current: ViewportScaleMode, cx: &Context<UnifiedDashboard>) -> Div {
@@ -3734,15 +4129,22 @@ fn is_shifted_macos_symbol(key: &str) -> bool {
 struct DashboardSnapshot {
     role: RoleState,
     devices: Vec<AppDevice>,
+    capture_sources: Arc<Vec<protocol::session::CaptureSourceInfo>>,
+    active_capture_source: protocol::session::CaptureSource,
+    pending_capture_source: Option<protocol::session::CaptureSource>,
+    active_capture_supports_input: bool,
+    capture_source_error: Option<String>,
 }
 
 #[cfg(test)]
 mod input_tests {
     use super::{
-        ControlIslandVisibility, PointerInputTracker, ViewportScaleMode, absolute_pointer_event,
-        control_island_visibility, dashboard_refresh_interval, host_stats_available,
-        is_shifted_macos_symbol, macos_key_code, product_window_appearance, protocol_key_event,
-        protocol_modifiers, protocol_mouse_button,
+        ControlIslandVisibility, PointerInputTracker, TOOLBAR_AUTO_HIDE_DELAY,
+        TOOLBAR_TRIGGER_ZONE_HEIGHT_PX, ViewportScaleMode, absolute_pointer_event,
+        control_island_visibility, dashboard_refresh_interval, display_capture_sources,
+        host_stats_available, is_shifted_macos_symbol, macos_key_code, product_window_appearance,
+        protocol_key_event, protocol_modifiers, protocol_mouse_button, should_auto_hide_toolbar,
+        should_reveal_toolbar,
     };
     use crate::HostStats;
     use gpui::{
@@ -3804,6 +4206,95 @@ mod input_tests {
                 show_disconnect: true,
             }
         );
+    }
+
+    #[test]
+    fn auto_hide_toolbar_sensors_and_delay_rules() {
+        // 顶部感应区：<= 16px 触发呈现，> 16px 不触发
+        assert!(should_reveal_toolbar(0.0));
+        assert!(!should_reveal_toolbar(-1.0));
+        assert!(!should_reveal_toolbar(f32::NAN));
+        assert!(!should_reveal_toolbar(f32::INFINITY));
+        assert!(should_reveal_toolbar(8.0));
+        assert!(should_reveal_toolbar(TOOLBAR_TRIGGER_ZONE_HEIGHT_PX));
+        assert!(!should_reveal_toolbar(TOOLBAR_TRIGGER_ZONE_HEIGHT_PX + 0.5));
+        assert!(!should_reveal_toolbar(100.0));
+
+        let now = Instant::now();
+        // 鼠标悬停在控制条上时，绝不自动隐藏
+        assert!(!should_auto_hide_toolbar(
+            true,
+            false,
+            now - Duration::from_secs(5),
+            now,
+            TOOLBAR_AUTO_HIDE_DELAY
+        ));
+
+        // 菜单展开时，绝不自动隐藏
+        assert!(!should_auto_hide_toolbar(
+            false,
+            true,
+            now - Duration::from_secs(5),
+            now,
+            TOOLBAR_AUTO_HIDE_DELAY
+        ));
+
+        // 鼠标移开但未达到延迟阈值，保持呈现
+        assert!(!should_auto_hide_toolbar(
+            false,
+            false,
+            now - Duration::from_millis(500),
+            now,
+            TOOLBAR_AUTO_HIDE_DELAY
+        ));
+
+        // 鼠标移开且超过延时阈值（1800ms），触发自隐藏
+        assert!(should_auto_hide_toolbar(
+            false,
+            false,
+            now - TOOLBAR_AUTO_HIDE_DELAY,
+            now,
+            TOOLBAR_AUTO_HIDE_DELAY
+        ));
+        assert!(should_auto_hide_toolbar(
+            false,
+            false,
+            now - Duration::from_secs(3),
+            now,
+            TOOLBAR_AUTO_HIDE_DELAY
+        ));
+    }
+
+    #[test]
+    fn display_switcher_uses_real_sources_and_never_invents_display_two() {
+        let one = vec![protocol::session::CaptureSourceInfo {
+            source: protocol::session::CaptureSource::MainDisplay,
+            title: "Physical display".into(),
+            application: String::new(),
+            process_id: None,
+            width: 1920,
+            height: 1080,
+            supports_input: true,
+        }];
+        let displays = display_capture_sources(&one);
+        assert_eq!(displays.len(), 1);
+        assert_eq!(
+            displays[0].source,
+            protocol::session::CaptureSource::MainDisplay
+        );
+
+        let real_secondary = protocol::session::CaptureSourceInfo {
+            source: protocol::session::CaptureSource::Display(77),
+            title: "External".into(),
+            application: String::new(),
+            process_id: None,
+            width: 2560,
+            height: 1440,
+            supports_input: false,
+        };
+        let displays = display_capture_sources(&[one[0].clone(), real_secondary.clone()]);
+        assert_eq!(displays.len(), 2);
+        assert_eq!(displays[1].source, real_secondary.source);
     }
 
     #[test]

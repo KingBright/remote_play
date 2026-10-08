@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 #[derive(Clone, serde::Serialize)]
 pub struct CaptureDemand {
@@ -39,7 +39,14 @@ impl Default for CaptureDemand {
         }
     }
 }
+#[derive(Clone, Copy)]
+struct MediaPermission {
+    enabled: bool,
+    audio: bool,
+    epoch: u64,
+}
 struct Frame {
+    epoch: u64,
     bytes: Vec<u8>,
     timestamp: u32,
     audio: bool,
@@ -50,6 +57,7 @@ pub struct MobilePublisher {
     source: Arc<Mutex<(u32, u32)>>,
     frames: mpsc::Sender<Frame>,
     errors: mpsc::Sender<String>,
+    permission: watch::Sender<MediaPermission>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for MobilePublisher {
@@ -95,6 +103,20 @@ impl MobilePublisher {
         key: Vec<u8>,
         allow_audio: bool,
     ) -> Result<Self, String> {
+        Self::start_with_permissions(bind, directory, key, true, allow_audio).await
+    }
+    /// Accept paired file sessions without requesting or exposing screen capture.
+    pub async fn start_receiver(bind: SocketAddr, directory: PathBuf) -> Result<Self, String> {
+        let key = load_session_psk().ok_or("Join a device network before receiving files")?;
+        Self::start_with_permissions(bind, directory, key, false, false).await
+    }
+    async fn start_with_permissions(
+        bind: SocketAddr,
+        directory: PathBuf,
+        key: Vec<u8>,
+        capture_enabled: bool,
+        allow_audio: bool,
+    ) -> Result<Self, String> {
         let mux = UdpMultiplexer::bind(&bind.to_string())
             .await
             .map_err(|e| e.to_string())?;
@@ -106,12 +128,38 @@ impl MobilePublisher {
         let geometry = source.clone();
         let (frames, mut frame_rx) = mpsc::channel::<Frame>(4);
         let (errors, mut error_rx) = mpsc::channel::<String>(1);
+        let (permission, mut permission_rx) = watch::channel(MediaPermission {
+            enabled: capture_enabled,
+            audio: capture_enabled && allow_audio,
+            epoch: 1,
+        });
         let task = tokio::spawn(async move {
             let mut peer: Option<Peer> = None;
             let mut authenticated: Option<(SocketAddr, [u8; 16], [u8; 16], u64)> = None;
             let mut maintenance = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
+                    biased;
+                    changed = permission_rx.changed() => {
+                        if changed.is_err() { break; }
+                        let permission = *permission_rx.borrow_and_update();
+                        // A new authorization must never inherit subscriptions or queued media.
+                        while frame_rx.try_recv().is_ok() {}
+                        *shared.lock().unwrap() = CaptureDemand::default();
+                        if let Some(p) = peer.as_mut() {
+                            if let Some(subscription) = p.subscription.take() {
+                                p.retired.insert(subscription.id);
+                                p.activity_revision = 0;
+                                p.settings_revision = 0;
+                                reply(&sender, p.addr, SessionCommand::Unsubscribed { id: subscription.id }).await;
+                            }
+                            let (width, height) = *geometry.lock().unwrap();
+                            reply(&sender, p.addr, SessionCommand::Sources {
+                                request_id: 0,
+                                sources: available_sources(permission, width, height),
+                            }).await;
+                        }
+                    }
                     Some(reason) = error_rx.recv() => {
                         if let Some(p) = &peer { reply(&sender,p.addr,SessionCommand::Closed {connection_id:p.id,reason}).await; }
                         break;
@@ -127,6 +175,8 @@ impl MobilePublisher {
                         }
                     }
                     Some(frame) = frame_rx.recv() => {
+                        let permission = *permission_rx.borrow();
+                        if !permission.enabled || frame.epoch != permission.epoch || (frame.audio && !permission.audio) { continue; }
                         let Some(p) = peer.as_mut() else { continue; };
                         let Some(subscription) = &p.subscription else { continue; };
                         let wanted = shared.lock().unwrap().clone();
@@ -166,20 +216,26 @@ impl MobilePublisher {
                                         }
                                         SessionCommand::ListSources { request_id } if peer.is_some() => {
                                             let (width, height) = *geometry.lock().unwrap();
-                                            reply(&sender, addr, SessionCommand::Sources { request_id, sources:vec![CaptureSourceInfo { source:CaptureSource::MainDisplay, title:"Android selected screen or app".into(), application:"MediaProjection".into(), process_id:None, width, height, supports_input:false }] }).await;
+                                            let permission = *permission_rx.borrow();
+                                            reply(&sender, addr, SessionCommand::Sources { request_id, sources:available_sources(permission, width, height) }).await;
                                         }
                                         SessionCommand::Subscribe(request) if peer.is_some() => {
+                                            let permission = *permission_rx.borrow();
+                                            if !permission.enabled {
+                                                reply(&sender, addr, SessionCommand::Error { request_id: request.id, reason: "Screen sharing is not authorized on this device; files remain available".into() }).await;
+                                                continue;
+                                            }
                                             let p = peer.as_mut().unwrap();
                                             if request.source != CaptureSource::MainDisplay || !valid(&request) || p.retired.contains(&request.id) || p.retired.len() >= 4096 || p.subscription.as_ref().is_some_and(|s| s.id != request.id) {
                                                 reply(&sender, addr, SessionCommand::Error { request_id:request.id, reason:"Android projection supports one authorized source".into() }).await; continue;
                                             }
-                                            if p.subscription.is_none() { let mut d = shared.lock().unwrap(); set_rates(&mut d, &request); d.active=true; d.audio=request.audio && allow_audio; d.keyframe+=1; }
+                                            if p.subscription.is_none() { let mut d = shared.lock().unwrap(); set_rates(&mut d, &request); d.active=true; d.audio=request.audio && permission.audio; d.keyframe+=1; }
                                             let id=request.id; if p.subscription.is_none() { p.subscription=Some(request); }
-                                            reply(&sender, addr, SessionCommand::Subscribed { id, audio_owner:allow_audio.then_some(id), supports_input:false }).await;
+                                            reply(&sender, addr, SessionCommand::Subscribed { id, audio_owner:permission.audio.then_some(id), supports_input:false }).await;
                                         }
                                         SessionCommand::SetActivity { id, revision, video, audio } if peer.is_some() => {
                                             let p=peer.as_mut().unwrap(); if p.subscription.as_ref().is_none_or(|s| s.id != id) { continue; }
-                                            let (video, audio) = { let mut d=shared.lock().unwrap(); if revision > p.activity_revision { p.activity_revision=revision; if video && !d.active { d.keyframe+=1; } d.active=video; d.audio=audio && allow_audio; } (d.active,d.audio) };
+                                            let (video, audio) = { let mut d=shared.lock().unwrap(); if revision > p.activity_revision { p.activity_revision=revision; if video && !d.active { d.keyframe+=1; } d.active=video; d.audio=audio && permission_rx.borrow().audio; } (d.active,d.audio) };
                                             reply(&sender, addr, SessionCommand::Activity { id, revision:p.activity_revision, video, audio }).await;
                                         }
                                         SessionCommand::Configure { id, revision, width, height, fps, bitrate_kbps } if peer.is_some() => {
@@ -218,11 +274,32 @@ impl MobilePublisher {
             source,
             frames,
             errors,
+            permission,
             task,
         })
     }
+    /// Detach or attach media without replacing the authenticated file connection.
+    pub fn set_capture_available(&self, enabled: bool, audio: bool) {
+        self.permission.send_if_modified(|permission| {
+            let audio = enabled && audio;
+            if permission.enabled == enabled && permission.audio == audio {
+                return false;
+            }
+            permission.enabled = enabled;
+            permission.audio = audio;
+            permission.epoch = permission.epoch.wrapping_add(1);
+            true
+        });
+        if !enabled {
+            *self.demand.lock().unwrap() = CaptureDemand::default();
+        }
+    }
     pub fn demand(&self) -> CaptureDemand {
-        self.demand.lock().unwrap().clone()
+        let mut demand = self.demand.lock().unwrap().clone();
+        let permission = *self.permission.borrow();
+        demand.active &= permission.enabled;
+        demand.audio &= permission.enabled && permission.audio;
+        demand
     }
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
@@ -231,12 +308,14 @@ impl MobilePublisher {
         *self.source.lock().unwrap() = (width, height);
     }
     pub fn frame(&self, bytes: Vec<u8>, _timestamp_us: i64, audio: bool) {
-        if bytes.len() > 8 * 1024 * 1024 {
+        let permission = *self.permission.borrow();
+        if !permission.enabled || (audio && !permission.audio) || bytes.len() > 8 * 1024 * 1024 {
             return;
         }
         if self
             .frames
             .try_send(Frame {
+                epoch: permission.epoch,
                 bytes,
                 timestamp: now_unix_ms() as u32,
                 audio,
@@ -250,6 +329,24 @@ impl MobilePublisher {
     pub fn fail(&self, reason: String) {
         let _ = self.errors.try_send(reason);
     }
+}
+fn available_sources(
+    permission: MediaPermission,
+    width: u32,
+    height: u32,
+) -> Vec<CaptureSourceInfo> {
+    if !permission.enabled {
+        return Vec::new();
+    }
+    vec![CaptureSourceInfo {
+        source: CaptureSource::MainDisplay,
+        title: "Android selected screen or app".into(),
+        application: "MediaProjection".into(),
+        process_id: None,
+        width,
+        height,
+        supports_input: false,
+    }]
 }
 fn valid(s: &SubscriptionRequest) -> bool {
     protocol::validate_video_settings(s.width, s.height, s.fps, s.bitrate_kbps).is_ok()
@@ -496,5 +593,378 @@ mod tests {
             SessionCommand::Error { .. }
         ));
         assert!(!publisher.demand().active);
+    }
+
+    struct ReceiverTestDir(PathBuf);
+    impl ReceiverTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "remote-play-receiver-{:032x}",
+                u128::from_le_bytes(random_bytes_16())
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for ReceiverTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    async fn receiver_client(
+        publisher: &MobilePublisher,
+        key: &[u8],
+    ) -> (UdpSender, remote_core::net::UdpReceiver) {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, receiver) = mux.split();
+        let nonce = random_bytes_16();
+        let timestamp_ms = now_unix_ms();
+        sender
+            .send_control(
+                &ControlMessage::SessionHello {
+                    nonce,
+                    timestamp_ms,
+                    mac: mac_session_hello(key, &nonce, timestamp_ms),
+                },
+                publisher.address,
+            )
+            .await
+            .unwrap();
+        let packet = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let MultiplexedPacket::Control(
+            ControlMessage::SessionAccept {
+                salt,
+                timestamp_ms,
+                mac,
+            },
+            _,
+        ) = packet
+        else {
+            panic!("missing handshake");
+        };
+        verify_session_mac(
+            &mac_session_accept(key, &salt, timestamp_ms),
+            &mac,
+            timestamp_ms,
+            now_unix_ms(),
+        )
+        .unwrap();
+        sender.install_peer_crypto(
+            publisher.address,
+            SessionCrypto::from_psk(key, &salt).unwrap(),
+        );
+        command(
+            &sender,
+            publisher.address,
+            SessionCommand::Open {
+                connection_id: 17,
+                version: SESSION_VERSION,
+            },
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Opened {
+                connection_id: 17,
+                files: true,
+                ..
+            }
+        ));
+        (sender, receiver)
+    }
+    fn receiver_subscription(id: u32) -> SubscriptionRequest {
+        SubscriptionRequest {
+            id,
+            source: CaptureSource::MainDisplay,
+            width: 720,
+            height: 1280,
+            fps: 30,
+            bitrate_kbps: 3500,
+            audio: true,
+        }
+    }
+    struct FileTestSender {
+        commands: mpsc::Sender<FileTransferCommand>,
+        incoming: mpsc::Sender<protocol::DataEnvelope>,
+        events: mpsc::UnboundedReceiver<FileTransferEvent>,
+        target: SocketAddr,
+        cancel: broadcast::Sender<()>,
+        tasks: Vec<tokio::task::AbortHandle>,
+    }
+    impl Drop for FileTestSender {
+        fn drop(&mut self) {
+            let _ = self.cancel.send(());
+            for task in &self.tasks {
+                task.abort();
+            }
+        }
+    }
+    impl FileTestSender {
+        fn new(sender: &UdpSender, target: SocketAddr) -> Self {
+            let (scheduled, worker) =
+                ScheduledDataSender::spawn(sender.clone(), target, Default::default());
+            let (commands, command_rx) = mpsc::channel(8);
+            let (incoming, inbound) = mpsc::channel(128);
+            let (events, event_rx) = mpsc::unbounded_channel();
+            let (cancel, cancel_rx) = broadcast::channel(1);
+            let task = tokio::spawn(run_file_transfer_runtime(
+                scheduled,
+                command_rx,
+                inbound,
+                events,
+                cancel_rx,
+                FileTransferRuntimeConfig::default(),
+            ));
+            Self {
+                commands,
+                incoming,
+                events: event_rx,
+                target,
+                cancel,
+                tasks: vec![worker.abort_handle(), task.abort_handle()],
+            }
+        }
+        async fn deliver(&mut self, receiver: &remote_core::net::UdpReceiver, source: PathBuf) {
+            self.commands
+                .send(FileTransferCommand::SendFile {
+                    path: source,
+                    mime_type: None,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    tokio::select! {
+                        event = self.events.recv() => match event {
+                            Some(FileTransferEvent::OutgoingCompleted { .. }) => break,
+                            Some(FileTransferEvent::Error {message,..}) => panic!("file transfer failed: {message}"),
+                            None => panic!("file worker closed before receiver confirmation"),
+                            _ => {}
+                        },
+                        packet = receiver.recv() => match packet.unwrap() {
+                            MultiplexedPacket::Data(e,a) | MultiplexedPacket::DataWithTiming(e,_,a) if a == self.target => { self.incoming.send(e).await.unwrap(); },
+                            _ => {}
+                        }
+                    }
+                }
+            }).await.expect("file receipt deadline");
+        }
+    }
+
+    #[tokio::test]
+    async fn receiver_requires_authentication_and_never_exposes_unauthorized_capture() {
+        let directory = ReceiverTestDir::new();
+        let key = b"file-receiver-test-key".to_vec();
+        let publisher = MobilePublisher::start_with_permissions(
+            "127.0.0.1:0".parse().unwrap(),
+            directory.0.clone(),
+            key.clone(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let bad_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (bad_sender, bad_receiver) = bad_mux.split();
+        command(
+            &bad_sender,
+            publisher.address,
+            SessionCommand::Open {
+                connection_id: 7,
+                version: SESSION_VERSION,
+            },
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), bad_receiver.recv())
+                .await
+                .is_err()
+        );
+        let (sender, receiver) = receiver_client(&publisher, &key).await;
+        command(
+            &sender,
+            publisher.address,
+            SessionCommand::ListSources { request_id: 3 },
+        )
+        .await;
+        assert!(
+            matches!(reply(&receiver).await, SessionCommand::Sources {sources,..} if sources.is_empty())
+        );
+        command(
+            &sender,
+            publisher.address,
+            SessionCommand::Subscribe(receiver_subscription(256)),
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Error {
+                request_id: 256,
+                ..
+            }
+        ));
+        publisher.frame(vec![1, 2, 3], 0, false);
+        publisher.frame(vec![1, 2, 3], 0, true);
+        assert!(!publisher.demand().active);
+        assert!(!publisher.demand().audio);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn receiver_files_survive_projection_start_and_stop() {
+        let directory = ReceiverTestDir::new();
+        let receive = directory.0.join("received");
+        let key = b"receiver-lifecycle-test".to_vec();
+        let publisher = MobilePublisher::start_with_permissions(
+            "127.0.0.1:0".parse().unwrap(),
+            receive.clone(),
+            key.clone(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let address = publisher.address;
+        let (sender, receiver) = receiver_client(&publisher, &key).await;
+        let contents: Vec<u8> = (0..131_072).map(|i| (i % 251) as u8).collect();
+        let first = directory.0.join("before-sharing.bin");
+        std::fs::write(&first, &contents).unwrap();
+        let mut file_sender = FileTestSender::new(&sender, address);
+        file_sender.deliver(&receiver, first).await;
+        assert_eq!(
+            std::fs::read(receive.join("before-sharing.bin")).unwrap(),
+            contents
+        );
+
+        publisher.set_capture_available(true, false);
+        assert!(
+            matches!(reply(&receiver).await, SessionCommand::Sources {sources,..} if sources.len()==1)
+        );
+        command(
+            &sender,
+            address,
+            SessionCommand::Subscribe(receiver_subscription(256)),
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Subscribed {
+                id: 256,
+                audio_owner: None,
+                ..
+            }
+        ));
+        assert!(publisher.demand().active);
+        publisher.set_capture_available(false, false);
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Unsubscribed { id: 256 }
+        ));
+        assert!(
+            matches!(reply(&receiver).await, SessionCommand::Sources {sources,..} if sources.is_empty())
+        );
+        assert!(!publisher.demand().active);
+        assert_eq!(publisher.address, address);
+        assert!(!publisher.is_finished());
+
+        let second = directory.0.join("after-sharing.bin");
+        let reversed: Vec<u8> = contents.iter().rev().copied().collect();
+        std::fs::write(&second, &reversed).unwrap();
+        file_sender.deliver(&receiver, second).await;
+        assert_eq!(
+            std::fs::read(receive.join("after-sharing.bin")).unwrap(),
+            reversed
+        );
+        // Reopening the SAME connection id succeeds, proving the authenticated
+        // connection was not replaced during the media permission transition.
+        command(
+            &sender,
+            address,
+            SessionCommand::Open {
+                connection_id: 17,
+                version: SESSION_VERSION,
+            },
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Opened {
+                connection_id: 17,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn old_capture_frames_cannot_cross_authorization_epochs() {
+        let directory = ReceiverTestDir::new();
+        let key = b"receiver-epoch-test".to_vec();
+        let publisher = MobilePublisher::start_with_permissions(
+            "127.0.0.1:0".parse().unwrap(),
+            directory.0.clone(),
+            key.clone(),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let (sender, receiver) = receiver_client(&publisher, &key).await;
+        let old_epoch = publisher.permission.borrow().epoch;
+        command(
+            &sender,
+            publisher.address,
+            SessionCommand::Subscribe(receiver_subscription(256)),
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Subscribed { .. }
+        ));
+        publisher.set_capture_available(false, false);
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Unsubscribed { .. }
+        ));
+        let _ = reply(&receiver).await;
+        publisher.set_capture_available(true, false);
+        let _ = reply(&receiver).await;
+        command(
+            &sender,
+            publisher.address,
+            SessionCommand::Subscribe(receiver_subscription(512)),
+        )
+        .await;
+        assert!(matches!(
+            reply(&receiver).await,
+            SessionCommand::Subscribed { id: 512, .. }
+        ));
+        publisher
+            .frames
+            .send(Frame {
+                epoch: old_epoch,
+                bytes: vec![9, 9, 9],
+                timestamp: 0,
+                audio: false,
+            })
+            .await
+            .unwrap();
+        publisher.frame(vec![0, 0, 0, 1, 0x26, 1, 7], 0, false);
+        let packet = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let envelope = match packet {
+            MultiplexedPacket::Data(e, _) | MultiplexedPacket::DataWithTiming(e, _, _) => e,
+            _ => panic!("expected media"),
+        };
+        assert_eq!(envelope.header.stream_id, 512);
+        assert_eq!(envelope.payload, vec![0, 0, 0, 1, 0x26, 1, 7]);
     }
 }

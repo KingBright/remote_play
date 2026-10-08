@@ -10,7 +10,8 @@ pub mod wasm_bridge;
 
 use protocol::{ControlMessage, TouchAction};
 use remote_core::client_session::{
-    AudioIngressEvent, ClientSessionReceiverConfig, SharedHostStats, spawn_client_session_receiver,
+    AudioIngressEvent, ClientSessionEvent, ClientSessionReceiverConfig, SharedHostStats,
+    spawn_client_session_receiver,
 };
 use remote_core::discovery::{
     DEFAULT_DISCOVERY_PORT, DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities,
@@ -103,6 +104,14 @@ pub struct BridgeDiscoveredDevice {
     pub endpoint: String,
     pub scope: String,
     pub can_stream: bool,
+    #[serde(default)]
+    pub can_view: bool,
+    #[serde(default)]
+    pub file_transfer: bool,
+    #[serde(default)]
+    pub clipboard_sync: bool,
+    #[serde(default)]
+    pub has_service: bool,
     pub online: bool,
 }
 
@@ -132,6 +141,7 @@ struct LiveSession {
     _audio_pump: tokio::task::JoinHandle<()>,
     _heartbeat: tokio::task::JoinHandle<()>,
     _telemetry: tokio::task::JoinHandle<()>,
+    _events: tokio::task::JoinHandle<()>,
 }
 
 impl LiveSession {
@@ -143,6 +153,7 @@ impl LiveSession {
             self._audio_pump,
             self._heartbeat,
             self._telemetry,
+            self._events,
         ];
         for task in &tasks {
             task.abort();
@@ -167,6 +178,8 @@ pub struct RemoteBridgeClient {
     pub state_rx: watch::Receiver<BridgeSessionState>,
     telemetry_tx: watch::Sender<BridgeTelemetry>,
     pub telemetry_rx: watch::Receiver<BridgeTelemetry>,
+    last_error_tx: watch::Sender<String>,
+    pub last_error_rx: watch::Receiver<String>,
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
     pub devices_rx: watch::Receiver<Vec<BridgeDiscoveredDevice>>,
     touch_tracker: Arc<Mutex<TouchStateTracker>>,
@@ -174,6 +187,7 @@ pub struct RemoteBridgeClient {
     nalu_queue: Arc<Mutex<VecDeque<EncodedVideoNalu>>>,
     audio_queue: Arc<Mutex<VecDeque<EncodedAudioPacket>>>,
     live: Mutex<Option<LiveSession>>,
+    virtual_keys: Mutex<touch_mapper::VirtualKeyboard>,
     lifecycle: Mutex<()>,
     last_connect: Mutex<Option<(String, String)>>,
     connected_at: Mutex<Option<Instant>>,
@@ -202,6 +216,7 @@ impl RemoteBridgeClient {
     pub fn new() -> Self {
         let (state_tx, state_rx) = watch::channel(BridgeSessionState::Disconnected);
         let (telemetry_tx, telemetry_rx) = watch::channel(BridgeTelemetry::default());
+        let (last_error_tx, last_error_rx) = watch::channel(String::new());
         let (devices_tx, devices_rx) = watch::channel(Vec::new());
         let (network_reload_tx, network_reload_rx) = mpsc::unbounded_channel();
         let client = Self {
@@ -210,6 +225,8 @@ impl RemoteBridgeClient {
             state_rx,
             telemetry_tx,
             telemetry_rx,
+            last_error_tx,
+            last_error_rx,
             devices_tx,
             devices_rx,
             touch_tracker: Arc::new(Mutex::new(TouchStateTracker::default())),
@@ -217,6 +234,7 @@ impl RemoteBridgeClient {
             nalu_queue: Arc::new(Mutex::new(VecDeque::with_capacity(8))),
             audio_queue: Arc::new(Mutex::new(VecDeque::with_capacity(16))),
             live: Mutex::new(None),
+            virtual_keys: Mutex::new(touch_mapper::VirtualKeyboard::default()),
             lifecycle: Mutex::new(()),
             last_connect: Mutex::new(None),
             connected_at: Mutex::new(None),
@@ -243,8 +261,15 @@ impl RemoteBridgeClient {
     }
 
     pub fn set_touch_mode(&self, mode: TouchMode) {
-        if let Ok(mut tracker) = self.touch_tracker.lock() {
-            tracker.set_mode(mode);
+        let releases = self
+            .touch_tracker
+            .lock()
+            .map(|mut tracker| tracker.set_mode(mode))
+            .unwrap_or_default();
+        if let Some(live) = self.live.lock().unwrap().as_ref() {
+            for event in releases {
+                let _ = live.control_tx.send(ControlMessage::Input(event));
+            }
         }
     }
 
@@ -276,10 +301,14 @@ impl RemoteBridgeClient {
     }
 
     pub fn send_virtual_key(&self, key_name: &str, pressed: bool) {
-        if let Some(ev) = touch_mapper::create_virtual_key_event(key_name, pressed)
-            && let Some(live) = self.live.lock().unwrap().as_ref()
-        {
-            let _ = live.control_tx.send(ControlMessage::Input(ev));
+        if pressed && self.desired_media_paused.load(Relaxed) {
+            return;
+        }
+        let live = self.live.lock().unwrap();
+        if let Some(live) = live.as_ref() {
+            for event in self.virtual_keys.lock().unwrap().event(key_name, pressed) {
+                let _ = live.control_tx.send(ControlMessage::Input(event));
+            }
         }
     }
 
@@ -295,19 +324,53 @@ impl RemoteBridgeClient {
         serde_json::to_string(&*self.devices_rx.borrow()).unwrap_or_else(|_| "[]".to_string())
     }
 
-    pub fn join_pairing_payload(&self, raw: &str) -> Result<String, String> {
-        let payload = parse_pairing_qr(raw).map_err(|err| err.to_string())?;
+    pub fn network_identity_json(&self) -> String {
         let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
-        let config = MeshConfig::from_invite_code(&payload.invite_code, "RemotePlay Android")
+        match store.load() {
+            Ok(Some(config)) => serde_json::json!({
+                "network_name": config.network_name,
+                "device_id": config.node_id,
+                "display_name": config.display_name,
+            })
+            .to_string(),
+            _ => "{}".into(),
+        }
+    }
+
+    pub fn join_pairing_payload(&self, raw: &str) -> Result<String, String> {
+        self.join_pairing_payload_with_change(raw)
+            .map(|(message, _)| message)
+    }
+
+    pub(crate) fn join_pairing_payload_with_change(
+        &self,
+        raw: &str,
+    ) -> Result<(String, bool), String> {
+        let payload = parse_pairing_qr(raw).map_err(|err| err.to_string())?;
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
+        let (config, changed) = store
+            .prepare_join(&payload.invite_code, "RemotePlay Android")
             .map_err(|err| err.to_string())?;
+        if !changed {
+            return Ok((format!("Already in network {}", config.network_name), false));
+        }
         store.save(&config).map_err(|err| err.to_string())?;
+        self.stop_live();
+        *self.last_connect.lock().unwrap() = None;
+        let _ = self.state_tx.send(BridgeSessionState::Disconnected);
         remote_core::session_crypto::refresh_paired_session_secret(
             config.network_secret.expose_secret(),
         );
+        self.devices_tx.send_replace(Vec::new());
+        self.network_enabled.store(true, Relaxed);
         let _ = self.network_reload_tx.send(());
-        Ok(format!(
-            "Joined {} (control port {})",
-            config.network_name, payload.control_port
+        Ok((
+            format!(
+                "Joined network {}. Discovering members...",
+                config.network_name
+            ),
+            true,
         ))
     }
 
@@ -344,6 +407,7 @@ impl RemoteBridgeClient {
     }
 
     fn connect_locked(&self, device_id: String, endpoint: String) {
+        self.last_error_tx.send_replace(String::new());
         if *self.state_rx.borrow() != BridgeSessionState::Reconnecting {
             let _ = self.state_tx.send(BridgeSessionState::Connecting);
         }
@@ -359,6 +423,7 @@ impl RemoteBridgeClient {
 
         let state_tx = self.state_tx.clone();
         let telemetry_tx = self.telemetry_tx.clone();
+        let last_error_tx = self.last_error_tx.clone();
         let host_stats = self.host_stats.clone();
         let nalu_queue = self.nalu_queue.clone();
         let active_session_id = self.active_session_id.clone();
@@ -382,6 +447,7 @@ impl RemoteBridgeClient {
                 active_session_id,
                 telemetry_tx,
                 state_tx,
+                last_error_tx,
             )
             .await
         });
@@ -391,8 +457,10 @@ impl RemoteBridgeClient {
                 *self.live.lock().unwrap() = Some(live);
             }
             Err(err) => {
-                eprintln!("Bridge connect failed: {err}");
+                let reason = err.to_string();
+                eprintln!("Bridge connect failed: {reason}");
                 self.stop_live();
+                self.last_error_tx.send_replace(reason);
                 let _ = self.state_tx.send(BridgeSessionState::Error);
             }
         }
@@ -411,6 +479,7 @@ impl RemoteBridgeClient {
         if let Some(live) = self.live.lock().unwrap().take() {
             self.runtime().block_on(live.stop());
         }
+        *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
         self.active_session_id.store(0, Relaxed);
         self.nalu_queue.lock().unwrap().clear();
         self.audio_queue.lock().unwrap().clear();
@@ -559,6 +628,7 @@ async fn start_live_session(
     active_session_id: Arc<AtomicU32>,
     telemetry_tx: watch::Sender<BridgeTelemetry>,
     state_tx: watch::Sender<BridgeSessionState>,
+    last_error_tx: watch::Sender<String>,
 ) -> Result<LiveSession, Box<dyn std::error::Error + Send + Sync>> {
     let bind_addr = if target.is_ipv6() {
         "[::]:0"
@@ -591,6 +661,7 @@ async fn start_live_session(
     let (audio_tx, mut audio_rx) = mpsc::channel(64);
     let (decode_tx, mut decode_rx) = mpsc::channel(64);
     let stats = Statistics::new();
+    let (session_event_tx, mut session_event_rx) = mpsc::unbounded_channel();
 
     let receiver = spawn_client_session_receiver(ClientSessionReceiverConfig {
         bind_addr: multiplexer.local_addr()?,
@@ -602,7 +673,23 @@ async fn start_live_session(
         decode_tx,
         clipboard_control: None,
         file_transfer_control: None,
-        session_event_tx: None,
+        session_event_tx: Some(session_event_tx),
+    });
+
+    let event_state_tx = state_tx.clone();
+    let event_error_tx = last_error_tx.clone();
+    let event_control_tx = control_tx.clone();
+    let events = tokio::spawn(async move {
+        while let Some(event) = session_event_rx.recv().await {
+            if let ClientSessionEvent::HostError { request_id, reason } = event
+                && request_id == session_id
+            {
+                event_error_tx.send_replace(reason);
+                let _ = event_state_tx.send(BridgeSessionState::Error);
+                let _ = event_control_tx.send(ControlMessage::StopStream);
+                break;
+            }
+        }
     });
 
     let egress_sender = udp_sender.clone();
@@ -744,6 +831,7 @@ async fn start_live_session(
         _audio_pump: audio_pump,
         _heartbeat: heartbeat,
         _telemetry: telemetry,
+        _events: events,
     })
 }
 
@@ -853,7 +941,10 @@ async fn run_bridge_network(
         }
 
         match start_bridge_relay(&identity, discovery_target, cancel_tx.clone()).await {
-            Ok((control_endpoint, discovery_endpoint, tasks)) => {
+            Ok((control_endpoint, discovery_endpoint, routes, tasks)) => {
+                discovery_config
+                    .relay_routes
+                    .push((discovery_endpoint, routes));
                 discovery_config.announce_targets.push(discovery_endpoint);
                 discovery_config
                     .route_overrides
@@ -948,7 +1039,12 @@ async fn start_bridge_relay(
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<
-    (SocketAddr, SocketAddr, Vec<tokio::task::JoinHandle<()>>),
+    (
+        SocketAddr,
+        SocketAddr,
+        remote_core::routed_relay::PeerRelayRoutes,
+        Vec<tokio::task::JoinHandle<()>>,
+    ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let relay_url = std::env::var("REMOTE_PLAY_RELAY_SERVER_ADDR")
@@ -956,19 +1052,32 @@ async fn start_bridge_relay(
     let control_group = derive_relay_group_id(
         &identity.network_name,
         identity.network_secret.expose_secret(),
-        "control",
+        "control-device-v1",
     )?;
     let discovery_group = derive_relay_group_id(
         &identity.network_name,
         identity.network_secret.expose_secret(),
         "discovery",
     )?;
-    let control_tunnel = BoundWebSocketRelayTunnel::bind(WebSocketRelayTunnelConfig::new(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        relay_url.clone(),
-        control_group,
+    let router = remote_core::routed_relay::RoutedRelay::bind(
         identity.node_id.clone(),
-    )?)
+        remote_core::routed_relay::derive_routing_key(
+            identity.network_secret.expose_secret().as_bytes(),
+        ),
+        None,
+    )
+    .await?;
+    let router_target = router.local_addr()?;
+    let routes = router.routes();
+    let control_tunnel = BoundWebSocketRelayTunnel::bind(
+        WebSocketRelayTunnelConfig::new(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            relay_url.clone(),
+            control_group,
+            identity.node_id.clone(),
+        )?
+        .with_local_target_addr(router_target),
+    )
     .await?;
     let control_endpoint = control_tunnel.local_addr()?;
     let discovery_tunnel = BoundWebSocketRelayTunnel::bind(
@@ -983,8 +1092,14 @@ async fn start_bridge_relay(
     .await?;
     let discovery_endpoint = discovery_tunnel.local_addr()?;
     let control_cancel_tx = cancel_tx.clone();
+    let router_cancel = cancel_tx.subscribe();
     let discovery_cancel_tx = cancel_tx;
     let tasks = vec![
+        tokio::spawn(async move {
+            if let Err(error) = router.run(control_endpoint, router_cancel).await {
+                eprintln!("Bridge addressed relay stopped: {error}");
+            }
+        }),
         tokio::spawn(async move {
             if let Err(err) = control_tunnel.run(control_cancel_tx.subscribe()).await {
                 eprintln!("Bridge relay control tunnel stopped: {err}");
@@ -996,13 +1111,13 @@ async fn start_bridge_relay(
             }
         }),
     ];
-    Ok((control_endpoint, discovery_endpoint, tasks))
+    Ok((control_endpoint, discovery_endpoint, routes, tasks))
 }
 
 fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscoveredDevice> {
     let mut selected = BTreeMap::<String, (u8, BridgeDiscoveredDevice)>::new();
     for peer in snapshot.peers() {
-        if !peer.announcement.capabilities.can_stream || peer.scope == DiscoveryScope::Mesh {
+        if peer.scope == DiscoveryScope::Mesh {
             continue;
         }
         let rank = match peer.scope {
@@ -1022,7 +1137,11 @@ fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscover
                 DiscoveryScope::Mesh => continue,
             }
             .to_string(),
-            can_stream: true,
+            can_stream: peer.announcement.capabilities.can_stream,
+            can_view: peer.announcement.capabilities.can_view,
+            file_transfer: peer.announcement.capabilities.file_transfer,
+            clipboard_sync: peer.announcement.capabilities.clipboard_sync,
+            has_service: peer.announcement.control_port != 0 && peer.endpoint.port() != 0,
             online: true,
         };
         match selected.get(&device.device_id) {
@@ -1178,6 +1297,67 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].scope, "LAN");
         assert_eq!(devices[0].endpoint, "192.168.1.20:39271");
+    }
+
+    #[test]
+    fn network_members_are_visible_without_video_publishing() {
+        let mut cache = remote_core::discovery::DiscoveryPeerCache::new("group", "local");
+        for (id, port, files) in [("viewer", 0, false), ("file-server", 42000, true)] {
+            cache.apply_announcement(
+                DiscoveryAnnouncement {
+                    network_name: "group".into(),
+                    device_id: id.into(),
+                    display_name: id.into(),
+                    control_port: port,
+                    virtual_ip: None,
+                    capabilities: DiscoveryCapabilities {
+                        can_view: true,
+                        file_transfer: files,
+                        clipboard_sync: files,
+                        ..DiscoveryCapabilities::default()
+                    },
+                    scope: DiscoveryScope::Lan,
+                    ttl: DEFAULT_PEER_TTL,
+                },
+                "192.168.1.10:38117".parse().unwrap(),
+                1,
+            );
+        }
+        let devices = devices_from_snapshot(&cache.snapshot());
+        assert_eq!(devices.len(), 2);
+        let viewer = devices.iter().find(|d| d.device_id == "viewer").unwrap();
+        assert!(viewer.can_view);
+        assert!(!viewer.can_stream);
+        assert!(!viewer.has_service);
+        let files = devices
+            .iter()
+            .find(|d| d.device_id == "file-server")
+            .unwrap();
+        assert!(files.has_service && files.file_transfer && files.clipboard_sync);
+        assert!(!files.can_stream);
+        let json = serde_json::to_value(files).unwrap();
+        assert_eq!(json["file_transfer"], true);
+        assert_eq!(json["can_stream"], false);
+    }
+
+    #[test]
+    fn legacy_mesh_route_does_not_reappear_as_a_network_member() {
+        let mut cache = remote_core::discovery::DiscoveryPeerCache::new("group", "local");
+        cache.apply_announcement(
+            DiscoveryAnnouncement {
+                network_name: "group".into(),
+                device_id: "legacy".into(),
+                display_name: "Legacy".into(),
+                control_port: 40000,
+                virtual_ip: None,
+                capabilities: DiscoveryCapabilities::all_interactive(),
+                scope: DiscoveryScope::Mesh,
+                ttl: DEFAULT_PEER_TTL,
+            },
+            "10.0.0.5:38117".parse().unwrap(),
+            1,
+        );
+        assert!(devices_from_snapshot(&cache.snapshot()).is_empty());
     }
 
     #[test]

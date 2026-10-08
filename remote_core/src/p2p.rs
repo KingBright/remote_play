@@ -336,7 +336,7 @@ impl BoundP2pRendezvousServer {
                     peers.retain(|_, peer| peer.last_seen.elapsed() <= ttl);
                 }
                 received = self.socket.recv_from(&mut buf) => {
-                    let (len, addr) = received?;
+                    let Some((len, addr))=datagram_receive_result(received)? else {continue;};
                     let Ok(P2pPacket::Register { group_id, peer_id, announcement }) = P2pPacket::decode(&buf[..len]) else {
                         continue;
                     };
@@ -681,7 +681,7 @@ impl BoundP2pTunnel {
                     }
                 }
                 received = public_socket.recv_from(&mut buf) => {
-                    let (len, addr) = received?;
+                    let Some((len, addr))=datagram_receive_result(received)? else {continue;};
                     let bytes = &buf[..len];
 
                     if self.config.rendezvous_addrs.contains(&addr) && P2pPacket::is_wire_packet(bytes) {
@@ -830,6 +830,9 @@ impl BoundP2pTunnel {
                             }
                             _ => {}
                         }
+                        // Reserved P2P control must never become raw application data,
+                        // including an unknown version or a different group/peer.
+                        continue;
                     }
 
                     let peer_id = peers.iter().find_map(|(peer_id, route)| {
@@ -948,6 +951,33 @@ async fn ensure_peer_route(
     Ok(())
 }
 
+fn datagram_receive_result(
+    result: std::io::Result<(usize, SocketAddr)>,
+) -> std::io::Result<Option<(usize, SocketAddr)>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn predict_neighbor_ports(address: SocketAddr) -> bool {
+    // Loopback has no NAT mapping to predict. Probing adjacent loopback ports
+    // can hit this process's unrelated app or discovery socket on Windows.
+    let ip = address.ip();
+    !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+}
+
 fn add_candidate_set(
     route: &mut PeerRoute,
     candidate: SocketAddr,
@@ -955,7 +985,10 @@ fn add_candidate_set(
     config: &P2pTunnelConfig,
 ) {
     add_candidate(route, candidate, kind, config.max_candidates_per_peer);
-    if kind != CandidateKind::Observed || config.predicted_port_span == 0 {
+    if kind != CandidateKind::Observed
+        || config.predicted_port_span == 0
+        || !predict_neighbor_ports(candidate)
+    {
         choose_active_candidate(route);
         return;
     }
@@ -1352,6 +1385,58 @@ mod tests {
         DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryScope,
     };
 
+    #[test]
+    fn localhost_and_non_unicast_addresses_have_no_nat_port_predictions() {
+        for address in [
+            "127.0.0.1:25000",
+            "127.0.0.2:25000",
+            "[::1]:25000",
+            "0.0.0.0:25000",
+            "224.0.0.1:25000",
+            "255.255.255.255:25000",
+        ] {
+            assert!(
+                !predict_neighbor_ports(address.parse().unwrap()),
+                "{address}"
+            );
+        }
+        for address in [
+            "203.0.113.4:25000",
+            "192.168.1.9:25000",
+            "[2001:db8::2]:25000",
+        ] {
+            assert!(
+                predict_neighbor_ports(address.parse().unwrap()),
+                "non-loopback prediction behavior must remain available"
+            );
+        }
+    }
+    #[test]
+    fn an_unreachable_udp_peer_does_not_close_the_shared_tunnel() {
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(
+                datagram_receive_result(Err(std::io::Error::from(kind)))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let sample = (12, "127.0.0.1:25000".parse().unwrap());
+        assert_eq!(datagram_receive_result(Ok(sample)).unwrap(), Some(sample));
+    }
+    #[test]
+    fn actual_socket_permission_and_configuration_errors_are_not_hidden() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::NotConnected,
+        ] {
+            assert!(datagram_receive_result(Err(std::io::Error::from(kind))).is_err());
+        }
+    }
+
     fn announcement(peer: &str, port: u16) -> Vec<u8> {
         DiscoveryAnnouncement {
             network_name: "network".into(),
@@ -1554,6 +1639,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(&buf[..len], b"hello-viewer");
+
+        let wrong_group = P2pPacket::Punch {
+            group_id: "other-group".into(),
+            peer_id: "viewer".into(),
+        }
+        .encode()
+        .unwrap();
+        viewer_app
+            .send_to(&wrong_group, viewer_route)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), host_app.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "P2P control from a non-matching group leaked into raw app traffic"
+        );
 
         let _ = host_cancel_tx.send(());
         let _ = viewer_cancel_tx.send(());

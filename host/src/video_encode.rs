@@ -81,6 +81,7 @@ struct FrameContext {
 
 pub struct MacVideoEncoder {
     session: Option<VTCompressionSessionRef>,
+    source_color: Option<crate::video_color::SourceColor>,
     _tx: mpsc::Sender<EncodedChunk>,
     rx: mpsc::Receiver<EncodedChunk>,
     _tx_box: Box<mpsc::Sender<EncodedChunk>>,
@@ -395,6 +396,7 @@ impl MacVideoEncoder {
 
         Ok(Self {
             session: Some(session),
+            source_color: None,
             _tx: tx,
             rx,
             _tx_box: tx_box,
@@ -404,6 +406,40 @@ impl MacVideoEncoder {
             fps,
             bitrate_kbps,
         })
+    }
+
+    fn prepare_source_color(&mut self,color:crate::video_color::SourceColor)->Result<VTCompressionSessionRef,Box<dyn Error+Send+Sync>> {
+        if self.source_color.as_ref()==Some(&color) {
+            return self.session.ok_or_else(||"VideoToolbox compression session is not available".into());
+        }
+        // VideoToolbox can return success for a mid-session metadata property
+        // update while retaining the old SPS. A color change needs a fresh
+        // compression session, not merely another forced I-frame.
+        let replacement=self.source_color.is_some() || self.session.is_none();
+        let candidate=if replacement {
+            let ref_con=self._tx_box.as_mut() as *mut _ as *mut c_void;
+            unsafe{Self::create_session(self.width,self.height,self.fps,self.bitrate_kbps,ref_con)?}
+        }else{self.session.unwrap()};
+        if let Err(error)=unsafe{color.apply(candidate,None)} {
+            unsafe{VTCompressionSessionInvalidate(candidate);CFRelease(candidate);}
+            if !replacement {self.session=None;self.source_color=None;}
+            return Err(error);
+        }
+        if replacement {
+            if let Some(old)=self.session {
+                // Retire all earlier-color outputs before a new SPS can be sent.
+                let result=unsafe{VTCompressionSessionCompleteFrames(old,CMTime{value:0,timescale:0,flags:0,epoch:0})};
+                if result!=0 {
+                    unsafe{VTCompressionSessionInvalidate(candidate);CFRelease(candidate);}
+                    return Err(format!("Cannot retire previous color generation: {result}").into());
+                }
+                unsafe{VTCompressionSessionInvalidate(old);CFRelease(old);}
+            }
+            self.session=Some(candidate);
+        }
+        self.source_color=Some(color);
+        self.force_keyframe=true;
+        Ok(candidate)
     }
 
     pub fn request_keyframe(&mut self) {
@@ -475,6 +511,7 @@ impl MacVideoEncoder {
                 unsafe { Self::create_session(width, height, fps, bitrate_kbps, ref_con) }
             {
                 self.session = Some(new_session);
+                self.source_color = None;
                 self.width = width;
                 self.height = height;
                 self.fps = fps;
@@ -521,9 +558,9 @@ impl VideoEncoder for MacVideoEncoder {
         let pts = frame.sample_buffer.presentation_timestamp();
         let duration = frame.sample_buffer.duration();
 
-        let session = self
-            .session
-            .ok_or("VideoToolbox compression session is not available")?;
+        // Carry actual metadata without guessing from buffer dimensions or format.
+        let color=unsafe{crate::video_color::SourceColor::from_pixel_buffer(cv_pixel_buffer.as_ptr().cast())?};
+        let session=self.prepare_source_color(color)?;
 
         let mut timing = frame.timing;
         if timing.capture_ts_us == 0 {
@@ -646,3 +683,7 @@ mod tests {
         assert!(encoder.force_keyframe);
     }
 }
+
+#[cfg(test)]
+#[path = "video_color_tests.rs"]
+mod color_preservation_tests;

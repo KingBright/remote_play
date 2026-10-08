@@ -1,9 +1,18 @@
+#[cfg(all(target_os="linux",feature="native-linux-video"))]
+pub mod linux_hevc;
+#[cfg(all(target_os="linux",feature="native-linux-video"))]
+pub mod linux_playback;
 pub mod audio_player;
+pub mod desktop_frame;
 mod host_config;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod host_list;
 mod mesh_pairing;
+#[cfg(any(target_os = "macos", test))]
+mod native_call;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod portable_video;
 #[cfg(target_os = "macos")]
 mod render;
 pub mod session;
@@ -58,7 +67,7 @@ use remote_platform::WindowsClipboardProvider;
 
 pub use mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
 pub use remote_core::client_session::{HostStats, SharedHostStats};
-pub use transfer_center::TransferEntrySnapshot;
+pub use transfer_center::{TransferCancelTarget, TransferEntrySnapshot};
 
 pub struct DiscoveryRuntimeHandle {
     cancel_tx: broadcast::Sender<()>,
@@ -317,7 +326,9 @@ pub use video_decode::{
     MacDecodedVideoFrame, decoded_video_frame_surface, decoded_video_frame_surface_with_fit,
 };
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use portable_video::DecodedFrame as MacDecodedVideoFrame;
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 #[derive(Clone, Debug)]
 pub struct MacDecodedVideoFrame;
 
@@ -332,24 +343,45 @@ pub struct ClientMediaRuntime {
     pub audio_tx: mpsc::Sender<AudioPlayerEvent>,
     pub decode_tx: mpsc::Sender<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>,
     pub status: ClientMediaRuntimeStatus,
+    pub decode_status: Arc<Mutex<String>>,
+    decode_epoch: Arc<std::sync::atomic::AtomicU64>,
+    decode_stats: Arc<Statistics>,
     shared_frame: Arc<Mutex<Option<MacDecodedVideoFrame>>>,
+    frame_signal: Arc<tokio::sync::Notify>,
     _audio_player: Option<audio_player::AudioPlayer>,
     _decode_task: tokio::task::JoinHandle<()>,
 }
 
 impl ClientMediaRuntime {
     pub fn start(stats: Arc<Statistics>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Self::start_with_audio(stats, true)
+        Self::start_with_audio(stats, true, None)
     }
 
     pub fn start_video_only(stats: Arc<Statistics>) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Self::start_with_audio(stats, false)
+        Self::start_with_audio(stats, false, None)
     }
 
+    /// Explicit native mode used by the restored renderer, never an implicit
+    /// default change to the existing portable viewer or audio configuration.
+    #[cfg(any(all(target_os="windows",feature="native-windows-video"),all(target_os="linux",feature="native-linux-video")))]
+    pub fn start_native(
+        stats: Arc<Statistics>,
+        audio: bool,
+        fps: u32,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::start_with_audio(stats, audio, Some(fps))
+    }
     fn start_with_audio(
         stats: Arc<Statistics>,
         enable_audio: bool,
+        native_fps: Option<u32>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if native_fps.is_none() {
+            portable_video::decoder_program()?;
+        }
+        #[cfg(target_os = "macos")]
+        let _ = native_fps;
         let (audio_tx, audio_rx) = mpsc::channel(100);
         let audio_playback = AudioPlaybackControl {
             audio_tx: audio_tx.clone(),
@@ -369,13 +401,19 @@ impl ClientMediaRuntime {
             }
         };
         let shared_frame = Arc::new(Mutex::new(None));
+        let frame_signal = Arc::new(tokio::sync::Notify::new());
+        let decode_status = Arc::new(Mutex::new(String::new()));
+        let decode_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
         let (decode_tx, mut decode_rx) =
             mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(8);
 
         #[cfg(target_os = "macos")]
         let decode_task = {
             let decode_shared_frame = shared_frame.clone();
+            let frame_signal = frame_signal.clone();
             let stats_decode = stats.clone();
+            let decode_epoch = decode_epoch.clone();
+            let decode_status = decode_status.clone();
             spawn(async move {
                 let mut video_decoder = match video_decode::MacVideoDecoder::new() {
                     Ok(decoder) => decoder,
@@ -385,19 +423,48 @@ impl ClientMediaRuntime {
                     }
                 };
 
+                let mut generation = decode_epoch.load(std::sync::atomic::Ordering::Acquire);
                 let mut waiting_for_keyframe = true;
+                stats_decode
+                    .video_decoder_needs_keyframe
+                    .store(true, std::sync::atomic::Ordering::Release);
                 let mut previous_packet = None;
                 while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
                     let current = (ordered_pkt.header.ssrc, ordered_pkt.header.sequence_number);
+                    let observed_epoch = decode_epoch.load(std::sync::atomic::Ordering::Acquire);
+                    if observed_epoch != generation {
+                        generation = observed_epoch;
+                        video_decoder = match video_decode::MacVideoDecoder::new() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                *decode_status.lock().unwrap() = e.to_string();
+                                break;
+                            }
+                        };
+                        previous_packet = None;
+                        waiting_for_keyframe = true;
+                        stats_decode
+                            .video_decoder_needs_keyframe
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     if previous_packet.is_some_and(|(ssrc, seq): (u32, u16)| {
                         ssrc != current.0 || seq.wrapping_add(1) != current.1
                     }) {
                         waiting_for_keyframe = true;
+                        stats_decode
+                            .video_decoder_reference_gaps
+                            .fetch_add(1, Relaxed);
+                        stats_decode
+                            .video_decoder_needs_keyframe
+                            .store(true, std::sync::atomic::Ordering::Release);
                     }
                     previous_packet = Some(current);
                     if waiting_for_keyframe
                         && !remote_core::media_plane::is_hevc_keyframe(&ordered_pkt.payload)
                     {
+                        stats_decode
+                            .video_decoder_reference_skipped
+                            .fetch_add(1, Relaxed);
                         stats_decode
                             .video_decode_queue_dropped
                             .fetch_add(1, Relaxed);
@@ -423,12 +490,31 @@ impl ClientMediaRuntime {
                             frame.decode_cost_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
                             frame.decoded_at = std::time::Instant::now();
                             frame.timing = timing;
-                            stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
-                            let previous = decode_shared_frame.lock().unwrap().replace(frame);
+                            // Synchronize epoch validation with reset_video's frame lock.
+                            // An output queued before a source reset cannot publish afterward.
+                            let mut slot = decode_shared_frame.lock().unwrap();
+                            if generation != decode_epoch.load(std::sync::atomic::Ordering::Acquire)
+                            {
+                                drop(slot);
+                                drop(frame);
+                                continue;
+                            }
+                            stats_decode
+                                .video_decoder_needs_keyframe
+                                .store(false, std::sync::atomic::Ordering::Release);
+                            let previous = slot.replace(frame);
+                            drop(slot);
                             drop(previous);
+                            stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
+                            decode_status.lock().unwrap().clear();
+                            frame_signal.notify_one();
                         }
                         Err(err) => {
                             waiting_for_keyframe = true;
+                            stats_decode
+                                .video_decoder_needs_keyframe
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            *decode_status.lock().unwrap() = err.to_string();
                             stats_decode.video_decode_errors.fetch_add(1, Relaxed);
                             if err.to_string() != "No frame data or session not ready" {
                                 eprintln!("Decode error: {}", err);
@@ -439,10 +525,47 @@ impl ClientMediaRuntime {
             })
         };
 
-        #[cfg(not(target_os = "macos"))]
-        let decode_task = spawn(async move {
-            let _ = &mut decode_rx;
-        });
+        #[cfg(all(target_os = "windows", feature = "native-windows-video"))]
+        let decode_task = if let Some(fps) = native_fps {
+            windows_playback::spawn_decoder(
+                decode_rx,
+                shared_frame.clone(),
+                stats.clone(),
+                decode_epoch.clone(),
+                decode_status.clone(),
+                frame_signal.clone(),
+                fps,
+            )?
+        } else {
+            portable_video::spawn_decoder_with_signal(
+                decode_rx,
+                shared_frame.clone(),
+                stats.clone(),
+                decode_epoch.clone(),
+                decode_status.clone(),
+                Some(frame_signal.clone()),
+            )
+        };
+        #[cfg(all(target_os="linux",feature="native-linux-video"))]
+        let decode_task=if let Some(fps)=native_fps {
+            linux_playback::spawn_decoder(decode_rx,shared_frame.clone(),stats.clone(),decode_epoch.clone(),decode_status.clone(),frame_signal.clone(),fps)?
+        } else {
+            portable_video::spawn_decoder_with_signal(decode_rx,shared_frame.clone(),stats.clone(),decode_epoch.clone(),decode_status.clone(),Some(frame_signal.clone()))
+        };
+        #[cfg(any(
+            all(target_os = "linux",not(feature="native-linux-video")),
+            all(target_os = "windows", not(feature = "native-windows-video"))
+        ))]
+        let decode_task = portable_video::spawn_decoder_with_signal(
+            decode_rx,
+            shared_frame.clone(),
+            stats.clone(),
+            decode_epoch.clone(),
+            decode_status.clone(),
+            Some(frame_signal.clone()),
+        );
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        let decode_task = spawn(async move { while decode_rx.recv().await.is_some() {} });
 
         Ok(Self {
             audio_playback,
@@ -450,9 +573,34 @@ impl ClientMediaRuntime {
             decode_tx,
             status,
             shared_frame,
+            frame_signal,
+            decode_status,
+            decode_epoch,
+            decode_stats: stats,
             _audio_player: audio_player,
             _decode_task: decode_task,
         })
+    }
+
+    pub fn reset_video(&self) {
+        let previous = {
+            let mut slot = self.shared_frame.lock().unwrap();
+            // Serialize generation changes and publication under the same lock.
+            // The counter alone cannot close the check-then-publish race.
+            self.decode_epoch
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.decode_stats
+                .video_decoder_needs_keyframe
+                .store(true, std::sync::atomic::Ordering::Release);
+            slot.take()
+        };
+        drop(previous);
+        self.decode_status.lock().unwrap().clear();
+    }
+
+    /// Coalescing notification only; frame ownership stays in the latest-frame slot.
+    pub fn frame_updates(&self) -> Arc<tokio::sync::Notify> {
+        self.frame_signal.clone()
     }
 
     pub fn shared_frame(&self) -> Arc<Mutex<Option<MacDecodedVideoFrame>>> {
@@ -825,7 +973,8 @@ fn env_path_or_temp(name: &str, fallback_dir_name: &str) -> PathBuf {
 
 fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
     match event {
-        FileTransferEvent::IncomingClipboardReady { .. } => {}
+        FileTransferEvent::IncomingClipboardReady { .. }
+        | FileTransferEvent::SharedResponse { .. } => {}
         FileTransferEvent::OutgoingGroupStarted {
             group_id,
             file_count,
@@ -1303,3 +1452,11 @@ mod tests {
         assert!(config.receive_policy.allow_overwrite);
     }
 }
+
+#[cfg(all(target_os = "windows", feature = "native-windows-video"))]
+pub mod windows_hevc;
+
+pub mod hevc_sequence;
+
+#[cfg(all(target_os = "windows", feature = "native-windows-video"))]
+pub mod windows_playback;

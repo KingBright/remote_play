@@ -87,8 +87,14 @@ impl MeshPairingControl {
             );
         }
 
-        match MeshConfig::from_invite_code(invite_code, &self.display_name) {
-            Ok(config) => self.save_and_update(
+        let store = AppPrivateMeshConfigStore::new(&self.config_dir);
+        match store.prepare_join(invite_code, &self.display_name) {
+            Ok((_, false)) => self.update_message(
+                "Already a member of this device network.",
+                MeshPairingMessageKind::Success,
+                self.snapshot().restart_required,
+            ),
+            Ok((config, true)) => self.save_and_update(
                 config,
                 "Joined the device group from clipboard.",
                 MeshPairingMessageKind::Success,
@@ -241,6 +247,26 @@ mod tests {
         assert!(joined.restart_required);
         assert_eq!(joined.message_kind, MeshPairingMessageKind::Success);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeat_join_preserves_device_identity_without_reloading() {
+        let root = temp_dir("repeat-join");
+        let (reload_tx, mut reload_rx) = mpsc::unbounded_channel();
+        let control = MeshPairingControl::load_or_create(&root, "Phone")
+            .unwrap()
+            .with_mesh_reload_tx(reload_tx);
+        let original_id = control.snapshot().device_id;
+        let remote = MeshConfig::generate("Desktop");
+        let first = control.join_from_invite_code(&remote.invite_code());
+        assert_eq!(first.device_id, original_id);
+        reload_rx.try_recv().unwrap();
+        let repeated = control.join_from_invite_code(&remote.invite_code());
+        assert_eq!(repeated.device_id, first.device_id);
+        assert_eq!(repeated.network_name, first.network_name);
+        assert!(!repeated.restart_required);
+        assert!(reload_rx.try_recv().is_err());
         let _ = fs::remove_dir_all(root);
     }
 

@@ -175,6 +175,7 @@ impl MobileWorkspace {
                     }
                     Some(event) = events.files.recv() => {
                         let detail = match &event {
+                            FileTransferEvent::SharedResponse { request_id, response } => serde_json::json!({"shared_request_id":request_id,"shared_response":response}),
                             FileTransferEvent::IncomingClipboardReady { paths, .. } => serde_json::json!({"clipboard_files":paths}),
                             FileTransferEvent::IncomingCompleted { path, .. } => serde_json::json!({"path": path}),
                             FileTransferEvent::Error { message, .. } => serde_json::json!({"error":message}),
@@ -295,6 +296,23 @@ impl MobileWorkspace {
             .send(FileTransferCommand::SendFile {
                 path,
                 mime_type: None,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+    pub async fn shared_request(&self, json: &str) -> Result<(), String> {
+        if !self.connection.files_available {
+            return Err("Peer does not support files".into());
+        }
+        let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        let request_id = value["request_id"].as_u64().ok_or("missing request ID")?;
+        let request =
+            serde_json::from_value(value["request"].clone()).map_err(|e| e.to_string())?;
+        self.connection
+            .file_commands
+            .send(FileTransferCommand::SharedRequest {
+                request_id,
+                request,
             })
             .await
             .map_err(|e| e.to_string())

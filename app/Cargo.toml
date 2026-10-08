@@ -1,6 +1,6 @@
 [package]
 name = "remote_play_app"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.8"
 edition = "2024"
 
 [dependencies]
@@ -16,16 +16,62 @@ tempfile = "3"
 rustls = { version = "0.23", features = ["ring"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
-yororen_ui = "0.2"
-rfd = "0.15"
 raw-window-handle = "0.6"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAppearance"] }
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dev-dependencies]
 gpui-ce = { version = "0.3.3", features = ["runtime_shaders", "test-support"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [[bin]]
 name = "remote_play"
 path = "src/main.rs"
+
+[target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]
+gpui-ce = { version = "0.3.3", features = ["runtime_shaders"] }
+yororen_ui = "0.2"
+rfd = "0.15"
+remote_client_bridge = { path = "../remote_client_bridge" }
+
+[features]
+default = ["gpui-restoration"]
+native-linux-video = ["gpui-native-video", "client/native-linux-video"]
+gpui-restoration = []
+gpui-native-video = ["gpui-restoration", "gpui-ce/native-video"]
+native-windows-video = ["gpui-native-video", "client/native-windows-video"]
+
+[[example]]
+name = "original_gpui_probe"
+path = "examples/original_gpui_probe.rs"
+required-features = ["gpui-restoration"]
+
+[[example]]
+name = "restored_gui_acceptance"
+path = "examples/restored_gui_acceptance.rs"
+required-features = ["gpui-restoration"]
+
+[[example]]
+name = "native_video_gpu_check"
+path = "examples/native_video_gpu_check.rs"
+required-features = ["gpui-native-video"]
+
+[[example]]
+name = "native_video_original_window"
+path = "examples/native_video_original_window.rs"
+required-features = ["gpui-native-video"]
+
+[[example]]
+name = "native_hevc_decode_check"
+path = "examples/native_hevc_decode_check.rs"
+required-features = ["native-windows-video"]
+
+[[example]]
+name = "native_hevc_original_window"
+path = "examples/native_hevc_original_window.rs"
+required-features = ["native-windows-video"]
+
+[[example]]
+name = "native_media_pipeline_check"
+path = "examples/native_media_pipeline_check.rs"
+required-features = ["gpui-native-video"]

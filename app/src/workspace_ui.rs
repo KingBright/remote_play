@@ -1,6 +1,7 @@
 use client::TransferCenterState;
 use client::audio_player::{AudioPlayer, AudioPlayerEvent};
 use client::{ClientMediaRuntime, ClipboardRuntimeControl};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use protocol::session::{CaptureSourceInfo, SessionCommand, SubscriptionRequest};
 use remote_core::workspace_session::{WorkspaceConnection, WorkspaceEvents};
@@ -22,6 +23,9 @@ struct Shared {
     status: String,
     audio_error: Option<String>,
     transfers: TransferCenterState,
+    remote_files: Vec<protocol::shared_files::SharedFileInfo>,
+    shared_next: Option<u64>,
+    shared_request: u64,
 }
 struct Pane {
     focus: FocusHandle,
@@ -199,7 +203,18 @@ impl WorkspaceView {
                             }
                             event = files.recv() => {
                                 let Some(event) = event else { break; };
-                                if let Some(shared) = weak.upgrade() { shared.lock().unwrap().transfers.apply_event(&event); } else { break; }
+                                if let Some(shared) = weak.upgrade() {
+                                    let mut s=shared.lock().unwrap();
+                                    if let remote_core::file_transfer_runtime::FileTransferEvent::SharedResponse {request_id,response}=&event {
+                                        match response {
+                                            protocol::shared_files::SharedFileResponse::Page {entries,next_after_id} if *request_id==s.shared_request => {s.remote_files=entries.clone();s.shared_next = *next_after_id;s.status="Shared list received; choose a file to retrieve".into();}
+                                            protocol::shared_files::SharedFileResponse::Queued {..} => s.status="File request accepted; waiting for delivery".into(),
+                                            protocol::shared_files::SharedFileResponse::Rejected {message} => s.status=message.clone(),
+                                            _ => {}
+                                        }
+                                    }
+                                    s.transfers.apply_event(&event);
+                                } else { break; }
                             }
                         }
                     }
@@ -227,6 +242,27 @@ impl WorkspaceView {
             rate_editor: None,
             fps_edit: String::new(),
             bitrate_edit: String::new(),
+        }
+    }
+    fn request_shared_files(&self, after_id: u64) {
+        if let Some(connection) = self.connection() {
+            let request_id = {
+                let mut s = self.shared.lock().unwrap();
+                s.shared_request += 1;
+                s.status = "Requesting remote shared list".into();
+                s.shared_request
+            };
+            tokio::spawn(async move {
+                let _ = connection
+                    .file_commands
+                    .send(
+                        remote_core::file_transfer_runtime::FileTransferCommand::SharedRequest {
+                            request_id,
+                            request: protocol::shared_files::SharedFileRequest::List { after_id },
+                        },
+                    )
+                    .await;
+            });
         }
     }
     fn connection(&self) -> Option<Arc<WorkspaceConnection>> {
@@ -567,6 +603,8 @@ impl Render for WorkspaceView {
         let audio_error = state.audio_error.clone();
         let transfers = state.transfers.snapshots();
         let bindings = state.bindings.clone();
+        let remote_files = state.remote_files.clone();
+        let shared_next = state.shared_next;
         drop(state);
         let toolbar = div().flex().gap_2().items_center().child(action("grid", if self.tiled { "Grid ✓" } else { "Grid" }).on_click(cx.listener(|this, _, _, cx| { this.tiled = true; cx.notify(); })))
             .child(action("clipboard", if self.clipboard.is_some() { "Clipboard ✓" } else { "Clipboard" })
@@ -580,6 +618,27 @@ impl Render for WorkspaceView {
             })))
             .child(action("received", "Received files").on_click(cx.listener(|this, _, _, cx| cx.reveal_path(&this.receive_dir))))
             .child(action("refresh", "Refresh sources").on_click(cx.listener(|this, _, _, _| { if let Some(connection) = this.connection() { tokio::spawn(async move { let _ = connection.control(SessionCommand::ListSources { request_id: 1 }).await; }); } })));
+        let file_toolbar=div().flex().flex_wrap().gap_2()
+            .child(action("publish-files","Share files with network").on_click(cx.listener(|this,_,_,_| {
+                let shared=Arc::downgrade(&this.shared);
+                std::thread::spawn(move || {
+                    let scope=remote_core::shared_files::current_share_scope();
+                    if let Some(paths)=rfd::FileDialog::new().pick_files() {
+                        let result=(|| -> Result<(),String> {
+                            let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e|e.to_string())?;
+                            for path in paths {
+                                if remote_core::shared_files::current_share_scope()!=scope {return Err("Device network changed; select files again".into());}
+                                runtime.block_on(remote_core::shared_files::shared_file_catalog().publish(&path,scope))?;
+                            }
+                            Ok(())
+                        })();
+                        if let Some(s)=shared.upgrade() {s.lock().unwrap().status=match result {Ok(())=>"Files shared with device network until cleared, network change, or app exit".into(),Err(e)=>e};}
+                    }
+                });
+            })))
+            .child(action("clear-shared","Clear my shared list").on_click(cx.listener(|this,_,_,_| {remote_core::shared_files::shared_file_catalog().clear();this.shared.lock().unwrap().status="Shared list cleared; accepted transfers may finish".into();})))
+            .child(action("list-shared","Retrieve shared files").on_click(cx.listener(|this,_,_,_| {this.request_shared_files(0);})))
+            .when_some(shared_next,|view,next| view.child(action("next-shared","Next shared page").on_click(cx.listener(move |this,_,_,_| {this.request_shared_files(next);})))) ;
         let mut sidebar = div()
             .id("sources")
             .w(px(240.))
@@ -600,6 +659,16 @@ impl Render for WorkspaceView {
                     cx.notify();
                 })),
             );
+        }
+        sidebar = sidebar.child(file_toolbar);
+        for file in remote_files {
+            let id = file.id;
+            sidebar=sidebar.child(action(format!("get-shared-{id}"),format!("Get {} ({} bytes)",file.name,file.size_bytes)).on_click(cx.listener(move |this,_,_,_| {
+                if let Some(connection)=this.connection() {
+                    let request_id={let mut s=this.shared.lock().unwrap();s.shared_request+=1;s.shared_request};
+                    tokio::spawn(async move {let _=connection.file_commands.send(remote_core::file_transfer_runtime::FileTransferCommand::SharedRequest {request_id,request:protocol::shared_files::SharedFileRequest::Fetch {file_id:id}}).await;});
+                }
+            })));
         }
         let mut tabs = div().flex().flex_wrap().gap_2();
         for pane in &self.panes {

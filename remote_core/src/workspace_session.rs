@@ -40,6 +40,7 @@ pub struct WorkspaceEvents {
 }
 
 pub struct WorkspaceConnection {
+    last_response_rx: tokio::sync::watch::Receiver<Instant>,
     pub max_subscriptions: usize,
     pub files_available: bool,
     pub clipboard_available: bool,
@@ -63,6 +64,13 @@ impl Drop for WorkspaceConnection {
 }
 
 impl WorkspaceConnection {
+    /// Authenticated connection health is independent of screen dirtiness.
+    /// An unchanged desktop is allowed to stop producing new image frames.
+    pub fn peer_is_responsive(&self) -> bool {
+        !self.task.is_finished()
+            && self.last_response_rx.borrow().elapsed() <= Duration::from_secs(6)
+    }
+
     pub async fn connect(
         target: SocketAddr,
         receive_dir: std::path::PathBuf,
@@ -95,6 +103,7 @@ impl WorkspaceConnection {
             ),
             _ => return Err("peer did not advertise session capabilities".into()),
         };
+        let (last_response_tx, last_response_rx) = tokio::sync::watch::channel(Instant::now());
         let (commands, command_rx) = mpsc::channel(128);
         let (control_tx, control) = mpsc::unbounded_channel();
         let _ = control_tx.send(reply);
@@ -122,6 +131,7 @@ impl WorkspaceConnection {
             },
         ));
         let mut actor = Actor {
+            last_response_tx,
             id,
             target,
             sender: sender.clone(),
@@ -142,6 +152,7 @@ impl WorkspaceConnection {
         });
         Ok((
             Self {
+                last_response_rx,
                 max_subscriptions,
                 files_available,
                 clipboard_available,
@@ -218,6 +229,7 @@ struct Pending {
     last_sent: Instant,
 }
 struct Actor {
+    last_response_tx: tokio::sync::watch::Sender<Instant>,
     id: u32,
     target: SocketAddr,
     sender: UdpSender,
@@ -240,6 +252,8 @@ fn request_key(command: &SessionCommand) -> Option<(u8, u32)> {
             Some((6, *id))
         }
         SessionCommand::SetClipboard { .. } | SessionCommand::ClipboardState { .. } => Some((5, 0)),
+        SessionCommand::SwitchSource { request_id, .. }
+        | SessionCommand::SourceSwitched { request_id, .. } => Some((8, *request_id)),
         SessionCommand::ListSources { request_id } | SessionCommand::Sources { request_id, .. } => {
             Some((1, *request_id))
         }
@@ -278,6 +292,8 @@ impl Actor {
     }
     async fn run(&mut self, mut cancel: broadcast::Receiver<()>) {
         let mut last_pong = Instant::now();
+        let mut rejected_count = 0u64;
+        let mut rejection_log_at: Option<Instant> = None;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         let mut retry = tokio::time::interval(Duration::from_millis(250));
         let mut media = tokio::time::interval(Duration::from_millis(10));
@@ -339,6 +355,7 @@ impl Actor {
                             let command = *command;
                             if let Some(key) = request_key(&command) {
                                 let current = self.pending.get(&key).is_none_or(|pending| match (&pending.command, &command) {
+                                    (SessionCommand::SwitchSource { id, request_id, source }, SessionCommand::SourceSwitched { id: accepted_id, request_id: accepted_request, source: accepted_source, .. }) => id == accepted_id && request_id == accepted_request && source == accepted_source,
                                     (SessionCommand::Configure { revision, .. }, SessionCommand::Configured { revision:accepted, .. }) => accepted >= revision,
                                     (SessionCommand::SetActivity { revision, .. }, SessionCommand::Activity { revision: accepted, .. }) => accepted >= revision,
                                     _ => true,
@@ -349,11 +366,20 @@ impl Actor {
                             if let SessionCommand::Error { request_id, .. } = &command { self.pending.retain(|key, _| key.1 != *request_id); }
                             let _ = self.control_tx.send(command);
                         }
-                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { .. }, addr)) if addr == self.target => last_pong = Instant::now(),
+                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { .. }, addr)) if addr == self.target => { last_pong = Instant::now(); self.last_response_tx.send_replace(last_pong); },
                         Ok(MultiplexedPacket::Data(envelope, addr)) if addr == self.target => self.envelope(envelope).await,
                         Ok(MultiplexedPacket::DataWithTiming(mut envelope, timing, addr)) if addr == self.target => { envelope.transport_timing = timing.or(envelope.transport_timing); self.envelope(envelope).await; },
                         Ok(MultiplexedPacket::Rtp(packet, addr)) if addr == self.target => self.packet(packet, FrameTimingCheckpoints::default()).await,
                         Ok(_) => {},
+                        Err(error) if error.is::<crate::net::UdpPacketRejection>() => {
+                            rejected_count=rejected_count.saturating_add(1);
+                            if rejection_log_at.is_none_or(|t|t.elapsed()>=Duration::from_secs(5)) {
+                                eprintln!("Discarded invalid session datagram (total {rejected_count}): {error}");
+                                rejection_log_at=Some(Instant::now());
+                            }
+                            // Never deliver rejected bytes as host errors, keepalive,
+                            // source changes, or input acknowledgements.
+                        }
                         Err(error) => { let _ = self.control_tx.send(SessionCommand::Error { request_id: self.id, reason: error.to_string() }); }
                     }
                 }
@@ -493,9 +519,14 @@ async fn initial_open(
             .await
             .map_err(|e| e.to_string())?;
         let deadline = Instant::now() + Duration::from_millis(750);
-        while let Ok(Ok(MultiplexedPacket::Control(message, addr))) =
-            tokio::time::timeout_at(deadline, receiver.recv()).await
-        {
+        loop {
+            let (message, addr) = match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                Ok(Ok(MultiplexedPacket::Control(message, addr))) => (message, addr),
+                Ok(Ok(_)) => continue,
+                Ok(Err(error)) if error.is::<crate::net::UdpPacketRejection>() => continue,
+                Ok(Err(error)) => return Err(error.to_string()),
+                Err(_) => break,
+            };
             if addr != target {
                 continue;
             }
@@ -520,6 +551,145 @@ async fn initial_open(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Protocol-only regression. No capture, decoder, account profile or system
+    /// input is used: synthetic encrypted datagrams exercise the real actor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_decoder_backpressure_cannot_stall_control_or_datagram_ingress() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let (server_tx, server_rx) = server.split();
+        let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let local = client.local_addr().unwrap();
+        let (sender, receiver) = client.split();
+        let key = b"local-actor-backpressure-regression";
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        let (last_response_tx, mut last_response_rx) = tokio::sync::watch::channel(Instant::now());
+        let (commands, command_rx) = mpsc::channel(128);
+        let (control_tx, mut controls) = mpsc::unbounded_channel();
+        let (audio_tx, _audio_rx) = mpsc::channel(4);
+        let (files_tx, _files_rx) = mpsc::channel(4);
+        let (video_tx, mut video_rx) = mpsc::channel(2);
+        let stats = Statistics::new();
+        let view = View {
+            active: true,
+            handler: MediaPacketHandler::new(
+                stats.clone(),
+                Arc::new(AtomicU32::new(7)),
+                Arc::new(SharedHostStats::default()),
+                audio_tx.clone(),
+                video_tx,
+                None,
+            ),
+        };
+        let mut actor = Actor {
+            last_response_tx,
+            id: 55,
+            target,
+            sender,
+            receiver,
+            commands: command_rx,
+            control_tx,
+            audio_tx,
+            files_tx,
+            subscriptions: HashMap::from([(7, view)]),
+            pending: HashMap::new(),
+            clipboard: None,
+        };
+        let (cancel, _) = broadcast::channel(2);
+        let cancel_rx = cancel.subscribe();
+        let task = tokio::spawn(async move { actor.run(cancel_rx).await });
+        // Keep the decoder queue deliberately full while fragmented ingress and
+        // encrypted control replies continue through the same UDP socket.
+        for seq in 0..30u16 {
+            let mut payload = vec![0x44; 5000];
+            payload[..5].copy_from_slice(&[0, 0, 1, 0x26, 1]);
+            let packet = RtpPacket {
+                header: protocol::RtpHeader {
+                    version: 2,
+                    payload_type: protocol::PayloadType::VideoH265 as u8,
+                    sequence_number: seq,
+                    timestamp: now_unix_ms() as u32,
+                    ssrc: 7,
+                },
+                payload,
+            };
+            server_tx.send_rtp(&packet, local).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while stats
+            .video_jitter_buffer_push
+            .load(std::sync::atomic::Ordering::Relaxed)
+            < 30
+        {
+            assert!(!task.is_finished(), "actor exited during queued video");
+            assert!(
+                Instant::now() < deadline,
+                "ingress stopped with a full decoder queue"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            stats
+                .video_decode_queue_dropped
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        );
+        server_tx
+            .send_control(
+                &ControlMessage::Pong {
+                    client_send_ts: 1,
+                    host_recv_ts: 2,
+                    host_send_ts: 3,
+                },
+                local,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), last_response_rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        commands
+            .send(Command::Control(SessionCommand::ListSources {
+                request_id: 77,
+            }))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1),async {
+            loop {if matches!(server_rx.recv().await.unwrap(),MultiplexedPacket::Control(ControlMessage::Session(cmd),_) if matches!(*cmd,SessionCommand::ListSources{request_id:77})){break;}}
+        }).await.unwrap();
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Sources {
+                    request_id: 77,
+                    sources: vec![],
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    controls.recv().await,
+                    Some(SessionCommand::Sources { request_id: 77, .. })
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        while video_rx.try_recv().is_ok() {}
+        cancel.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn handshake_retries_loss_and_ignores_unrelated_control_without_spending_retries() {
@@ -585,5 +755,198 @@ mod tests {
         .unwrap()
         .unwrap();
         task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod rejected_datagram_tests {
+    use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rejected_plaintext_cannot_poison_an_authenticated_session() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        // Independent encryption state over the same test socket simulates a
+        // delayed plaintext packet carrying a forged session-level command.
+        let (plain, _) = server.split();
+        let (server_tx, _) = server.split();
+        let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let local = client.local_addr().unwrap();
+        let (sender, receiver) = client.split();
+        let key = b"local-only-rejected-datagram-regression";
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"test-salt").unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"test-salt").unwrap());
+        let (last_response_tx, mut response) = tokio::sync::watch::channel(Instant::now());
+        let (commands, commands_rx) = mpsc::channel(8);
+        let (control_tx, mut controls) = mpsc::unbounded_channel();
+        let (audio_tx, _) = mpsc::channel(2);
+        let (files_tx, _) = mpsc::channel(2);
+        let mut actor = Actor {
+            last_response_tx,
+            id: 91,
+            target,
+            sender,
+            receiver,
+            commands: commands_rx,
+            control_tx,
+            audio_tx,
+            files_tx,
+            subscriptions: HashMap::new(),
+            pending: HashMap::new(),
+            clipboard: None,
+        };
+        let (cancel, _) = broadcast::channel(1);
+        let cancel_rx = cancel.subscribe();
+        let task = tokio::spawn(async move { actor.run(cancel_rx).await });
+        for _ in 0..8 {
+            plain
+                .send_control(
+                    &ControlMessage::Session(Box::new(SessionCommand::Closed {
+                        connection_id: 91,
+                        reason: "forged untrusted close".into(),
+                    })),
+                    local,
+                )
+                .await
+                .unwrap();
+        }
+        server_tx
+            .send_control(
+                &ControlMessage::Pong {
+                    client_send_ts: 1,
+                    host_recv_ts: 2,
+                    host_send_ts: 3,
+                },
+                local,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), response.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let delivered = controls.try_recv().ok();
+        let alive = !task.is_finished();
+        // Authenticated errors are still real product events. We must not hide
+        // those merely to eliminate noise from rejected transport datagrams.
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Error {
+                    request_id: 77,
+                    reason: "authentic source unavailable".into(),
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        let trusted = tokio::time::timeout(Duration::from_secs(2), controls.recv())
+            .await
+            .unwrap();
+        cancel.send(()).unwrap();
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            alive,
+            "a rejected datagram must not close the session actor"
+        );
+        assert!(
+            delivered.is_none(),
+            "unauthenticated packet failure leaked into product control state: {delivered:?}"
+        );
+        assert!(
+            matches!(trusted,Some(SessionCommand::Error{request_id:77,reason}) if reason=="authentic source unavailable")
+        );
+    }
+}
+
+#[cfg(test)]
+mod open_packet_isolation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn rejected_datagrams_do_not_consume_connection_open_retry_budget() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let local = client.local_addr().unwrap();
+        let (plain, _) = server.split();
+        let (server_tx, _) = server.split();
+        let (sender, receiver) = client.split();
+        let key = b"synthetic-open-retry-isolation";
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt").unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt").unwrap());
+        for _ in 0..8 {
+            plain
+                .send_control(&ControlMessage::Heartbeat, local)
+                .await
+                .unwrap();
+        }
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Opened {
+                    connection_id: 44,
+                    version: SESSION_VERSION,
+                    max_subscriptions: 4,
+                    files: true,
+                    clipboard: false,
+                    window_capture: true,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        let result = initial_open(
+            &sender,
+            &receiver,
+            target,
+            SessionCommand::Open {
+                connection_id: 44,
+                version: SESSION_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            SessionCommand::Opened {
+                connection_id: 44,
+                ..
+            }
+        ));
+    }
+    #[tokio::test]
+    async fn an_authenticated_open_error_remains_an_error() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let local = client.local_addr().unwrap();
+        let (server_tx, _) = server.split();
+        let (sender, receiver) = client.split();
+        let key = b"synthetic-open-error-test";
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt").unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt").unwrap());
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Error {
+                    request_id: 44,
+                    reason: "connection limit reached".into(),
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        let error = initial_open(
+            &sender,
+            &receiver,
+            target,
+            SessionCommand::Open {
+                connection_id: 44,
+                version: SESSION_VERSION,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "connection limit reached");
     }
 }

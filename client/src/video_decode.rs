@@ -212,6 +212,15 @@ impl MacVideoDecoder {
         sps: &[u8],
         pps: &[u8],
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        crate::native_call::run(|| self.update_format_desc_native(vps, sps, pps))
+    }
+
+    fn update_format_desc_native(
+        &mut self,
+        vps: &[u8],
+        sps: &[u8],
+        pps: &[u8],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         unsafe {
             let pointers = [vps.as_ptr(), sps.as_ptr(), pps.as_ptr()];
             let sizes = [vps.len(), sps.len(), pps.len()];
@@ -371,7 +380,7 @@ impl VideoDecoder for MacVideoDecoder {
         }
 
         let start_time = std::time::Instant::now();
-        unsafe {
+        crate::native_call::run(|| unsafe {
             // Create CMBlockBuffer
             let mut block_buffer: *mut c_void = std::ptr::null_mut();
             let status = CMBlockBufferCreateWithMemoryBlock(
@@ -426,7 +435,8 @@ impl VideoDecoder for MacVideoDecoder {
             if status != 0 {
                 return Err(format!("Decode failed: {}", status).into());
             }
-        }
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        })?;
 
         // Add a timeout to prevent deadlocks if the callback is never called
         match tokio::time::timeout(std::time::Duration::from_millis(200), self.rx.recv()).await {
@@ -443,17 +453,19 @@ impl VideoDecoder for MacVideoDecoder {
 
 impl Drop for MacVideoDecoder {
     fn drop(&mut self) {
-        if let Some(session) = self.session.take() {
-            unsafe {
-                VTDecompressionSessionWaitForAsynchronousFrames(session);
-                VTDecompressionSessionInvalidate(session);
-                CFRelease(session as _);
+        crate::native_call::run(|| {
+            if let Some(session) = self.session.take() {
+                unsafe {
+                    VTDecompressionSessionWaitForAsynchronousFrames(session);
+                    VTDecompressionSessionInvalidate(session);
+                    CFRelease(session as _);
+                }
             }
-        }
-        if !self.format_desc.is_null() {
-            unsafe {
-                CFRelease(self.format_desc as _);
+            if !self.format_desc.is_null() {
+                unsafe {
+                    CFRelease(self.format_desc as _);
+                }
             }
-        }
+        });
     }
 }

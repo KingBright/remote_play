@@ -118,6 +118,26 @@ pub enum SessionCommand {
         request_id: u32,
         reason: String,
     },
+    // Appended variants preserve existing serialized enum discriminants.
+    // A source switch has its own request identity, separate from media/session IDs.
+    SwitchSource {
+        id: u32,
+        request_id: u32,
+        source: CaptureSource,
+    },
+    SourceSwitched {
+        id: u32,
+        request_id: u32,
+        source: CaptureSource,
+        supports_input: bool,
+    },
+    // Window input is bound to a source revision. An old datagram cannot act on
+    // the newly selected window even when the media subscription ID is reused.
+    SourceInput {
+        id: u32,
+        source_revision: u32,
+        event: crate::InputEvent,
+    },
 }
 
 /// Fit inside both requested dimensions, preserve source aspect and align 4:2:0

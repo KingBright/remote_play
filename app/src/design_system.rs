@@ -1,6 +1,16 @@
 use gpui::{Hsla, Rgba, rgb, rgba};
 use yororen_ui::theme::{Theme, ThemeSet};
 
+/// Resolve a semantic font role without changing the original visual hierarchy.
+/// DirectWrite does not interpret CSS generic family names as installed fonts.
+pub(crate) const fn product_ui_font() -> &'static str {
+    if cfg!(any(target_os="macos",target_os="windows")){".SystemUIFont"}else{"sans-serif"}
+}
+/// Keep numeric telemetry monospaced; never silently substitute proportional text.
+pub(crate) const fn product_mono_font() -> &'static str {
+    if cfg!(target_os="windows"){"Consolas"}else{"monospace"}
+}
+
 pub fn remote_play_themes() -> ThemeSet {
     ThemeSet::new(light_theme()).dark(dark_theme())
 }
@@ -200,6 +210,19 @@ mod tests {
                 contrast_ratio(theme.action.danger.fg, theme.action.danger.bg) >= 4.5,
                 "danger actions must meet normal text contrast"
             );
+        }
+    }
+}
+
+#[cfg(test)] mod platform_font_tests {
+    use super::*;
+    #[test] fn font_roles_are_explicit_and_distinct() {
+        assert!(!product_ui_font().is_empty());assert!(!product_mono_font().is_empty());
+        assert_ne!(product_ui_font(),product_mono_font());
+    }
+    #[test] fn windows_does_not_request_css_names_from_directwrite() {
+        if cfg!(target_os="windows") {
+            assert_eq!(product_ui_font(),".SystemUIFont");assert_eq!(product_mono_font(),"Consolas");
         }
     }
 }

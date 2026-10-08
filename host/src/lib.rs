@@ -3,6 +3,8 @@ mod audio_capture;
 mod audio_encode;
 #[cfg(target_os = "macos")]
 mod capture;
+#[cfg(target_os = "windows")]
+mod capture_readiness;
 pub mod capture_sources;
 mod connection_services;
 #[cfg(target_os = "macos")]
@@ -15,7 +17,11 @@ pub mod service;
 #[cfg(target_os = "macos")]
 mod talkback_player;
 #[cfg(target_os = "macos")]
+mod video_color;
+#[cfg(target_os = "macos")]
 mod video_encode;
+#[cfg(target_os = "macos")]
+mod window_input;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffmpeg_hevc;
@@ -56,6 +62,18 @@ use remote_core::scheduled_sender::ScheduledDataSender;
 use remote_core::stats::Statistics;
 use remote_core::{AudioCapturer, VideoCapturer, VideoEncoder};
 pub use service::{HostServiceConfig, run_host_service};
+
+pub fn video_capture_readiness() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::capture_readiness::ffmpeg_program().map(|_| ())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(())
+    }
+}
+
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -225,7 +243,8 @@ fn now_ms() -> u64 {
 
 fn log_file_transfer_event(label: &str, event: FileTransferEvent) {
     match event {
-        FileTransferEvent::IncomingClipboardReady { .. } => {}
+        FileTransferEvent::IncomingClipboardReady { .. }
+        | FileTransferEvent::SharedResponse { .. } => {}
         FileTransferEvent::OutgoingGroupStarted {
             group_id,
             file_count,
@@ -345,6 +364,7 @@ struct StreamingRunConfig {
     source: protocol::session::CaptureSource,
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     keyframe_requested: Arc<std::sync::atomic::AtomicBool>,
+    video_sequence: Arc<std::sync::atomic::AtomicU16>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -813,6 +833,44 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
     tasks
 }
 
+/// Wait before acquiring any native capture/encoder resource. A paused source
+/// switch still reports liveness, but never briefly captures a frame first.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+async fn wait_for_capture_start<F, Fut>(
+    settings: &mut Option<watch::Receiver<StreamSettings>>,
+    cancel: &mut broadcast::Receiver<()>,
+    fallback: StreamSettings,
+    mut report_paused: F,
+) -> Option<StreamSettings>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if !matches!(
+            cancel.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ) {
+            return None;
+        }
+        let Some(rx) = settings.as_mut() else {
+            return Some(fallback);
+        };
+        let current = rx.borrow_and_update().clone();
+        if !current.paused {
+            return Some(current);
+        }
+        tokio::select! {
+            biased;
+            _ = cancel.recv() => return None,
+            changed = rx.changed() => { if changed.is_err() { return None; } },
+            _ = heartbeat.tick() => report_paused().await,
+        }
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let StreamingRunConfig {
@@ -829,7 +887,44 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         source,
         mut stream_settings_rx,
         keyframe_requested,
+        video_sequence,
     } = config;
+
+    let Some(initial) = wait_for_capture_start(
+        &mut stream_settings_rx,
+        &mut cancel_rx,
+        StreamSettings {
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+            paused: false,
+        },
+        || async {
+            let _ = udp_sender
+                .send_control(
+                    &protocol::ControlMessage::HostTelemetry {
+                        fps: 0.0,
+                        encode_latency_ms: 0.0,
+                        jitter_ms: 0.0,
+                        bitrate_kbps: 0,
+                    },
+                    client_addr,
+                )
+                .await;
+        },
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    let StreamSettings {
+        width,
+        height,
+        fps,
+        bitrate_kbps,
+        ..
+    } = initial;
 
     #[cfg(target_os = "macos")]
     let _display_power = display_power::DisplayPowerGuard::activate();
@@ -862,7 +957,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     #[cfg(not(target_os = "macos"))]
     let _ = source;
 
-    let mut seq_num: u16 = 0;
+    // Sequence state belongs to the subscription, not to this capture run.
     let stats_video = stats.clone();
 
     let mut last_fps_update = std::time::Instant::now();
@@ -894,9 +989,16 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                 }
             } => {
                 if let Ok(new_settings) = settings_changed {
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    {
+                        if new_settings.paused { video_encoder.set_paused(true)?; }
+                        video_encoder.update_settings(
+                            new_settings.width, new_settings.height,
+                            new_settings.fps, new_settings.bitrate_kbps,
+                        )?;
+                        if !new_settings.paused { video_encoder.set_paused(false)?; }
+                    }
                     if new_settings.paused != paused {
-                        #[cfg(any(target_os = "linux", target_os = "windows"))]
-                        video_encoder.set_paused(new_settings.paused)?;
                         if new_settings.paused { video_capturer.pause().await?; }
                         else {
                             video_capturer.resume().await?;
@@ -913,11 +1015,14 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                         video_capturer.update_resolution_and_fps(new_settings.width, new_settings.height, new_settings.fps)?;
                         video_encoder.update_rate_settings(new_settings.fps, new_settings.bitrate_kbps);
                     }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        video_capturer.update_resolution_and_fps(new_settings.height, new_settings.fps)?;
-                        video_encoder.update_settings(new_settings.width, new_settings.height, new_settings.fps, new_settings.bitrate_kbps);
-                    }
+                    #[cfg(target_os = "linux")]
+                    video_capturer.update_resolution_and_fps(new_settings.height, new_settings.fps)?;
+                    #[cfg(target_os = "windows")]
+                    video_capturer.update_resolution_and_fps(
+                        new_settings.width,
+                        new_settings.height,
+                        new_settings.fps,
+                    )?;
                 }
             }
             frame_res = video_capturer.capture_frame(), if !paused => {
@@ -982,13 +1087,12 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                     header: protocol::RtpHeader {
                         version: 2,
                         payload_type: 96,
-                        sequence_number: seq_num,
+                        sequence_number: video_sequence.fetch_add(1, Relaxed),
                         timestamp: chunk.capture_time_ms,
                         ssrc: session_id,
                     },
                     payload: chunk.nalu,
                 };
-                seq_num = seq_num.wrapping_add(1);
 
                 let packet_size =
                     send_media_packet(
@@ -1009,4 +1113,58 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod capture_start_lifecycle_tests {
+    use super::*;
+    fn settings(paused: bool) -> StreamSettings {
+        StreamSettings {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 8000,
+            paused,
+        }
+    }
+    #[tokio::test]
+    async fn initially_paused_capture_waits_for_resume_and_uses_latest_settings() {
+        let (tx, rx) = watch::channel(settings(true));
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move {
+            wait_for_capture_start(&mut Some(rx), &mut cancel_rx, settings(false), || async {})
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        let mut next = settings(false);
+        next.width = 1280;
+        next.height = 720;
+        next.fps = 30;
+        tx.send_replace(next.clone());
+        assert_eq!(task.await.unwrap(), Some(next));
+    }
+    #[tokio::test]
+    async fn initially_paused_capture_can_be_cancelled_without_starting() {
+        let (_tx, rx) = watch::channel(settings(true));
+        let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move {
+            wait_for_capture_start(&mut Some(rx), &mut cancel_rx, settings(false), || async {})
+                .await
+        });
+        tokio::task::yield_now().await;
+        cancel_tx.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), None);
+    }
+    #[tokio::test]
+    async fn closed_settings_channel_does_not_start_paused_capture() {
+        let (tx, rx) = watch::channel(settings(true));
+        drop(tx);
+        let (_cancel_tx, mut cancel_rx) = broadcast::channel(1);
+        assert_eq!(
+            wait_for_capture_start(&mut Some(rx), &mut cancel_rx, settings(false), || async {})
+                .await,
+            None
+        );
+    }
 }

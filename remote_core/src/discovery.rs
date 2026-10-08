@@ -386,6 +386,7 @@ pub struct DiscoveryRuntimeConfig {
     pub bind_addr: SocketAddr,
     pub announce_targets: Vec<SocketAddr>,
     pub route_overrides: Vec<DiscoveryRouteOverride>,
+    pub relay_routes: Vec<(SocketAddr, crate::routed_relay::PeerRelayRoutes)>,
     pub announcement: DiscoveryAnnouncement,
     pub announce_interval: Duration,
     pub prune_interval: Duration,
@@ -402,6 +403,7 @@ impl DiscoveryRuntimeConfig {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
             announce_targets: vec![SocketAddr::from(([255, 255, 255, 255], port))],
             route_overrides: Vec::new(),
+            relay_routes: Vec::new(),
             announcement,
             announce_interval: DEFAULT_ANNOUNCE_INTERVAL,
             prune_interval: Duration::from_secs(1),
@@ -445,6 +447,9 @@ pub async fn run_discovery_runtime(
         .accept_any_network(config.accept_any_network),
     ));
     let route_overrides = config.route_overrides.clone();
+    let relay_routes = config.relay_routes.clone();
+    let expected_network = config.announcement.network_name.clone();
+    let own_device = config.announcement.device_id.clone();
 
     let send_socket = socket.clone();
     let send_packet = packet.clone();
@@ -485,10 +490,15 @@ pub async fn run_discovery_runtime(
                             match DiscoveryAnnouncement::decode(&buffer[..len]) {
                                 Ok(announcement) => {
                                     let now_ms = unix_now_ms();
-                                    let route_override = route_overrides
+                                    let mut route_override = route_overrides
                                         .iter()
                                         .copied()
                                         .find(|route_override| route_override.source == source);
+                                    if let Some((_, routes)) = relay_routes.iter().find(|(from,_)| *from == source) {
+                                        if announcement.network_name != expected_network || announcement.device_id == own_device { continue; }
+                                        let Ok(endpoint) = routes.endpoint(&announcement.device_id).await else { continue; };
+                                        route_override = Some(DiscoveryRouteOverride { source, endpoint, scope: DiscoveryScope::Relay });
+                                    }
                                     let (peer, snapshot) = {
                                         let mut cache = recv_cache.lock().expect("discovery cache lock");
                                         let peer = cache.apply_announcement_with_route_override_option(
@@ -1060,6 +1070,7 @@ mod tests {
                 bind_addr: local_addr,
                 announce_targets: vec![peer_addr],
                 route_overrides: Vec::new(),
+                relay_routes: Vec::new(),
                 announcement: local,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),
@@ -1074,6 +1085,7 @@ mod tests {
                 bind_addr: peer_addr,
                 announce_targets: vec![local_addr],
                 route_overrides: Vec::new(),
+                relay_routes: Vec::new(),
                 announcement: peer,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),

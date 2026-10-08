@@ -102,7 +102,14 @@ impl MacVideoCapturer {
         ));
         config.set_queue_depth(3);
         config.set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
+        config.set_color_matrix(&crate::video_color::capture_yuv_matrix());
         config.set_shows_cursor(false);
+        if matches!(self.source, protocol::session::CaptureSource::Window(_)) {
+            // The visual rectangle must be the same rectangle used for normalized input.
+            // Shadows are decorations outside the AX/CG window bounds.
+            config.set_ignores_shadows_single_window(true);
+            config.set_scales_to_fit(true);
+        }
         config
     }
 
@@ -212,6 +219,26 @@ impl Drop for MacVideoCapturer {
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take() {
             let _ = stream.stop_capture();
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_matrix_tests {
+    use super::*;
+    #[test] fn nv12_configuration_explicitly_requests_a_known_conversion_matrix() {
+        let mut config=SCStreamConfiguration::new();
+        config.set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
+        let value=crate::video_color::capture_yuv_matrix();
+        assert!(!value.is_empty());
+        config.set_color_matrix(&value);
+        assert_eq!(config.color_matrix().as_deref(),Some(value.as_str()));
+        // Reconfigure through all documented matrices and exercise allocation
+        // churn after the temporary Rust CString/Swift String have been dropped.
+        for value in ["ITU_R_601_4","ITU_R_709_2","SMPTE_240M_1995"] {
+            config.set_color_matrix(&value.to_owned());
+            for index in 0..2048 {let _=core_foundation::string::CFString::new(&format!("color-lifetime-test-{index}"));}
+            assert_eq!(config.clone().color_matrix().as_deref(),Some(value));
         }
     }
 }

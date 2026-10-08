@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 pub mod session;
+pub mod shared_files;
 pub mod timing;
 
 pub use timing::{
@@ -327,6 +328,14 @@ pub enum FileTransferControl {
     /// Ordinary downloads must never replace the clipboard.
     ClipboardGroup {
         group_id: u64,
+    },
+    SharedRequest {
+        request_id: u64,
+        request: shared_files::SharedFileRequest,
+    },
+    SharedResponse {
+        request_id: u64,
+        response: shared_files::SharedFileResponse,
     },
 }
 
@@ -1117,6 +1126,7 @@ pub enum InputEvent {
         dx: i32,
         dy: i32,
     },
+    /// Absolute position normalized to 0..=65535 on each axis, never video pixels.
     MouseMoveAbsolute {
         x: u16,
         y: u16,
@@ -1127,7 +1137,7 @@ pub enum InputEvent {
         modifiers: u8,
     },
     ModifiersChanged(u8),
-    MouseDown(u8), // Button ID
+    MouseDown(u8), // 0 = left, 1 = right, 2 = middle
     MouseUp(u8),
     MouseScroll {
         delta_x: i32,
@@ -1719,6 +1729,34 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn source_switch_messages_roundtrip_with_independent_request_ids() {
+        use crate::session::{CaptureSource, SessionCommand};
+        let switch = roundtrip_control(ControlMessage::Session(Box::new(
+            SessionCommand::SwitchSource {
+                id: 7,
+                request_id: 0x4000_002a,
+                source: CaptureSource::Display(77),
+            },
+        )));
+        assert!(
+            matches!(switch,ControlMessage::Session(command) if matches!(*command,
+            SessionCommand::SwitchSource{id:7,request_id:0x4000_002a,source:CaptureSource::Display(77)}))
+        );
+        let reply = roundtrip_control(ControlMessage::Session(Box::new(
+            SessionCommand::SourceSwitched {
+                id: 7,
+                request_id: 0x4000_002a,
+                source: CaptureSource::Display(77),
+                supports_input: false,
+            },
+        )));
+        assert!(
+            matches!(reply,ControlMessage::Session(command) if matches!(*command,
+            SessionCommand::SourceSwitched{id:7,request_id:0x4000_002a,source:CaptureSource::Display(77),supports_input:false}))
+        );
     }
 
     #[test]

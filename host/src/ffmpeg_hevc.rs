@@ -1,16 +1,30 @@
 use std::error::Error;
 use std::io::Read;
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 
 /// Long-running ffmpeg capture → HEVC Annex-B pipeline used by Linux and Windows hosts.
+/// Stdout is drained on a dedicated bounded reader so cancellation never waits on a
+/// blocking pipe read and an overloaded viewer cannot grow memory without bound.
 pub struct FfmpegHevcSource {
     child: Mutex<Option<Child>>,
-    stdout: Mutex<Option<ChildStdout>>,
-    leftover: Mutex<Vec<u8>>,
+    access_units: AsyncMutex<mpsc::Receiver<Result<(Vec<u8>, bool), String>>>,
+    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+}
+
+/// Drop the old OS capture process before creating its replacement. On failure
+/// the slot stays empty rather than keeping a stale encoder with new settings.
+pub(crate) fn replace_capture_source<T, E>(
+    slot: &mut Option<T>,
+    create: impl FnOnce() -> Result<T, E>,
+) -> Result<(), E> {
+    drop(slot.take());
+    *slot = Some(create()?);
+    Ok(())
 }
 
 impl FfmpegHevcSource {
@@ -21,7 +35,11 @@ impl FfmpegHevcSource {
         bitrate_kbps: u32,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut command = capture_command(width, height, fps, bitrate_kbps)?;
-        command.stdout(Stdio::piped()).stderr(Stdio::null());
+        // Keep startup/codec failures in the host's existing diagnostic log.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
         let mut child = command.spawn().map_err(|err| {
             format!("ffmpeg HEVC pipeline failed to start ({err}). Install ffmpeg with libx265.")
         })?;
@@ -29,46 +47,85 @@ impl FfmpegHevcSource {
             .stdout
             .take()
             .ok_or("ffmpeg stdout was not captured")?;
+        let (access_tx, access_rx) = mpsc::channel(4);
+        let reader = match std::thread::Builder::new()
+            .name("remoteplay-ffmpeg-reader".into())
+            .spawn(move || drain_hevc_reader(stdout, access_tx))
+        {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to start FFmpeg reader thread: {error}").into());
+            }
+        };
         println!(
             "[FfmpegHevc] started {width}x{height}@{fps} {bitrate_kbps} kbps ({})",
             capture_backend_name()
         );
         Ok(Self {
             child: Mutex::new(Some(child)),
-            stdout: Mutex::new(Some(stdout)),
-            leftover: Mutex::new(Vec::new()),
+            access_units: AsyncMutex::new(access_rx),
+            reader: Mutex::new(Some(reader)),
             width,
             height,
             fps,
         })
     }
 
-    pub fn pull_access_unit(&self) -> Result<(Vec<u8>, bool), Box<dyn Error + Send + Sync>> {
-        let mut leftover = self.leftover.lock().unwrap_or_else(|err| err.into_inner());
-        loop {
-            if let Some(au) = take_access_unit(&mut leftover) {
-                let keyframe = is_hevc_keyframe(&au);
-                return Ok((au, keyframe));
+    pub async fn pull_access_unit(&self) -> Result<(Vec<u8>, bool), Box<dyn Error + Send + Sync>> {
+        let mut receiver = self.access_units.lock().await;
+        match receiver.recv().await {
+            Some(Ok(packet)) => Ok(packet),
+            Some(Err(error)) => Err(error.into()),
+            None => Err("ffmpeg HEVC pipeline ended".into()),
+        }
+    }
+}
+
+fn drain_hevc_reader<R: Read>(
+    mut stdout: R,
+    access_tx: mpsc::Sender<Result<(Vec<u8>, bool), String>>,
+) {
+    use tokio::sync::mpsc::error::TrySendError;
+
+    let mut leftover = Vec::new();
+    let mut buf = [0u8; 32_768];
+    loop {
+        while let Some(au) = take_access_unit(&mut leftover) {
+            let packet = Ok((au.clone(), is_hevc_keyframe(&au)));
+            match access_tx.try_send(packet) {
+                Ok(()) | Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Closed(_)) => return,
             }
-            let mut stdout = self.stdout.lock().unwrap_or_else(|err| err.into_inner());
-            let stdout = stdout.as_mut().ok_or("ffmpeg stdout closed")?;
-            let mut buf = [0u8; 32_768];
-            let read = stdout.read(&mut buf)?;
-            if read == 0 {
-                return Err("ffmpeg HEVC pipeline ended".into());
+        }
+
+        match stdout.read(&mut buf) {
+            Ok(0) => {
+                let _ = access_tx.try_send(Err("ffmpeg HEVC pipeline ended".into()));
+                return;
             }
-            leftover.extend_from_slice(&buf[..read]);
+            Ok(read) => leftover.extend_from_slice(&buf[..read]),
+            Err(error) => {
+                let _ = access_tx.try_send(Err(format!("ffmpeg HEVC read failed: {error}")));
+                return;
+            }
         }
     }
 }
 
 impl Drop for FfmpegHevcSource {
     fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(mut child) = child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if let Ok(mut child) = self.child.lock()
+            && let Some(mut child) = child.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Ok(mut reader) = self.reader.lock()
+            && let Some(reader) = reader.take()
+        {
+            let _ = reader.join();
         }
     }
 }
@@ -89,15 +146,44 @@ fn capture_command(
     fps: u32,
     bitrate_kbps: u32,
 ) -> Result<Command, Box<dyn Error + Send + Sync>> {
-    let mut cmd = Command::new("ffmpeg");
-    cmd.arg("-hide_banner").arg("-loglevel").arg("error");
+    #[cfg(target_os = "windows")]
+    let program = crate::capture_readiness::ffmpeg_program()?;
+    #[cfg(not(target_os = "windows"))]
+    let program = std::path::PathBuf::from("ffmpeg");
+    capture_command_using(&program, width, height, fps, bitrate_kbps)
+}
+
+fn capture_command_using(
+    program: &std::path::Path,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+) -> Result<Command, Box<dyn Error + Send + Sync>> {
+    let mut cmd = Command::new(program);
+    cmd.args(["-hide_banner", "-nostdin", "-loglevel", "error"]);
+    #[cfg(target_os = "windows")]
+    let capture_rect = crate::capture_readiness::capture_display_rect()?;
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+        cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        let capture_size = format!("{}x{}", capture_rect.width, capture_rect.height);
+        let offset_x = capture_rect.x.to_string();
+        let offset_y = capture_rect.y.to_string();
         cmd.args([
             "-f",
             "gdigrab",
             "-framerate",
             &fps.to_string(),
+            "-video_size",
+            &capture_size,
+            "-offset_x",
+            &offset_x,
+            "-offset_y",
+            &offset_y,
             "-i",
             "desktop",
         ]);
@@ -131,8 +217,30 @@ fn capture_command(
         let _ = (width, height, fps);
         return Err("ffmpeg HEVC capture is only implemented for Linux and Windows".into());
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Capture only the primary physical desktop rectangle. The encoded output
+        // may be smaller, but RemotePlay never changes display modes or touches a
+        // virtual display owned by another remote desktop application.
+        let target_width = width.min(capture_rect.width).max(2);
+        let target_height = height.min(capture_rect.height).max(2);
+        cmd.args([
+            "-vf",
+            &format!(
+                "scale=w={target_width}:h={target_height}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+            ),
+            "-filter_threads",
+            "1",
+            "-threads",
+            "2",
+        ]);
+    }
     let bitrate = format!("{bitrate_kbps}k");
     let keyint = fps.max(1).to_string();
+    let mut encoder_options =
+        format!("keyint={keyint}:min-keyint={keyint}:repeat-headers=1:bframes=0");
+    #[cfg(target_os = "windows")]
+    encoder_options.push_str(":pools=2:frame-threads=1");
     cmd.args([
         "-pix_fmt",
         "yuv420p",
@@ -143,7 +251,7 @@ fn capture_command(
         "-tune",
         "zerolatency",
         "-x265-params",
-        &format!("keyint={keyint}:min-keyint={keyint}:repeat-headers=1:bframes=0"),
+        &encoder_options,
         "-b:v",
         &bitrate,
         "-maxrate",
@@ -229,6 +337,102 @@ fn take_access_unit(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacement_drops_previous_capture_before_factory_runs() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Capture(Arc<AtomicUsize>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = Arc::new(AtomicUsize::new(1));
+        let mut slot = Some(Capture(live.clone()));
+        replace_capture_source(&mut slot, || {
+            assert_eq!(live.load(Ordering::SeqCst), 0);
+            live.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, ()>(Capture(live.clone()))
+        })
+        .unwrap();
+        assert_eq!(live.load(Ordering::SeqCst), 1);
+        drop(slot);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_replacement_leaves_no_stale_capture() {
+        let mut slot = Some(42u32);
+        let error = replace_capture_source(&mut slot, || Err::<u32, _>("startup failed"));
+        assert_eq!(error, Err("startup failed"));
+        assert!(slot.is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_capture_command_bounds_output_and_worker_threads_without_launching() {
+        let command = capture_command_using(
+            std::path::Path::new("fixture-ffmpeg.exe"),
+            1280,
+            720,
+            30,
+            4000,
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|value| value == "-nostdin"));
+        let display = crate::capture_readiness::capture_display_rect().unwrap();
+        let display_size = format!("{}x{}", display.width, display.height);
+        let offset_x = display.x.to_string();
+        let offset_y = display.y.to_string();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-video_size", display_size.as_str()])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-offset_x", offset_x.as_str()])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-offset_y", offset_y.as_str()])
+        );
+        assert!(args.iter().any(|value| value
+            == "scale=w=1280:h=720:force_original_aspect_ratio=decrease:force_divisible_by=2"));
+        assert!(args.windows(2).any(|pair| pair == ["-threads", "2"]));
+        assert!(
+            args.iter()
+                .any(|value| value.contains("pools=2:frame-threads=1"))
+        );
+        assert_eq!(command.get_program(), "fixture-ffmpeg.exe");
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_drops_overload_without_blocking() {
+        let mut input = Vec::new();
+        for byte in 0u8..20 {
+            input.extend_from_slice(&[0, 0, 0, 1, 0x02, byte]);
+        }
+        input.extend_from_slice(&[0, 0, 0, 1, 0x02, 0xff]);
+        let (tx, mut rx) = mpsc::channel(2);
+        let reader = std::thread::spawn(move || {
+            drain_hevc_reader(std::io::Cursor::new(input), tx);
+        });
+        reader.join().unwrap();
+
+        let mut delivered = 0;
+        while let Some(packet) = rx.recv().await {
+            assert!(packet.is_ok());
+            delivered += 1;
+        }
+        assert_eq!(delivered, 2);
+    }
 
     #[test]
     fn splits_two_vcl_nals_into_access_units() {

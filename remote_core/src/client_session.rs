@@ -38,6 +38,24 @@ pub enum ClientSessionEvent {
         session_id: u32,
         payload_type: u8,
     },
+    CaptureSources {
+        request_id: u32,
+        sources: Vec<protocol::session::CaptureSourceInfo>,
+    },
+    SubscriptionAccepted {
+        id: u32,
+        supports_input: bool,
+    },
+    CaptureSourceSwitched {
+        id: u32,
+        request_id: u32,
+        source: protocol::session::CaptureSource,
+        supports_input: bool,
+    },
+    HostError {
+        request_id: u32,
+        reason: String,
+    },
 }
 
 #[derive(Default, Clone, Debug, PartialEq)]
@@ -353,6 +371,49 @@ pub fn spawn_client_session_receiver(
                     protocol::ControlMessage::PipelineTelemetry(report) => {
                         host_stats.set_pipeline_report(*report);
                     }
+                    protocol::ControlMessage::Session(command) => {
+                        if let Some(tx) = &session_event_tx {
+                            match *command {
+                                protocol::session::SessionCommand::Sources {
+                                    request_id,
+                                    sources,
+                                } => {
+                                    let _ = tx.send(ClientSessionEvent::CaptureSources {
+                                        request_id,
+                                        sources,
+                                    });
+                                }
+                                protocol::session::SessionCommand::Subscribed {
+                                    id,
+                                    supports_input,
+                                    ..
+                                } => {
+                                    let _ = tx.send(ClientSessionEvent::SubscriptionAccepted {
+                                        id,
+                                        supports_input,
+                                    });
+                                }
+                                protocol::session::SessionCommand::SourceSwitched {
+                                    id,
+                                    request_id,
+                                    source,
+                                    supports_input,
+                                } => {
+                                    let _ = tx.send(ClientSessionEvent::CaptureSourceSwitched {
+                                        id,
+                                        request_id,
+                                        source,
+                                        supports_input,
+                                    });
+                                }
+                                protocol::session::SessionCommand::Error { request_id, reason } => {
+                                    let _ = tx
+                                        .send(ClientSessionEvent::HostError { request_id, reason });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 },
                 Ok(MultiplexedPacket::Data(envelope, addr)) => {
@@ -536,6 +597,13 @@ impl MediaPacketHandler {
 
     pub(crate) fn take_keyframe_request(&mut self) -> Option<(SocketAddr, u32)> {
         let errors = self.stats_net.video_decode_errors.load(Relaxed);
+        if self
+            .stats_net
+            .video_decoder_needs_keyframe
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.needs_keyframe = true;
+        }
         if errors != self.observed_decode_errors {
             self.observed_decode_errors = errors;
             self.needs_keyframe = true;
@@ -548,6 +616,7 @@ impl MediaPacketHandler {
             return None;
         }
         self.last_keyframe_request = Some(Instant::now());
+        self.stats_net.video_keyframe_requests.fetch_add(1, Relaxed);
         Some((self.video_source?, self.last_video_ssrc))
     }
 
@@ -1086,6 +1155,55 @@ mod tests {
         session.store(0, Relaxed);
         assert_eq!(handler.take_keyframe_request(), None);
         assert_eq!(handler.recovery_wait(), None);
+    }
+
+    #[tokio::test]
+    async fn decoder_reference_loss_rearms_recovery_without_a_codec_error() {
+        let stats = Statistics::new();
+        let id = Arc::new(AtomicU32::new(7));
+        let (audio_tx, _audio_rx) = mpsc::channel(2);
+        let (decode_tx, mut decoded) = mpsc::channel(2);
+        let mut h = MediaPacketHandler::new(
+            stats.clone(),
+            id.clone(),
+            Arc::new(SharedHostStats::default()),
+            audio_tx,
+            decode_tx,
+            None,
+        );
+        let host = "127.0.0.1:49373".parse().unwrap();
+        let mut p = video_packet(7);
+        p.header.sequence_number = 1;
+        p.payload = vec![0, 0, 1, 0x26, 1];
+        h.remember_video_source(&p, host);
+        h.handle(p.clone(), 16).await;
+        decoded.try_recv().unwrap();
+        assert_eq!(h.take_keyframe_request(), None);
+        // A full decoder queue can discard the IDR after ingress saw it.
+        // Skipping dependent frames need not increment video_decode_errors.
+        stats
+            .video_decoder_needs_keyframe
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(stats.video_decode_errors.load(Relaxed), 0);
+        assert_eq!(h.take_keyframe_request(), Some((host, 7)));
+        assert_eq!(h.take_keyframe_request(), None); // Existing 250 ms rate limit.
+        p.header.sequence_number = 2;
+        h.handle(p, 16).await;
+        decoded.try_recv().unwrap();
+        h.last_keyframe_request = Some(Instant::now() - Duration::from_millis(251));
+        assert_eq!(
+            h.take_keyframe_request(),
+            Some((host, 7)),
+            "receiving IDR is not decoder recovery"
+        );
+        assert_eq!(stats.video_keyframe_requests.load(Relaxed), 2);
+        id.store(0, Relaxed);
+        h.last_keyframe_request = None;
+        assert_eq!(
+            h.take_keyframe_request(),
+            None,
+            "closed sessions cannot request recovery"
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 [package]
 name = "client"
-version = "2.0.0-alpha.1"
+version = "2.0.0-alpha.6"
 edition = "2024"
 
 [dependencies]
@@ -27,3 +27,17 @@ yororen_ui = "0.2"
 core-video-sys = "0.1.4"
 core-foundation = "0.10.0"
 core-video = "0.4.3"
+
+[features]
+native-linux-video = ["dep:gpui-ce", "dep:anyhow", "dep:libc"]
+native-windows-video = ["dep:windows", "dep:anyhow", "dep:gpui-ce"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui-ce = { version = "0.3.3", optional = true, features = ["native-video"] }
+anyhow = { version = "1", optional = true }
+windows = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D10", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
+
+[target.'cfg(target_os="linux")'.dependencies]
+gpui-ce = { version="0.3.3", optional=true, features=["native-video"] }
+anyhow = {version="1",optional=true}
+libc = {version="0.2",optional=true}

@@ -1,5 +1,9 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod design_system;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub mod desktop;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+mod original_design;
 pub mod preferences;
 #[cfg(target_os = "macos")]
 mod ui;
@@ -197,6 +201,14 @@ pub struct UnifiedAppRuntime {
     role: RoleStateMachine,
     devices: BTreeMap<String, AppDevice>,
     next_session_id: u32,
+    capture_sources: Arc<Vec<protocol::session::CaptureSourceInfo>>,
+    active_capture_source: protocol::session::CaptureSource,
+    pending_capture_source: Option<protocol::session::CaptureSource>,
+    pending_source_request: Option<u32>,
+    source_request_started: Option<std::time::Instant>,
+    next_source_request: u32,
+    active_capture_supports_input: bool,
+    capture_source_error: Option<String>,
 }
 
 impl UnifiedAppRuntime {
@@ -205,6 +217,14 @@ impl UnifiedAppRuntime {
             role: RoleStateMachine::with_config(config.role_config),
             devices: BTreeMap::new(),
             next_session_id: config.first_session_id.max(1),
+            capture_sources: Arc::new(Vec::new()),
+            active_capture_source: protocol::session::CaptureSource::MainDisplay,
+            pending_capture_source: None,
+            pending_source_request: None,
+            source_request_started: None,
+            next_source_request: 0x4000_0000,
+            active_capture_supports_input: true,
+            capture_source_error: None,
         }
     }
 
@@ -214,6 +234,116 @@ impl UnifiedAppRuntime {
 
     pub fn devices(&self) -> Vec<AppDevice> {
         self.devices.values().cloned().collect()
+    }
+
+    pub fn capture_sources(&self) -> Vec<protocol::session::CaptureSourceInfo> {
+        self.capture_sources.as_ref().clone()
+    }
+
+    pub fn capture_sources_snapshot(&self) -> Arc<Vec<protocol::session::CaptureSourceInfo>> {
+        self.capture_sources.clone()
+    }
+
+    pub fn active_capture_source(&self) -> protocol::session::CaptureSource {
+        self.active_capture_source
+    }
+
+    pub fn pending_capture_source(&self) -> Option<protocol::session::CaptureSource> {
+        self.pending_capture_source
+    }
+
+    pub fn active_capture_supports_input(&self) -> bool {
+        self.active_capture_supports_input && self.pending_capture_source.is_none()
+    }
+
+    pub fn capture_source_error(&self) -> Option<String> {
+        self.capture_source_error.clone()
+    }
+
+    fn begin_capture_source_switch(
+        &mut self,
+        source: protocol::session::CaptureSource,
+    ) -> Result<u32, UnifiedAppError> {
+        if self.pending_capture_source.is_some() {
+            return Err(UnifiedAppError::ControlSend(
+                "a source switch is already pending".into(),
+            ));
+        }
+        self.next_source_request = self
+            .next_source_request
+            .checked_add(1)
+            .filter(|id| *id < 0x8000_0000)
+            .ok_or_else(|| {
+                UnifiedAppError::ControlSend(
+                    "source request IDs exhausted; restart the application".into(),
+                )
+            })?;
+        self.pending_capture_source = Some(source);
+        self.pending_source_request = Some(self.next_source_request);
+        self.source_request_started = Some(std::time::Instant::now());
+        self.capture_source_error = None;
+        Ok(self.next_source_request)
+    }
+
+    fn expire_capture_source_request(&mut self, now: std::time::Instant) {
+        if self
+            .source_request_started
+            .is_some_and(|started| now.saturating_duration_since(started) >= Duration::from_secs(5))
+        {
+            self.pending_capture_source = None;
+            self.pending_source_request = None;
+            self.source_request_started = None;
+            // The host may have switched while its reply was lost. Never inject
+            // input against an unconfirmed source; a new confirmed switch restores it.
+            self.active_capture_supports_input = false;
+            self.capture_source_error = Some("Source switch not confirmed. Retry selecting a source; older hosts need an update. Input is paused for safety.".into());
+        }
+    }
+
+    fn apply_capture_sources(
+        &mut self,
+        request_id: u32,
+        sources: Vec<protocol::session::CaptureSourceInfo>,
+    ) {
+        if self
+            .active_session()
+            .is_some_and(|session| capture_source_list_request_id(session.session_id) == request_id)
+        {
+            self.capture_sources = Arc::new(sources);
+        }
+    }
+
+    fn confirm_capture_source_switch(
+        &mut self,
+        id: u32,
+        request_id: u32,
+        source: protocol::session::CaptureSource,
+        supports_input: bool,
+    ) {
+        if self
+            .active_session()
+            .is_some_and(|session| session.session_id == id)
+            && self.pending_source_request == Some(request_id)
+            && self.pending_capture_source == Some(source)
+        {
+            self.pending_capture_source = None;
+            self.pending_source_request = None;
+            self.source_request_started = None;
+            self.active_capture_source = source;
+            self.active_capture_supports_input = supports_input;
+            self.capture_source_error = None;
+        }
+    }
+
+    fn reject_capture_source_switch(&mut self, request_id: u32, reason: String) -> bool {
+        if self.pending_source_request == Some(request_id) {
+            self.pending_capture_source = None;
+            self.pending_source_request = None;
+            self.source_request_started = None;
+            self.capture_source_error = Some(reason);
+            return true;
+        }
+        false
     }
 
     pub fn streamable_devices(&self) -> Vec<AppDevice> {
@@ -269,6 +399,13 @@ impl UnifiedAppRuntime {
         let change = self
             .role
             .start_viewing(device.role_peer(), session_id, now_ms)?;
+        self.capture_sources = Arc::new(Vec::new());
+        self.active_capture_source = protocol::session::CaptureSource::MainDisplay;
+        self.pending_capture_source = None;
+        self.pending_source_request = None;
+        self.source_request_started = None;
+        self.active_capture_supports_input = true;
+        self.capture_source_error = None;
         Ok(ViewingRequest {
             change,
             target,
@@ -312,7 +449,20 @@ impl UnifiedAppRuntime {
     }
 
     pub fn stop_session(&mut self, session_id: u32) -> Result<Option<RoleChange>, UnifiedAppError> {
-        self.role.stop_session(session_id).map_err(Into::into)
+        let change = self
+            .role
+            .stop_session(session_id)
+            .map_err(UnifiedAppError::from)?;
+        if change.is_some() {
+            self.capture_sources = Arc::new(Vec::new());
+            self.active_capture_source = protocol::session::CaptureSource::MainDisplay;
+            self.pending_capture_source = None;
+            self.pending_source_request = None;
+            self.source_request_started = None;
+            self.active_capture_supports_input = true;
+            self.capture_source_error = None;
+        }
+        Ok(change)
     }
 
     pub fn expire_timed_out(&mut self, now_ms: u64) -> Option<RoleChange> {
@@ -578,6 +728,7 @@ pub struct UnifiedP2pRuntimeConfig {
 pub struct UnifiedRelayRuntimeConfig {
     pub endpoint: UnifiedRelayEndpoint,
     pub control_group_id: String,
+    pub routing_key: remote_core::routed_relay::RoutingKey,
     pub discovery_group_id: String,
     pub peer_id: String,
     pub control_bind_addr: SocketAddr,
@@ -602,7 +753,8 @@ impl UnifiedRelayRuntimeConfig {
         let group_id = group_id.into();
         Self {
             endpoint: UnifiedRelayEndpoint::Tcp(relay_addr),
-            control_group_id: relay_control_group(&group_id),
+            control_group_id: format!("{}-mux1", relay_control_group(&group_id)),
+            routing_key: remote_core::routed_relay::derive_routing_key(group_id.as_bytes()),
             discovery_group_id: relay_discovery_group(&group_id),
             peer_id: peer_id.into(),
             control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -621,7 +773,12 @@ impl UnifiedRelayRuntimeConfig {
     ) -> Result<Self, RelayConfigError> {
         Ok(Self {
             endpoint,
-            control_group_id: derive_relay_group_id(network_name, network_secret, "control")?,
+            control_group_id: derive_relay_group_id(
+                network_name,
+                network_secret,
+                "control-device-v1",
+            )?,
+            routing_key: remote_core::routed_relay::derive_routing_key(network_secret.as_bytes()),
             discovery_group_id: derive_relay_group_id(network_name, network_secret, "discovery")?,
             peer_id: peer_id.into(),
             control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -655,6 +812,7 @@ pub struct UnifiedRuntimeConfig {
     pub enable_file_transfer: bool,
     pub enable_talkback: bool,
     pub enable_viewer_media: bool,
+    pub enable_workspace_viewer: bool,
     pub enable_session_timeout_monitor: bool,
 }
 
@@ -683,6 +841,7 @@ impl UnifiedRuntimeConfig {
             enable_file_transfer: true,
             enable_talkback: true,
             enable_viewer_media: true,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: true,
         }
     }
@@ -1010,11 +1169,23 @@ fn build_unified_discovery_config(
     } else {
         0
     };
+    let can_stream = if config.enable_passive_host {
+        match host::video_capture_readiness() {
+            Ok(()) => true,
+            Err(reason) => {
+                eprintln!("RemotePlay host will stay available for non-video services: {reason}");
+                false
+            }
+        }
+    } else {
+        false
+    };
     let capabilities = DiscoveryCapabilities {
-        can_stream: config.enable_passive_host,
-        can_view: config.enable_client_receiver
-            && config.enable_viewer_media
-            && cfg!(target_os = "macos"),
+        can_stream,
+        can_view: config.enable_workspace_viewer
+            || (config.enable_client_receiver
+                && config.enable_viewer_media
+                && cfg!(target_os = "macos")),
         file_transfer: config.enable_file_transfer,
         clipboard_sync: config.enable_clipboard_sync,
         talkback: config.enable_talkback && cfg!(target_os = "macos"),
@@ -1199,6 +1370,7 @@ impl Drop for UnifiedP2pRuntime {
 
 struct UnifiedRelayRuntime {
     control_endpoint: SocketAddr,
+    routes: remote_core::routed_relay::PeerRelayRoutes,
     discovery_endpoint: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
     tasks: Vec<AbortOnDropTask>,
@@ -1305,6 +1477,10 @@ impl UnifiedServiceOwner {
                 if let Some(relay_state) = &relay_runtime {
                     let relay_guard = relay_state.runtime.lock().expect("relay runtime lock");
                     if let Some(relay_runtime) = relay_guard.as_ref() {
+                        discovery_config.relay_routes.push((
+                            relay_runtime.discovery_endpoint,
+                            relay_runtime.routes.clone(),
+                        ));
                         discovery_config
                             .announce_targets
                             .push(relay_runtime.discovery_endpoint);
@@ -1600,6 +1776,98 @@ impl UnifiedServiceOwner {
         Ok(())
     }
 
+    pub async fn request_capture_sources(&self) -> Result<(), UnifiedAppError> {
+        let (target, session_id) = {
+            let runtime = self.runtime.lock().expect("unified runtime lock");
+            match runtime.role_state() {
+                RoleState::Viewing(session) | RoleState::Connecting(session) => {
+                    (session.peer.endpoint, session.session_id)
+                }
+                _ => return Err(UnifiedAppError::Role(RoleStateError::NoActiveSession)),
+            }
+        };
+        let Some(sender) = &self.client_control_sender else {
+            return Err(UnifiedAppError::NoClientControlSender);
+        };
+        sender
+            .send_control(
+                &protocol::ControlMessage::Session(Box::new(
+                    protocol::session::SessionCommand::ListSources {
+                        request_id: capture_source_list_request_id(session_id),
+                    },
+                )),
+                target,
+            )
+            .await
+            .map_err(|err| UnifiedAppError::ControlSend(err.to_string()))
+    }
+
+    pub async fn switch_capture_source(
+        &self,
+        source: protocol::session::CaptureSource,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> Result<(), UnifiedAppError> {
+        protocol::validate_video_settings(width, height, fps, bitrate_kbps)
+            .map_err(|err| UnifiedAppError::ControlSend(err.into()))?;
+        let sender = self
+            .client_control_sender
+            .as_ref()
+            .ok_or(UnifiedAppError::NoClientControlSender)?;
+        let (target, session_id, request_id) = {
+            let mut runtime = self.runtime.lock().expect("unified runtime lock");
+            let (target, id) = match runtime.role_state() {
+                RoleState::Viewing(session) => (session.peer.endpoint, session.session_id),
+                _ => return Err(UnifiedAppError::Role(RoleStateError::NoActiveSession)),
+            };
+            let request_id = runtime.begin_capture_source_switch(source)?;
+            (target, id, request_id)
+        };
+        // Source-only changes preserve the host's current rates, audio and pause state.
+        let msg = protocol::ControlMessage::Session(Box::new(
+            protocol::session::SessionCommand::SwitchSource {
+                id: session_id,
+                request_id,
+                source,
+            },
+        ));
+        if let Err(err) = sender.send_control(&msg, target).await {
+            let reason = err.to_string();
+            self.runtime
+                .lock()
+                .expect("unified runtime lock")
+                .reject_capture_source_switch(request_id, reason.clone());
+            return Err(UnifiedAppError::ControlSend(reason));
+        }
+        Ok(())
+    }
+
+    pub async fn send_session_command(
+        &self,
+        command: protocol::session::SessionCommand,
+    ) -> Result<(), UnifiedAppError> {
+        let target = {
+            let runtime = self.runtime.lock().expect("unified runtime lock");
+            match runtime.role_state() {
+                RoleState::Viewing(session) | RoleState::Connecting(session) => {
+                    session.peer.endpoint
+                }
+                _ => return Err(UnifiedAppError::Role(RoleStateError::NoActiveSession)),
+            }
+        };
+        let Some(sender) = &self.client_control_sender else {
+            return Err(UnifiedAppError::NoClientControlSender);
+        };
+        let msg = protocol::ControlMessage::Session(Box::new(command));
+        sender
+            .send_control(&msg, target)
+            .await
+            .map_err(|err| UnifiedAppError::ControlSend(err.to_string()))?;
+        Ok(())
+    }
+
     pub fn mark_viewing_connected(
         &self,
         session_id: u32,
@@ -1615,7 +1883,10 @@ impl UnifiedServiceOwner {
         let target = {
             let runtime = self.runtime.lock().expect("unified runtime lock");
             match runtime.role_state() {
-                RoleState::Viewing(session) => Some(session.peer.endpoint),
+                RoleState::Viewing(session) if runtime.active_capture_supports_input() => {
+                    Some(session.peer.endpoint)
+                }
+                RoleState::Viewing(_) => None,
                 RoleState::Idle | RoleState::Connecting(_) | RoleState::Serving(_) => None,
             }
         };
@@ -1875,12 +2146,20 @@ async fn start_unified_relay_runtime(
     config: UnifiedRelayRuntimeConfig,
 ) -> Result<UnifiedRelayRuntime, UnifiedServiceOwnerError> {
     let (cancel_tx, _) = broadcast::channel(1);
+    let router = remote_core::routed_relay::RoutedRelay::bind(
+        config.peer_id.clone(),
+        config.routing_key.clone(),
+        config.host_control_target_addr,
+    )
+    .await?;
+    let router_target = router.local_addr()?;
+    let routes = router.routes();
     let control_tunnel = build_unified_relay_tunnel(
         config.control_bind_addr,
         &config.endpoint,
         config.control_group_id,
         &config.peer_id,
-        config.host_control_target_addr,
+        Some(router_target),
         config.log_events,
     )
     .await?;
@@ -1898,6 +2177,14 @@ async fn start_unified_relay_runtime(
     let discovery_endpoint = discovery_tunnel.local_addr()?;
 
     let tasks = vec![
+        AbortOnDropTask(tokio::spawn({
+            let cancel = cancel_tx.subscribe();
+            async move {
+                if let Err(error) = router.run(control_endpoint, cancel).await {
+                    eprintln!("Device relay router stopped: {error}");
+                }
+            }
+        })),
         AbortOnDropTask(tokio::spawn({
             let cancel_rx = cancel_tx.subscribe();
             async move {
@@ -1918,6 +2205,7 @@ async fn start_unified_relay_runtime(
 
     Ok(UnifiedRelayRuntime {
         control_endpoint,
+        routes,
         discovery_endpoint,
         cancel_tx,
         tasks,
@@ -2102,6 +2390,9 @@ async fn reload_unified_runtime_components(
                 Ok(new_relay) => {
                     if let Some(discovery) = discovery_config.as_mut() {
                         discovery
+                            .relay_routes
+                            .push((new_relay.discovery_endpoint, new_relay.routes.clone()));
+                        discovery
                             .announce_targets
                             .push(new_relay.discovery_endpoint);
                         discovery.route_overrides.push(DiscoveryRouteOverride {
@@ -2159,10 +2450,18 @@ fn spawn_client_session_event_bridge(
     mut event_rx: mpsc::UnboundedReceiver<ClientSessionEvent>,
 ) -> AbortOnDropTask {
     AbortOnDropTask(tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            let now_ms = unix_now_ms();
-            let mut runtime = runtime.lock().expect("unified runtime lock");
-            let _ = apply_client_session_event(&mut runtime, event, now_ms);
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else { break; };
+                    let mut runtime = runtime.lock().expect("unified runtime lock");
+                    let _ = apply_client_session_event(&mut runtime, event, unix_now_ms());
+                }
+                _ = tick.tick() => runtime.lock().expect("unified runtime lock")
+                    .expire_capture_source_request(std::time::Instant::now()),
+            }
         }
     }))
 }
@@ -2339,6 +2638,41 @@ fn apply_client_session_event(
             };
             apply_viewing_activity(runtime, session_id, now_ms)
         }
+        ClientSessionEvent::CaptureSources {
+            request_id,
+            sources,
+        } => {
+            runtime.apply_capture_sources(request_id, sources);
+            None
+        }
+        // Legacy Subscribe replies have no source identity and must never confirm a switch.
+        ClientSessionEvent::SubscriptionAccepted { .. } => None,
+        ClientSessionEvent::CaptureSourceSwitched {
+            id,
+            request_id,
+            source,
+            supports_input,
+        } => {
+            runtime.confirm_capture_source_switch(id, request_id, source, supports_input);
+            None
+        }
+        ClientSessionEvent::HostError { request_id, reason } => {
+            eprintln!("Host rejected session request {request_id}: {reason}");
+            if runtime.reject_capture_source_switch(request_id, reason.clone()) {
+                return None;
+            }
+            let current_session = match runtime.role_state() {
+                RoleState::Connecting(session) | RoleState::Viewing(session) => {
+                    Some(session.session_id)
+                }
+                RoleState::Idle | RoleState::Serving(_) => None,
+            };
+            if current_session == Some(request_id) {
+                runtime.stop_session(request_id).ok().flatten()
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2356,6 +2690,10 @@ fn apply_viewing_activity(
         }
         _ => None,
     }
+}
+
+fn capture_source_list_request_id(session_id: u32) -> u32 {
+    session_id ^ 0x8000_0000
 }
 
 fn unix_now_ms() -> u64 {
@@ -2557,6 +2895,7 @@ mod tests {
             enable_file_transfer: false,
             enable_talkback: false,
             enable_viewer_media: false,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: false,
         };
 
@@ -2598,6 +2937,7 @@ mod tests {
         let config = UnifiedRuntimeConfig {
             mesh_dir: mesh_dir.clone(),
             enable_viewer_media: false,
+            enable_workspace_viewer: false,
             ..UnifiedRuntimeConfig::app_defaults()
         };
         let discovery = build_unified_discovery_config(&config).unwrap();
@@ -2629,6 +2969,7 @@ mod tests {
             enable_file_transfer: true,
             enable_talkback: true,
             enable_viewer_media: true,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: true,
         };
 
@@ -2639,7 +2980,21 @@ mod tests {
         assert_eq!(discovery.announcement.control_port, 8123);
         assert_eq!(discovery.announcement.virtual_ip, None);
         assert_eq!(discovery.announcement.scope, DiscoveryScope::Lan);
-        assert!(discovery.announcement.capabilities.can_stream);
+        // A platform backend is not enough: the deployed capture runtime must be ready.
+        // In particular, a Windows test process without private FFmpeg must not advertise video.
+        assert_eq!(
+            discovery.announcement.capabilities.can_stream,
+            host::video_capture_readiness().is_ok()
+        );
+        let mut disabled = config.clone();
+        disabled.enable_passive_host = false;
+        assert!(
+            !build_unified_discovery_config(&disabled)
+                .unwrap()
+                .announcement
+                .capabilities
+                .can_stream
+        );
         assert_eq!(
             discovery.announcement.capabilities.can_view,
             cfg!(target_os = "macos")
@@ -2678,6 +3033,7 @@ mod tests {
             enable_file_transfer: false,
             enable_talkback: false,
             enable_viewer_media: false,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: true,
         })
         .await
@@ -2749,6 +3105,7 @@ mod tests {
             enable_file_transfer: false,
             enable_talkback: false,
             enable_viewer_media: false,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: false,
         };
         let (snapshot_tx, _snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
@@ -2807,6 +3164,7 @@ mod tests {
             enable_file_transfer: false,
             enable_talkback: false,
             enable_viewer_media: false,
+            enable_workspace_viewer: false,
             enable_session_timeout_monitor: false,
         })
         .await
@@ -3078,6 +3436,130 @@ mod tests {
     }
 
     #[test]
+    fn capture_source_state_uses_host_ids_and_tracks_input_capability() {
+        let mut runtime = runtime_with_peer("peer-a", true, DEFAULT_CONTROL_PORT);
+        let request = runtime.connect_device("peer-a", 200).unwrap();
+        runtime
+            .mark_viewing_connected(request.session_id, 220)
+            .unwrap();
+
+        let sources = vec![
+            protocol::session::CaptureSourceInfo {
+                source: protocol::session::CaptureSource::Display(42),
+                title: "Main".into(),
+                application: String::new(),
+                process_id: None,
+                width: 2560,
+                height: 1440,
+                supports_input: true,
+            },
+            protocol::session::CaptureSourceInfo {
+                source: protocol::session::CaptureSource::Display(77),
+                title: "Secondary".into(),
+                application: String::new(),
+                process_id: None,
+                width: 1920,
+                height: 1080,
+                supports_input: false,
+            },
+        ];
+        assert!(
+            apply_client_session_event(
+                &mut runtime,
+                ClientSessionEvent::CaptureSources {
+                    request_id: capture_source_list_request_id(request.session_id),
+                    sources: sources.clone(),
+                },
+                230,
+            )
+            .is_none()
+        );
+        assert_eq!(runtime.capture_sources(), sources);
+
+        let switch_id = runtime
+            .begin_capture_source_switch(protocol::session::CaptureSource::Display(77))
+            .unwrap();
+        assert!(
+            apply_client_session_event(
+                &mut runtime,
+                ClientSessionEvent::CaptureSourceSwitched {
+                    id: request.session_id,
+                    request_id: switch_id,
+                    source: protocol::session::CaptureSource::Display(77),
+                    supports_input: false,
+                },
+                240,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            runtime.active_capture_source(),
+            protocol::session::CaptureSource::Display(77)
+        );
+        assert!(!runtime.active_capture_supports_input());
+        assert_eq!(runtime.role_state().kind(), RoleKind::Viewing);
+    }
+
+    #[test]
+    fn capture_source_switch_error_is_nonfatal_to_existing_viewing_session() {
+        let mut runtime = runtime_with_peer("peer-a", true, DEFAULT_CONTROL_PORT);
+        let request = runtime.connect_device("peer-a", 200).unwrap();
+        runtime
+            .mark_viewing_connected(request.session_id, 220)
+            .unwrap();
+        let switch_id = runtime
+            .begin_capture_source_switch(protocol::session::CaptureSource::Window(123))
+            .unwrap();
+
+        assert!(
+            apply_client_session_event(
+                &mut runtime,
+                ClientSessionEvent::HostError {
+                    request_id: switch_id,
+                    reason: "window disappeared".into(),
+                },
+                230,
+            )
+            .is_none()
+        );
+        assert_eq!(runtime.role_state().kind(), RoleKind::Viewing);
+        assert_eq!(runtime.pending_capture_source(), None);
+        assert_eq!(
+            runtime.capture_source_error().as_deref(),
+            Some("window disappeared")
+        );
+    }
+
+    #[test]
+    fn source_switch_rejects_duplicate_and_late_ack_and_recovers_after_timeout() {
+        use protocol::session::CaptureSource;
+        let mut r = runtime_with_peer("peer-a", true, DEFAULT_CONTROL_PORT);
+        let id = r.connect_device("peer-a", 200).unwrap().session_id;
+        r.mark_viewing_connected(id, 220).unwrap();
+        let first = r
+            .begin_capture_source_switch(CaptureSource::Display(77))
+            .unwrap();
+        assert!(
+            r.begin_capture_source_switch(CaptureSource::Display(42))
+                .is_err()
+        );
+        assert!(!r.active_capture_supports_input());
+        r.confirm_capture_source_switch(id, first + 1, CaptureSource::Display(77), true);
+        assert_eq!(r.pending_source_request, Some(first));
+        r.expire_capture_source_request(std::time::Instant::now() + Duration::from_secs(6));
+        assert!(r.pending_capture_source().is_none());
+        assert!(!r.active_capture_supports_input());
+        let second = r
+            .begin_capture_source_switch(CaptureSource::MainDisplay)
+            .unwrap();
+        r.confirm_capture_source_switch(id, first, CaptureSource::Display(77), true);
+        assert_eq!(r.pending_source_request, Some(second));
+        r.confirm_capture_source_switch(id, second, CaptureSource::MainDisplay, true);
+        assert!(r.active_capture_supports_input());
+        assert!(r.capture_source_error().is_none());
+    }
+
+    #[test]
     fn connect_device_rejects_missing_or_non_streamable_devices() {
         let mut runtime = runtime_with_peer("viewer-only", false, 0);
 
@@ -3201,6 +3683,7 @@ mod tests {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             announce_targets: Vec::new(),
             route_overrides: Vec::new(),
+            relay_routes: Vec::new(),
             announcement: DiscoveryAnnouncement {
                 network_name: "test-net".to_string(),
                 device_id: "local-device".to_string(),
@@ -3246,6 +3729,7 @@ mod tests {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             announce_targets: Vec::new(),
             route_overrides: Vec::new(),
+            relay_routes: Vec::new(),
             announcement: DiscoveryAnnouncement {
                 network_name: "test-net".to_string(),
                 device_id: "local-device".to_string(),
@@ -3267,6 +3751,7 @@ mod tests {
 
         let owner = UnifiedServiceOwner::start(UnifiedServiceOwnerConfig {
             relay: Some(UnifiedRelayRuntimeConfig {
+                routing_key: remote_core::routed_relay::derive_routing_key(b"relay-test-network"),
                 endpoint: UnifiedRelayEndpoint::Tcp(relay_addr),
                 control_group_id: relay_control_group("test-net"),
                 discovery_group_id: relay_discovery_group("test-net"),
@@ -3319,7 +3804,7 @@ mod tests {
             .expect("discovery runtime");
         assert!(owner.owns_relay());
         assert!(owner.owns_discovery());
-        assert_eq!(owner.task_count(), 5);
+        assert_eq!(owner.task_count(), 6);
         assert_eq!(
             discovery_runtime.0,
             vec![DiscoveryRouteOverride {
@@ -3371,7 +3856,7 @@ mod tests {
             .as_ref()
             .expect("live relay runtime")
             .task_count();
-        assert_eq!(relay_task_count, 2);
+        assert_eq!(relay_task_count, 3);
 
         drop(owner);
         let _ = relay_cancel_tx.send(());
@@ -3971,3 +4456,12 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(
+    feature = "gpui-restoration",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+pub mod restored_ui;
+
+/// Default product presentation and side-effect-free build identity.
+pub mod gui_backend;

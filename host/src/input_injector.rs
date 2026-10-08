@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 pub struct MacInputInjector {
     source: CGEventSource,
+    window: Option<crate::window_input::WindowTarget>,
+    window_pointer: Mutex<Option<(u16, u16)>>,
     pressed_buttons: AtomicU8,
     active_modifiers: AtomicU8,
     pressed_keys: Mutex<BTreeSet<u16>>,
@@ -34,10 +36,140 @@ impl MacInputInjector {
             .map_err(|_| "Failed to create CGEventSource")?;
         Ok(Self {
             source,
+            window: None,
+            window_pointer: Mutex::new(None),
             pressed_buttons: AtomicU8::new(0),
             active_modifiers: AtomicU8::new(0),
             pressed_keys: Mutex::new(BTreeSet::new()),
         })
+    }
+
+    pub fn for_window(id: u32, pid: i32) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        if !unsafe { CGPreflightPostEventAccess() } {
+            return Err("The signed host lacks input-posting permission; verify Accessibility for the running RemotePlay app".into());
+        }
+        let window = crate::window_input::WindowTarget::new(id, pid)?;
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| "Cannot create window input source")?;
+        Ok(Self {
+            source,
+            window: Some(window),
+            window_pointer: Mutex::new(None),
+            pressed_buttons: AtomicU8::new(0),
+            active_modifiers: AtomicU8::new(0),
+            pressed_keys: Mutex::new(BTreeSet::new()),
+        })
+    }
+    fn post(&self, event: &CGEvent) {
+        if let Some(window) = &self.window {
+            if !window.alive() {
+                return;
+            }
+            event.set_integer_value_field(
+                EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER,
+                i64::from(window.id),
+            );
+            event.set_integer_value_field(
+                EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER_THAT_CAN_HANDLE_THIS_EVENT,
+                i64::from(window.id),
+            );
+            // This is explicitly foreground-window control, not background posting.
+            event.post(CGEventTapLocation::HID);
+        } else {
+            event.post(CGEventTapLocation::HID);
+        }
+    }
+    fn pointer_position(&self) -> CGPoint {
+        if let Some(window) = &self.window {
+            if let (Ok(bounds), Some((x, y))) = (
+                window.bounds(),
+                *self.window_pointer.lock().expect("window pointer lock"),
+            ) {
+                return normalized_pointer_location(x, y, bounds);
+            }
+            return CGPoint::new(0., 0.);
+        }
+        current_pointer_location(&self.source)
+    }
+    fn prepare_window_event(&self, event: &InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let Some(window) = &self.window else {
+            return Ok(());
+        };
+        window.bounds()?;
+        if matches!(event, InputEvent::MouseMove { .. }) {
+            return Err("Window control requires normalized absolute coordinates".into());
+        }
+        if matches!(event, InputEvent::MouseMoveAbsolute { .. }) {
+            return Ok(());
+        }
+        if matches!(
+            event,
+            InputEvent::MouseDown(_) | InputEvent::MouseScroll { .. }
+        ) && self
+            .window_pointer
+            .lock()
+            .expect("window pointer lock")
+            .is_none()
+        {
+            return Err("Click inside the selected remote window before using its pointer".into());
+        }
+        if matches!(
+            event,
+            InputEvent::MouseDown(_)
+                | InputEvent::Touch {
+                    action: protocol::TouchAction::Down,
+                    ..
+                }
+        ) {
+            window.focus_for_click()?;
+            let point = match event {
+                InputEvent::Touch {
+                    normalized_x,
+                    normalized_y,
+                    ..
+                } => {
+                    if !normalized_x.is_finite() || !normalized_y.is_finite() {
+                        return Err("Invalid touch coordinates".into());
+                    }
+                    (
+                        (normalized_x.clamp(0., 1.) * 65535.) as u16,
+                        (normalized_y.clamp(0., 1.) * 65535.) as u16,
+                    )
+                }
+                _ => self
+                    .window_pointer
+                    .lock()
+                    .expect("window pointer lock")
+                    .ok_or("Pointer position missing")?,
+            };
+            window.check_pointer(point.0, point.1)?;
+            return Ok(());
+        }
+        // Release only previously tracked presses. Source changes also release held state.
+        if matches!(
+            event,
+            InputEvent::MouseUp(_)
+                | InputEvent::KeyUp(_)
+                | InputEvent::Key { pressed: false, .. }
+                | InputEvent::Touch {
+                    action: protocol::TouchAction::Up | protocol::TouchAction::Cancel,
+                    ..
+                }
+        ) {
+            return Ok(());
+        }
+        if matches!(event, InputEvent::MouseScroll { .. }) {
+            let (x, y) = self
+                .window_pointer
+                .lock()
+                .expect("window pointer lock")
+                .ok_or("Pointer position missing")?;
+            window.check_pointer(x, y)?;
+        }
+        if !window.focused() {
+            return Err("The selected application window does not have keyboard focus. Click that window's remote picture before typing".into());
+        }
+        Ok(())
     }
 
     pub fn inject(&self, event: InputEvent) {
@@ -60,7 +192,7 @@ impl MacInputInjector {
                 self.set_modifiers(modifiers);
             }
             InputEvent::MouseMove { dx, dy } => {
-                let current_pos = current_pointer_location(&self.source);
+                let current_pos = self.pointer_position();
                 let new_pos = CGPoint::new(current_pos.x + dx as f64, current_pos.y + dy as f64);
                 if let Ok(cg_event) = CGEvent::new_mouse_event(
                     self.source.clone(),
@@ -68,23 +200,37 @@ impl MacInputInjector {
                     new_pos,
                     pointer_mouse_button(self.pressed_buttons.load(Ordering::Relaxed)),
                 ) {
-                    cg_event.post(CGEventTapLocation::HID);
+                    self.post(&cg_event);
                 }
             }
             InputEvent::MouseMoveAbsolute { x, y } => {
-                self.post_pointer_move(normalized_pointer_location(
-                    x,
-                    y,
-                    CGDisplay::main().bounds(),
-                ));
+                let bounds = if let Some(window) = &self.window {
+                    let Ok(bounds) = window.bounds() else {
+                        return;
+                    };
+                    *self.window_pointer.lock().expect("window pointer lock") = Some((x, y));
+                    if !window.focused() || window.check_pointer(x, y).is_err() {
+                        return;
+                    }
+                    bounds
+                } else {
+                    CGDisplay::main().bounds()
+                };
+                self.post_pointer_move(normalized_pointer_location(x, y, bounds));
             }
             InputEvent::MouseDown(button) => {
+                if self.window.is_some() {
+                    self.post_pointer_move(self.pointer_position());
+                }
                 self.post_mouse_button(button, true);
             }
             InputEvent::MouseUp(button) => {
                 self.post_mouse_button(button, false);
             }
             InputEvent::MouseScroll { delta_x, delta_y } => {
+                if self.window.is_some() {
+                    self.post_pointer_move(self.pointer_position());
+                }
                 if let Ok(cg_event) = CGEvent::new_scroll_event(
                     self.source.clone(),
                     ScrollEventUnit::PIXEL,
@@ -93,7 +239,7 @@ impl MacInputInjector {
                     delta_x,
                     0,
                 ) {
-                    cg_event.post(CGEventTapLocation::HID);
+                    self.post(&cg_event);
                 }
             }
             InputEvent::Touch {
@@ -103,19 +249,29 @@ impl MacInputInjector {
                 normalized_y,
                 pressure: _,
             } => {
-                let bounds = CGDisplay::main().bounds();
-                let x = (normalized_x.clamp(0.0, 1.0) * bounds.size.width as f32) as u16;
-                let y = (normalized_y.clamp(0.0, 1.0) * bounds.size.height as f32) as u16;
+                let bounds = if let Some(window) = &self.window {
+                    let Ok(bounds) = window.bounds() else {
+                        return;
+                    };
+                    bounds
+                } else {
+                    CGDisplay::main().bounds()
+                };
+                let x = (normalized_x.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
+                let y = (normalized_y.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
+                if self.window.is_some() {
+                    *self.window_pointer.lock().expect("window pointer lock") = Some((x, y));
+                }
                 let pos = normalized_pointer_location(x, y, bounds);
                 self.post_pointer_move(pos);
 
                 match action {
                     protocol::TouchAction::Down => {
-                        self.post_mouse_button(1, true);
+                        self.post_mouse_button(0, true);
                     }
                     protocol::TouchAction::Move => {}
                     protocol::TouchAction::Up | protocol::TouchAction::Cancel => {
-                        self.post_mouse_button(1, false);
+                        self.post_mouse_button(0, false);
                     }
                 }
             }
@@ -146,7 +302,7 @@ impl MacInputInjector {
     fn post_key(&self, key_code: u16, pressed: bool, modifiers: u8) {
         if let Ok(cg_event) = CGEvent::new_keyboard_event(self.source.clone(), key_code, pressed) {
             cg_event.set_flags(modifier_event_flags(modifiers));
-            cg_event.post(CGEventTapLocation::HID);
+            self.post(&cg_event);
         }
     }
 
@@ -177,7 +333,7 @@ impl MacInputInjector {
             position,
             pointer_mouse_button(pressed_buttons),
         ) {
-            cg_event.post(CGEventTapLocation::HID);
+            self.post(&cg_event);
         }
     }
 
@@ -190,13 +346,14 @@ impl MacInputInjector {
         let Ok(cg_event) = CGEvent::new_mouse_event(
             self.source.clone(),
             event_type,
-            current_pointer_location(&self.source),
+            self.pointer_position(),
             cg_button,
         ) else {
             return;
         };
         cg_event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button as i64);
-        cg_event.post(CGEventTapLocation::HID);
+        cg_event.set_flags(modifier_event_flags(self.current_modifiers()));
+        self.post(&cg_event);
 
         let mask = 1_u8 << button;
         if pressed {
@@ -229,7 +386,7 @@ fn current_pointer_location(source: &CGEventSource) -> CGPoint {
         .unwrap_or_else(|_| CGPoint::new(0.0, 0.0))
 }
 
-fn normalized_pointer_location(
+pub(crate) fn normalized_pointer_location(
     x: u16,
     y: u16,
     display_bounds: core_graphics::geometry::CGRect,
@@ -237,8 +394,12 @@ fn normalized_pointer_location(
     let normalized_x = f64::from(x) / f64::from(u16::MAX);
     let normalized_y = f64::from(y) / f64::from(u16::MAX);
     CGPoint::new(
-        display_bounds.origin.x + display_bounds.size.width * normalized_x,
-        display_bounds.origin.y + display_bounds.size.height * normalized_y,
+        display_bounds.origin.x
+            + (display_bounds.size.width * normalized_x)
+                .min((display_bounds.size.width - 0.5).max(0.)),
+        display_bounds.origin.y
+            + (display_bounds.size.height * normalized_y)
+                .min((display_bounds.size.height - 0.5).max(0.)),
     )
 }
 
@@ -323,6 +484,7 @@ fn pointer_mouse_button(pressed_buttons: u8) -> CGMouseButton {
 
 impl InputInjector for MacInputInjector {
     fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.prepare_window_event(&event)?;
         self.inject(event);
         Ok(())
     }
@@ -374,6 +536,6 @@ mod tests {
         assert_eq!((top_left.x, top_left.y), (100.0, 200.0));
 
         let bottom_right = normalized_pointer_location(u16::MAX, u16::MAX, bounds);
-        assert_eq!((bottom_right.x, bottom_right.y), (1700.0, 1100.0));
+        assert_eq!((bottom_right.x, bottom_right.y), (1699.5, 1099.5));
     }
 }

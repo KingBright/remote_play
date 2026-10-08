@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "package": "gpui-ce",
+  "fixed_version": "0.3.3",
+  "registry_sha256": "e44a107ce223acf01c69a901edfa5bb7d233e3f226aaefe017d2268e9cfe11ca",
+  "native_feature_default_enabled": false,
+  "patch_files": {
+    "Cargo.toml": {
+      "upstream": "7ecc8c5796c2df53ec901c2f0e4a9a46db56393babae63e371168c504e63afea",
+      "current": "43d33af73f448ae1a945f5b2a74cb113304c8602b6601f2a5b30f8ada87d7f10"
+    },
+    "src/elements/surface.rs": {
+      "upstream": "5e91b7af155ef147687aa51c95aba538b9499958567030ff834561d841fa4f31",
+      "current": "0fb7dc398493bbf0c99855a00c89aefee6f2b001af80ddf05ec51107ad1ac47c"
+    },
+    "src/gpui.rs": {
+      "upstream": "ecd4272cb0fa460d2b1ab8d6ff2f9aabc0c9b5c32e120d953a1e9ced75cb4968",
+      "current": "615a00deebd54e7d70a1c460e8f1ac7328878ba0ccf8e3f9fab2389770cb5877"
+    },
+    "src/platform/windows/directx_renderer.rs": {
+      "upstream": "dc8b30767e52a54303f666975c4f32966ea371cfcef8ed2d6b6b4e4b30d8da51",
+      "current": "8f822c44c8db29be8550c948774801bf28d673c24dfd1caef6a33fbd833c02dd"
+    },
+    "src/platform/windows.rs": {
+      "upstream": "7a568673ee16d8ad4f2147fa4df75b274bd36ba7b3dbd8f90088beb20cbb40d2",
+      "current": "ae62ea60cb90fc1c1933682cf88054406900a19024c1c033801fec1602dca194"
+    },
+    "src/platform.rs": {
+      "upstream": "6a23fa258d2af852a40e28f570a5bfd76ccd7ec0688888bfccd240fc3e99c561",
+      "current": "7a15f1244fe9af44d5b16d8efdaf0547e6ce9571590ffbdcaa2b6eee8d25702c"
+    },
+    "src/scene.rs": {
+      "upstream": "aecaa953ed9b2fa291e926647aa34321016ed78967d38af89a371443f3d26530",
+      "current": "465f2ada51779742c443785f90544c1c2f7127e68661f57d1814ea2a96a18146"
+    },
+    "src/window.rs": {
+      "upstream": "7a7971c8533b04c2ab77e2285a2af28cd600a6b1ddf2aaf61be4e3be13d0dc2b",
+      "current": "1f32c544470b5a262f499d1d8b210e302d291b6b67d8367f2dae3f3bc7febc38"
+    },
+    "src/native_video.rs": {
+      "upstream": null,
+      "current": "da0903f8a7c972d9d56e34387d27b1d35e4d83f2ac52f361d58ba692c1eeab13"
+    },
+    "src/native_video/windows.rs": {
+      "upstream": null,
+      "current": "6e76e113d08c1711a467de7f7d40aaa8bc7a44f4f847eb8e6d394093eec9ab76"
+    },
+    "src/platform/windows/native_video.hlsl": {
+      "upstream": null,
+      "current": "98bca75f688a4d7b49a3c0eccb7b8bac3b63ae9f0ac293a01018db631ccb124a"
+    },
+    "src/platform/windows/native_video.rs": {
+      "upstream": null,
+      "current": "3466a223290b52da2033d07c9883a0fddc517a2922b5977a5b57fb8739039141"
+    }
+  },
+  "protected_application_files_unchanged": [
+    "app/src/main.rs",
+    "app/src/restored_ui.rs",
+    "app/src/ui.rs",
+    "app/src/design_system.rs",
+    "app/src/desktop/model.rs",
+    "app/src/desktop/instance.rs",
+    "client/src/lib.rs",
+    "client/src/video_decode.rs",
+    "client/src/portable_video.rs",
+    "client/src/native_call.rs",
+    "host/src/service.rs",
+    "host/src/input_injector.rs",
+    "remote_core/src/routed_relay.rs",
+    "remote_core/src/workspace_session.rs",
+    "protocol/src/session.rs",
+    "android/app/src/main/java/com/remoteplay/client/ui/MobileViewportScreen.kt",
+    "scripts/macos_release_guard.py",
+    "scripts/install_macos_unified.py"
+  ],
+  "decoder_connected": false,
+  "linux_native_import_completed": false,
+  "full_product_release_approved_by_this_record": false
+}
