@@ -9,6 +9,7 @@ members = [
     "remote_client_bridge",
 ]
 resolver = "2"
+exclude = ["third_party/ely-gpui-component"]
 
 [patch.crates-io]
 gpui-ce = { path = "third_party/gpui-ce" }

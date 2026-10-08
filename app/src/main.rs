@@ -23,10 +23,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     if !headless {
-        #[cfg(target_os = "macos")]
-        if std::env::var("REMOTE_PLAY_LEGACY_MAC_GUI").as_deref() == Ok("1") {
-            return remote_play_app::run_unified_gui(config).await;
-        }
         #[cfg(feature = "gpui-restoration")]
         return remote_play_app::restored_ui::run_restored_gui(config).await;
         #[cfg(not(feature = "gpui-restoration"))]

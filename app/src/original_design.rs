@@ -5,7 +5,7 @@ use crate::design_system::{
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use yororen_ui::{
+use crate::product_components::{
     component::{IconName, icon},
     theme::{ActiveTheme, Theme},
 };

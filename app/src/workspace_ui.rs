@@ -345,7 +345,7 @@ impl WorkspaceView {
             return;
         };
         use remote_core::VideoFrame;
-        if let Some(event) = crate::ui::absolute_pointer_event(
+        if let Some(event) = crate::restored_ui::absolute_pointer_event(
             (position.x.into(), position.y.into()),
             (
                 rect.origin.x.into(),
@@ -354,7 +354,7 @@ impl WorkspaceView {
                 rect.size.height.into(),
             ),
             (frame.width(), frame.height()),
-            crate::ui::ViewportScaleMode::AspectFit,
+            crate::restored_ui::ViewportScaleMode::AspectFit,
         ) {
             self.input(id, event);
         }
@@ -776,7 +776,7 @@ impl Render for WorkspaceView {
                                     }
                                     this.pointer(id, event.position);
                                     if let Some(button) =
-                                        crate::ui::protocol_mouse_button(event.button)
+                                        crate::restored_ui::protocol_mouse_button(event.button)
                                     {
                                         this.input(id, protocol::InputEvent::MouseDown(button));
                                     }
@@ -785,7 +785,7 @@ impl Render for WorkspaceView {
                             .capture_any_mouse_up(cx.listener(
                                 move |this, event: &MouseUpEvent, _, _| {
                                     if let Some(button) =
-                                        crate::ui::protocol_mouse_button(event.button)
+                                        crate::restored_ui::protocol_mouse_button(event.button)
                                     {
                                         this.input(id, protocol::InputEvent::MouseUp(button));
                                     }
@@ -794,7 +794,7 @@ impl Render for WorkspaceView {
                             .capture_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, _, _| {
                                     if let Some(event) =
-                                        crate::ui::protocol_key_event(&event.keystroke, true)
+                                        crate::restored_ui::protocol_key_event(&event.keystroke, true)
                                     {
                                         this.input(id, event);
                                     }
@@ -802,7 +802,7 @@ impl Render for WorkspaceView {
                             ))
                             .capture_key_up(cx.listener(move |this, event: &KeyUpEvent, _, _| {
                                 if let Some(event) =
-                                    crate::ui::protocol_key_event(&event.keystroke, false)
+                                    crate::restored_ui::protocol_key_event(&event.keystroke, false)
                                 {
                                     this.input(id, event);
                                 }
@@ -851,7 +851,7 @@ impl Render for WorkspaceView {
             rates = rates
                 .child("FPS / kbps")
                 .child(
-                    yororen_ui::component::text_input("pane-fps")
+                    crate::product_components::component::text_input("pane-fps")
                         .content(self.fps_edit.clone())
                         .on_change({
                             let view = cx.weak_entity();
@@ -861,7 +861,7 @@ impl Render for WorkspaceView {
                         }),
                 )
                 .child(
-                    yororen_ui::component::text_input("pane-bitrate")
+                    crate::product_components::component::text_input("pane-bitrate")
                         .content(self.bitrate_edit.clone())
                         .on_change({
                             let view = cx.weak_entity();

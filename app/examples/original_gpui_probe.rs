@@ -1,6 +1,7 @@
 //! Real native-window probe of the existing design, not a replacement app.
 //! Reuses the original design system and two original visual functions verbatim.
 //! No networking, capture, recording, account state or input injection is started.
+use remote_play_app::product_components;
 #[path = "../src/design_system.rs"]
 mod design_system;
 #[path = "../src/original_design.rs"]
@@ -16,10 +17,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use yororen_ui::{
+use remote_play_app::product_components::{
     assets::UiAsset,
     component::{self, IconName, icon},
-    theme::{ActiveTheme, GlobalTheme},
+    theme::{ActiveTheme},
 };
 
 struct OriginalDesignProbe {
@@ -136,11 +137,10 @@ fn main() {
     Application::new()
         .with_assets(UiAsset)
         .run(move |cx: &mut App| {
-            component::init(cx);
-            cx.set_global(GlobalTheme::new_with_themes(
+            component::init(cx).expect("Ely native acceptance assets");
+            remote_play_app::product_components::theme::install(
                 WindowAppearance::Dark,
-                remote_play_themes(),
-            ));
+                remote_play_themes(), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds(
@@ -167,7 +167,7 @@ fn main() {
                 let rendered=saved_renders.load(Ordering::Relaxed);
                 assert!(rendered>0,"native view never rendered");
                 let receipt=serde_json::json!({"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
-                    "gpui":"0.3.3","yororen_ui":"0.2.0","native_window_created":true,"render_calls":rendered,
+                    "gpui":"0.3.3","ely_revision":"f756043853ca93407e2da5d07cfe520c84f90963","native_window_created":true,"render_calls":rendered,
                     "elapsed_ms":began.elapsed().as_millis(),"original_design_system_reused":true,
                     "full_product_restored":false,"video_tested":false,"network_started":false,"input_injected":false});
                 std::fs::write(&saved_output,serde_json::to_vec_pretty(&receipt).unwrap()).expect("receipt write failed");
@@ -178,7 +178,7 @@ fn main() {
         });
     let rendered = renders.load(Ordering::Relaxed);
     assert!(rendered > 0, "native view never rendered");
-    let receipt = serde_json::json!({"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"gpui":"0.3.3","yororen_ui":"0.2.0","native_window_created":true,"render_calls":rendered,"elapsed_ms":began.elapsed().as_millis(),"original_design_system_reused":true,"full_product_restored":false,"video_tested":false,"network_started":false,"input_injected":false});
+    let receipt = serde_json::json!({"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"gpui":"0.3.3","ely_revision":"f756043853ca93407e2da5d07cfe520c84f90963","native_window_created":true,"render_calls":rendered,"elapsed_ms":began.elapsed().as_millis(),"original_design_system_reused":true,"full_product_restored":false,"video_tested":false,"network_started":false,"input_injected":false});
     std::fs::write(output, serde_json::to_vec_pretty(&receipt).unwrap())
         .expect("receipt write failed");
     println!("ORIGINAL_GPUI_NATIVE_WINDOW {receipt}");

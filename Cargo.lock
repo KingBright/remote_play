@@ -1062,20 +1062,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.44"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
-dependencies = [
- "iana-time-zone",
- "js-sys",
- "num-traits",
- "serde",
- "wasm-bindgen",
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1130,7 +1116,6 @@ dependencies = [
  "wgpu",
  "windows 0.61.3",
  "winit",
- "yororen_ui",
 ]
 
 [[package]]
@@ -1915,6 +1900,17 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "ely-gpui-component"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "gpui-ce",
+ "log",
+ "rust-embed",
+ "web-time 1.1.0",
+]
 
 [[package]]
 name = "embed-resource"
@@ -2733,7 +2729,7 @@ dependencies = [
  "smallvec",
  "smol",
  "spin 0.10.0",
- "stacksafe 0.1.4",
+ "stacksafe",
  "strum 0.27.2",
  "taffy",
  "thiserror 2.0.18",
@@ -3173,30 +3169,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "iana-time-zone"
-version = "0.1.65"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
-dependencies = [
- "android_system_properties",
- "core-foundation-sys 0.8.7",
- "iana-time-zone-haiku",
- "js-sys",
- "log",
- "wasm-bindgen",
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "iana-time-zone-haiku"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -5411,6 +5383,7 @@ name = "remote_play_app"
 version = "2.0.0-alpha.8"
 dependencies = [
  "client",
+ "ely-gpui-component",
  "gpui-ce",
  "host",
  "image",
@@ -5427,7 +5400,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "yororen_ui",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -6175,17 +6148,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d9c1172965d317e87ddb6d364a040d958b40a1db82b6ef97da26253a8b3d090"
 dependencies = [
  "stacker",
- "stacksafe-macro 0.1.4",
-]
-
-[[package]]
-name = "stacksafe"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85aa5f4867b937e9cd3626e1182625a025d8254629d8d75c1127bfbbd0e2cb1a"
-dependencies = [
- "stacker",
- "stacksafe-macro 1.0.1",
+ "stacksafe-macro",
 ]
 
 [[package]]
@@ -6193,17 +6156,6 @@ name = "stacksafe-macro"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "172175341049678163e979d9107ca3508046d4d2a7c6682bee46ac541b17db69"
-dependencies = [
- "proc-macro-error2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "stacksafe-macro"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "381076ae65b1126e035e8e3d107a8f7cf88c85ee09588d20f6683f1eb9c6f41d"
 dependencies = [
  "proc-macro-error2",
  "quote",
@@ -8642,23 +8594,6 @@ dependencies = [
  "quote",
  "syn 2.0.117",
  "synstructure",
-]
-
-[[package]]
-name = "yororen_ui"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae424c3b1d288a90eb805b177dd5ab8849e03dbca8302e1d94ad7d1a55e08136"
-dependencies = [
- "chrono",
- "gpui-ce",
- "rust-embed",
- "serde",
- "serde_json",
- "smallvec",
- "stacksafe 1.0.1",
- "unicode-segmentation",
- "uuid",
 ]
 
 [[package]]

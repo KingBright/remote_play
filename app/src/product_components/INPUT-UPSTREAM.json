@@ -1,0 +1,31 @@
+{
+  "package": "yororen_ui",
+  "version": "0.2.0",
+  "purpose": "retain existing product scalar-input IME/selection; no toolkit dependency or theme/focus runtime",
+  "files": {
+    "component/text_input.rs": "b99a01a97266e748a2bb97312f7e4626ecc2c572ac89d2bda9a82276b4ae681e",
+    "component/text_edit_state.rs": "84b847c71b7ec8bfdb378434a7957f0f359d31f97dd82c4ed2ee030d8d6cd41d",
+    "component/input/actions.rs": "646b9ab425792bb01814ef4c70b55867ef9ff67dd024a7f38fd384bded98e9b1",
+    "theme.rs": "ce1e9839329272eca7b2651585a7266b4346bcfe69d83db6e5340e9239c4f5f5"
+  },
+  "license": "Apache-2.0",
+  "icons": {
+    "server.svg": "d61d15c02a3b490883b63fd6f713e4521996e6f96f5f65755d7ba49d595ecfc6",
+    "maximize-off.svg": "c7f5cf3cc43024f42798a24e33e372b7412ec8eac6d80ab35a9cc197f8eec28d",
+    "maximize-on.svg": "f89a478797009ca74fc979828ad9c171264591c45127fb987d5cfa154ed26f1c",
+    "minimize.svg": "c980b93007045618945d461f8a7e22c63e564e1d6eb0267580e01777b9075cf0",
+    "info.svg": "86b6b4dab9528366a678e5999d5f6ce0aa85b3c70a56a2f2a74f4963d4b19623",
+    "user.svg": "4775ab2d5b7cf3eedffe8b4e7586616889fb853b1826cfc9e4e22277abd0b43b",
+    "ping-indicator-0.svg": "735bef1987230191c995ca1807710f9b365b11a1a4b12977a97a47d858b1bb6d",
+    "ping-indicator-1.svg": "04c2e444e1f9e3a39e88a49fc2f43cd5ee00a648e668300dff8885b87e6068e6",
+    "ping-indicator-2.svg": "4320469b8e83e816e8d9452d24b1156ec8e822968ec71028d85e5835978aeff4",
+    "ping-indicator-3.svg": "bc242d0db1f1e8bdc6731e242cb316678aba4a1bb83b380e9b009b4cee5c15e1"
+  },
+  "repository": "https://github.com/MeowLynxSea/yororen-ui",
+  "revision": "31005a92286067b56dcc45e7833b91e428533274",
+  "copyright": "Copyright 2026 MeowLynxSea",
+  "license_source": "https://raw.githubusercontent.com/MeowLynxSea/yororen-ui/31005a92286067b56dcc45e7833b91e428533274/LICENSE",
+  "notice_source": "https://raw.githubusercontent.com/MeowLynxSea/yororen-ui/31005a92286067b56dcc45e7833b91e428533274/NOTICE",
+  "license_sha256": "fcb3c2d6639d13e858f4ed82d232405d55398d807b344a6a221129a446b24fa8",
+  "notice_sha256": "b5c412fcf6abf01c8fa932bba7e8e5794afb6cd30fb27c561ab2ce35604a2715"
+}

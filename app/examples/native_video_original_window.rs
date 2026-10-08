@@ -1,5 +1,6 @@
 //! Generated GPU patterns in a real GPUI window with the original product capsule.
 //! This development probe never creates a device network, media session or input injector.
+use remote_play_app::product_components;
 #[cfg(target_os = "windows")]
 #[path = "../src/design_system.rs"]
 mod design_system;
@@ -24,10 +25,10 @@ mod probe {
         },
         time::Duration,
     };
-    use yororen_ui::{
+    use remote_play_app::product_components::{
         assets::UiAsset,
         component,
-        theme::{ActiveTheme, GlobalTheme},
+        theme::{ActiveTheme},
     };
     struct NativeWindow {
         frames: Vec<D3dVideoFrame>,
@@ -147,7 +148,7 @@ mod probe {
         let view_tick = tick.clone();
         let out = path.clone();
         Application::new().with_assets(UiAsset).run(move |cx:&mut App| {
-            component::init(cx);cx.set_global(GlobalTheme::new_with_themes(WindowAppearance::Dark,remote_play_themes()));
+            component::init(cx).expect("Ely native acceptance assets");remote_play_app::product_components::theme::install(WindowAppearance::Dark,remote_play_themes(), cx);
             cx.open_window(WindowOptions{window_bounds:Some(WindowBounds::Windowed(bounds(point(px(100.),px(100.)),size(px(1120.),px(740.))))),
                 titlebar:Some(TitlebarOptions{title:Some("RemotePlay native-video development check".into()),..Default::default()}),..Default::default()},
                 move |_,cx|cx.new(|_|NativeWindow{frames,tick:view_tick,renders:view_renders})).expect("native window creation");

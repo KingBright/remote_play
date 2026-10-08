@@ -5,10 +5,6 @@ pub mod desktop;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod original_design;
 pub mod preferences;
-#[cfg(target_os = "macos")]
-mod ui;
-#[cfg(target_os = "macos")]
-mod workspace_ui;
 
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveredPeer, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
@@ -53,15 +49,20 @@ pub use client::{
     start_file_transfer_runtime_control, start_talkback_runtime_control,
 };
 pub use host::{HostServiceConfig, run_host_service};
-#[cfg(target_os = "macos")]
-pub use ui::run_unified_gui;
+#[cfg(all(
+    feature = "gpui-restoration",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+pub use restored_ui::run_restored_gui as run_unified_gui;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(
+    feature = "gpui-restoration",
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+)))]
 pub async fn run_unified_gui(
     _config: UnifiedRuntimeConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    eprintln!("GUI is only available on macOS. Running in daemon/host headless mode.");
-    Ok(())
+    Err("Original GPUI GUI was not compiled".into())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4465,3 +4466,6 @@ pub mod restored_ui;
 
 /// Default product presentation and side-effect-free build identity.
 pub mod gui_backend;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub mod product_components;

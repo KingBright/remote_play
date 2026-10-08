@@ -21,10 +21,10 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use yororen_ui::{
+use crate::product_components::{
     assets::UiAsset,
     component::{self, Button, IconName, button, icon, tooltip},
-    theme::{ActionVariantKind, ActiveTheme, GlobalTheme, Theme},
+    theme::{ActionVariantKind, ActiveTheme, Theme},
 };
 
 pub async fn run_unified_gui(
@@ -37,11 +37,10 @@ pub async fn run_unified_gui(
     app.run(move |cx: &mut App| {
         apply_product_window_appearance();
         let appearance = product_window_appearance();
-        component::init(cx);
-        cx.set_global(GlobalTheme::new_with_themes(
+        component::init(cx).expect("Ely legacy reference assets");
+        crate::product_components::theme::install(
             appearance,
-            remote_play_themes(),
-        ));
+            remote_play_themes(), cx);
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(80.0), px(60.0)),
@@ -3753,7 +3752,7 @@ fn command_button<T: 'static>(
         .variant(variant)
         .focusable()
         .focus_visible(move |style| style.border_2().border_color(focus))
-        .active(|style| style.opacity(0.82))
+
 }
 
 fn empty_state(

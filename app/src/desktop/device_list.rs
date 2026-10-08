@@ -25,7 +25,7 @@ impl DeviceConnectionStatus {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Connecting => "Connecting…",
-            Self::Viewing => "Connected Live",
+            Self::Viewing => "Session connected",
             Self::Serving => "Serving",
             Self::Available => "Available",
             Self::Standby => "Standby",
@@ -53,6 +53,16 @@ pub(crate) struct DeviceRowViewModel {
 impl DeviceRowViewModel {
     pub(crate) const fn is_active(&self) -> bool {
         self.connection.is_active()
+    }
+}
+
+pub(crate) struct DeviceListModel<'a> {
+    pub devices: &'a [AppDevice],
+    pub role: &'a RoleState,
+}
+impl DeviceListModel<'_> {
+    pub(crate) fn project(&self, filter: DeviceFilterKind) -> DeviceListViewModel {
+        DeviceListViewModel::project(self.devices, self.role, filter)
     }
 }
 
@@ -217,6 +227,42 @@ mod tests {
         assert_eq!(
             state.reduce(DeviceListAction::OpenWorkspace("peer-3".into())),
             Some(DeviceListEffect::OpenWorkspace("peer-3".into()))
+        );
+    }
+
+    #[test]
+    fn switching_device_moves_active_state_without_rebinding_row_identity() {
+        let devices = [
+            device("a", DiscoveryScope::Lan, true),
+            device("b", DiscoveryScope::Relay, true),
+        ];
+        let viewing_a = RoleState::Viewing(RoleSession::new(devices[0].role_peer(), 7, 0));
+        let connecting_b = RoleState::Connecting(RoleSession::new(devices[1].role_peer(), 8, 1));
+        let before = DeviceListModel {
+            devices: &devices,
+            role: &viewing_a,
+        }
+        .project(DeviceFilterKind::All);
+        let after = DeviceListModel {
+            devices: &devices,
+            role: &connecting_b,
+        }
+        .project(DeviceFilterKind::All);
+        assert_eq!(before.rows[0].connection.label(), "Session connected");
+        assert!(!before.rows[0].can_connect);
+        assert!(after.rows[0].can_connect);
+        assert!(!after.rows[1].can_connect);
+        assert_eq!(after.rows[1].device_id, "b");
+        assert_eq!(after.rows[1].endpoint, devices[1].endpoint);
+        let filtered = DeviceListModel {
+            devices: &devices,
+            role: &connecting_b,
+        }
+        .project(DeviceFilterKind::Lan);
+        assert_eq!(filtered.rows.len(), 1);
+        assert_eq!(
+            filtered.rows[0].connection,
+            DeviceConnectionStatus::Available
         );
     }
 }

@@ -1,5 +1,5 @@
 use gpui::{Hsla, Rgba, rgb, rgba};
-use yororen_ui::theme::{Theme, ThemeSet};
+use crate::product_components::theme::{Theme, ThemeSet};
 
 /// Resolve a semantic font role without changing the original visual hierarchy.
 /// DirectWrite does not interpret CSS generic family names as installed fonts.
@@ -63,7 +63,7 @@ pub fn color_border_fine() -> Rgba {
     rgb(0x2d2f34)
 }
 
-fn dark_theme() -> Theme {
+pub(crate) fn dark_theme() -> Theme {
     let mut theme = Theme::default_dark();
 
     theme.surface.canvas = rgb(0x121316).into();
@@ -117,7 +117,7 @@ fn dark_theme() -> Theme {
     theme
 }
 
-fn light_theme() -> Theme {
+pub(crate) fn light_theme() -> Theme {
     let mut theme = Theme::default_light();
 
     theme.surface.canvas = rgb(0xeef2f0).into();

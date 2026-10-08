@@ -19,6 +19,27 @@ class SingleDesktopGuiStaticTests(unittest.TestCase):
             r'(?m)^name = "(?:eframe|egui|egui-winit|egui_glow)"$',
         )
 
+    def test_component_and_gpui_dependency_families_are_single(self):
+        names = set(re.findall(r'^name = "([^"]+)"$', (ROOT / "Cargo.lock").read_text(), re.M))
+        self.assertEqual({name for name in names if name in {"gpui", "gpui-ce", "gpui-pre", "gpui-platform", "gpui-macos", "gpui-linux", "gpui-windows"}}, {"gpui-ce"})
+        self.assertIn("ely-gpui-component", names)
+        self.assertNotIn("yororen_ui", names)
+        for path in (APP / "Cargo.toml", ROOT / "client/Cargo.toml", ROOT / "third_party/ely-gpui-component/Cargo.toml"):
+            manifest = path.read_text()
+            self.assertNotRegex(manifest, r"(?mi)^\s*(?:yororen_ui|gpui-pre|gpui-platform)\s*=")
+
+    def test_ely_fixed_source_and_single_entry_are_explicit(self):
+        import json
+        upstream = json.loads((ROOT / "third_party/ely-gpui-component/UPSTREAM.json").read_text())
+        self.assertEqual(upstream["revision"], "f756043853ca93407e2da5d07cfe520c84f90963")
+        self.assertIn("remote_play_app", (APP / "Cargo.toml").read_text())
+        lib = (APP / "src/lib.rs").read_text()
+        self.assertNotIn("pub use ui::run_unified_gui", lib)
+        self.assertIn("pub use restored_ui::run_restored_gui as run_unified_gui", lib)
+        self.assertNotIn("REMOTE_PLAY_LEGACY_MAC_GUI", (APP / "src/main.rs").read_text())
+        theme = (APP / "src/product_components/theme.rs").read_text()
+        self.assertNotRegex(theme, r"impl\s+Global\s+for")
+
     def test_app_sources_have_no_egui_widget_implementation(self):
         sources = list((APP / "src").rglob("*.rs"))
         matches = [

@@ -10,8 +10,7 @@ use crate::design_system::{
 };
 use crate::desktop::instance::Instance;
 use crate::desktop::device_list::{
-    DeviceFilterKind, DeviceListAction, DeviceListEffect, DeviceListState,
-    DeviceListViewModel,
+    DeviceListAction, DeviceListEffect, DeviceListState,
 };
 use crate::desktop::original_owner::{FrameSlot, OriginalOwner};
 use crate::original_design::{full_idle_canvas_stage, stream_status_capsule_card};
@@ -33,10 +32,10 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use yororen_ui::{
+use crate::product_components::{
     assets::UiAsset,
     component::{self, Button, IconName, button, icon, tooltip},
-    theme::{ActionVariantKind, ActiveTheme, GlobalTheme, Theme},
+    theme::{ActionVariantKind, ActiveTheme, Theme},
 };
 
 pub async fn run_restored_gui(
@@ -62,19 +61,27 @@ pub async fn run_restored_gui(
         config.enable_passive_host = false;
     }
     let runtime = Arc::new(start_unified_runtime(config).await?);
+    let startup_error = Arc::new(Mutex::new(None));
+    let init_error = startup_error.clone();
     crate::desktop::foreground_runtime::run(move || {
         Application::new()
             .with_assets(UiAsset)
             .run(move |cx: &mut App| {
                 apply_product_window_appearance();
-                component::init(cx);
-                cx.set_global(GlobalTheme::new_with_themes(
+                if let Err(error) = component::init(cx) {
+                    *init_error.lock().expect("GUI startup error lock") = Some(error.to_string());
+                    cx.quit();
+                    return;
+                }
+                crate::product_components::theme::install(
                     product_window_appearance(),
-                    remote_play_themes(),
-                ));
+                    remote_play_themes(), cx);
                 open_restored_window(runtime, Some(instance), activation, None, cx);
             })
     })?;
+    if let Some(error) = startup_error.lock().map_err(|_| "GUI startup error lock poisoned")?.take() {
+        return Err(format!("Ely initialization failed: {error}").into());
+    }
     Ok(())
 }
 fn open_restored_window(
@@ -258,6 +265,7 @@ struct RestoredDashboard {
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     pointer_input: PointerInputTracker,
     input_focus: FocusHandle,
+    root_focus: FocusHandle,
     video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     input_session_id: Option<u32>,
     status: String,
@@ -315,6 +323,8 @@ impl RestoredDashboard {
         } else {
             ViewportScaleMode::AspectFit
         };
+        let root_focus = cx.focus_handle();
+        window.focus(&root_focus);
         Self {
             runtime,
             owner,
@@ -336,6 +346,7 @@ impl RestoredDashboard {
             mesh_pairing_snapshot,
             pointer_input: PointerInputTracker::default(),
             input_focus: cx.focus_handle(),
+            root_focus,
             video_surface_bounds: Arc::new(Mutex::new(None)),
             input_session_id: None,
             status: "Ready".into(),
@@ -1723,6 +1734,7 @@ impl Render for RestoredDashboard {
                     ))
                 },
             )
+            .map(|tree| ely_gpui_component::primitives::FocusScope::new(&self.root_focus).root().size_full().child(tree))
     }
 }
 
@@ -2871,275 +2883,54 @@ fn drawer_tab_button(
 }
 
 fn drawer_devices_tab(
-    devices: &[AppDevice],
-    role: &RoleState,
-    state: &DeviceListState,
-    owner: Arc<OriginalOwner>,
-    cx: &mut Context<RestoredDashboard>,
+    devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
+    _owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
 ) -> Div {
-    let theme = cx.theme().clone();
     let view = cx.weak_entity();
-    let view_model = DeviceListViewModel::project(devices, role, state.filter);
-
-    let mut content = div().flex().flex_col().gap_3().child(
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(filter_pill("All", DeviceFilterKind::All, state.filter, cx))
-            .child(filter_pill("LAN", DeviceFilterKind::Lan, state.filter, cx))
-            .child(filter_pill("P2P", DeviceFilterKind::P2p, state.filter, cx))
-            .child(filter_pill("Relay", DeviceFilterKind::Relay, state.filter, cx)),
-    );
-
-    if view_model.rows.is_empty() {
-        content = content.child(empty_state(
-            "No devices found",
-            "No peers are currently online in this device group.",
-            cx,
-        ));
-    } else {
-        for row in view_model.rows {
-            let is_active = row.is_active();
-            let is_connectable = row.can_connect;
-            let device_id = row.device_id.clone();
-            let owner = owner.clone();
-
-            content = content.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .bg(if is_active {
-                        rgb(0x192830).into()
-                    } else {
-                        theme.surface.raised
-                    })
-                    .border_1()
-                    .border_color(if is_active {
-                        color_accent_cyan()
-                    } else {
-                        color_border_fine()
-                    })
-                    .rounded(px(8.0))
-                    .shadow_xs()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().size(px(8.0)).flex_none().rounded_full().bg(
-                                        if row.online {
-                                            Hsla::from(color_accent_emerald())
-                                        } else {
-                                            theme.content.disabled
-                                        },
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.content.primary)
-                                            .whitespace_nowrap()
-                                            .truncate()
-                                            .child(row.display_name.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_full()
-                                    .bg(theme.surface.sunken)
-                                    .text_size(px(9.0))
-                                    .text_color(theme.content.tertiary)
-                                    .child(discovery_scope_label(row.scope)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_size(px(10.0))
-                            .text_color(theme.content.tertiary)
-                            .child(format!("Endpoint: {}", row.endpoint))
-                            .child(row.connection.label()),
-                    )
-                    .child(div().flex().gap_2().child({
-                        let view = view.clone();
-                        command_button(
-                            format!("drawer_connect_{device_id}"),
-                            if is_connectable {
-                                ActionVariantKind::Primary
-                            } else {
-                                ActionVariantKind::Neutral
-                            },
-                            cx,
-                        )
-                        .disabled(!is_connectable)
-                        .h(px(28.0))
-                        .flex_1()
-                        .text_size(px(10.0))
-                        .on_click(move |_event, _window, cx| {
-                            let owner = owner.clone();
-                            let device_id = device_id.clone();
-                            let _ = view.update(cx, |this, cx| {
-                                let Some(DeviceListEffect::ConnectStream(device_id)) = this
-                                    .device_list_state
-                                    .reduce(DeviceListAction::Connect(device_id))
-                                else {
-                                    return;
-                                };
-                                this.status = format!("Connecting to {device_id}");
-                                this.reset_host_stats();
-                                let start_opts = StreamStartOptions {
-                                    width: this.selected_resolution.0,
-                                    height: this.selected_resolution.1,
-                                    fps: this.selected_fps,
-                                    bitrate_kbps: this.selected_bitrate_kbps,
-                                };
-                                cx.spawn(async move |this: WeakEntity<RestoredDashboard>, cx| {
-                                    let result = owner
-                                        .connect_device(
-                                            &device_id,
-                                            start_opts,
-                                            crate::unix_now_ms(),
-                                        )
-                                        .await;
-                                    let _ = this.update(cx, |this, cx| {
-                                        match result {
-                                            Ok(_) => {
-                                                this.status = "Waiting for video".to_string();
-                                            }
-                                            Err(err) => {
-                                                this.status = format!("Connection failed: {err}");
-                                                this.drawer_open = true;
-                                            }
-                                        }
-                                        cx.notify();
-                                    });
-                                })
-                                .detach();
-                                cx.notify();
-                            });
-                        })
-                        .child(match row.connection {
-                            crate::desktop::device_list::DeviceConnectionStatus::Connecting => {
-                                "Connecting…"
-                            }
-                            crate::desktop::device_list::DeviceConnectionStatus::Viewing => {
-                                "Active Viewport"
-                            }
-                            crate::desktop::device_list::DeviceConnectionStatus::Serving => {
-                                "Serving"
-                            }
-                            _ => "Connect Stream",
-                        })
-                    }))
-                    .child({
-                        let key = row.device_id.clone();
-                        let view = view.clone();
-                        command_button(
-                            format!("drawer_files_{key}"),
-                            ActionVariantKind::Neutral,
-                            cx,
-                        )
-                        .child("Files")
-                        .disabled(!row.can_open_files)
-                        .on_click(move |_, _, cx| {
-                            let key = key.clone();
-                            let _ = view.update(cx, |this, cx| {
-                                let Some(DeviceListEffect::ConnectFiles(key)) = this
-                                    .device_list_state
-                                    .reduce(DeviceListAction::OpenFiles(key))
-                                else {
-                                    return;
-                                };
-                                this.owner.release_input();
-                                this.drawer_open = true;
-                                this.active_tab = DrawerTab::Files;
-                                this.status = "Connecting files without starting video".into();
-                                let owner = this.owner.clone();
-                                cx.spawn(async move |view, cx| {
-                                    let result = owner.connect_files(&key).await;
-                                    let _ = view.update(cx, |this, cx| {
-                                        if let Err(error) = result {
-                                            this.status = format!("Files unavailable: {error}");
-                                        }
-                                        cx.notify();
-                                    });
-                                })
-                                .detach();
-                                cx.notify();
-                            });
-                        })
-                    })
-                    .child({
-                        let target = row.device_id.clone();
-                        let view = view.clone();
-                        command_button(
-                            format!("workspace-{}", row.device_id),
-                            ActionVariantKind::Neutral,
-                            cx,
-                        )
-                        .child("Open multi-window workspace")
-                        .disabled(!row.can_open_workspace)
-                        .on_click(move |_, _, cx| {
-                            let target = target.clone();
-                            let _ = view.update(cx, |this, cx| {
-                                let Some(DeviceListEffect::OpenWorkspace(target)) = this
-                                    .device_list_state
-                                    .reduce(DeviceListAction::OpenWorkspace(target))
-                                else {
-                                    return;
-                                };
-                                this.open_device_window(&target, cx);
-                            });
-                        })
-                    }),
-            );
-        }
-    }
-
-    content
+    let model = crate::desktop::device_list::DeviceListModel { devices, role };
+    div().child(crate::desktop::device_drawer::DeviceDrawer::new(
+        model.project(state.filter), state.filter,
+        move |action, cx| {
+            if let Err(error) = view.update(cx, |this, cx| this.dispatch_device_action(action.clone(), cx)) {
+                eprintln!("Device drawer action target closed: {error}");
+            }
+        },
+    ))
 }
 
-fn filter_pill(
-    label: &'static str,
-    kind: DeviceFilterKind,
-    current_filter: DeviceFilterKind,
-    cx: &Context<RestoredDashboard>,
-) -> Button {
-    let view = cx.weak_entity();
-    let is_selected = kind == current_filter;
-    command_button(
-        format!("filter_{label}"),
-        if is_selected {
-            ActionVariantKind::Primary
-        } else {
-            ActionVariantKind::Neutral
-        },
-        cx,
-    )
-    .h(px(24.0))
-    .flex_1()
-    .text_size(px(9.0))
-    .on_click(move |_event, _window, cx| {
-        let _ = view.update(cx, |this, cx| {
-            let _ = this
-                .device_list_state
-                .reduce(DeviceListAction::SelectFilter(kind));
-            cx.notify();
-        });
-    })
-    .child(label)
+impl RestoredDashboard {
+    fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
+        let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
+        match effect {
+            DeviceListEffect::ConnectStream(device_id) => {
+                self.status = format!("Connecting to {device_id}");
+                self.reset_host_stats();
+                let options = StreamStartOptions { width: self.selected_resolution.0, height: self.selected_resolution.1, fps: self.selected_fps, bitrate_kbps: self.selected_bitrate_kbps };
+                let owner = self.owner.clone();
+                cx.spawn(async move |view, cx| {
+                    let result = owner.connect_device(&device_id, options, crate::unix_now_ms()).await;
+                    let _ = view.update(cx, |this, cx| {
+                        match result {
+                            Ok(_) => this.status = "Waiting for video".into(),
+                            Err(error) => { this.status = format!("Connection failed: {error}"); this.drawer_open=true; }
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+            DeviceListEffect::ConnectFiles(device_id) => {
+                self.owner.release_input(); self.drawer_open=true; self.active_tab=DrawerTab::Files;
+                self.status="Connecting files without starting video".into();
+                let owner=self.owner.clone();
+                cx.spawn(async move |view, cx| {
+                    let result=owner.connect_files(&device_id).await;
+                    let _=view.update(cx,|this,cx|{ if let Err(error)=result { this.status=format!("Files unavailable: {error}"); } cx.notify(); });
+                }).detach();
+            }
+            DeviceListEffect::OpenWorkspace(device_id) => self.open_device_window(&device_id,cx),
+        }
+        cx.notify();
+    }
 }
 
 fn drawer_device_group_tab(
@@ -4413,7 +4204,7 @@ fn command_button<T: 'static>(
         .variant(variant)
         .focusable()
         .focus_visible(move |style| style.border_2().border_color(focus))
-        .active(|style| style.opacity(0.82))
+
 }
 
 fn empty_state(

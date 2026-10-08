@@ -1,7 +1,7 @@
 //! Opt-in full restored GPUI event-routing regression. Uses a local packet recorder,
 //! never a real host, native screen capture, device identity, or OS input injection.
 use super::{
-    DrawerTab, GlobalTheme, RestoredDashboard, UnifiedRuntimeConfig, component, remote_play_themes,
+    DrawerTab, RestoredDashboard, UnifiedRuntimeConfig, component, remote_play_themes,
     start_unified_runtime,
 };
 use crate::desktop::OriginalGuiSession;
@@ -127,11 +127,8 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
         (runtime, session, recorder, recovery)
     });
     cx.update(|cx| {
-        component::init(cx);
-        cx.set_global(GlobalTheme::new_with_themes(
-            WindowAppearance::Dark,
-            remote_play_themes(),
-        ));
+        component::init(cx).expect("Ely test initialization");
+        crate::product_components::theme::install(WindowAppearance::Dark, remote_play_themes(), cx);
     });
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view =

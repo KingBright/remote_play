@@ -1,5 +1,6 @@
 //! Local encoded test clip -> actual MF decoder -> GPU copy -> original GPUI surface.
 //! No capture, network identity, remote input, files transfer, or installed app changes.
+use remote_play_app::product_components;
 #[cfg(target_os = "windows")]
 #[path = "../src/design_system.rs"]
 mod design_system;
@@ -32,10 +33,10 @@ mod check {
         },
         time::{Duration, Instant},
     };
-    use yororen_ui::{
+    use remote_play_app::product_components::{
         assets::UiAsset,
         component,
-        theme::{ActiveTheme, GlobalTheme},
+        theme::{ActiveTheme},
     };
     type E = Box<dyn std::error::Error + Send + Sync>;
     #[derive(Default)]
@@ -306,7 +307,7 @@ mod check {
         let report_state = state.clone();
         let updates = state.clone();
         Application::new().with_assets(UiAsset).run(move|cx:&mut App|{
-            component::init(cx);cx.set_global(GlobalTheme::new_with_themes(WindowAppearance::Dark,remote_play_themes()));
+            component::init(cx).expect("Ely native acceptance assets");remote_play_app::product_components::theme::install(WindowAppearance::Dark,remote_play_themes(), cx);
             cx.open_window(WindowOptions{window_bounds:Some(WindowBounds::Windowed(bounds(point(px(100.),px(100.)),size(px(1120.),px(740.))))),titlebar:Some(TitlebarOptions{title:Some("RemotePlay native decoded video validation".into()),..Default::default()}),..Default::default()},move|_,cx|cx.new(|_|View{state:view_state,frame:None})).expect("native window creation");
             cx.spawn(async move|cx|{
                 loop{updates.frame_ready.notified().await;if updates.stop.load(Ordering::Acquire){break;}let _=cx.update(|cx|cx.refresh_windows());if updates.done.load(Ordering::Acquire){break;}}

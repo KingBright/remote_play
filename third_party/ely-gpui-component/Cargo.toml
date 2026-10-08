@@ -1,0 +1,24 @@
+[package]
+name = "ely-gpui-component"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/remoteplay.rs"
+
+[features]
+default = []
+runtime_shaders = ["gpui/runtime_shaders"]
+test-support = ["gpui/test-support"]
+
+[dependencies]
+anyhow = "1"
+gpui = { package = "gpui-ce", version = "=0.3.3" }
+log = "0.4"
+rust-embed = "=8.11.0"
+web-time = "1.1"

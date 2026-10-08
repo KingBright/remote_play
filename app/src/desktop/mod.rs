@@ -6,6 +6,8 @@ use std::sync::{Arc, Weak};
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod foreground_runtime;
 pub(crate) mod device_list;
+#[cfg(feature = "gpui-restoration")]
+pub(crate) mod device_drawer;
 pub(crate) mod instance;
 mod model;
 #[cfg(all(test, feature = "gpui-restoration"))]
