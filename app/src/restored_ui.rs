@@ -27,6 +27,7 @@ use remote_core::{
     pairing_qr::{encode_pairing_qr, qr_matrix_from_payload},
     role::RoleKind,
     session_tabs::{SessionCommandState, SessionTabsAction, SessionTabsEffect},
+    stream_settings::{StreamSettingsAction, StreamSettingsState, StreamSettingsValues},
 };
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -282,12 +283,7 @@ struct RestoredDashboard {
     telemetry_hud_collapsed: bool,
     input_locked: bool,
     capture_supports_input: bool,
-    selected_resolution: (u32, u32),
-    selected_fps: u32,
-    selected_bitrate_kbps: u32,
-    custom_fps: String,
-    custom_bitrate: String,
-    stream_settings_error: Option<String>,
+    stream_settings: StreamSettingsState,
     manual_media_paused: bool,
     pause_when_inactive: bool,
     window_active: bool,
@@ -363,12 +359,10 @@ impl RestoredDashboard {
             telemetry_hud_collapsed: prefs.ui.telemetry_hud_collapsed,
             input_locked: true,
             capture_supports_input: false,
-            selected_resolution: (prefs.stream.width, prefs.stream.height),
-            selected_fps: prefs.stream.fps,
-            selected_bitrate_kbps: prefs.stream.bitrate_kbps,
-            custom_fps: prefs.stream.fps.to_string(),
-            custom_bitrate: prefs.stream.bitrate_kbps.to_string(),
-            stream_settings_error: None,
+            stream_settings: StreamSettingsState::new(StreamSettingsValues {
+                width: prefs.stream.width, height: prefs.stream.height,
+                fps: prefs.stream.fps, bitrate_kbps: prefs.stream.bitrate_kbps,
+            }),
             manual_media_paused: false,
             pause_when_inactive: prefs.ui.pause_when_inactive,
             window_active: window.is_window_active(),
@@ -399,10 +393,10 @@ impl RestoredDashboard {
 
     fn persist_preferences(&self) {
         if let Err(err) = crate::preferences::UserPreferences::update(|prefs| {
-            prefs.stream.width = self.selected_resolution.0;
-            prefs.stream.height = self.selected_resolution.1;
-            prefs.stream.fps = self.selected_fps;
-            prefs.stream.bitrate_kbps = self.selected_bitrate_kbps;
+            prefs.stream.width = self.stream_settings.values().resolution().0;
+            prefs.stream.height = self.stream_settings.values().resolution().1;
+            prefs.stream.fps = self.stream_settings.values().fps;
+            prefs.stream.bitrate_kbps = self.stream_settings.values().bitrate_kbps;
             prefs.ui.scale_mode = match self.scale_mode {
                 ViewportScaleMode::AspectFit => "aspect_fit".to_string(),
                 ViewportScaleMode::Fill => "fill".to_string(),
@@ -629,9 +623,9 @@ impl RestoredDashboard {
         self.toolbar_hovered = false;
         self.last_toolbar_activity = Instant::now();
         let owner = self.owner.clone();
-        let (width, height) = self.selected_resolution;
-        let fps = self.selected_fps;
-        let bitrate = self.selected_bitrate_kbps;
+        let (width, height) = self.stream_settings.values().resolution();
+        let fps = self.stream_settings.values().fps;
+        let bitrate = self.stream_settings.values().bitrate_kbps;
         let view = cx.weak_entity();
         cx.spawn(async move |_this, cx| {
             if let Err(err) = owner
@@ -824,6 +818,7 @@ impl RestoredDashboard {
     }
 
     fn media_controls(&self, cx: &mut Context<Self>) -> Div {
+        let form = self.stream_settings.project();
         let (paused, pending) = self.owner.media_state();
         let (volume, muted) = self.owner.audio();
         let mut controls = div()
@@ -837,22 +832,22 @@ impl RestoredDashboard {
             )
             .child(
                 component::text_input("custom_fps")
-                    .content(self.selected_fps.to_string())
+                    .content(form.fps_text.to_owned())
                     .on_change({
                         let view = cx.weak_entity();
                         move |text, _, cx| {
-                            let _ = view.update(cx, |this, _| this.custom_fps = text.to_string());
+                            let _ = view.update(cx, |this, cx| this.dispatch_stream_settings_action(StreamSettingsAction::EditFps(text.to_string()), cx));
                         }
                     }),
             )
             .child(
                 component::text_input("custom_bitrate")
-                    .content(self.selected_bitrate_kbps.to_string())
+                    .content(form.bitrate_text.to_owned())
                     .on_change({
                         let view = cx.weak_entity();
                         move |text, _, cx| {
                             let _ =
-                                view.update(cx, |this, _| this.custom_bitrate = text.to_string());
+                                view.update(cx, |this, cx| this.dispatch_stream_settings_action(StreamSettingsAction::EditBitrate(text.to_string()), cx));
                         }
                     }),
             )
@@ -860,45 +855,7 @@ impl RestoredDashboard {
                 command_button("apply_custom_stream", ActionVariantKind::Primary, cx)
                     .child("Apply custom values")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        let values = this
-                            .custom_fps
-                            .trim()
-                            .parse::<u32>()
-                            .ok()
-                            .zip(this.custom_bitrate.trim().parse::<u32>().ok());
-                        let (width, height) = this.selected_resolution;
-                        let Some((fps, bitrate)) = values.filter(|&(fps, bitrate)| {
-                            protocol::validate_video_settings(width, height, fps, bitrate).is_ok()
-                        }) else {
-                            this.stream_settings_error =
-                                Some("Enter positive whole numbers for FPS and kbps.".into());
-                            cx.notify();
-                            return;
-                        };
-                        this.selected_fps = fps;
-                        this.selected_bitrate_kbps = bitrate;
-                        this.stream_settings_error = None;
-                        this.persist_preferences();
-                        let connected = matches!(
-                            this.snapshot().role,
-                            RoleState::Viewing(_) | RoleState::Connecting(_)
-                        );
-                        if connected {
-                            let owner = this.owner.clone();
-                            cx.spawn(async move |view, cx| {
-                                if let Err(err) = owner
-                                    .update_stream_settings(width, height, fps, bitrate)
-                                    .await
-                                {
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.stream_settings_error = Some(err.to_string());
-                                        cx.notify();
-                                    });
-                                }
-                            })
-                            .detach();
-                        }
-                        cx.notify();
+                        this.dispatch_stream_settings_action(StreamSettingsAction::ApplyCustom, cx);
                     })),
             )
             .child(
@@ -972,8 +929,8 @@ impl RestoredDashboard {
                     .on_click(move |_, _, _| mute.set_audio(volume, !muted)),
                 ),
         );
-        if let Some(error) = &self.stream_settings_error {
-            controls = controls.child(div().text_size(px(11.0)).child(error.clone()));
+        if let Some(error) = form.error {
+            controls = controls.child(div().text_size(px(11.0)).child(error.to_owned()));
         }
         controls
     }
@@ -1708,9 +1665,9 @@ impl Render for RestoredDashboard {
                     &self.device_list_state,
                     self.input_locked,
                     side_services,
-                    self.selected_resolution,
-                    self.selected_fps,
-                    self.selected_bitrate_kbps,
+                    self.stream_settings.values().resolution(),
+                    self.stream_settings.values().fps,
+                    self.stream_settings.values().bitrate_kbps,
                     media_controls,
                     host_stats.as_ref(),
                     self.owner.clone(),
@@ -2873,6 +2830,71 @@ fn drawer_devices_tab(
 }
 
 impl RestoredDashboard {
+    fn dispatch_stream_settings_action(
+        &mut self,
+        action: StreamSettingsAction,
+        cx: &mut Context<Self>,
+    ) {
+        let effect = self.stream_settings.reduce(action);
+        if let Some(effect) = effect {
+            self.persist_preferences();
+            let should_update = effect.should_update(false)
+                || matches!(
+                    self.snapshot().role,
+                    RoleState::Viewing(_) | RoleState::Connecting(_)
+                );
+            if should_update {
+                let owner = self.owner.clone();
+                let connection = owner.active_connection();
+                cx.spawn(async move |view, cx| {
+                    let current = view
+                        .update(cx, |this, _| {
+                            this.stream_settings.effect_is_current(effect.receipt)
+                                && this
+                                    .owner
+                                    .active_connection()
+                                    .as_ref().map(Arc::as_ptr)
+                                    == connection.as_ref().map(Arc::as_ptr)
+                        })
+                        .unwrap_or(false);
+                    if !current {
+                        return;
+                    }
+                    let values = effect.values;
+                    let result = owner
+                        .update_stream_settings(
+                            values.width,
+                            values.height,
+                            values.fps,
+                            values.bitrate_kbps,
+                        )
+                        .await;
+                    if effect.report_error
+                        && let Err(error) = result
+                    {
+                        let _ = view.update(cx, |this, cx| {
+                            if this
+                                .owner
+                                .active_connection()
+                                .as_ref().map(Arc::as_ptr)
+                                == connection.as_ref().map(Arc::as_ptr)
+                            {
+                                this.stream_settings
+                                    .reduce(StreamSettingsAction::UpdateFailed(
+                                        effect.receipt,
+                                        error.to_string(),
+                                    ));
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
     fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
         let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
         let ticket = self.session_commands.begin();
@@ -2909,7 +2931,7 @@ impl RestoredDashboard {
                 let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
                 self.reset_host_stats();
-                let options = StreamStartOptions { width: self.selected_resolution.0, height: self.selected_resolution.1, fps: self.selected_fps, bitrate_kbps: self.selected_bitrate_kbps };
+                let options = StreamStartOptions { width: self.stream_settings.values().resolution().0, height: self.stream_settings.values().resolution().1, fps: self.stream_settings.values().fps, bitrate_kbps: self.stream_settings.values().bitrate_kbps };
                 let owner = self.owner.clone();
                 cx.spawn(async move |view, cx| {
                     if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
@@ -3404,7 +3426,7 @@ fn drawer_network_telemetry_tab(
     selected_bitrate_kbps: u32,
     media_controls: Div,
     host_stats: Option<&HostStats>,
-    owner: Arc<OriginalOwner>,
+    _owner: Arc<OriginalOwner>,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let theme = cx.theme().clone();
@@ -3556,7 +3578,6 @@ fn drawer_network_telemetry_tab(
                             (2560, 1440, "2K QHD"),
                             (3840, 2160, "4K UHD"),
                         ].into_iter().map(|(w, h, label)| {
-                            let owner = owner.clone();
                             let view = view.clone();
                             let is_active = cur_res == (w, h);
                             let variant = if is_active {
@@ -3572,18 +3593,9 @@ fn drawer_network_telemetry_tab(
                             .h(px(24.0))
                             .text_size(px(10.0))
                             .on_click(move |_event, _window, cx| {
-                                let owner = owner.clone();
                                 let view = view.clone();
                                 let _ = view.update(cx, |this, cx| {
-                                    this.selected_resolution = (w, h);
-                                    this.persist_preferences();
-                                    let (send_w, send_h) = this.selected_resolution;
-                                    let send_fps = this.selected_fps;
-                                    let send_bitrate = this.selected_bitrate_kbps;
-                                    cx.spawn(async move |_this: WeakEntity<RestoredDashboard>, _cx| {
-                                        let _ = owner.update_stream_settings(send_w, send_h, send_fps, send_bitrate).await;
-                                    }).detach();
-                                    cx.notify();
+                                    this.dispatch_stream_settings_action(StreamSettingsAction::SelectResolution(w, h), cx);
                                 });
                             })
                             .child(label)
@@ -3607,7 +3619,6 @@ fn drawer_network_telemetry_tab(
                             (60, "60 FPS (Standard)"),
                             (120, "120 FPS (High-Hz)"),
                         ].into_iter().map(|(fps, label)| {
-                            let owner = owner.clone();
                             let view = view.clone();
                             let is_active = cur_fps == fps;
                             let variant = if is_active {
@@ -3623,19 +3634,9 @@ fn drawer_network_telemetry_tab(
                             .h(px(24.0))
                             .text_size(px(10.0))
                             .on_click(move |_event, _window, cx| {
-                                let owner = owner.clone();
                                 let view = view.clone();
                                 let _ = view.update(cx, |this, cx| {
-                                    this.selected_fps = fps;
-                                    this.custom_fps = fps.to_string();
-                                    this.persist_preferences();
-                                    let (send_w, send_h) = this.selected_resolution;
-                                    let send_fps = this.selected_fps;
-                                    let send_bitrate = this.selected_bitrate_kbps;
-                                    cx.spawn(async move |_this: WeakEntity<RestoredDashboard>, _cx| {
-                                        let _ = owner.update_stream_settings(send_w, send_h, send_fps, send_bitrate).await;
-                                    }).detach();
-                                    cx.notify();
+                                    this.dispatch_stream_settings_action(StreamSettingsAction::SelectFps(fps), cx);
                                 });
                             })
                             .child(label)
@@ -3662,7 +3663,6 @@ fn drawer_network_telemetry_tab(
                             (40_000, "40 Mbps"),
                             (80_000, "80 Mbps"),
                         ].into_iter().map(|(kbps, label)| {
-                            let owner = owner.clone();
                             let view = view.clone();
                             let is_active = cur_bitrate == kbps;
                             let variant = if is_active {
@@ -3678,19 +3678,9 @@ fn drawer_network_telemetry_tab(
                             .h(px(24.0))
                             .text_size(px(10.0))
                             .on_click(move |_event, _window, cx| {
-                                let owner = owner.clone();
                                 let view = view.clone();
                                 let _ = view.update(cx, |this, cx| {
-                                    this.selected_bitrate_kbps = kbps;
-                                    this.custom_bitrate = kbps.to_string();
-                                    this.persist_preferences();
-                                    let (send_w, send_h) = this.selected_resolution;
-                                    let send_fps = this.selected_fps;
-                                    let send_bitrate = this.selected_bitrate_kbps;
-                                    cx.spawn(async move |_this: WeakEntity<RestoredDashboard>, _cx| {
-                                        let _ = owner.update_stream_settings(send_w, send_h, send_fps, send_bitrate).await;
-                                    }).detach();
-                                    cx.notify();
+                                    this.dispatch_stream_settings_action(StreamSettingsAction::SelectBitrate(kbps), cx);
                                 });
                             })
                             .child(label)
