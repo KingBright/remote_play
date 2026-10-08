@@ -1,0 +1,104 @@
+{
+  "schema": "remoteplay.lifecycle.adoption-plan.v1",
+  "project": "RemotePlay",
+  "state": "blocked-before-mechanical-wiring",
+  "native_helper_policy": false,
+  "product_source_baseline": "9f2f80dd636acb77065c18a8335535788b8d6a43",
+  "priority": "host-maintenance-before-project-builds",
+  "observed": {
+    "cargo_version": "1.94.1",
+    "helper_source_sha256": "393fb23fb47b7f52ed0af381afc9f40240e5f21e59a0afa934a6f442a0c09806",
+    "target_locator": "cargo.metadata.target_directory",
+    "build_locator": "cargo.metadata.build_directory",
+    "target_and_build_same": true,
+    "target_external_to_project": true,
+    "target_ownership": "shared-multiple-projects",
+    "explicit_root_profiles": [],
+    "profile_action": "preserve existing Cargo defaults and overrides",
+    "size_scan_performed": false
+  },
+  "policy": {
+    "existing_target_action": "preserve; register reference only",
+    "single_project_shared_target_clean_allowed": false,
+    "move_or_rotate_existing_cache_allowed": false,
+    "automatic_apply_allowed": false,
+    "cleanup_executor": "existing clean-mac-storage only, separately reviewed exact scope",
+    "retention": {
+      "latest_hash_variants_per_name_extension": 2,
+      "hash_retention_executor": "existing cleaner, not reimplemented here",
+      "latest_history_per_artifact_family": 2,
+      "artifact_family_dimensions": ["component", "platform", "architecture", "environment", "purpose"],
+      "current_always_protected": true,
+      "necessary_rollback_always_protected": true,
+      "active_always_protected": true,
+      "unique_delivery_always_protected": true,
+      "unknown_owner_or_activity_always_protected": true,
+      "unverified_backup_always_protected": true,
+      "source_git_config_identity_and_user_data_protected": true,
+      "latest_failure_evidence_minimum": 1
+    },
+    "space": {
+      "existing_stream_test_emergency_reserve_bytes": 4294967296,
+      "emergency_floor_is_not_a_general_budget": true,
+      "project_owned_budget_bytes": null,
+      "long_term_host_reserve_bytes": null,
+      "expected_build_headroom_bytes": null,
+      "calibration_state": "pending actual ownership partition and authorized build measurements",
+      "budget_check_ready": false
+    }
+  },
+  "resource_references": [
+    {
+      "id": "host-shared-cargo-target-and-build",
+      "scope": "shared-dependency",
+      "path_locator": "cargo.metadata.target_directory and build_directory",
+      "owned_by_this_project": false,
+      "known_consumer": "RemotePlay",
+      "other_consumers": "not enumerated by this project task",
+      "activity": "unknown-protected",
+      "logical_bytes": null,
+      "reclaim_bytes": null,
+      "delete_now": false,
+      "dry_run_candidate": false
+    },
+    {
+      "id": "signed-deliverables-current-and-rollback",
+      "scope": "existing release and per-device installation receipts",
+      "path_locator": "existing packaging, publication and installation records; not traversed",
+      "current_identity": "unverified-retain",
+      "rollback_identity": "unverified-retain",
+      "backup_verified": false,
+      "delete_now": false,
+      "dry_run_candidate": false
+    },
+    {
+      "id": "source-git-and-persistent-user-state",
+      "scope": "protected non-cache data",
+      "path_locator": "project source/Git and existing runtime configuration; no credential read",
+      "delete_now": false,
+      "dry_run_candidate": false
+    },
+    {
+      "id": "acceptance-and-failure-evidence",
+      "scope": "existing project and per-device evidence",
+      "path_locator": "existing review and acceptance records; no broad enumeration",
+      "activity": "unknown-protected",
+      "delete_now": false,
+      "dry_run_candidate": false
+    }
+  ],
+  "entrypoints": {
+    "check": {"backend": "rust-project-lifecycle/scripts/rust_storage.py check", "wired": false},
+    "dry_run": {"backend": "rust-project-lifecycle/scripts/rust_storage.py dry-run", "wired": false},
+    "build": {"existing_stream_test": "scripts/test_stream_settings_model.py", "native_helper_wired": false},
+    "init_existing_project": "forbidden",
+    "rotate_shared_target": "forbidden"
+  },
+  "interface_gaps": [
+    "no non-overwriting existing-project adoption command",
+    "native load/registry accept only project/.rust-artifacts, not shared references or external releases",
+    "native run forces new target/build roots instead of preserving existing target and protected test entry",
+    "project budget and growth cannot be attributed from shared hash filenames",
+    "existing cleaner lacks exact registry-plan apply interface; direct Cargo/IDE/CI coordination remains unverified"
+  ]
+}
