@@ -10,26 +10,20 @@ use protocol::{
 use remote_core::{
     file_transfer_runtime::FileTransferCommand,
     role::{RolePeer, RoleSession, RoleState},
+    session_tabs::{
+        Completion, OpenDecision, SessionCandidate, SessionFacts, SessionHealth, SessionPeer,
+        SessionTabsState, SessionTabsViewModel,
+    },
     shared_files::ShareScope,
     workspace_session::WorkspaceConnection,
 };
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
-
-// A delayed result must never remove the replacement request for the same device.
-fn retire_attempt(pending: &mut BTreeMap<String, u64>, key: &str, attempt: u64) -> bool {
-    if pending.get(key) != Some(&attempt) {
-        return false;
-    }
-    pending.remove(key);
-    true
-}
 
 pub(crate) type FrameSlot = Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>;
 
@@ -67,11 +61,7 @@ impl Drop for ViewSession {
 }
 struct Pool {
     sessions: Vec<ViewSession>,
-    selected: usize,
-    pending: BTreeMap<String, u64>,
-    intent: Option<String>,
-    next_attempt: u64,
-    connecting: Option<RoleSession>,
+    tabs: SessionTabsState,
     message: String,
     receive_dir: PathBuf,
     talkback: Option<(u32, client::TalkbackRuntimeControl)>,
@@ -79,17 +69,17 @@ struct Pool {
 }
 impl Pool {
     fn active(&self) -> Option<&ViewSession> {
-        if self.connecting.is_some() {
+        if self.tabs.connecting().is_some() {
             None
         } else {
-            self.sessions.get(self.selected)
+            self.sessions.get(self.tabs.selected_index())
         }
     }
     fn active_mut(&mut self) -> Option<&mut ViewSession> {
-        if self.connecting.is_some() {
+        if self.tabs.connecting().is_some() {
             None
         } else {
-            self.sessions.get_mut(self.selected)
+            self.sessions.get_mut(self.tabs.selected_index())
         }
     }
 }
@@ -126,11 +116,7 @@ impl OriginalOwner {
             updates,
             pool: Mutex::new(Pool {
                 sessions: Vec::new(),
-                selected: 0,
-                pending: BTreeMap::new(),
-                intent: None,
-                next_attempt: 0,
-                connecting: None,
+                tabs: SessionTabsState::default(),
                 message: "Ready".into(),
                 receive_dir: prefs.receive_dir,
                 talkback: None,
@@ -145,9 +131,9 @@ impl OriginalOwner {
         let Ok(mut pool) = self.pool.try_lock() else {
             return;
         };
-        let selected = pool.selected;
+        let selected = pool.tabs.selected_index();
         let mut retired: [Option<Arc<MacDecodedVideoFrame>>; 8] = std::array::from_fn(|_| None);
-        let transitioning = pool.connecting.is_some();
+        let transitioning = pool.tabs.connecting().is_some();
         for (index, entry) in pool.sessions.iter_mut().enumerate() {
             entry
                 .session
@@ -206,7 +192,7 @@ impl OriginalOwner {
                 }
             }
         }
-        let selected = pool.selected;
+        let selected = pool.tabs.selected_index();
         if pool.sessions.get(selected).is_some_and(|s| {
             !s.session.connected || s.session.paused || s.session.background_paused
         }) && let Some((_, control)) = pool.talkback.take()
@@ -219,9 +205,12 @@ impl OriginalOwner {
     pub fn snapshot(&self) -> ViewSnapshot {
         let devices = self.backend.runtime().lock().unwrap().devices();
         let p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(connecting) = &p.connecting {
+        if let Some(connecting) = p.tabs.connecting() {
             return ViewSnapshot {
-                role: RoleState::Connecting(connecting.clone()),
+                role: RoleState::Connecting(RoleSession::new(
+                    RolePeer::new(&connecting.peer.device_id, &connecting.peer.name, connecting.peer.endpoint),
+                    connecting.attempt as u32, 0,
+                )),
                 devices,
                 sources: Arc::new(Vec::new()),
                 active_source: CaptureSource::MainDisplay,
@@ -282,15 +271,23 @@ impl OriginalOwner {
     }
     pub fn can_change_network(&self) -> bool {
         let p = self.pool.lock().unwrap();
-        p.sessions.is_empty() && p.pending.is_empty()
+        p.tabs.can_change_network(p.sessions.len())
     }
-    pub fn sessions(&self) -> Vec<(u32, String, bool)> {
+    pub fn session_tabs(&self) -> SessionTabsViewModel {
         let p = self.pool.lock().unwrap();
-        p.sessions
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.session.conn.id, e.session.name.clone(), i == p.selected))
-            .collect()
+        p.tabs.project(p.sessions.iter().map(|e| SessionFacts {
+            connection_id: e.session.conn.id,
+            device_id: &e.session.key,
+            name: &e.session.name,
+            connected: e.session.connected,
+            video_confirmed: e.session.confirmed,
+            has_media: e.session.media.is_some(),
+        }))
+    }
+    #[cfg(test)]
+    pub fn sessions(&self) -> Vec<(u32, String, bool)> {
+        self.session_tabs().tabs.into_iter()
+            .map(|tab| (tab.connection_id, tab.label, tab.selected)).collect()
     }
     pub fn select(&self, id: u32) {
         let mut p = self.pool.lock().unwrap();
@@ -301,9 +298,20 @@ impl OriginalOwner {
             if let Some((_, c)) = p.talkback.take() {
                 c.stop();
             }
-            p.selected = index;
-            p.intent = Some(p.sessions[index].session.key.clone());
-            p.connecting = None;
+            let key = p.sessions[index].session.key.clone();
+            let count = p.sessions.len();
+            p.tabs.select(index, &key, count);
+        }
+    }
+    pub fn close_session(&self, id: u32) {
+        let mut p = self.pool.lock().unwrap();
+        let Some(index) = p.sessions.iter().position(|e| e.session.conn.id == id) else { return; };
+        let was_active = p.active().is_some_and(|e| e.session.conn.id == id);
+        let count = p.sessions.len();
+        if p.tabs.close_index(index, count) {
+            // OriginalGuiSession::drop releases input and its media/file resources.
+            p.sessions.remove(index);
+            if was_active && let Some((_, control)) = p.talkback.take() { control.stop(); }
         }
     }
     pub fn active_connection(&self) -> Option<Arc<WorkspaceConnection>> {
@@ -378,19 +386,26 @@ impl OriginalOwner {
         }
         let (attempt, receive_dir) = {
             let mut p = self.pool.lock().unwrap();
-            p.intent = Some(key.to_owned());
-            if let Some(index) = p.sessions.iter().position(|e| e.session.key == key) {
+            let existing = p.sessions.iter().position(|e| e.session.key == key).map(|index| {
                 let s = &p.sessions[index].session;
-                if super::reusable_connection(
-                    s.connected,
-                    s.conn.peer_is_responsive(),
-                    s.video_error.is_some(),
-                ) {
-                    if let Some(e) = p.active_mut() {
-                        e.session.release_input();
-                    }
-                    p.selected = index;
-                    p.connecting = None;
+                SessionCandidate { index, health: SessionHealth {
+                    connected: s.connected,
+                    peer_responsive: s.conn.peer_is_responsive(),
+                    video_failed: s.video_error.is_some(),
+                }}
+            });
+            if existing.is_some_and(|candidate| candidate.health.reusable())
+                && let Some(e) = p.active_mut() {
+                e.session.release_input();
+            }
+            let peer = device.role_peer();
+            let count = p.sessions.len();
+            let plan = p.tabs.plan_open(SessionPeer {
+                device_id: peer.device_id, name: peer.display_name, endpoint: peer.endpoint,
+            }, existing, count);
+            if let Some(index) = plan.retire_index { p.sessions.remove(index); }
+            let attempt = match plan.decision {
+                OpenDecision::Reuse(index) => {
                     if let Some((_, c)) = p.talkback.take() {
                         c.stop();
                     }
@@ -408,27 +423,24 @@ impl OriginalOwner {
                     }
                     return Ok(());
                 }
-                p.sessions.remove(index);
-                p.selected = super::selection_after_close(p.selected, index, p.sessions.len());
-            }
-            if p.pending.contains_key(key) {
-                return Ok(());
-            }
-            if p.sessions.len() + p.pending.len() >= 8 {
-                return Err("Close an unused connection before opening another (maximum 8)".into());
-            }
-            p.next_attempt = p
-                .next_attempt
-                .checked_add(1)
-                .ok_or("Connection generation exhausted")?;
-            let attempt = p.next_attempt;
-            p.pending.insert(key.to_owned(), attempt);
-            let previous = p.selected;
+                OpenDecision::AlreadyPending => {
+                    let previous = p.tabs.selected_index();
+                    if let Some(e) = p.sessions.get_mut(previous) {
+                        e.session.release_input();
+                        e.session.set_background(true);
+                    }
+                    p.message = format!("Connecting to {}", device.display_name);
+                    return Ok(());
+                }
+                OpenDecision::AtCapacity => return Err("Close an unused connection before opening another (maximum 8)".into()),
+                OpenDecision::GenerationExhausted => return Err("Connection generation exhausted".into()),
+                OpenDecision::Start(attempt) => attempt,
+            };
+            let previous = p.tabs.selected_index();
             if let Some(e) = p.sessions.get_mut(previous) {
                 e.session.release_input();
                 e.session.set_background(true);
             }
-            p.connecting = Some(RoleSession::new(device.role_peer(), attempt as u32, 0));
             p.message = format!("Connecting to {}", device.display_name);
             (attempt, p.receive_dir.clone())
         };
@@ -444,26 +456,21 @@ impl OriginalOwner {
             }
         }
         let mut p = self.pool.lock().unwrap();
-        if !retire_attempt(&mut p.pending, key, attempt) {
+        let count = p.sessions.len();
+        let completion = p.tabs.complete(key, attempt, connected.is_some(), count);
+        if completion == Completion::Cancelled {
             drop(connected);
             return Err("Connection request was cancelled or superseded".into());
         }
-        let selected = p.intent.as_deref() == Some(key);
-        if selected {
-            p.connecting = None;
-        }
+        let selected = completion == Completion::Selected;
         let Some((route, (conn, events))) = connected else {
-            if selected {
-                // Keep earlier sessions available as tabs, but never show one as
-                // the newly requested device after its connection failed.
-                p.selected = p.sessions.len();
-            }
-            p.message = format!(
+            let message = format!(
                 "Could not connect to {}: {}",
                 device.display_name,
                 failures.join("; ")
             );
-            return Err(p.message.clone().into());
+            if selected { p.message = message.clone(); }
+            return Err(message.into());
         };
         let mut session =
             OriginalGuiSession::new(key.into(), device.display_name, route, conn, events);
@@ -482,7 +489,7 @@ impl OriginalOwner {
         } else {
             session.list_files(0);
         }
-        let previous = p.selected;
+        let previous = p.tabs.selected_index();
         if selected && let Some(e) = p.sessions.get_mut(previous) {
             e.session.release_input();
         }
@@ -493,22 +500,15 @@ impl OriginalOwner {
             frame_observer: None,
             sources: Arc::new(Vec::new()),
         });
-        if selected || p.sessions.len() == 1 {
-            p.selected = p.sessions.len() - 1;
-        }
+        let count = p.sessions.len();
+        p.tabs.attached(completion, count);
         Ok(())
     }
     pub async fn disconnect_active(&self) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
-        let index = p.selected;
-        let cancelling_connection = p.connecting.take().is_some();
-        if let Some(key) = p.intent.take() {
-            p.pending.remove(&key);
-        }
-        // Cancelling a pending B connection must not destroy the existing A tab.
-        if !cancelling_connection && index < p.sessions.len() {
+        let count = p.sessions.len();
+        if let Some(index) = p.tabs.disconnect(count) {
             p.sessions.remove(index);
-            p.selected = super::selection_after_close(index, index, p.sessions.len());
         }
         if let Some((_, c)) = p.talkback.take() {
             c.stop();
@@ -520,7 +520,7 @@ impl OriginalOwner {
             let p = self.pool.lock().unwrap();
             let s = &p
                 .sessions
-                .get(p.selected)
+                .get(p.tabs.selected_index())
                 .ok_or("No selected device")?
                 .session;
             (
@@ -872,7 +872,7 @@ impl OriginalOwner {
     }
     pub fn diagnostic_snapshot(&self) -> serde_json::Value {
         let p = self.pool.lock().unwrap();
-        serde_json::json!({"pending":p.pending.len(),"sessions":p.sessions.iter().map(|e|{
+        serde_json::json!({"pending":p.tabs.pending_count(),"sessions":p.sessions.iter().map(|e|{
             let s=&e.session;
             let native=serde_json::Value::Null;
             #[cfg(all(target_os="windows",feature="native-windows-video"))]
@@ -907,8 +907,7 @@ impl OriginalOwner {
         session.first_frame_after = Instant::now() - std::time::Duration::from_secs(1);
         session.uploaded_at = Some(Instant::now());
         let mut p = self.pool.lock().unwrap();
-        p.intent = Some(session.key.clone());
-        p.selected = 0;
+        let key = session.key.clone();
         p.sessions.push(ViewSession {
             source_seen: session.source,
             session,
@@ -916,13 +915,13 @@ impl OriginalOwner {
             frame_observer: None,
             sources: Arc::new(Vec::new()),
         });
+        let count = p.sessions.len();
+        p.tabs.select(0, &key, count);
     }
 
     pub fn close_all(&self) {
         let mut p = self.pool.lock().unwrap();
-        p.pending.clear();
-        p.connecting = None;
-        p.intent = None;
+        p.tabs.clear();
         p.sessions.clear();
         if let Some((_, c)) = p.talkback.take() {
             c.stop();
@@ -954,15 +953,6 @@ mod restoration_regression_tests {
         ));
         drop(first);
         assert!(!view_binding_matches(&binding, &second, scope, scope));
-    }
-    #[test]
-    fn late_connection_cannot_cancel_newer_attempt_for_same_device() {
-        let mut pending = BTreeMap::from([("macbook".to_owned(), 2), ("studio".to_owned(), 1)]);
-        assert!(!retire_attempt(&mut pending, "macbook", 1));
-        assert_eq!(pending.get("macbook"), Some(&2));
-        assert!(retire_attempt(&mut pending, "macbook", 2));
-        assert!(!retire_attempt(&mut pending, "macbook", 2));
-        assert_eq!(pending.get("studio"), Some(&1));
     }
 }
 

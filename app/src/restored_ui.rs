@@ -26,6 +26,7 @@ use remote_core::{
     net::DEFAULT_CONTROL_PORT,
     pairing_qr::{encode_pairing_qr, qr_matrix_from_payload},
     role::RoleKind,
+    session_tabs::{SessionCommandState, SessionTabsAction, SessionTabsEffect},
 };
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -128,12 +129,15 @@ fn open_restored_window(
         });
         if let Some(device) = device {
             view.update(cx, |this, cx| {
+                let ticket = this.session_commands.begin();
                 let owner = this.owner.clone();
                 cx.spawn(async move |view, cx| {
+                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
                     let result = owner
                         .connect_device(&device, StreamStartOptions::default(), 0)
                         .await;
                     let _ = view.update(cx, |this, cx| {
+                        if !this.session_commands.is_current(ticket) { return; }
                         if let Err(e) = result {
                             this.status = e.to_string();
                         }
@@ -273,6 +277,7 @@ struct RestoredDashboard {
     drawer_open: bool,
     active_tab: DrawerTab,
     device_list_state: DeviceListState,
+    session_commands: SessionCommandState,
     scale_mode: ViewportScaleMode,
     telemetry_hud_collapsed: bool,
     input_locked: bool,
@@ -353,6 +358,7 @@ impl RestoredDashboard {
             drawer_open: true,
             active_tab: DrawerTab::Devices,
             device_list_state: DeviceListState::default(),
+            session_commands: SessionCommandState::default(),
             scale_mode,
             telemetry_hud_collapsed: prefs.ui.telemetry_hud_collapsed,
             input_locked: true,
@@ -1203,7 +1209,6 @@ impl RestoredDashboard {
     }
 
     fn session_switcher(&self, cx: &mut Context<Self>) -> Div {
-        let owner = self.owner.clone();
         let view = cx.weak_entity();
         let mut row = div()
             .absolute()
@@ -1212,13 +1217,15 @@ impl RestoredDashboard {
             .flex()
             .items_center()
             .gap_2();
-        for (id, name, active) in owner.sessions() {
-            let o = owner.clone();
+        let model = self.owner.session_tabs();
+        let can_reconnect = model.can_reconnect;
+        for tab in model.tabs {
+            let id = tab.connection_id;
             let view = view.clone();
             row = row.child(
                 command_button(
                     format!("session_{id}"),
-                    if active {
+                    if tab.selected {
                         ActionVariantKind::Primary
                     } else {
                         ActionVariantKind::Neutral
@@ -1228,15 +1235,13 @@ impl RestoredDashboard {
                 .rounded_full()
                 .h(px(28.))
                 .text_size(px(10.))
-                .child(name)
+                .child(tab.label)
                 .on_click(move |_, _, cx| {
-                    o.select(id);
-                    let _ = view.update(cx, |_, cx| cx.notify());
+                    let _ = view.update(cx, |this, cx| this.dispatch_session_action(SessionTabsAction::Select(id), cx));
                 }),
             );
         }
-        if owner.active_connection().is_some() {
-            let o = owner.clone();
+        if can_reconnect {
             let view = view.clone();
             row = row.child(
                 command_button("selected_reconnect", ActionVariantKind::Neutral, cx)
@@ -1245,19 +1250,7 @@ impl RestoredDashboard {
                     .text_size(px(10.))
                     .child("Reconnect")
                     .on_click(move |_, _, cx| {
-                        let o = o.clone();
-                        let _ = view.update(cx, |_, cx| {
-                            cx.spawn(async move |v, cx| {
-                                let r = o.reconnect_active().await;
-                                let _ = v.update(cx, |this, cx| {
-                                    if let Err(e) = r {
-                                        this.status = e.to_string();
-                                    }
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
-                        });
+                        let _ = view.update(cx, |this, cx| this.dispatch_session_action(SessionTabsAction::Reconnect, cx));
                     }),
             );
         }
@@ -2214,7 +2207,6 @@ fn floating_control_island(
                                 })
                         })
                         .when(visibility.show_disconnect, |this| {
-                            let owner = owner.clone();
                             let view = view.clone();
                             this.child(
                                 command_button("island_disconnect", ActionVariantKind::Danger, cx)
@@ -2222,26 +2214,8 @@ fn floating_control_island(
                                     .px(if compact { px(8.0) } else { px(12.0) })
                                     .text_size(px(10.0))
                                     .on_click(move |_event, _window, cx| {
-                                        let owner = owner.clone();
                                         let _ = view.update(cx, |this, cx| {
-                                            this.status = "Disconnecting".to_string();
-                                            cx.spawn(async move |this: WeakEntity<RestoredDashboard>, cx| {
-                                                let result = owner.disconnect_active().await;
-                                                let _ = this.update(cx, |this, cx| {
-                                                    match result {
-                                                        Ok(_) => {
-                                                            this.status = "Ready".to_string();
-                                                            this.drawer_open = true;
-                                                        }
-                                                        Err(err) => {
-                                                            this.status = format!("Disconnect failed: {err}");
-                                                        }
-                                                    }
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .detach();
-                                            cx.notify();
+                                            this.dispatch_session_action(SessionTabsAction::Disconnect, cx);
                                         });
                                     })
                                     .child(if compact { "End" } else { "Disconnect" }),
@@ -2899,17 +2873,49 @@ fn drawer_devices_tab(
 }
 
 impl RestoredDashboard {
+    fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
+        let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
+        let ticket = self.session_commands.begin();
+        match effect {
+            SessionTabsEffect::Select(id) => self.owner.select(id),
+            SessionTabsEffect::Close(id) => self.owner.close_session(id),
+            SessionTabsEffect::Disconnect | SessionTabsEffect::Reconnect => {
+                let disconnect = effect == SessionTabsEffect::Disconnect;
+                if disconnect { self.status = "Disconnecting".into(); }
+                let owner = self.owner.clone();
+                cx.spawn(async move |view, cx| {
+                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
+                    let result = if disconnect { owner.disconnect_active().await } else { owner.reconnect_active().await };
+                    let _ = view.update(cx, |this, cx| {
+                        if !this.session_commands.is_current(ticket) { return; }
+                        if disconnect {
+                            match result {
+                                Ok(_) => { this.status = "Ready".into(); this.drawer_open = true; }
+                                Err(error) => this.status = format!("Disconnect failed: {error}"),
+                            }
+                        } else if let Err(error) = result { this.status = error.to_string(); }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+        }
+        cx.notify();
+    }
+
     fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
         let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
         match effect {
             DeviceListEffect::ConnectStream(device_id) => {
+                let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
                 self.reset_host_stats();
                 let options = StreamStartOptions { width: self.selected_resolution.0, height: self.selected_resolution.1, fps: self.selected_fps, bitrate_kbps: self.selected_bitrate_kbps };
                 let owner = self.owner.clone();
                 cx.spawn(async move |view, cx| {
+                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
                     let result = owner.connect_device(&device_id, options, crate::unix_now_ms()).await;
                     let _ = view.update(cx, |this, cx| {
+                        if !this.session_commands.is_current(ticket) { return; }
                         match result {
                             Ok(_) => this.status = "Waiting for video".into(),
                             Err(error) => { this.status = format!("Connection failed: {error}"); this.drawer_open=true; }
@@ -2919,12 +2925,17 @@ impl RestoredDashboard {
                 }).detach();
             }
             DeviceListEffect::ConnectFiles(device_id) => {
+                let ticket = self.session_commands.begin();
                 self.owner.release_input(); self.drawer_open=true; self.active_tab=DrawerTab::Files;
                 self.status="Connecting files without starting video".into();
                 let owner=self.owner.clone();
                 cx.spawn(async move |view, cx| {
+                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
                     let result=owner.connect_files(&device_id).await;
-                    let _=view.update(cx,|this,cx|{ if let Err(error)=result { this.status=format!("Files unavailable: {error}"); } cx.notify(); });
+                    let _=view.update(cx,|this,cx|{
+                        if !this.session_commands.is_current(ticket) { return; }
+                        if let Err(error)=result { this.status=format!("Files unavailable: {error}"); } cx.notify();
+                    });
                 }).detach();
             }
             DeviceListEffect::OpenWorkspace(device_id) => self.open_device_window(&device_id,cx),

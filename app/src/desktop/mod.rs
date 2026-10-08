@@ -43,23 +43,6 @@ fn prefs_path() -> PathBuf {
     crate::preferences::UserPreferences::default_path()
 }
 
-fn reusable_connection(connected: bool, peer_responsive: bool, video_error: bool) -> bool {
-    connected && peer_responsive && !video_error
-}
-
-fn selection_after_close(selected: usize, closed: usize, remaining: usize) -> usize {
-    if remaining == 0 {
-        0
-    } else {
-        let selected = if selected > closed {
-            selected.saturating_sub(1)
-        } else {
-            selected
-        };
-        selected.min(remaining - 1)
-    }
-}
-
 fn same_connection(
     target: &Weak<remote_core::workspace_session::WorkspaceConnection>,
     connection: &Arc<remote_core::workspace_session::WorkspaceConnection>,

@@ -25,6 +25,7 @@ pub mod relay;
 pub mod role;
 pub mod scheduled_sender;
 pub mod session_crypto;
+pub mod session_tabs;
 pub mod stats;
 pub mod telemetry;
 pub mod timing;
