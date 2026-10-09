@@ -140,7 +140,16 @@
     "running_binary_version": null,
     "running_binary_sha256": null,
     "prior_process_read_error": "Permission denied /proc/1520582/exe; no privilege escalation used",
-    "display_session_details": "loginctl list-sessions reported liang seat0 tty2; show-session returned empty output, so active display/type remains unconfirmed"
+    "display_session_details": "loginctl list-sessions reported liang seat0 tty2; show-session returned empty output, so active display/type remains unconfirmed",
+    "follow_up_artifact": {
+      "version_from_public_manifest": "2.0.0-alpha.8",
+      "artifact_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+      "manifest_gui": "restored-original-gpui",
+      "manifest_native_video": true,
+      "artifact_not_runtime_provenance": true,
+      "active_wayland_user_session": true,
+      "artifact_operation_id": "cd2982ef-16ba-4307-86a5-2dd49aac170d"
+    }
   },
   "method_corrections": [
     {
@@ -172,5 +181,16 @@
     "no_deployment": true,
     "no_security_or_TCC_change": true,
     "unrelated_paths": 105
+  },
+  "follow_up_startup_diagnosis": {
+    "record": "docs/reviews/2026-10-09/evidence/installed-startup.json",
+    "owned_startup_exit_code": 1,
+    "owned_startup_elapsed_seconds": 0.212,
+    "cause": "mesh.conf root:staff mode 0600; current uid 501 cannot read",
+    "exact_owner_repair_exit_code": 1,
+    "repair_error": "sudo: a password is required",
+    "configuration_owner_changed": false,
+    "system_admin_authentication_pending": true,
+    "ui_timeout_cause_is_inference": "Direct start confirms pre-window config failure; no tool process-exit receipt ties that CLI PID to the earlier CUA invocation."
   }
 }

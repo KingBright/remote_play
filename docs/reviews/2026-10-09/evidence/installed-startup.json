@@ -1,0 +1,284 @@
+{
+  "schema": 1,
+  "source_checkpoint": "13d1b7b89cd07a9a40fb6ef9422cbe4ace7d825c",
+  "installed_bundle_static": {
+    "info": {
+      "CFBundleExecutable": "remote_play",
+      "CFBundleIdentifier": "com.remoteplay.unified",
+      "CFBundleName": "RemotePlay",
+      "CFBundlePackageType": "APPL",
+      "CFBundleShortVersionString": "2.0.0",
+      "CFBundleVersion": "20260930.7",
+      "LSUIElement": null,
+      "LSBackgroundOnly": null,
+      "LSMinimumSystemVersion": "13.0",
+      "NSHighResolutionCapable": true
+    },
+    "executable": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+    "resolved_executable": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+    "executable_mode": "0o755",
+    "executable_sha256": "27f4e4f6f7e9cbbbfbf2125f45293b946a5c76bfab1734410b3cd9c9fb5771d0",
+    "checks": [
+      {
+        "command": [
+          "file",
+          "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        ],
+        "exit_code": 0,
+        "output": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play: Mach-O 64-bit executable arm64\n"
+      },
+      {
+        "command": [
+          "otool",
+          "-L",
+          "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        ],
+        "exit_code": 0,
+        "output": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play:\n\t/System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices (compatibility version 1.0.0, current version 66.0.0)\n\t/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit (compatibility version 1.0.0, current version 275.0.0)\n\t/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics (compatibility version 64.0.0, current version 1965.5.1)\n\t/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia (compatibility version 1.0.0, current version 3320.8.5)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)\n\t/System/Library/Frameworks/Metal.framework/Versions/A/Metal (compatibility version 1.0.0, current version 373.2.0)\n\t/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore (compatibility version 1.2.0, current version 1195.14.4)\n\t/System/Library/Frameworks/ScreenCaptureKit.framework/Versions/A/ScreenCaptureKit (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)\n\t/System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo (compatibility version 1.2.0, current version 734.4.0)\n\t/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit (compatibility version 45.0.0, current version 2685.60.104)\n\t/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox (compatibility version 1.0.0, current version 3320.8.5)\n\t/System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox (compatibility version 1.0.0, current version 1000.0.0)\n\t/System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio (compatibility version 1.0.0, current version 1.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)\n\t/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)\n\t/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon (compatibility version 2.0.0, current version 170.0.0)\n\t/System/Library/Frameworks/CoreText.framework/Versions/A/CoreText (compatibility version 1.0.0, current version 877.4.0)\n\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61901.120.67)\n\t/System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL (compatibility version 1.0.0, current version 1.0.0)\n\t/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration (compatibility version 1.0.0, current version 1405.120.5)\n\t/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)\n\t/System/Library/Frameworks/AVFoundation.framework/Versions/A/AVFoundation (compatibility version 1.0.0, current version 2.0.0)\n\t/System/Library/Frameworks/ColorSync.framework/Versions/A/ColorSync (compatibility version 1.0.0, current version 3813.5.1)\n\t/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1226.0.0)\n\t/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO (compatibility version 1.0.0, current version 1.0.0)\n\t/usr/lib/swift/libswiftAVFoundation.dylib (compatibility version 1.0.0, current version 2420.7.1, weak)\n\t/usr/lib/swift/libswiftCore.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/swift/libswiftCoreAudio.dylib (compatibility version 1.0.0, current version 411.255.0, weak)\n\t/usr/lib/swift/libswiftCoreFoundation.dylib (compatibility version 1.0.0, current version 120.100.0)\n\t/usr/lib/swift/libswiftCoreImage.dylib (compatibility version 1.0.0, current version 2.2.0, weak)\n\t/usr/lib/swift/libswiftCoreMIDI.dylib (compatibility version 1.0.0, current version 6.0.0, weak)\n\t/usr/lib/swift/libswiftCoreMedia.dylib (compatibility version 1.0.0, current version 3320.8.5, weak)\n\t/usr/lib/swift/libswiftDarwin.dylib (compatibility version 1.0.0, current version 377.120.8, weak)\n\t/usr/lib/swift/libswiftDispatch.dylib (compatibility version 1.0.0, current version 1542.100.32)\n\t/usr/lib/swift/libswiftIOKit.dylib (compatibility version 1.0.0, current version 1.0.0, weak)\n\t/usr/lib/swift/libswiftMetal.dylib (compatibility version 1.0.0, current version 373.2.0)\n\t/usr/lib/swift/libswiftOSLog.dylib (compatibility version 1.0.0, current version 10.0.0, weak)\n\t/usr/lib/swift/libswiftObjectiveC.dylib (compatibility version 1.0.0, current version 951.7.0)\n\t/usr/lib/swift/libswiftQuartzCore.dylib (compatibility version 1.0.0, current version 5.0.0, weak)\n\t/usr/lib/swift/libswiftSpatial.dylib (compatibility version 1.0.0, current version 1.0.0, weak)\n\t/usr/lib/swift/libswiftUniformTypeIdentifiers.dylib (compatibility version 1.0.0, current version 877.5.1)\n\t/usr/lib/swift/libswiftXPC.dylib (compatibility version 1.0.0, current version 128.120.2, weak)\n\t/usr/lib/swift/libswiftos.dylib (compatibility version 1.0.0, current version 1082.0.0, weak)\n\t/usr/lib/swift/libswiftsimd.dylib (compatibility version 1.0.0, current version 23.0.0, weak)\n\t@rpath/libswift_Concurrency.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/swift/libswiftCoreGraphics.dylib (compatibility version 1.0.0, current version 1.0.0)\n\t/usr/lib/swift/libswiftFoundation.dylib (compatibility version 1.0.0, current version 1.0.0)\n"
+      },
+      {
+        "command": [
+          "uname",
+          "-m"
+        ],
+        "exit_code": 0,
+        "output": "arm64\n"
+      },
+      {
+        "command": [
+          "pgrep",
+          "-x",
+          "remote_play"
+        ],
+        "exit_code": 1,
+        "output": ""
+      }
+    ]
+  },
+  "owned_startup": {
+    "bundle": "/Users/jinliang/Applications/RemotePlay.app",
+    "binary_sha256": "27f4e4f6f7e9cbbbfbf2125f45293b946a5c76bfab1734410b3cd9c9fb5771d0",
+    "installed_build": "20260930.7",
+    "started_at": "2026-10-09T17:10:42.910769+00:00",
+    "max_seconds": 180,
+    "configuration_override": false,
+    "replaced_app": false,
+    "os_permissions_changed": false,
+    "method": "one bounded direct start of existing signed bundle executable",
+    "owned_pid": 27007,
+    "exit_code": 1,
+    "elapsed_seconds": 0.212,
+    "stop_reason": null,
+    "binary_stable": true,
+    "log_bytes": 177,
+    "log_sha256": "e924267530b5f4d03fcceafdbd20b91437f54adf3d0be29cc6a4ce958475251c",
+    "sanitized_output_tail": [
+      "Error: Io { path: \"/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf\", source: Os { code: 13, kind: PermissionDenied, message: \"Permission denied\" } }"
+    ]
+  },
+  "profile_metadata_only": {
+    "caller_uid": 501,
+    "caller_euid": 501,
+    "caller_user": "jinliang",
+    "files": [
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay",
+        "symlink": false,
+        "uid": 501,
+        "owner": "jinliang",
+        "gid": 20,
+        "group": "staff",
+        "mode": "0o755",
+        "size": 224,
+        "readable_access": true,
+        "writable_access": true
+      },
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh",
+        "symlink": false,
+        "uid": 501,
+        "owner": "jinliang",
+        "gid": 20,
+        "group": "staff",
+        "mode": "0o700",
+        "size": 160,
+        "readable_access": true,
+        "writable_access": true
+      },
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf",
+        "symlink": false,
+        "uid": 0,
+        "owner": "root",
+        "gid": 20,
+        "group": "staff",
+        "mode": "0o600",
+        "size": 233,
+        "readable_access": false,
+        "writable_access": false
+      },
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/desktop-instance.lock",
+        "symlink": false,
+        "uid": 501,
+        "owner": "jinliang",
+        "gid": 20,
+        "group": "staff",
+        "mode": "0o600",
+        "size": 0,
+        "readable_access": true,
+        "writable_access": true
+      }
+    ],
+    "acl_listing": {
+      "exit_code": 0,
+      "output": "drwxr-xr-x@ 7 jinliang  staff  224 Sep 30 19:22 /Users/jinliang/Library/Application Support/RemotePlay\ndrwx------@ 5 jinliang  staff  160 Oct  8 10:05 /Users/jinliang/Library/Application Support/RemotePlay/NativeMesh\n-rw-------  1 jinliang  staff    0 Sep 30 18:21 /Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/desktop-instance.lock\n-rw-------  1 root      staff  233 Sep 30 19:22 /Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf\n"
+    }
+  },
+  "owner_repair_attempt": {
+    "observed_at": "2026-10-09T17:13:09.578628+00:00",
+    "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf",
+    "before": {
+      "uid": 0,
+      "gid": 20,
+      "mode": "0o600",
+      "inode": 551706101,
+      "size": 233,
+      "mtime_ns": 1790767363014709605
+    },
+    "intended_after": {
+      "uid": 501,
+      "gid": 20,
+      "mode": "0o600"
+    },
+    "file_contents_read": false,
+    "recursive": false,
+    "exit_code": 1,
+    "output": "sudo: a password is required\n",
+    "after": {
+      "uid": 0,
+      "gid": 20,
+      "mode": "0o600",
+      "inode": 551706101,
+      "size": 233,
+      "mtime_ns": 1790767363014709605
+    },
+    "same_inode_size_mtime": true,
+    "readable_by_current_user": false
+  },
+  "candidate_main_inspection": {
+    "path": "/Users/jinliang/rust-target/debug/remote_play",
+    "exists": false,
+    "gui_or_profile_started": false,
+    "used_for_deployment": false
+  },
+  "ho5_public_checks": {
+    "artifact": {
+      "configured_binary_path": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+      "observations": [
+        {
+          "command_kind": "loginctl",
+          "exit_code": 0,
+          "output": "User=1000\nName=liang\nDisplay=\nRemote=no\nLeader=4273\nType=wayland\nClass=user\nActive=yes\nState=active"
+        },
+        {
+          "command_kind": "systemctl",
+          "exit_code": 0,
+          "output": "ActiveState=active\nSubState=running\nMainPID=1520582\n"
+        }
+      ],
+      "public_artifact_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+      "artifact_mode": "0o755",
+      "size": 56439960,
+      "product_info_flag_present": false
+    },
+    "artifact_operation": {
+      "operation_id": "cd2982ef-16ba-4307-86a5-2dd49aac170d",
+      "exit_code": 0,
+      "output_complete": true
+    },
+    "runtime": {
+      "operation_id": "fe139efc-ebf1-4b03-b539-f396aa622d64",
+      "exit_code": 0,
+      "output_complete": true,
+      "output": {
+        "caller_uid": 1000,
+        "caller_euid": 1000,
+        "public_install_files": [
+          "remote_play",
+          "build-info.json"
+        ],
+        "process": {
+          "public_status_lines": [
+            "Name:\tremote_play",
+            "State:\tS (sleeping)",
+            "Uid:\t1000\t1000\t1000\t1000",
+            "Gid:\t1000\t1000\t1000\t1000",
+            "NSpid:\t1520582",
+            "NoNewPrivs:\t0",
+            "Seccomp:\t0"
+          ]
+        },
+        "checks": [
+          {
+            "command_kind": "systemctl",
+            "exit_code": 0,
+            "output": "ActiveState=active\nSubState=running\nMainPID=1520582\nExecMainStartTimestamp=Sun 2026-10-04 20:07:35 CST\nExecMainPID=1520582\n"
+          },
+          {
+            "command_kind": "file",
+            "exit_code": 0,
+            "output": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play: ELF 64-bit LSB pie executable, x86-64, version 1 (SYSV), dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 3.2.0, BuildID[sha1]=bcdb25646bacf9a6de397aa41f9082f6cde9a36e, not stripped\n"
+          }
+        ]
+      }
+    },
+    "manifest": {
+      "operation_id": "87f81bd1-5b21-476d-8f4d-9dc6062f903c",
+      "exit_code": 0,
+      "output_complete": true,
+      "output": {
+        "public_manifest_path": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/build-info.json",
+        "manifest_sha256": "b37f60c67878301a757230815b9a6b47422bde4651678081ace73631c755bae8",
+        "public_keys": [
+          "binary_sha256",
+          "default_gui",
+          "native_video",
+          "source_id",
+          "version"
+        ],
+        "selected_fields": {
+          "version": "2.0.0-alpha.8",
+          "binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c"
+        },
+        "read_only": true
+      }
+    },
+    "manifest_gui": {
+      "operation_id": "b2b85e64-0f89-4652-b26e-cf474c26bd57",
+      "exit_code": 0,
+      "output_complete": true,
+      "output": {
+        "public_manifest_fields": {
+          "version": "2.0.0-alpha.8",
+          "binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+          "default_gui": "restored-original-gpui",
+          "native_video": true,
+          "source_id": "67bf20c6295b898e95c803c7898ec7f5e547bb162bae6d3d7c90fe42dfd37c33"
+        },
+        "claim_scope": "manifest metadata for configured public artifact, not running process or external presentation"
+      }
+    }
+  },
+  "physical_directions_executed": 0,
+  "frames_observed": null,
+  "screen_capture_permission": "unknown; no permission request or change",
+  "input_permission": "unknown; no permission request or change",
+  "private_configuration_contents_read": false,
+  "private_keys_read": false,
+  "app_or_profile_replaced": false,
+  "configuration_owner_changed": false,
+  "next_minimal_action": "System administrator runs sudo chown 501:20 '/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf'; keep 0600 and existing content. Observe owner metadata and recover one same-app start after confirmation.",
+  "next_action_requires_system_authentication": true,
+  "no_password_collected": true
+}
