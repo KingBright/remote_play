@@ -509,6 +509,8 @@ impl RestoredDashboard {
             return;
         }
         if let Some(control) = &self.mesh_pairing {
+            self.session_commands.begin();
+            self.owner.clear_failed_connection();
             self.mesh_pairing_snapshot = Some(control.create_new_group());
         }
     }
@@ -525,6 +527,8 @@ impl RestoredDashboard {
             .read_from_clipboard()
             .and_then(|item| item.text())
             .unwrap_or_default();
+        self.session_commands.begin();
+        self.owner.clear_failed_connection();
         self.mesh_pairing_snapshot = Some(control.join_from_invite_code(&invite_code));
     }
 
@@ -1175,7 +1179,7 @@ impl RestoredDashboard {
             .items_center()
             .gap_2();
         let model = self.owner.session_tabs();
-        let can_reconnect = model.can_reconnect;
+        let can_reconnect = model.can_reconnect && model.failed.is_none();
         for tab in model.tabs {
             let id = tab.connection_id;
             let view = view.clone();
@@ -2815,11 +2819,18 @@ fn drawer_tab_button(
 
 fn drawer_devices_tab(
     devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
-    _owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
+    owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let view = cx.weak_entity();
+    let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
-    div().child(crate::desktop::device_drawer::DeviceDrawer::new(
+    div().flex().flex_col().gap_3()
+    .child(crate::desktop::session_recovery::ConnectionRecoveryControls::new(
+        owner.session_tabs(), move |action, cx| {
+            let _ = recovery_view.update(cx, |this, cx| this.dispatch_session_action(action, cx));
+        },
+    ))
+    .child(crate::desktop::device_drawer::DeviceDrawer::new(
         model.project(state.filter), state.filter,
         move |action, cx| {
             if let Err(error) = view.update(cx, |this, cx| this.dispatch_device_action(action.clone(), cx)) {
@@ -2909,11 +2920,16 @@ impl RestoredDashboard {
             SessionTabsEffect::Close(id) => self.owner.close_session(id),
             SessionTabsEffect::Disconnect | SessionTabsEffect::Reconnect => {
                 let disconnect = effect == SessionTabsEffect::Disconnect;
-                if disconnect { self.status = "Disconnecting".into(); }
+                self.status = if disconnect { "Disconnecting" } else { "Retrying connection" }.into();
                 let owner = self.owner.clone();
                 cx.spawn(async move |view, cx| {
-                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
-                    let result = if disconnect { owner.disconnect_active().await } else { owner.reconnect_active().await };
+                    let Some(options) = view.update(cx, |this, _| {
+                        if !this.session_commands.is_current(ticket) { return None; }
+                        let values = this.stream_settings.values();
+                        Some(StreamStartOptions { width: values.width, height: values.height,
+                            fps: values.fps, bitrate_kbps: values.bitrate_kbps })
+                    }).unwrap_or(None) else { return; };
+                    let result = if disconnect { owner.disconnect_active().await } else { owner.reconnect_active(options).await };
                     let _ = view.update(cx, |this, cx| {
                         if !this.session_commands.is_current(ticket) { return; }
                         if disconnect {
@@ -2921,7 +2937,11 @@ impl RestoredDashboard {
                                 Ok(_) => { this.status = "Ready".into(); this.drawer_open = true; }
                                 Err(error) => this.status = format!("Disconnect failed: {error}"),
                             }
-                        } else if let Err(error) = result { this.status = error.to_string(); }
+                        } else if let Err(error) = result {
+                            if !owner.connection_error_is_current(&error) { return; }
+                            this.status = error.to_string(); this.drawer_open = true;
+                            this.active_tab = DrawerTab::Devices;
+                        }
                         cx.notify();
                     });
                 }).detach();
@@ -2952,7 +2972,11 @@ impl RestoredDashboard {
                         if !this.session_commands.is_current(ticket) { return; }
                         match result {
                             Ok(_) => this.status = "Waiting for video".into(),
-                            Err(error) => { this.status = format!("Connection failed: {error}"); this.drawer_open=true; }
+                            Err(error) => {
+                                if !owner.connection_error_is_current(&error) { return; }
+                                this.status = format!("Connection failed: {error}"); this.drawer_open=true;
+                                this.active_tab = DrawerTab::Devices;
+                            }
                         }
                         cx.notify();
                     });
@@ -2968,7 +2992,11 @@ impl RestoredDashboard {
                     let result=owner.connect_files(&device_id).await;
                     let _=view.update(cx,|this,cx|{
                         if !this.session_commands.is_current(ticket) { return; }
-                        if let Err(error)=result { this.status=format!("Files unavailable: {error}"); } cx.notify();
+                        if let Err(error)=result {
+                            if !owner.connection_error_is_current(&error) { return; }
+                            this.status=format!("Files unavailable: {error}");
+                            this.active_tab=DrawerTab::Devices;
+                        } cx.notify();
                     });
                 }).detach();
             }

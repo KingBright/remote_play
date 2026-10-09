@@ -36,6 +36,11 @@ EXPECTED = {
         "cancelling_pending_connect_restores_first_background_arrival_without_routing_it_early",
         "resource_routing_and_reconnect_projection_share_transition_and_empty_selection_gate",
         "late_background_attach_preserves_empty_selection_after_foreground_failure",
+        "first_failure_retry_reuses_pending_attempt_and_rejects_previous_generation",
+        "switching_device_and_selecting_existing_same_device_fences_late_failure",
+        "preflight_failure_and_back_preserve_empty_selection_against_background_attach",
+        "cancelling_retry_and_clearing_do_not_restore_failed_target_or_old_response",
+        "failed_retry_respects_background_connection_capacity",
     ],
     "stream_settings": [
         "drafts_survive_projection_without_changing_committed_values_or_emitting_effects",
@@ -50,6 +55,7 @@ EXPECTED = {
 SOURCES = [
     "app/src/lib.rs", "app/src/main.rs", "app/src/restored_ui.rs",
     "app/src/desktop/device_list.rs", "app/src/desktop/device_drawer.rs",
+    "app/src/desktop/session_recovery.rs", "app/src/desktop/mod.rs",
     "app/src/desktop/original_owner.rs", "app/src/desktop/original_presenter.rs",
     "app/src/desktop/model.rs", "app/src/product_components.rs",
     "app/src/product_components/text_input.rs", "remote_core/src/lib.rs",
@@ -157,7 +163,7 @@ def main():
     listed = run([str(binary), "--list"], "rust-list.log")
     discovered = re.findall(r"^(.+): test$", listed, re.M)
     expected = {f"{module}::tests::{name}" for module, names in EXPECTED.items() for name in names}
-    assert len(discovered) == len(set(discovered)) == len(expected) == 22
+    assert len(discovered) == len(set(discovered)) == len(expected) == 27
     assert set(discovered) == expected, set(discovered) ^ expected
     rust_results = []
     for number, name in enumerate(sorted(expected), 1):

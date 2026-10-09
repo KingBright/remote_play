@@ -26,6 +26,28 @@ use std::{
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+#[derive(Clone, Copy)]
+struct RetryBinding {
+    attempt: u64,
+    scope: ShareScope,
+    video: bool,
+    audio: bool,
+}
+#[derive(Debug)]
+struct ConnectionFailure {
+    device: String,
+    attempt: u64,
+    scope: ShareScope,
+    message: String,
+}
+impl std::fmt::Display for ConnectionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+}
+impl std::error::Error for ConnectionFailure {}
+fn connection_failure(device: &str, attempt: u64, scope: ShareScope, message: String) -> Error {
+    Box::new(ConnectionFailure { device: device.into(), attempt, scope, message })
+}
+
 pub(crate) type FrameSlot = Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>;
 
 #[derive(Clone)]
@@ -64,12 +86,38 @@ struct Pool {
     sessions: Vec<ViewSession>,
     tabs: SessionTabsState,
     pending_settings: PendingStreamSettingsState,
+    retry_binding: Option<RetryBinding>,
     message: String,
     receive_dir: PathBuf,
     talkback: Option<(u32, client::TalkbackRuntimeControl)>,
     clipboard_preference: bool,
 }
 impl Pool {
+    fn retry(&self, scope: ShareScope) -> Option<(&remote_core::session_tabs::FailedSession, RetryBinding)> {
+        let failed = self.tabs.failed()?;
+        let binding = self.retry_binding?;
+        (binding.attempt == failed.attempt && binding.scope == scope).then_some((failed, binding))
+    }
+    fn expire_retry(&mut self, scope: ShareScope) {
+        if self.tabs.failed().is_some() && self.retry(scope).is_none() {
+            self.tabs.dismiss_failure();
+            self.retry_binding = None;
+            self.message = "Ready".into();
+        }
+    }
+    fn reconnect_target(&self, scope: ShareScope) -> Option<(String, Option<RetryBinding>)> {
+        if let Some((failed, binding)) = self.retry(scope) {
+            return Some((failed.device_id.clone(), Some(binding)));
+        }
+        // Two clicks can be accepted before the first scheduled task starts.
+        // Reuse its pending generation rather than reporting No selected device.
+        if let Some(connecting) = self.tabs.connecting()
+            && let Some(binding) = self.retry_binding
+            && binding.attempt == connecting.attempt && binding.scope == scope {
+            return Some((connecting.peer.device_id.clone(), Some(binding)));
+        }
+        self.active().map(|entry| (entry.session.key.clone(), None))
+    }
     fn active(&self) -> Option<&ViewSession> {
         let index = self.tabs.active_index(self.sessions.len())?;
         self.sessions.get(index)
@@ -129,6 +177,7 @@ impl OriginalOwner {
                 sessions: Vec::new(),
                 tabs: SessionTabsState::default(),
                 pending_settings: PendingStreamSettingsState::default(),
+                retry_binding: None,
                 message: "Ready".into(),
                 receive_dir: prefs.receive_dir,
                 talkback: None,
@@ -216,7 +265,8 @@ impl OriginalOwner {
     }
     pub fn snapshot(&self) -> ViewSnapshot {
         let devices = self.backend.runtime().lock().unwrap().devices();
-        let p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut p = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        p.expire_retry(remote_core::shared_files::current_share_scope());
         if let Some(connecting) = p.tabs.connecting() {
             return ViewSnapshot {
                 role: RoleState::Connecting(RoleSession::new(
@@ -286,7 +336,8 @@ impl OriginalOwner {
         p.tabs.can_change_network(p.sessions.len())
     }
     pub fn session_tabs(&self) -> SessionTabsViewModel {
-        let p = self.pool.lock().unwrap();
+        let mut p = self.pool.lock().unwrap();
+        p.expire_retry(remote_core::shared_files::current_share_scope());
         p.tabs.project(p.sessions.iter().map(|e| SessionFacts {
             connection_id: e.session.conn.id,
             device_id: &e.session.key,
@@ -355,15 +406,15 @@ impl OriginalOwner {
         options: StreamStartOptions,
         _now: u64,
     ) -> Result<(), Error> {
-        self.connect_mode(key, options, true, true).await
+        self.connect_mode(key, options, true, true, None).await
     }
     pub async fn connect_files(&self, key: &str) -> Result<(), Error> {
-        self.connect_mode(key, StreamStartOptions::default(), false, true)
+        self.connect_mode(key, StreamStartOptions::default(), false, true, None)
             .await
     }
 
     pub async fn connect_silent_files(&self, key: &str) -> Result<(), Error> {
-        self.connect_mode(key, StreamStartOptions::default(), false, false)
+        self.connect_mode(key, StreamStartOptions::default(), false, false, None)
             .await
     }
     async fn connect_mode(
@@ -372,6 +423,7 @@ impl OriginalOwner {
         options: StreamStartOptions,
         video: bool,
         audio: bool,
+        expected_scope: Option<ShareScope>,
     ) -> Result<(), Error> {
         protocol::validate_video_settings(
             options.width,
@@ -383,6 +435,10 @@ impl OriginalOwner {
             width: options.width, height: options.height,
             fps: options.fps, bitrate_kbps: options.bitrate_kbps,
         };
+        let scope = remote_core::shared_files::current_share_scope();
+        if expected_scope.is_some_and(|expected| expected != scope) {
+            return Err("Device network changed; choose the device again".into());
+        }
         let device = self
             .backend
             .runtime()
@@ -390,16 +446,32 @@ impl OriginalOwner {
             .unwrap()
             .devices()
             .into_iter()
-            .find(|d| d.device_id == key && d.online)
-            .ok_or("Device is not currently online")?;
+            .find(|d| d.device_id == key);
         let routes = self
             .backend
             .discovery_snapshot_rx()
             .map(|rx| candidate_routes(&rx.borrow(), key))
             .unwrap_or_default();
-        if routes.is_empty() {
-            return Err("No current route to the selected device".into());
+        let rejected = if device.as_ref().is_none_or(|d| !d.online) {
+            Some("Device is not currently online")
+        } else if routes.is_empty() {
+            Some("No current route to the selected device")
+        } else { None };
+        if let Some(message) = rejected {
+            let mut p = self.pool.lock().unwrap();
+            if let Some(e) = p.active_mut() {
+                e.session.release_input(); e.session.set_background(true);
+            }
+            if let Some((_, control)) = p.talkback.take() { control.stop(); }
+            if let Some(old) = p.tabs.pending_attempt(key) { p.pending_settings.take(key, old); }
+            let count = p.sessions.len();
+            let name = device.as_ref().map(|d| d.display_name.as_str()).unwrap_or(key);
+            let attempt = p.tabs.reject_open(key, name, count).ok_or("Connection generation exhausted")?;
+            p.retry_binding = Some(RetryBinding { attempt, scope, video, audio });
+            p.message = message.into();
+            return Err(connection_failure(key, attempt, scope, message.into()));
         }
+        let device = device.unwrap();
         let (attempt, receive_dir) = {
             let mut p = self.pool.lock().unwrap();
             let existing = p.sessions.iter().position(|e| e.session.key == key).map(|index| {
@@ -422,6 +494,7 @@ impl OriginalOwner {
             if let Some(index) = plan.retire_index { p.sessions.remove(index); }
             let attempt = match plan.decision {
                 OpenDecision::Reuse(index) => {
+                    p.retry_binding = None;
                     if let Some((_, c)) = p.talkback.take() {
                         c.stop();
                     }
@@ -442,6 +515,7 @@ impl OriginalOwner {
                 OpenDecision::AlreadyPending => {
                     if let Some(connecting) = p.tabs.connecting().cloned() {
                         p.pending_settings.update(key, connecting.attempt, initial_settings);
+                        p.retry_binding = Some(RetryBinding { attempt: connecting.attempt, scope, video, audio });
                     }
                     let previous = p.tabs.selected_index();
                     if let Some(e) = p.sessions.get_mut(previous) {
@@ -455,6 +529,7 @@ impl OriginalOwner {
                 OpenDecision::GenerationExhausted => return Err("Connection generation exhausted".into()),
                 OpenDecision::Start(attempt) => attempt,
             };
+            p.retry_binding = Some(RetryBinding { attempt, scope, video, audio });
             p.pending_settings.begin(key, attempt, initial_settings);
             let previous = p.tabs.selected_index();
             if let Some(e) = p.sessions.get_mut(previous) {
@@ -475,13 +550,17 @@ impl OriginalOwner {
                 Err(e) => failures.push(format!("{route}: {e}")),
             }
         }
+        if remote_core::shared_files::current_share_scope() != scope {
+            connected = None;
+            failures.push("Device network changed during connection".into());
+        }
         let mut p = self.pool.lock().unwrap();
         let count = p.sessions.len();
         let settings = p.pending_settings.take(key, attempt);
         let completion = p.tabs.complete(key, attempt, connected.is_some() && settings.is_some(), count);
         if completion == Completion::Cancelled {
             drop(connected);
-            return Err("Connection request was cancelled or superseded".into());
+            return Err(connection_failure(key, attempt, scope, "Connection request was cancelled or superseded".into()));
         }
         let selected = completion == Completion::Selected;
         let Some((route, (conn, events))) = connected else {
@@ -491,10 +570,10 @@ impl OriginalOwner {
                 failures.join("; ")
             );
             if selected { p.message = message.clone(); }
-            return Err(message.into());
+            return Err(connection_failure(key, attempt, scope, message));
         };
         let Some(settings) = settings else {
-            return Err("Connection settings expired; retry the selected device".into());
+            return Err(connection_failure(key, attempt, scope, "Connection settings expired; retry the selected device".into()));
         };
         let mut session =
             OriginalGuiSession::new(key.into(), device.display_name, route, conn, events);
@@ -537,27 +616,34 @@ impl OriginalOwner {
         if let Some(index) = p.tabs.disconnect(count) {
             p.sessions.remove(index);
         }
+        p.retry_binding = None;
+        p.message = "Ready".into();
         if let Some((_, c)) = p.talkback.take() {
             c.stop();
         }
         Ok(())
     }
-    pub async fn reconnect_active(&self) -> Result<(), Error> {
-        let (key, opts) = {
+    pub async fn reconnect_active(&self, options: StreamStartOptions) -> Result<(), Error> {
+        let (key, mode) = {
             let p = self.pool.lock().unwrap();
-            let s = &p.active().ok_or("No selected device")?.session;
-            (
-                s.key.clone(),
-                StreamStartOptions {
-                    width: s.request.width,
-                    height: s.request.height,
-                    fps: s.request.fps,
-                    bitrate_kbps: s.request.bitrate_kbps,
-                },
-            )
+            p.reconnect_target(remote_core::shared_files::current_share_scope()).ok_or("No selected device")?
         };
+        if let Some(mode) = mode {
+            return self.connect_mode(&key, options, mode.video, mode.audio, Some(mode.scope)).await;
+        }
         self.disconnect_active().await?;
-        self.connect_device(&key, opts, 0).await
+        self.connect_device(&key, options, 0).await
+    }
+    pub fn clear_failed_connection(&self) {
+        let mut p = self.pool.lock().unwrap();
+        p.tabs.dismiss_failure(); p.retry_binding = None; p.message = "Ready".into();
+    }
+    pub fn connection_error_is_current(&self, error: &Error) -> bool {
+        let Some(error) = error.downcast_ref::<ConnectionFailure>() else { return true; };
+        let p = self.pool.lock().unwrap();
+        p.retry(remote_core::shared_files::current_share_scope())
+            .is_some_and(|(failed, _)| failed.device_id == error.device
+                && failed.attempt == error.attempt && error.scope == remote_core::shared_files::current_share_scope())
     }
     pub async fn request_capture_sources(&self) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
@@ -976,6 +1062,7 @@ impl OriginalOwner {
         let mut p = self.pool.lock().unwrap();
         p.tabs.clear();
         p.pending_settings.clear();
+        p.retry_binding = None;
         p.sessions.clear();
         if let Some((_, c)) = p.talkback.take() {
             c.stop();
@@ -995,6 +1082,7 @@ mod restoration_regression_tests {
         Pool {
             sessions: Vec::new(), tabs: SessionTabsState::default(),
             pending_settings: PendingStreamSettingsState::default(),
+            retry_binding: None,
             message: String::new(), receive_dir: PathBuf::new(),
             talkback: None, clipboard_preference: false,
         }
@@ -1009,6 +1097,35 @@ mod restoration_regression_tests {
     }
     fn values() -> StreamSettingsValues {
         StreamSettingsValues { width: 1920, height: 1080, fps: 60, bitrate_kbps: 10_000 }
+    }
+
+    #[test]
+    fn failed_retry_preserves_media_mode_and_expires_with_device_network_or_generation() {
+        let mut pool = pending_pool();
+        let scope = Some([7; 32]);
+        let first = pool.tabs.reject_open("a", "A", 0).unwrap();
+        pool.retry_binding = Some(RetryBinding { attempt: first, scope, video: false, audio: false });
+        let (failed, mode) = pool.retry(scope).unwrap();
+        assert_eq!(failed.device_id, "a");
+        assert!(!mode.video && !mode.audio);
+        let next = pool.tabs.reject_open("a", "A", 0).unwrap();
+        assert!(next > first);
+        assert!(pool.retry(scope).is_none());
+        pool.retry_binding = Some(RetryBinding { attempt: next, scope, video: true, audio: true });
+        assert!(pool.retry(scope).is_some());
+        pool.expire_retry(Some([8; 32]));
+        assert!(pool.tabs.failed().is_none());
+        assert!(pool.retry_binding.is_none());
+        assert_eq!(pool.message, "Ready");
+        let pending = begin(&mut pool, "b", values());
+        pool.retry_binding = Some(RetryBinding { attempt: pending, scope, video: false, audio: true });
+        let (key, mode) = pool.reconnect_target(scope).unwrap();
+        assert_eq!(key, "b");
+        assert_eq!(mode.unwrap().attempt, pending);
+        assert_eq!(pool.tabs.pending_count(), 1);
+        assert!(pool.reconnect_target(Some([8; 32])).is_none());
+        pool.tabs.disconnect(0);
+        assert!(pool.reconnect_target(scope).is_none());
     }
 
     #[test]

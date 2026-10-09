@@ -34,6 +34,13 @@ pub struct ConnectingSession {
     pub attempt: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailedSession {
+    pub device_id: String,
+    pub name: String,
+    pub attempt: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenDecision {
     Reuse(usize),
@@ -62,6 +69,7 @@ pub struct SessionTabsState {
     intent: Option<String>,
     next_attempt: u64,
     connecting: Option<ConnectingSession>,
+    failed: Option<FailedSession>,
 }
 impl SessionTabsState {
     pub fn selected_index(&self) -> usize {
@@ -74,6 +82,34 @@ impl SessionTabsState {
     }
     pub fn connecting(&self) -> Option<&ConnectingSession> {
         self.connecting.as_ref()
+    }
+    pub fn failed(&self) -> Option<&FailedSession> {
+        self.failed.as_ref()
+    }
+    pub fn pending_attempt(&self, key: &str) -> Option<u64> {
+        self.pending.get(key).copied()
+    }
+    /// A failed preflight is still a new user intent, without inventing a route
+    /// or starting a network request. Other pending devices remain background.
+    pub fn reject_open(&mut self, key: &str, name: &str, sessions: usize) -> Option<u64> {
+        self.pending.remove(key);
+        self.intent = Some(key.to_owned());
+        self.connecting = None;
+        self.selected = sessions;
+        self.failed = None;
+        let attempt = self.next_attempt.checked_add(1)?;
+        self.next_attempt = attempt;
+        self.failed = Some(FailedSession {
+            device_id: key.into(),
+            name: name.into(),
+            attempt,
+        });
+        Some(attempt)
+    }
+    pub fn dismiss_failure(&mut self) {
+        self.failed = None;
+        // Keep the empty-selection intent marker: a late background attach must
+        // not reopen an unrelated device after returning to the drawer.
     }
     pub fn pending_count(&self) -> usize {
         self.pending.len()
@@ -89,6 +125,7 @@ impl SessionTabsState {
         self.selected = index;
         self.intent = Some(key.to_owned());
         self.connecting = None;
+        self.failed = None;
         true
     }
 
@@ -99,6 +136,7 @@ impl SessionTabsState {
         existing: Option<SessionCandidate>,
         mut sessions: usize,
     ) -> OpenPlan {
+        self.failed = None;
         let existing = existing.filter(|candidate| candidate.index < sessions);
         if let Some(candidate) = existing
             && candidate.health.reusable()
@@ -147,12 +185,22 @@ impl SessionTabsState {
             return Completion::Cancelled;
         }
         self.pending.remove(key);
-        if self.intent.as_deref() != Some(key) {
+        if self.intent.as_deref() != Some(key)
+            || self
+                .connecting
+                .as_ref()
+                .is_none_or(|c| c.peer.device_id != key || c.attempt != attempt)
+        {
             return Completion::Background;
         }
-        self.connecting = None;
+        let connecting = self.connecting.take().unwrap();
         if !success {
             self.selected = sessions;
+            self.failed = Some(FailedSession {
+                device_id: connecting.peer.device_id,
+                name: connecting.peer.name,
+                attempt,
+            });
         }
         Completion::Selected
     }
@@ -195,6 +243,9 @@ impl SessionTabsState {
 
     /// A pending connect is cancelled without closing the previous available page.
     pub fn disconnect(&mut self, sessions: usize) -> Option<usize> {
+        if self.failed.take().is_some() {
+            return None;
+        }
         let cancelling = self.connecting.take().is_some();
         if let Some(key) = self.intent.take() {
             self.pending.remove(&key);
@@ -211,6 +262,7 @@ impl SessionTabsState {
         self.pending.clear();
         self.intent = None;
         self.connecting = None;
+        self.failed = None;
         self.selected = 0;
         // Keep the generation monotonic so an old reply cannot match an open after clear.
     }
@@ -237,10 +289,16 @@ impl SessionTabsState {
             })
             .collect();
         let active = self.active_index(tabs.len()).is_some();
+        let can_reconnect = active
+            || (self.failed.is_some()
+                && self.connecting.is_none()
+                && tabs.len() + self.pending.len() < MAX_CONNECTIONS);
         SessionTabsViewModel {
             tabs,
-            can_disconnect: active || self.connecting.is_some(),
-            can_reconnect: active,
+            can_disconnect: active || self.connecting.is_some() || self.failed.is_some(),
+            can_reconnect,
+            failed: self.failed.clone(),
+            connecting: self.connecting.clone(),
         }
     }
 }
@@ -269,10 +327,13 @@ pub struct SessionTabViewModel {
     /// Protocol/stream state, never a claim of actual frame presentation.
     pub connection: ConnectionStatus,
 }
+#[derive(Clone)]
 pub struct SessionTabsViewModel {
     pub tabs: Vec<SessionTabViewModel>,
     pub can_disconnect: bool,
     pub can_reconnect: bool,
+    pub failed: Option<FailedSession>,
+    pub connecting: Option<ConnectingSession>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionTabsAction {
@@ -500,7 +561,8 @@ mod tests {
         assert_eq!(s.selected_index(), 2);
         s.close_index(0, 2);
         assert_eq!(s.selected_index(), 1);
-        assert!(!s.project([facts(2, "b", true)]).can_reconnect);
+        assert!(s.project([facts(2, "b", true)]).can_reconnect);
+        assert_eq!(s.failed().unwrap().device_id, "c");
     }
     #[test]
     fn reconnect_actions_and_status_projection_use_scalar_identity_not_frames() {
@@ -580,7 +642,8 @@ mod tests {
             Completion::Selected
         );
         assert_eq!(state.active_index(1), None);
-        assert!(!state.project([facts(1, "existing", true)]).can_reconnect);
+        assert!(state.project([facts(1, "existing", true)]).can_reconnect);
+        assert_eq!(state.failed().unwrap().device_id, "new");
         state.select(0, "existing", 1);
         assert_eq!(state.active_index(1), Some(0));
         assert!(state.project([facts(1, "existing", true)]).can_reconnect);
@@ -615,8 +678,96 @@ mod tests {
                 vec![facts(10, "existing", true), facts(11, "old", true)]
             };
             let view = state.project(rows);
-            assert!(!view.can_reconnect);
+            assert!(view.can_reconnect);
+            assert_eq!(view.failed.unwrap().device_id, "current");
             assert!(view.tabs.iter().all(|tab| !tab.selected));
         }
+    }
+
+    #[test]
+    fn first_failure_retry_reuses_pending_attempt_and_rejects_previous_generation() {
+        let mut state = SessionTabsState::default();
+        let first = start(&mut state, "a", 0);
+        assert_eq!(state.complete("a", first, false, 0), Completion::Selected);
+        let view = state.project([]);
+        assert!(view.can_reconnect && view.can_disconnect);
+        assert_eq!(view.failed.as_ref().unwrap().attempt, first);
+        assert_eq!(
+            view.effect(SessionTabsAction::Reconnect),
+            Some(SessionTabsEffect::Reconnect)
+        );
+        let retry = start(&mut state, "a", 0);
+        assert!(retry > first);
+        assert!(state.failed().is_none());
+        assert_eq!(
+            state.plan_open(peer("a"), None, 0).decision,
+            OpenDecision::AlreadyPending
+        );
+        assert!(!state.project([]).can_reconnect);
+        assert_eq!(state.complete("a", first, false, 0), Completion::Cancelled);
+        assert_eq!(state.connecting().unwrap().attempt, retry);
+        assert_eq!(state.complete("a", retry, true, 0), Completion::Selected);
+        state.attached(Completion::Selected, 1);
+        assert!(state.failed().is_none());
+        assert_eq!(state.active_index(1), Some(0));
+    }
+    #[test]
+    fn switching_device_and_selecting_existing_same_device_fences_late_failure() {
+        let mut state = SessionTabsState::default();
+        let old = start(&mut state, "a", 1);
+        let current = start(&mut state, "b", 1);
+        assert_eq!(state.complete("b", current, false, 1), Completion::Selected);
+        assert_eq!(state.complete("a", old, false, 1), Completion::Background);
+        assert_eq!(state.failed().unwrap().device_id, "b");
+        let a = start(&mut state, "a", 1);
+        assert!(state.select(0, "a", 1));
+        assert_eq!(state.complete("a", a, false, 1), Completion::Background);
+        assert!(state.failed().is_none());
+        assert_eq!(state.active_index(1), Some(0));
+    }
+    #[test]
+    fn preflight_failure_and_back_preserve_empty_selection_against_background_attach() {
+        let mut state = SessionTabsState::default();
+        let old = start(&mut state, "a", 0);
+        let rejected = state.reject_open("offline", "Offline device", 0).unwrap();
+        assert!(rejected > old);
+        assert_eq!(state.failed().unwrap().name, "Offline device");
+        assert_eq!(state.disconnect(0), None);
+        assert!(state.failed().is_none());
+        assert_eq!(state.complete("a", old, true, 0), Completion::Background);
+        state.attached(Completion::Background, 1);
+        assert_eq!(state.active_index(1), None);
+        assert!(!state.project([facts(1, "a", true)]).can_reconnect);
+    }
+    #[test]
+    fn cancelling_retry_and_clearing_do_not_restore_failed_target_or_old_response() {
+        let mut state = SessionTabsState::default();
+        let first = state.reject_open("a", "A", 0).unwrap();
+        let retry = start(&mut state, "a", 0);
+        state.disconnect(0);
+        assert_eq!(state.complete("a", retry, false, 0), Completion::Cancelled);
+        assert!(state.failed().is_none());
+        state.clear();
+        let third = start(&mut state, "a", 0);
+        assert!(third > retry && retry > first);
+        assert_eq!(state.complete("a", retry, true, 0), Completion::Cancelled);
+        assert_eq!(state.connecting().unwrap().attempt, third);
+    }
+    #[test]
+    fn failed_retry_respects_background_connection_capacity() {
+        let mut state = SessionTabsState::default();
+        state.reject_open("a", "A", MAX_CONNECTIONS).unwrap();
+        let rows = (0..MAX_CONNECTIONS).map(|id| facts(id as u32, "background", true));
+        let view = state.project(rows);
+        assert!(view.failed.is_some() && view.can_disconnect);
+        assert!(!view.can_reconnect);
+        assert_eq!(view.effect(SessionTabsAction::Reconnect), None);
+        state.close_index(0, MAX_CONNECTIONS);
+        assert!(
+            state
+                .project((0..MAX_CONNECTIONS - 1).map(|id| facts(id as u32, "background", true)))
+                .can_reconnect
+        );
+        assert_eq!(state.active_index(MAX_CONNECTIONS - 1), None);
     }
 }
