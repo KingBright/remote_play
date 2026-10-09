@@ -26,6 +26,33 @@ Cross-platform support must not mean lowering every backend to the slowest commo
 
 ## Current Core Abstractions
 
+Acceptance is tracked at [Runtime Smoke Checks](RUNTIME_SMOKE.md#current-four-platform-acceptance-entry)
+for Android, Silicon macOS, Windows and Linux. The shared contract is Session-v2
+connection/subscription identity, source IDs/revisions, capability negotiation,
+session/source command state and consistent failure/cancellation semantics. Source
+capability and permission errors must be explicit; an unavailable window is never
+an instruction to switch to a desktop or another application. The production GPUI
+model/Owner boundary owns native resources and checks the selected connection plus
+scope before dispatch, keeping late source replies from mutating another view.
+
+Platform adapters own capture/window enumeration and exact OS target metadata,
+native hardware codec/buffer import, input injection, audio devices and consent.
+Do not put OS permission checkboxes or native buffer conversions into the shared
+protocol/state model. Explicit unsupported capability is preferable to assuming
+all platforms grant equivalent operations.
+
+Current source capability gaps must remain visible: `host/src/service.rs` advertises
+independent window capture only on macOS; `host/src/capture_sources.rs` currently
+enumerates a main display on Windows/Linux. Android's
+`remote_client_bridge/src/publisher_bridge.rs` advertises `window_capture=false`
+and `max_subscriptions=1` per publisher connection; `ProjectionService.kt` owns
+MediaProjection consent and MediaCodec/AudioPlaybackCapture. A user's consent-selected
+projection is distinct from general OS application enumeration and simultaneous
+independent windows. These are source-inspection facts, not device acceptance or
+permission claims. Android MediaProjection/recording/input rights, macOS screen/
+Accessibility consent, Windows capture/input restrictions and Linux compositor/
+portal/input access must each be tested honestly at their platform boundary.
+
 `remote_core::traits` now contains the platform-facing contracts:
 
 - `VideoCapturer`, `VideoEncoder`, `VideoDecoder`, `VideoRenderer`

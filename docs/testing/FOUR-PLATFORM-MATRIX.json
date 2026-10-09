@@ -1,0 +1,1764 @@
+{
+  "schema": 1,
+  "scope": "Directed current product acceptance; inventory/capability facts do not imply executed stream acceptance.",
+  "observed_at_utc": "2026-10-09",
+  "inventory": {
+    "remotehosts_request_id": "req_17d4896850ff4b4e81d49f00cdf503e8",
+    "gateway_version": "0.10.27",
+    "agents_version": "0.10.25 (tool version, not RemotePlay version)",
+    "devices": {
+      "android": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+      "macos_silicon": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+      "windows": "cube (RemoteHosts offline)",
+      "linux": "HO5 (running remote-play-current.service)"
+    },
+    "mac_studio": {
+      "pid": 23896,
+      "path": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+      "version": "2.0.0",
+      "build": "20261004.80",
+      "sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+      "operation_id": "a9b35718-b78a-4899-b4dd-a304ab0d9be5",
+      "exit_code": 0
+    },
+    "ho5": {
+      "pid": 1520582,
+      "service": "remote-play-current.service",
+      "service_state": "active running",
+      "version": null,
+      "sha256": null,
+      "process_observation_operation": "6d749a3a-dabe-409d-92b5-dab7789d8d82",
+      "metadata_read_operation": "8b1900f6-f477-48d6-b721-908827d84989",
+      "metadata_read_exit_code": 1,
+      "metadata_error": "Permission denied /proc/1520582/exe",
+      "incorrect_unit_query": "remoteplay.service was absent; do not infer RemotePlay inactive from that query"
+    },
+    "android": {
+      "adb_devices_exit_code": 0,
+      "usb_state": "unauthorized",
+      "agent_online": false,
+      "no_consent_granted": true
+    },
+    "windows": {
+      "agent_online": false,
+      "running_app_version": null
+    }
+  },
+  "directions": [
+    {
+      "id": "cross_platform:android->macos_silicon",
+      "kind": "cross_platform",
+      "from": "android",
+      "to": "macos_silicon",
+      "producer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted.",
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:android->windows",
+      "kind": "cross_platform",
+      "from": "android",
+      "to": "windows",
+      "producer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted.",
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:android->linux",
+      "kind": "cross_platform",
+      "from": "android",
+      "to": "linux",
+      "producer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted.",
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:macos_silicon->android",
+      "kind": "cross_platform",
+      "from": "macos_silicon",
+      "to": "android",
+      "producer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_push": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:macos_silicon->windows",
+      "kind": "cross_platform",
+      "from": "macos_silicon",
+      "to": "windows",
+      "producer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "viewer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_push": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:macos_silicon->linux",
+      "kind": "cross_platform",
+      "from": "macos_silicon",
+      "to": "linux",
+      "producer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "viewer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_push": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:windows->android",
+      "kind": "cross_platform",
+      "from": "windows",
+      "to": "android",
+      "producer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged.",
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:windows->macos_silicon",
+      "kind": "cross_platform",
+      "from": "windows",
+      "to": "macos_silicon",
+      "producer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged.",
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:windows->linux",
+      "kind": "cross_platform",
+      "from": "windows",
+      "to": "linux",
+      "producer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged.",
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:linux->android",
+      "kind": "cross_platform",
+      "from": "linux",
+      "to": "android",
+      "producer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:linux->macos_silicon",
+      "kind": "cross_platform",
+      "from": "linux",
+      "to": "macos_silicon",
+      "producer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "cross_platform:linux->windows",
+      "kind": "cross_platform",
+      "from": "linux",
+      "to": "windows",
+      "producer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "same_platform:android->android",
+      "kind": "same_platform",
+      "from": "android",
+      "to": "android",
+      "producer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Android-Phone (RemoteHosts offline); USB device unauthorized",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Offline agent; adb devices exit 0 reports USB unauthorized. No MediaProjection consent or remote input grant inspected/granted."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "same_platform:macos_silicon->macos_silicon",
+      "kind": "same_platform",
+      "from": "macos_silicon",
+      "to": "macos_silicon",
+      "producer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "viewer": {
+        "device": "Mac-Studio (running installed app), MacBook-M2-Max (build machine)",
+        "version": "installed metadata 2.0.0/build 20261004.80; current candidate not deployed",
+        "artifact_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_push": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "same_platform:windows->windows",
+      "kind": "same_platform",
+      "from": "windows",
+      "to": "windows",
+      "producer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "cube (RemoteHosts offline)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "Authorized cube device offline; no executable/permissions/current version observation. Windows capture defaults and UU coexistence unchanged."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "same_platform:linux->linux",
+      "kind": "same_platform",
+      "from": "linux",
+      "to": "linux",
+      "producer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "viewer": {
+        "device": "HO5 (running remote-play-current.service)",
+        "version": null,
+        "artifact_sha256": null,
+        "renderer": null
+      },
+      "transport": {
+        "path": null,
+        "authenticated": null
+      },
+      "capture_source": {
+        "kind": null,
+        "source_id": null,
+        "process_id": null
+      },
+      "encode": {
+        "codec": null,
+        "backend": null
+      },
+      "decode": {
+        "codec": null,
+        "backend": null
+      },
+      "first_frame": {
+        "decoded": null,
+        "visible": null,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": null,
+        "decode_errors": null,
+        "elapsed_ms": null
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Playback, capture, mute and ownership require separate real evidence."
+      },
+      "input": {
+        "status": "not_tested",
+        "notes": "Protocol routing and real OS injection are separate."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "No current direction executed."
+      },
+      "result": "not_tested",
+      "evidence": [],
+      "blockers": [
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "single_application_capture": {
+          "status": "unsupported",
+          "notes": "Current source advertises window_capture=false; whole display/projection support is separate."
+        },
+        "multi_window_push": {
+          "status": "unsupported",
+          "notes": "Independent per-window sources not advertised by current publisher/capture source adapter."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "resource_release": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        }
+      }
+    },
+    {
+      "id": "loopback:synthetic-hevc->full-gpui",
+      "kind": "loopback",
+      "from": "macos_silicon",
+      "to": "macos_silicon",
+      "producer": {
+        "device": "isolated loopback peer in PID 64144",
+        "version": "Session-v2 fixture; source base d0d9271 plus compiled source hashes in evidence",
+        "artifact_sha256": "38c335539870c6c0f1f1833d0888c91d957f95d14aa7804042835a72e495ef9e",
+        "renderer": null
+      },
+      "viewer": {
+        "device": "local Silicon Mac, owned PID 64144",
+        "version": "2.0.0-alpha.8; source hashes in evidence",
+        "artifact_sha256": "38c335539870c6c0f1f1833d0888c91d957f95d14aa7804042835a72e495ef9e",
+        "renderer": "restored-original-gpui"
+      },
+      "transport": {
+        "path": "127.0.0.1 UDP; actual Session-v2 MAC handshake and encrypted media",
+        "authenticated": true
+      },
+      "capture_source": {
+        "kind": "generated HEVC; not OS/application capture",
+        "source_id": "MainDisplay -> Window(202), source_revision 1001",
+        "process_id": 64144
+      },
+      "encode": {
+        "codec": "HEVC",
+        "backend": "hevc_videotoolbox + explicit fixture-only HEVC metadata BSF"
+      },
+      "decode": {
+        "codec": "HEVC",
+        "backend": "product VideoToolbox -> production GPUI surface"
+      },
+      "first_frame": {
+        "decoded": true,
+        "visible": true,
+        "latency_ms": null
+      },
+      "continuous_frames": {
+        "decoded_count": 2682,
+        "decode_errors": 0,
+        "elapsed_ms": 160637
+      },
+      "audio": {
+        "status": "not_tested",
+        "notes": "Audio requested; fixture audio_owner=None and no audio packets. Audible playback unverified."
+      },
+      "input": {
+        "status": "partial",
+        "notes": "Input remained locked/ineligible; peer input event list stayed empty. Unlock/real OS injection unverified."
+      },
+      "reconnect": {
+        "status": "not_tested",
+        "notes": "Disconnect verified, restoration not executed before bounded expiry."
+      },
+      "result": "partial",
+      "evidence": [
+        "../reviews/2026-10-09/evidence/loopback-vui.json"
+      ],
+      "blockers": [
+        "Remaining real capture, concurrency, permissions and physical four-platform tests are separate."
+      ],
+      "core_regressions": {
+        "enumeration_identity": {
+          "status": "partial",
+          "notes": "Production menu lists explicit synthetic Window IDs; Window(202) accepted with revision 1001. No actual application identity/window enumeration."
+        },
+        "single_application_capture": {
+          "status": "not_tested",
+          "notes": "Synthetic peer does not establish actual application/window capture."
+        },
+        "multi_window_push": {
+          "status": "not_tested",
+          "notes": "Synthetic peer does not establish actual application/window capture."
+        },
+        "multi_window_pull": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "concurrent_isolation": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "move_resize_close": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "rapid_switch": {
+          "status": "not_tested",
+          "notes": "No executed current-candidate receipt."
+        },
+        "disconnect_duplicate_connect": {
+          "status": "partial",
+          "notes": "First Hello and Open response intentionally dropped; retries succeed. Formal Disconnect empties sessions/canvas. Reconnect/duplicate GUI action pending."
+        },
+        "resource_release": {
+          "status": "partial",
+          "notes": "Disconnected session count zero and frame absent; process exits 0 after 180 seconds. No device-wide resource measurement."
+        }
+      },
+      "synthetic_source": true
+    }
+  ]
+}

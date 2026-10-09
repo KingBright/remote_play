@@ -6,6 +6,24 @@
 mod peer;
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let result = run();
+    if let Err(error) = &result {
+        let path = format!(
+            "/tmp/remoteplay-product-loopback-{}/startup-error.json",
+            std::process::id()
+        );
+        let _ = std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "pid":std::process::id(),"error":error.to_string()
+            }))
+            .unwrap(),
+        );
+    }
+    result
+}
+#[cfg(target_os = "macos")]
+fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use remote_core::{discovery::*, mesh::MeshConfig};
     use remote_play_app::{UnifiedRuntimeHandle, UnifiedServiceOwner, UnifiedServiceOwnerConfig};
     use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -14,6 +32,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::id()
     ));
     std::fs::create_dir(&root)?;
+    if std::env::args().nth(1).as_deref() == Some("--preflight") {
+        peer::preflight(&root)?;
+        println!("PRODUCT_LOOPBACK_PREFLIGHT_PASSED root={}", root.display());
+        return Ok(());
+    }
     let profile = root.join("mesh");
     // Set only task-specific configuration before creating any runtime threads.
     unsafe {

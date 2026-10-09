@@ -132,6 +132,10 @@ fn clip(root: &Path, color: &str) -> Result<Vec<u8>, Error> {
             "1",
             "-b:v",
             "2500k",
+            // VideoToolbox's setter alone does not reliably write all VUI fields.
+            // This is generated BT.709 test content, never inferred capture metadata.
+            "-bsf:v",
+            "hevc_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0",
             "-f",
             "hevc",
         ])
@@ -175,6 +179,95 @@ fn clip(root: &Path, color: &str) -> Result<Vec<u8>, Error> {
         }))?,
     )?;
     Ok(bytes)
+}
+
+/// No GUI, network, installed profile, or capture. Verify the actual bitstream
+/// with the production SPS reader and a second parser, then decode one frame.
+pub fn preflight(root: &Path) -> Result<(), Error> {
+    let mut reports = Vec::new();
+    for color in ["blue", "green"] {
+        let bytes = clip(root, color)?;
+        let input = root.join(format!("{color}.hevc"));
+        let probe = root.join(format!("probe-{color}.json"));
+        let mut command = std::process::Command::new("/opt/homebrew/bin/ffprobe");
+        command.args(["-v", "error", "-show_entries",
+            "stream=codec_name,width,height,color_range,color_space,color_transfer,color_primaries",
+            "-of", "json"]).arg(&input);
+        bounded_command(command, &probe, &root.join(format!("probe-{color}.log")))?;
+        let parsed: serde_json::Value = serde_json::from_slice(&std::fs::read(&probe)?)?;
+        let stream = &parsed["streams"][0];
+        if stream["width"] != 640
+            || stream["height"] != 360
+            || stream["color_range"] != "tv"
+            || stream["color_space"] != "bt709"
+            || stream["color_transfer"] != "bt709"
+            || stream["color_primaries"] != "bt709"
+        {
+            return Err("independent SPS/VUI parser rejected generated BT.709 fixture".into());
+        }
+        let decoded = root.join(format!("decoded-{color}.framemd5"));
+        let mut command = std::process::Command::new("/opt/homebrew/bin/ffmpeg");
+        command
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&input)
+            .args(["-frames:v", "1", "-f", "framemd5"])
+            .arg(&decoded);
+        bounded_command(
+            command,
+            &root.join(format!("decode-{color}.stdout")),
+            &root.join(format!("decode-{color}.log")),
+        )?;
+        let checksum = std::fs::read_to_string(&decoded)?;
+        let frames: Vec<_> = checksum
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .collect();
+        if frames.len() != 1 || !frames[0].contains("345600") {
+            return Err(
+                "independent decoder did not return exactly one 640x360 YUV420 frame".into(),
+            );
+        }
+        reports.push(
+            serde_json::json!({"color":color,"encoded_bytes":bytes.len(),
+            "independent_bitstream_parser":stream,"decoded_frame_checksum":frames[0],
+            "production_sps_reader_receipt":root.join(format!("color-{color}.json")),
+            "decoder":"FFmpeg preflight; product VideoToolbox decode not yet exercised"}),
+        );
+    }
+    std::fs::write(
+        root.join("preflight.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "passed":true,"generated_content":true,"gui_started":false,"network_started":false,
+            "real_screen_capture":false,"reports":reports
+        }))?,
+    )?;
+    Ok(())
+}
+
+fn bounded_command(
+    mut command: std::process::Command,
+    output: &Path,
+    error: &Path,
+) -> Result<(), Error> {
+    command
+        .stdout(std::fs::File::create(output)?)
+        .stderr(std::fs::File::create(error)?);
+    let mut child = command.spawn()?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                return Err(format!("preflight command failed: {}", error.display()).into());
+            }
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(12) {
+            child.kill()?;
+            child.wait()?;
+            return Err("owned preflight command exceeded 12 seconds".into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 pub async fn start(root: &Path, network: &str) -> Result<Fixture, Error> {
     let location = root.to_owned();

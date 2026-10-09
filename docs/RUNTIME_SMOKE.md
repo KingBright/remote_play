@@ -1,5 +1,64 @@
 # Runtime Smoke Checks
 
+## Current Four-Platform Acceptance Entry
+
+Changes to capture/publish/pull, codecs, source selection or end-to-end behavior
+must use [the directed acceptance matrix](testing/FOUR-PLATFORM-MATRIX.json).
+It has twelve cross-platform directions (capture/publisher → viewer), four
+same-platform rows and a separate synthetic loopback row. Current device versions,
+access blockers and unsupported source capabilities are recorded separately from
+executed acceptance. A source list, decoded frame and visible frame are distinct
+claims; source hashes must be paired with the compiled artifact and actual process.
+
+```bash
+python3 scripts/check_platform_matrix.py
+python3 scripts/check_platform_matrix.py --require-cross-platform
+```
+
+The first command checks supplied record consistency; the second exits 1 until
+all twelve directions have complete acceptance evidence. Neither inspects devices,
+independently verifies a screenshot/performance report, nor authorizes deployment.
+Unknown, failed and unsupported are separate results. In particular, unsupported
+window capture cannot silently pass as full functional preservation.
+
+The compact [current experiment record](reviews/2026-10-09/PRODUCT-LOOPBACK-CHECKPOINT.md#follow-up-vui-fix-and-real-product-observations)
+links the raw small receipts, exact source/artifact hashes, environment, method,
+observations, limitations and reproduction commands. This is the repository entry
+for the current experiment, without copying targets, binaries or all logs.
+
+Core regression cases, with minimal sufficient real sources on each available
+platform, are mandatory:
+
+- Enumerate applications/windows and bind the exact source ID, owning process,
+  connection and source revision; reject disappeared/ambiguous targets.
+- Capture a selected application's actual window; move, resize and close it.
+  Permission failure or missing window must not redirect capture/input to a desktop
+  or another same-titled window.
+- Publish and pull at least two distinct windows concurrently where supported;
+  verify different target identities/content, input isolation, active audio ownership,
+  cancellation and complete release of subscriptions/native resources.
+- Switch sources quickly with reordered/late replies, interrupt the connection,
+  repeat connect/retry actions, and exercise timeout/recovery. No stale response may
+  resurrect a dismissed view or deliver input to another source.
+- Verify first visible frame, advancing/continuous content, audible audio/mute,
+  actual intended OS input, and resume/disconnect behavior independently. Collect
+  sufficient negative evidence for locked, paused, stale-revision and closed sources.
+
+Use existing `app/examples/window_scoped_acceptance.rs` with
+`scripts/acceptance/WindowControlFixture.swift` for controlled real macOS windows;
+the current shared `scripts/tests/run_gui_slice_regressions.py` and production
+owner/component tests cover state/dispatch invariants only. Existing real-capture
+fixtures require an explicit owned source/profile and existing OS consent; their
+presence or earlier historical result does not establish current-candidate coverage.
+The synthetic `scripts/run_product_loopback.py` below does not replace these cases.
+
+For controlled loopback preflight/window runs, build only the explicit example in
+the already configured target, then use `scripts/run_product_loopback.py preflight`
+and `window` with `--binary`; see the experiment record for the exact commands.
+Every launched fixture has a hard owned-process deadline and saved output/exit.
+No automatic permission approval, TCC changes, replacement identity, capture-default
+change, unreviewed installation or simultaneous duplicate runtime is permitted.
+
 ## Headless Data-Plane Media And File Smoke
 
 Use this check when changing the unified data plane, scheduler, media adapter, or file-transfer runtime:

@@ -1,0 +1,501 @@
+{
+  "hypothesis": "Explicit HEVC VUI fixes the generated fixture startup blocker without weakening product validation, allowing production transport, decoder and GPUI presentation to be exercised.",
+  "source_base_commit": "d0d927129a20f841219ddc4fa83e89d871c59518",
+  "environment": {
+    "os": "macOS-26.5-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "ffmpeg": "8.0.1",
+    "video_encoder": "hevc_videotoolbox",
+    "viewer_decoder": "product VideoToolbox",
+    "gui": "original GPUI/Ely",
+    "transport": "authenticated Session-v2 over loopback UDP"
+  },
+  "build": {
+    "command": [
+      "/Users/jinliang/.cargo/bin/cargo",
+      "build",
+      "--offline",
+      "--locked",
+      "--target-dir",
+      "/Users/jinliang/rust-target",
+      "-p",
+      "remote_play_app",
+      "--example",
+      "product_loopback_e2e"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 16.099,
+    "stop_reason": null,
+    "source_hashes": {
+      "app/examples/product_loopback_e2e.rs": "1126c4b15378627fd788e1ab59602f281ecc70ce378ce472654550a5f9acb50e",
+      "app/examples/support/product_loopback_peer.rs": "54c235b92ac3a92d6004693475e05b117d4dff32a4d295993dc91735350c8dc4",
+      "app/src/lib.rs": "e3a5bed835ce17c07b45cba0b6ebfddd85b0e6af3fc56a45dc50e8678852bc4c",
+      "remote_core/src/lib.rs": "70dc79e8b2531570c9201addcbcad356f97a98ff2786dd294efc58dd630829a6",
+      "remote_core/src/view_commands.rs": "770b813888f2b822166047c6ab66dc5ad8b14c25505ef6f991762c1d7848d65c",
+      "remote_core/src/session_tabs.rs": "c0cbac59d4325b01602f341ac3795c2b5e7969d174fe0e32a1a70dd0f3094fb5",
+      "remote_core/src/stream_settings.rs": "cd936f5e4642a7d42ea2bc58b1083e0a9c5637d5e514577db6fdf23fffeb5aff",
+      "app/src/desktop/original_owner.rs": "bd5c9463285bd66712b636c0e2be510b1462cfb455da78abcd4019b18a24eead",
+      "app/src/restored_ui.rs": "12f56fc51eb4e1b2badf02b5cf793ea1d323203e723daf2765ccb3ae65c32c91",
+      "app/src/desktop/mod.rs": "f8781671c5c93965fdacd598f39430648c96f814792e2ce7a7236a27bc642950",
+      "app/src/desktop/session_recovery.rs": "1a74e3a274a1bf2cf1a49442c8f582216ebe8c0042766b01e3b83db3fe7b1a32",
+      "app/examples/session_recovery_offline_smoke.rs": "df7644d4f9382e0f50143c3afd761da3c64356a0eb1d7cd196862dd06479fd74",
+      "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+      "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+      ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c",
+      "app/Cargo.toml": "761ca4ab21298950752230127dd3e7b7676b9ae3d00ba083084fb0e34afc8637"
+    },
+    "sources_stable": true,
+    "target_reused": "/Users/jinliang/rust-target",
+    "log": "/tmp/remoteplay-product-loopback-vui-build.log",
+    "gui_started": false,
+    "real_network_started": false,
+    "cleanup": false,
+    "free_bytes": 108240396288
+  },
+  "preflight": {
+    "mode": "preflight",
+    "pid": 61172,
+    "head": "d0d927129a20f841219ddc4fa83e89d871c59518",
+    "fixture_root": "/tmp/remoteplay-product-loopback-61172",
+    "log": "/var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T/remoteplay-product-preflight-ihzyy1uf/process.log",
+    "binary": "/Users/jinliang/rust-target/debug/examples/product_loopback_e2e",
+    "binary_sha256": "38c335539870c6c0f1f1833d0888c91d957f95d14aa7804042835a72e495ef9e",
+    "source_hashes": {
+      "app/examples/product_loopback_e2e.rs": "1126c4b15378627fd788e1ab59602f281ecc70ce378ce472654550a5f9acb50e",
+      "app/examples/support/product_loopback_peer.rs": "54c235b92ac3a92d6004693475e05b117d4dff32a4d295993dc91735350c8dc4",
+      "app/src/restored_ui.rs": "12f56fc51eb4e1b2badf02b5cf793ea1d323203e723daf2765ccb3ae65c32c91",
+      "app/src/desktop/original_owner.rs": "bd5c9463285bd66712b636c0e2be510b1462cfb455da78abcd4019b18a24eead",
+      "app/src/lib.rs": "e3a5bed835ce17c07b45cba0b6ebfddd85b0e6af3fc56a45dc50e8678852bc4c",
+      "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+      "scripts/run_product_loopback.py": "ee54519ad18128880bebc29ac039f4e1025f651fc907234f63fcafdc38e46a74"
+    },
+    "deadline_seconds": 45,
+    "generated_content": true,
+    "full_product_acceptance": false,
+    "exit_code": 0,
+    "stop_reason": null,
+    "elapsed_seconds": 1.683,
+    "sources_stable": true,
+    "process_exited": true,
+    "log_sha256": "ece3a20cfbac015e08b6b65d9f445de77d70fda9823dc31ede2116544bae64cc",
+    "free_bytes": 108226498560,
+    "preflight": {
+      "passed": true,
+      "generated_content": true,
+      "gui_started": false,
+      "network_started": false,
+      "real_screen_capture": false,
+      "reports": [
+        {
+          "color": "blue",
+          "encoded_bytes": 350,
+          "independent_bitstream_parser": {
+            "codec_name": "hevc",
+            "width": 640,
+            "height": 360,
+            "color_range": "tv",
+            "color_space": "bt709",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709"
+          },
+          "decoded_frame_checksum": "0,          0,          0,        1,   345600, 087327ad018b94222f6030a06f198324",
+          "production_sps_reader_receipt": "/tmp/remoteplay-product-loopback-61172/color-blue.json",
+          "decoder": "FFmpeg preflight; product VideoToolbox decode not yet exercised"
+        },
+        {
+          "color": "green",
+          "encoded_bytes": 350,
+          "independent_bitstream_parser": {
+            "codec_name": "hevc",
+            "width": 640,
+            "height": 360,
+            "color_range": "tv",
+            "color_space": "bt709",
+            "color_transfer": "bt709",
+            "color_primaries": "bt709"
+          },
+          "decoded_frame_checksum": "0,          0,          0,        1,   345600, 104dec42e30dca5d86a5915d728bd02b",
+          "production_sps_reader_receipt": "/tmp/remoteplay-product-loopback-61172/color-green.json",
+          "decoder": "FFmpeg preflight; product VideoToolbox decode not yet exercised"
+        }
+      ]
+    }
+  },
+  "window_run": {
+    "mode": "window",
+    "pid": 64144,
+    "head": "d0d927129a20f841219ddc4fa83e89d871c59518",
+    "fixture_root": "/tmp/remoteplay-product-loopback-64144",
+    "log": "/var/folders/q_/0bykfl6x79zgp4fkvht8ddmc0000gn/T/remoteplay-product-window-w1h03ray/process.log",
+    "binary": "/Users/jinliang/rust-target/debug/examples/product_loopback_e2e",
+    "launch_path": "/tmp/RemotePlay Product Loopback.app/Contents/MacOS/product_loopback_e2e",
+    "binary_sha256": "38c335539870c6c0f1f1833d0888c91d957f95d14aa7804042835a72e495ef9e",
+    "source_hashes": {
+      "app/examples/product_loopback_e2e.rs": "1126c4b15378627fd788e1ab59602f281ecc70ce378ce472654550a5f9acb50e",
+      "app/examples/support/product_loopback_peer.rs": "54c235b92ac3a92d6004693475e05b117d4dff32a4d295993dc91735350c8dc4",
+      "app/src/restored_ui.rs": "12f56fc51eb4e1b2badf02b5cf793ea1d323203e723daf2765ccb3ae65c32c91",
+      "app/src/desktop/original_owner.rs": "bd5c9463285bd66712b636c0e2be510b1462cfb455da78abcd4019b18a24eead",
+      "app/src/lib.rs": "e3a5bed835ce17c07b45cba0b6ebfddd85b0e6af3fc56a45dc50e8678852bc4c",
+      "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+      "scripts/run_product_loopback.py": "683314876d1c6db8eebb45def9bab15d948e5747aeb664e8dbf3844d5e7d0bcf"
+    },
+    "deadline_seconds": 210,
+    "generated_content": true,
+    "full_product_acceptance": false,
+    "exit_code": 0,
+    "stop_reason": null,
+    "elapsed_seconds": 181.36,
+    "sources_stable": true,
+    "process_exited": true,
+    "log_sha256": "63ac0c05142481b2afcc5d7985c2f1beede8afe431b54f3472dd0d9aeddbdd22",
+    "free_bytes": 108051853312
+  },
+  "final_product_receipt": {
+    "version": "2.0.0-alpha.8",
+    "renderer": "restored-original-gpui",
+    "render_calls": 3132,
+    "elapsed_ms": 180091,
+    "state": {
+      "pending": 0,
+      "sessions": []
+    },
+    "frame_boundary": "gpui_scene_submission",
+    "actual_display_completion_measured": false,
+    "screen_capture_started_locally": false,
+    "input_injected": false,
+    "full_acceptance": false
+  },
+  "observations": {
+    "01-blue-gui.progress": {
+      "elapsed_ms": 67005,
+      "render_calls": 980,
+      "status": "View only: click Enable control, then click the remote picture",
+      "drawer_open": false,
+      "source_menu_open": false,
+      "input_locked": true,
+      "current_frame": {
+        "width": 640,
+        "height": 360
+      },
+      "can_reconnect": true,
+      "state": {
+        "pending": 0,
+        "sessions": [
+          {
+            "connected": true,
+            "peer_responsive": true,
+            "supports_input": true,
+            "input_eligible": false,
+            "request_audio": true,
+            "volume": 100,
+            "muted": false,
+            "paused": false,
+            "background_paused": false,
+            "activity_pending": false,
+            "decoder_status": "",
+            "decoder_needs_keyframe": false,
+            "native_frame": null,
+            "device_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "name": "Protocol video peer",
+            "connection_id": 2009339053,
+            "target": "127.0.0.1:59363",
+            "route": "Lan",
+            "source": "MainDisplay",
+            "decoded_frames": 810,
+            "decode_errors": 0,
+            "confirmed": true,
+            "scene_submitted_frame": true,
+            "input_locked": true,
+            "error": "",
+            "video_error": null,
+            "files_listed": 0,
+            "transfers": 0
+          }
+        ]
+      }
+    },
+    "01-blue-peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "elapsed_ms": 67851,
+      "hello_count": 2,
+      "open_count": 2,
+      "packets": 810,
+      "fault_command": 0,
+      "input": [],
+      "events": [
+        {
+          "at_ms": 26448,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27201,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "Subscribe(SubscriptionRequest { id: 1, source: MainDisplay, width: 640, height: 360, fps: 20, bitrate_kbps: 2500, audio: true })"
+        },
+        {
+          "at_ms": 27683,
+          "command": "ListSources { request_id: 900001 }"
+        }
+      ],
+      "connections": [
+        {
+          "connection_id": 2009339053,
+          "subscriptions": [
+            {
+              "id": 1,
+              "source": "MainDisplay",
+              "source_revision": 0,
+              "video": true,
+              "audio": true
+            }
+          ]
+        }
+      ]
+    },
+    "02-green-gui.progress": {
+      "elapsed_ms": 160637,
+      "render_calls": 2868,
+      "status": "View only: click Enable control, then click the remote picture",
+      "drawer_open": false,
+      "source_menu_open": false,
+      "input_locked": true,
+      "current_frame": {
+        "width": 640,
+        "height": 360
+      },
+      "can_reconnect": true,
+      "state": {
+        "pending": 0,
+        "sessions": [
+          {
+            "connected": true,
+            "peer_responsive": true,
+            "supports_input": true,
+            "input_eligible": false,
+            "request_audio": true,
+            "volume": 100,
+            "muted": false,
+            "paused": false,
+            "background_paused": false,
+            "activity_pending": false,
+            "decoder_status": "",
+            "decoder_needs_keyframe": false,
+            "native_frame": null,
+            "device_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "name": "Protocol video peer",
+            "connection_id": 2009339053,
+            "target": "127.0.0.1:59363",
+            "route": "Lan",
+            "source": "Window(202)",
+            "decoded_frames": 2682,
+            "decode_errors": 0,
+            "confirmed": true,
+            "scene_submitted_frame": true,
+            "input_locked": true,
+            "error": "",
+            "video_error": null,
+            "files_listed": 0,
+            "transfers": 0
+          }
+        ]
+      }
+    },
+    "02-green-peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "elapsed_ms": 161484,
+      "hello_count": 2,
+      "open_count": 2,
+      "packets": 2682,
+      "fault_command": 0,
+      "input": [],
+      "events": [
+        {
+          "at_ms": 26448,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27201,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "Subscribe(SubscriptionRequest { id: 1, source: MainDisplay, width: 640, height: 360, fps: 20, bitrate_kbps: 2500, audio: true })"
+        },
+        {
+          "at_ms": 27683,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 131332,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 151949,
+          "command": "SwitchSource { id: 1, request_id: 1001, source: Window(202) }"
+        }
+      ],
+      "connections": [
+        {
+          "connection_id": 2009339053,
+          "subscriptions": [
+            {
+              "id": 1,
+              "source": "Window(202)",
+              "source_revision": 1001,
+              "video": true,
+              "audio": true
+            }
+          ]
+        }
+      ]
+    },
+    "03-disconnected-gui.progress": {
+      "elapsed_ms": 178648,
+      "render_calls": 3119,
+      "status": "Ready",
+      "drawer_open": true,
+      "source_menu_open": false,
+      "input_locked": true,
+      "current_frame": null,
+      "can_reconnect": false,
+      "state": {
+        "pending": 0,
+        "sessions": []
+      }
+    },
+    "03-disconnected-peer-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+      "elapsed_ms": 179551,
+      "hello_count": 2,
+      "open_count": 2,
+      "packets": 2833,
+      "fault_command": 0,
+      "input": [],
+      "events": [
+        {
+          "at_ms": 26448,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27201,
+          "command": "Open { connection_id: 2009339053, version: 2 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 27380,
+          "command": "Subscribe(SubscriptionRequest { id: 1, source: MainDisplay, width: 640, height: 360, fps: 20, bitrate_kbps: 2500, audio: true })"
+        },
+        {
+          "at_ms": 27683,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 131332,
+          "command": "ListSources { request_id: 900001 }"
+        },
+        {
+          "at_ms": 151949,
+          "command": "SwitchSource { id: 1, request_id: 1001, source: Window(202) }"
+        },
+        {
+          "at_ms": 169031,
+          "command": "Unsubscribe { id: 1 }"
+        },
+        {
+          "at_ms": 169031,
+          "command": "Close { connection_id: 2009339053 }"
+        }
+      ],
+      "connections": []
+    }
+  },
+  "samples": {
+    "blue": {
+      "sha256": "c6ea47d118650c23f39aafd96821629935785cf8b826d42d887ee94d3685066c",
+      "production_sps": {
+        "matrix": 1,
+        "primaries": 1,
+        "transfer": 1,
+        "full_range": false,
+        "coded": [
+          640,
+          368
+        ],
+        "visible": [
+          0,
+          0,
+          640,
+          360
+        ],
+        "encoded_bytes": 350,
+        "encoder": "hevc_videotoolbox"
+      }
+    },
+    "green": {
+      "sha256": "de5364b05acf104cbdab54a544228861dc8e2b656c79434a956b96bacfe463a8",
+      "production_sps": {
+        "matrix": 1,
+        "primaries": 1,
+        "transfer": 1,
+        "full_range": false,
+        "coded": [
+          640,
+          368
+        ],
+        "visible": [
+          0,
+          0,
+          640,
+          360
+        ],
+        "encoded_bytes": 350,
+        "encoder": "hevc_videotoolbox"
+      }
+    }
+  },
+  "log_excerpts": {
+    "build": {
+      "sha256": "5dfa0074a061214186321fa1d2dcf3a8ed4762348b52ceefdf59283f113965a3",
+      "full_bytes": 9724,
+      "tail": "nput(&mut self, event: InputEvent) {\n    |            ^^^^^\n\nwarning: function `video_failure_guidance` is never used\n   --> app/src/desktop/model.rs:732:8\n    |\n732 | pub fn video_failure_guidance(reason: &str) -> &'static str {\n    |        ^^^^^^^^^^^^^^^^^^^^^^\n\nwarning: function `discovery_scope_label` is never used\n    --> app/src/restored_ui.rs:4393:4\n     |\n4393 | fn discovery_scope_label(scope: remote_core::discovery::DiscoveryScope) -> &'static str {\n     |    ^^^^^^^^^^^^^^^^^^^^^\n\nwarning: method `clamp_offset` is never used\n  --> app/src/product_components/text_edit_state.rs:18:12\n   |\n17 | impl TextEditState {\n   | ------------------ method in this implementation\n18 |     pub fn clamp_offset(&self, offset: usize) -> usize {\n   |            ^^^^^^^^^^^^\n\nwarning: method `selection_reversed` is never used\n  --> app/src/product_components/text_edit_state.rs:47:12\n   |\n34 | impl TextEditState {\n   | ------------------ method in this implementation\n...\n47 |     pub fn selection_reversed(&self) -> bool {\n   |            ^^^^^^^^^^^^^^^^^^\n\nwarning: method `content` is never used\n   --> app/src/product_components/text_input.rs:152:12\n    |\n 84 | impl TextInputState {\n    | ------------------- method in this implementation\n...\n152 |     pub fn content(&self) -> &SharedString {\n    |            ^^^^^^^\n\nwarning: `remote_play_app` (lib) generated 9 warnings (run `cargo fix --lib -p remote_play_app` to apply 1 suggestion)\n   Compiling remote_play_app v2.0.0-alpha.8 (/Users/jinliang/remote_play/app)\n    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.80s\n"
+    },
+    "preflight": {
+      "sha256": "ece3a20cfbac015e08b6b65d9f445de77d70fda9823dc31ede2116544bae64cc",
+      "full_bytes": 78,
+      "tail": "PRODUCT_LOOPBACK_PREFLIGHT_PASSED root=/tmp/remoteplay-product-loopback-61172\n"
+    },
+    "window": {
+      "sha256": "63ac0c05142481b2afcc5d7985c2f1beede8afe431b54f3472dd0d9aeddbdd22",
+      "full_bytes": 434,
+      "tail": "PRODUCT_LOOPBACK_READY root=/tmp/remoteplay-product-loopback-64144 renderer=restored-original-gpui\nRESTORED_NATIVE_GUI_TEST {\"version\":\"2.0.0-alpha.8\",\"renderer\":\"restored-original-gpui\",\"render_calls\":3132,\"elapsed_ms\":180091,\"state\":{\"pending\":0,\"sessions\":[]},\"frame_boundary\":\"gpui_scene_submission\",\"actual_display_completion_measured\":false,\"screen_capture_started_locally\":false,\"input_injected\":false,\"full_acceptance\":false}\n"
+    }
+  },
+  "native_visual_evidence": {
+    "storage": "CUA screenshots in this task tool trace only; no screenshot file exported",
+    "observed": [
+      "actual blue canvas after connection",
+      "Apps catalogue with synthetic blue/green/timeout entries",
+      "actual green canvas after Window(202) selection",
+      "Ready device drawer with empty canvas after Disconnect"
+    ],
+    "image_file_sha256": null
+  },
+  "limitations": [
+    "generated content is not physical screen/application capture",
+    "scene submission is not scanout timing",
+    "no audible audio/OS input injection measured",
+    "reconnect, rapid switching, source timeout, concurrent multi-window not executed",
+    "180-second bounded run is not long-duration acceptance"
+  ]
+}
