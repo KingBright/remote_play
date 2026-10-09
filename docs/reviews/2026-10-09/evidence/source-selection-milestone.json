@@ -42,7 +42,7 @@
       "log": "/tmp/remoteplay-source-selection-app-tests.log",
       "log_sha256": "5dc1fc5fa3b1c05504256977b45a0e294beb528c518b97900db6448629ded65a"
     },
-    "physical": "not_run_for_this_candidate",
+    "physical": "two bounded signed staged-product runs recorded separately; ignored Rust physical tests still not run",
     "passed_existing_suites": "not repeated; no Python code changed in this fix"
   },
   "build": {
@@ -117,33 +117,58 @@
     "permission_requests_made": false
   },
   "remote_candidate_validation": {
-    "state": "blocked_before_upload",
-    "requested_destination": "Mac Studio /Users/jinliang/workspace/.rp-source-selection-20261009",
-    "requested_workspace_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196:60ae9a54-29a8-46bc-b71d-a91193e00c35",
-    "blocked_action": "Remote Hosts file_upload of the signed proprietary candidate package",
-    "automatic_approval_review": "rejected",
-    "review_reason": "Sensitive egress of proprietary compiled package; destination and disclosure not explicitly authorized in trusted user messages",
-    "bypassed": false,
-    "explicit_approval_question_presented": true,
-    "response_received": false,
-    "post_rejection_workspace_observation": {
-      "operation_id": "725466e9-b026-4054-866c-c945a08129bd",
-      "active_terminals": 0,
-      "retained_transfers": 0,
-      "active_transfers": 0
+    "state": "bounded_candidate_decode_scene_tests_complete",
+    "initial_rejection_history": {
+      "state": "blocked_before_upload",
+      "requested_destination": "Mac Studio /Users/jinliang/workspace/.rp-source-selection-20261009",
+      "requested_workspace_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196:60ae9a54-29a8-46bc-b71d-a91193e00c35",
+      "blocked_action": "Remote Hosts file_upload of the signed proprietary candidate package",
+      "automatic_approval_review": "rejected",
+      "review_reason": "Sensitive egress of proprietary compiled package; destination and disclosure not explicitly authorized in trusted user messages",
+      "bypassed": false,
+      "explicit_approval_question_presented": true,
+      "response_received": false,
+      "post_rejection_workspace_observation": {
+        "operation_id": "725466e9-b026-4054-866c-c945a08129bd",
+        "active_terminals": 0,
+        "retained_transfers": 0,
+        "active_transfers": 0
+      },
+      "candidate_started_on_studio": false,
+      "new_ho5_build": false,
+      "installer_apply": false,
+      "installed_apps_changed": false,
+      "launch_agents_or_services_changed_in_this_fix_phase": false
     },
-    "candidate_started_on_studio": false,
+    "authorization_evidence_received": true,
+    "authorization_source": "Parent delegation supplied prior human cross-device-test/deployment instructions and explicitly authorized one exact upload retry",
+    "package_upload": {
+      "operation_id": "769075c8-9a50-4a4c-8968-8035e4399d95",
+      "state": "completed",
+      "path": ".rp-source-selection-20261009/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.205212.zip",
+      "sha256": "f3e1716d6ca30d2411d4c4daa638f9ed359a1bfa47d1463d0a973f03bfbcc729",
+      "size_bytes": 8599856,
+      "original_rejected_call_retry_count": 1
+    },
+    "candidate_started_on_studio": true,
     "new_ho5_build": false,
     "installer_apply": false,
     "installed_apps_changed": false,
-    "launch_agents_or_services_changed_in_this_fix_phase": false
+    "launch_agent_file_changed": false,
+    "studio_service_temporarily_stopped_and_restored": true,
+    "ho5_service_changed": false,
+    "no_unknown_external_command_replayed": true
   },
   "acceptance": {
+    "source_selection": "passed_on_actual_catalog",
+    "x11_capture_stream_decode_scene": "passed_for_two_bounded_runs",
+    "minimum_thirty_second_decode_scene_interval": "observed_in_both_runs",
+    "process_level_disconnect_reconnect": "observed_new_allocation_and_recapture",
+    "same_process_reconnect": "not_tested",
+    "complete_wayland_desktop_capture": "not_verified",
+    "visible_first_frame": "not_measured",
+    "native_display_completion": "not_measured",
     "visual": "not_evaluated",
-    "first_visible_frame": "not_measured",
-    "native_presentation": "not_measured",
-    "sustained_stream": "not_run",
-    "disconnect_recovery": "not_run",
     "input": "not_tested",
     "audio": "not_tested",
     "installed": false,
@@ -158,5 +183,2968 @@
     "push": false,
     "new_target": false,
     "source_repository_copied": false
+  },
+  "actual_bounded_runs": {
+    "schema": 1,
+    "scope": "signed staged candidate source-selection test; real visible Wayland screen acceptance remains unmeasured",
+    "source_commit": "80de0721cbd256b5673335569b0b43e0d9a9e7b8",
+    "package_upload": {
+      "operation_id": "769075c8-9a50-4a4c-8968-8035e4399d95",
+      "state": "completed",
+      "path": ".rp-source-selection-20261009/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.205212.zip",
+      "sha256": "f3e1716d6ca30d2411d4c4daa638f9ed359a1bfa47d1463d0a973f03bfbcc729",
+      "size_bytes": 8599856,
+      "original_rejected_call_retry_count": 1
+    },
+    "helper_uploads": {
+      "installer": "a64a166f-e6ba-4866-8aef-51e631615841",
+      "guard": "aaaba2c4-6d07-402b-b1cf-aad185c4455e",
+      "policy": "b0bfba6c-0af0-478c-b62c-01042e5392fc",
+      "guard_original_transfer_resumed_once": true
+    },
+    "preparation": {
+      "operation_id": "f3883889-48b2-4996-a77c-9ea3e92f264c",
+      "remote_path": ".rp-source-selection-20261009/staging-plan.json",
+      "sha256": "b7fa3205e42b16d3e156e919a905498a5dfa16e28818db8412676415a39e1157",
+      "receipt": {
+        "recorded_at": "2026-10-09T21:06:21.306454+00:00",
+        "installer_plan": {
+          "action": "compatible_upgrade",
+          "target": "/Users/jinliang/Applications/RemotePlay.app",
+          "previous": {
+            "version": "2.0.0-alpha.8",
+            "build": "20261004.80",
+            "bundle_id": "com.remoteplay.unified",
+            "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+            "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+            "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+            "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+            "signature_verified": true,
+            "notarization_verified": false
+          },
+          "candidate": {
+            "version": "2.0.0-alpha.8",
+            "build": "20261009.205212",
+            "bundle_id": "com.remoteplay.unified",
+            "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+            "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+            "executable_sha256": "13345e66c9499ece95a7ea52dca44dff26cbd4cb949115d67f24465bf416193f",
+            "info_sha256": "93df1f652855414bdd9f34e820cb97061d388963e0541abe825226061e8a7a97",
+            "signature_verified": true,
+            "notarization_verified": false,
+            "archive_sha256": "f3e1716d6ca30d2411d4c4daa638f9ed359a1bfa47d1463d0a973f03bfbcc729",
+            "size_bytes": 8599856
+          },
+          "will_restart_only_remoteplay": true,
+          "permissions_modified": false,
+          "capture_health": "not_tested_by_installer",
+          "applied": false,
+          "system_mesh": {
+            "domain": "system",
+            "label": "com.remoteplay.mesh",
+            "management": "not_managed_by_user_installer",
+            "status": "not_loaded",
+            "loaded": false,
+            "running": false,
+            "pid": null
+          },
+          "apply_blockers": []
+        },
+        "candidate_app": "/Users/jinliang/workspace/.rp-source-selection-20261009/candidate/RemotePlay.app",
+        "candidate_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261009.205212",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "13345e66c9499ece95a7ea52dca44dff26cbd4cb949115d67f24465bf416193f",
+          "info_sha256": "93df1f652855414bdd9f34e820cb97061d388963e0541abe825226061e8a7a97",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "rollback_app": "/Users/jinliang/workspace/.rp-source-selection-20261009/rollback/RemotePlay.app",
+        "rollback_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "product_info": {
+          "schema": 1,
+          "product": "RemotePlay",
+          "version": "2.0.0-alpha.8",
+          "platform": "macos",
+          "architecture": "aarch64",
+          "default_gui": "restored-original-gpui",
+          "original_gui_compiled": true,
+          "native_video_compiled": true
+        },
+        "service_before": {
+          "loaded": true,
+          "running": true,
+          "pid": 52066,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "installed_app_changed": false,
+        "profile_contents_read_by_tools": false,
+        "user_profile_metadata_preflight": "passed",
+        "free_bytes_after": 80792686592,
+        "preparation_recovery": "previous comparison differed only by archive metadata; original bundles retained and verified, no repeated copy"
+      }
+    },
+    "run1": {
+      "operation_id": "faef144d-666d-408f-bc57-39e80fc4545a",
+      "remote_path": ".rp-source-selection-20261009/ho5-desktop-run1-driver.json",
+      "sha256": "802c7e4f466fa2341d8a90ce1b1077df113bd699254314d4a8c75eb5d025b7cd",
+      "driver": {
+        "scope": "signed staged source-fix candidate; installed canonical app retained",
+        "producer": "HO5",
+        "viewer": "Mac Studio",
+        "started_at": "2026-10-09T21:07:53.712629+00:00",
+        "before": {
+          "loaded": true,
+          "running": true,
+          "pid": 52066,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "candidate_executable": "/Users/jinliang/workspace/.rp-source-selection-20261009/candidate/RemotePlay.app/Contents/MacOS/remote_play",
+        "candidate_build": "20261009.205212",
+        "candidate_signed_executable_sha256": "13345e66c9499ece95a7ea52dca44dff26cbd4cb949115d67f24465bf416193f",
+        "installed_before_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "rollback_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354333,
+            "size": 225,
+            "mtime_ns": 1791577603293058800
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354332,
+            "size": 64,
+            "mtime_ns": 1791577603292900600
+          }
+        ],
+        "launch_agent_sha256_before": "2cfb08d0282dada2e0e925749990e3a2fb7be8756176c40c258531c95387155c",
+        "requested_device": "6a32a19406b9e02dcbad058cd1cced30",
+        "requested_source": {
+          "source": "MainDisplay",
+          "title": "Desktop"
+        },
+        "test_seconds": 65,
+        "permissions_requested": false,
+        "input_injected": false,
+        "private_profile_contents_read_by_tools": false,
+        "samples": [
+          {
+            "elapsed_ms": 0,
+            "status": null,
+            "current_frame": null,
+            "session": {
+              "device_id": null,
+              "connection_id": null,
+              "route": null,
+              "source": null,
+              "connected": null,
+              "peer_responsive": null,
+              "decoded_frames": null,
+              "decode_errors": null,
+              "confirmed": null,
+              "scene_submitted_frame": null,
+              "input_locked": null,
+              "video_error": null,
+              "error": null,
+              "decoder_status": null,
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 1327,
+            "status": "Recovering video references: control waits for a newly displayed frame",
+            "current_frame": null,
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 0,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": false,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 2700,
+            "status": "Recovering video references: control waits for a newly displayed frame",
+            "current_frame": null,
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 13,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": false,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 4001,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 91,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 4901,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 145,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 6155,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 220,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 7468,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 299,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 8757,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 376,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 10088,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 456,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 11417,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 536,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 12734,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 615,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 14069,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 695,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 15407,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 775,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 16720,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 853,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 17626,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 908,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 18935,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 987,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 20252,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1066,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 21584,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1146,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 22484,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1200,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 23807,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1279,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 25100,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1357,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 26001,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1411,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 27317,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1490,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 28634,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1569,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 29835,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1641,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 31084,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1716,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 32389,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1794,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 33690,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1871,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 34590,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1926,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 35825,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2000,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 37156,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2080,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 38056,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2134,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 39371,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2213,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 40719,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2292,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 42050,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2374,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 43353,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2452,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 44266,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2506,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 45523,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2582,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 46837,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2660,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 47754,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2716,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 49054,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2794,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 50383,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2874,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 51639,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2949,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 52950,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3027,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 54270,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3107,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 55572,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3185,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 56721,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3254,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 57940,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3327,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 59252,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3406,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 60385,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3474,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 61683,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3551,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 62985,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3630,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 64319,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 2612631463,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 3710,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          }
+        ],
+        "normal_stop_exit": 0,
+        "product_pids_after_stop": [],
+        "test_pid": 59132,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 319,
+          "elapsed_ms": 65003,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "supports_input": true,
+                "input_eligible": false,
+                "request_audio": false,
+                "volume": 100,
+                "muted": false,
+                "paused": false,
+                "background_paused": false,
+                "activity_pending": false,
+                "decoder_status": "",
+                "decoder_needs_keyframe": false,
+                "native_frame": null,
+                "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+                "name": "HO5",
+                "connection_id": 2612631463,
+                "target": "127.0.0.1:49294",
+                "route": "Relay",
+                "source": "MainDisplay",
+                "decoded_frames": 3751,
+                "decode_errors": 0,
+                "confirmed": true,
+                "scene_submitted_frame": true,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "source_selection": {
+            "enumerated_match": {
+              "source": "MainDisplay",
+              "title": "Desktop",
+              "application": "",
+              "process_id": null,
+              "width": 0,
+              "height": 0,
+              "supports_input": true
+            },
+            "command_queued": true,
+            "status": "View only: click Enable control, then click the remote picture"
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "profile_after_candidate_exit_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354333,
+            "size": 225,
+            "mtime_ns": 1791577603293058800
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354332,
+            "size": 64,
+            "mtime_ns": 1791577603292900600
+          }
+        ],
+        "restore_exit": 0,
+        "after": {
+          "loaded": true,
+          "running": true,
+          "pid": 59348,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "after_second_observation": {
+          "loaded": true,
+          "running": true,
+          "pid": 59348,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "installed_after_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "launch_agent_sha256_after": "2cfb08d0282dada2e0e925749990e3a2fb7be8756176c40c258531c95387155c",
+        "profile_after_restore_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379656,
+            "size": 225,
+            "mtime_ns": 1791580142116973000
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379655,
+            "size": 64,
+            "mtime_ns": 1791580142116815600
+          }
+        ],
+        "runtime_renderer_after": {
+          "schema": 1,
+          "renderer": "restored-original-gpui"
+        },
+        "ended_at": "2026-10-09T21:09:03.606076+00:00",
+        "first_connected_observation_ms": 1327,
+        "first_decoded_observation_ms": 2700,
+        "first_scene_submitted_observation_ms": 4001,
+        "installed_app_changed": false,
+        "launch_agent_changed": false,
+        "actual_display_completion_measured": false,
+        "full_acceptance": false
+      }
+    },
+    "producer_during_run1": {
+      "operation_id": "ca18f5cb-4279-42d0-84c1-ec9f249e8325",
+      "observation": {
+        "at": "2026-10-09T21:08:30.870915+00:00",
+        "uid": 1000,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948",
+          "NRestarts": "0"
+        },
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "owned_ffmpeg_children": [
+          {
+            "pid": 2260951,
+            "ppid": 2232948,
+            "capture_and_color_flags_only": [
+              [
+                "-f",
+                "x11grab"
+              ],
+              [
+                "-video_size",
+                "1920x1080"
+              ],
+              [
+                "-framerate",
+                "60"
+              ],
+              [
+                "-i",
+                ":0"
+              ],
+              [
+                "-pix_fmt",
+                "yuv420p"
+              ],
+              [
+                "-c:v",
+                "libx265"
+              ],
+              [
+                "-f",
+                "hevc"
+              ]
+            ]
+          }
+        ],
+        "sample_scope": "current existing RemotePlay user-service descendants only; no capture permission or service changes"
+      }
+    },
+    "producer_after_run1": {
+      "operation_id": "5a6a61e7-52b0-4a31-beec-1ce347529dfc",
+      "observation": {
+        "at": "2026-10-09T21:09:55.565316+00:00",
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948",
+          "NRestarts": "0"
+        },
+        "direct_capture_children_after_run1": [],
+        "run1_capture_pid": 2260951,
+        "run1_capture_pid_gone": true
+      }
+    },
+    "run2": {
+      "operation_id": "42aeb3d0-9758-4c09-a266-9958f58ae35a",
+      "remote_path": ".rp-source-selection-20261009/ho5-desktop-run2-driver.json",
+      "sha256": "50d52c1f93b290147ee3ba5a010e5decfc02ddd316486ef5db290c9b8ba91a23",
+      "driver": {
+        "scope": "signed staged source-fix candidate; installed canonical app retained",
+        "producer": "HO5",
+        "viewer": "Mac Studio",
+        "started_at": "2026-10-09T21:10:16.679537+00:00",
+        "before": {
+          "loaded": true,
+          "running": true,
+          "pid": 59348,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "candidate_executable": "/Users/jinliang/workspace/.rp-source-selection-20261009/candidate/RemotePlay.app/Contents/MacOS/remote_play",
+        "candidate_build": "20261009.205212",
+        "candidate_signed_executable_sha256": "13345e66c9499ece95a7ea52dca44dff26cbd4cb949115d67f24465bf416193f",
+        "installed_before_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "rollback_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379656,
+            "size": 225,
+            "mtime_ns": 1791580142116973000
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379655,
+            "size": 64,
+            "mtime_ns": 1791580142116815600
+          }
+        ],
+        "launch_agent_sha256_before": "2cfb08d0282dada2e0e925749990e3a2fb7be8756176c40c258531c95387155c",
+        "requested_device": "6a32a19406b9e02dcbad058cd1cced30",
+        "requested_source": {
+          "source": "MainDisplay",
+          "title": "Desktop"
+        },
+        "test_seconds": 45,
+        "permissions_requested": false,
+        "input_injected": false,
+        "private_profile_contents_read_by_tools": false,
+        "samples": [
+          {
+            "elapsed_ms": 0,
+            "status": null,
+            "current_frame": null,
+            "session": {
+              "device_id": null,
+              "connection_id": null,
+              "route": null,
+              "source": null,
+              "connected": null,
+              "peer_responsive": null,
+              "decoded_frames": null,
+              "decode_errors": null,
+              "confirmed": null,
+              "scene_submitted_frame": null,
+              "input_locked": null,
+              "video_error": null,
+              "error": null,
+              "decoder_status": null,
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 1104,
+            "status": "Connecting to HO5",
+            "current_frame": null,
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 0,
+              "decode_errors": 0,
+              "confirmed": false,
+              "scene_submitted_frame": false,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": null,
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 2445,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 15,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 3682,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 89,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 5014,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 169,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 6334,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 247,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 7597,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 324,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 8925,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 404,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 10268,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 484,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 11601,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 564,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 12929,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 644,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 13829,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 697,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 15099,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 773,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 16417,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 851,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 17696,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 930,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 18999,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1008,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 20797,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1116,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 22132,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1196,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 23416,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1271,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 24766,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1354,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 26084,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1431,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 27002,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1488,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 28330,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1566,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 29645,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1647,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 30960,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1726,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 32244,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1803,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 33144,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1857,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 34444,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 1934,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 35709,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2011,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 37029,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2090,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 38271,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2164,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 39579,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2243,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 40894,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2322,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 42237,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2402,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 43137,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2455,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          },
+          {
+            "elapsed_ms": 44430,
+            "status": "View only: click Enable control, then click the remote picture",
+            "current_frame": {
+              "width": 1920,
+              "height": 1080
+            },
+            "session": {
+              "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+              "connection_id": 1942155545,
+              "route": "Relay",
+              "source": "MainDisplay",
+              "connected": true,
+              "peer_responsive": true,
+              "decoded_frames": 2534,
+              "decode_errors": 0,
+              "confirmed": true,
+              "scene_submitted_frame": true,
+              "input_locked": true,
+              "video_error": null,
+              "error": "",
+              "decoder_status": "",
+              "native_frame": null
+            }
+          }
+        ],
+        "normal_stop_exit": 0,
+        "product_pids_after_stop": [],
+        "test_pid": 59545,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 223,
+          "elapsed_ms": 45011,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "supports_input": true,
+                "input_eligible": false,
+                "request_audio": false,
+                "volume": 100,
+                "muted": false,
+                "paused": false,
+                "background_paused": false,
+                "activity_pending": false,
+                "decoder_status": "",
+                "decoder_needs_keyframe": false,
+                "native_frame": null,
+                "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+                "name": "HO5",
+                "connection_id": 1942155545,
+                "target": "127.0.0.1:63546",
+                "route": "Relay",
+                "source": "MainDisplay",
+                "decoded_frames": 2568,
+                "decode_errors": 0,
+                "confirmed": true,
+                "scene_submitted_frame": true,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "source_selection": {
+            "enumerated_match": {
+              "source": "MainDisplay",
+              "title": "Desktop",
+              "application": "",
+              "process_id": null,
+              "width": 0,
+              "height": 0,
+              "supports_input": true
+            },
+            "command_queued": true,
+            "status": "View only: click Enable control, then click the remote picture"
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "profile_after_candidate_exit_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379656,
+            "size": 225,
+            "mtime_ns": 1791580142116973000
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359379655,
+            "size": 64,
+            "mtime_ns": 1791580142116815600
+          }
+        ],
+        "restore_exit": 0,
+        "after": {
+          "loaded": true,
+          "running": true,
+          "pid": 59676,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "after_second_observation": {
+          "loaded": true,
+          "running": true,
+          "pid": 59676,
+          "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play"
+        },
+        "installed_after_identity": {
+          "version": "2.0.0-alpha.8",
+          "build": "20261004.80",
+          "bundle_id": "com.remoteplay.unified",
+          "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+          "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+          "executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+          "info_sha256": "27e713a0995a31ca228157131c93fc3e49f4ad8307cb3cbca1722e2a38504e61",
+          "signature_verified": true,
+          "notarization_verified": false
+        },
+        "launch_agent_sha256_after": "2cfb08d0282dada2e0e925749990e3a2fb7be8756176c40c258531c95387155c",
+        "profile_after_restore_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359380587,
+            "size": 225,
+            "mtime_ns": 1791580263868417800
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359380586,
+            "size": 64,
+            "mtime_ns": 1791580263868024800
+          }
+        ],
+        "runtime_renderer_after": {
+          "schema": 1,
+          "renderer": "restored-original-gpui"
+        },
+        "ended_at": "2026-10-09T21:11:05.753053+00:00",
+        "first_connected_observation_ms": 1104,
+        "first_decoded_observation_ms": 2445,
+        "first_scene_submitted_observation_ms": 2445,
+        "installed_app_changed": false,
+        "launch_agent_changed": false,
+        "actual_display_completion_measured": false,
+        "full_acceptance": false
+      }
+    },
+    "producer_after_run2": {
+      "operation_id": "b571b2b8-82ba-4977-ae9e-8fd75113d8d9",
+      "observation": {
+        "at": "2026-10-09T21:11:49.359080+00:00",
+        "uid": 1000,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948",
+          "NRestarts": "0"
+        },
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "direct_capture_children_after_run2": [],
+        "profile_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422863
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422862
+          }
+        ],
+        "runtime_renderer": {
+          "schema": 1,
+          "renderer": "restored-original-gpui"
+        },
+        "service_changed": false,
+        "private_profile_contents_read_by_tools": false
+      }
+    },
+    "derived_runs": [
+      {
+        "operation_id": "faef144d-666d-408f-bc57-39e80fc4545a",
+        "connection_id": 2612631463,
+        "elapsed_ms": 65003,
+        "decoded_frames_final": 3751,
+        "decode_errors_final": 0,
+        "first_decoded_observation_ms": 2700,
+        "first_decoded_observation_interval_ms": [
+          1327,
+          2700
+        ],
+        "first_scene_observation_ms": 4001,
+        "first_scene_observation_interval_ms": [
+          2700,
+          4001
+        ],
+        "healthy_sample_count": 50,
+        "healthy_observed_from_ms": 4001,
+        "healthy_observed_to_ms": 64319,
+        "healthy_span_ms": 60318,
+        "all_observations_in_span_healthy": true,
+        "decoded_counter_increased_on_every_healthy_observation": true,
+        "thirty_second_window": {
+          "from_ms": 4001,
+          "to_ms": 34590,
+          "span_ms": 30589,
+          "decoded_frames_from": 91,
+          "decoded_frames_to": 1926
+        },
+        "exact_enumerated_source": {
+          "source": "MainDisplay",
+          "title": "Desktop",
+          "application": "",
+          "process_id": null,
+          "width": 0,
+          "height": 0,
+          "supports_input": true
+        },
+        "candidate_process_exit": 0,
+        "restored_installed_pid": 59348,
+        "installed_app_changed": false,
+        "launch_agent_changed": false,
+        "profile_metadata_unchanged_during_candidate": true,
+        "boundary": "decoded-frame and GPUI-scene observations; no visible presentation or complete Wayland desktop verification"
+      },
+      {
+        "operation_id": "42aeb3d0-9758-4c09-a266-9958f58ae35a",
+        "connection_id": 1942155545,
+        "elapsed_ms": 45011,
+        "decoded_frames_final": 2568,
+        "decode_errors_final": 0,
+        "first_decoded_observation_ms": 2445,
+        "first_decoded_observation_interval_ms": [
+          1104,
+          2445
+        ],
+        "first_scene_observation_ms": 2445,
+        "first_scene_observation_interval_ms": [
+          1104,
+          2445
+        ],
+        "healthy_sample_count": 34,
+        "healthy_observed_from_ms": 2445,
+        "healthy_observed_to_ms": 44430,
+        "healthy_span_ms": 41985,
+        "all_observations_in_span_healthy": true,
+        "decoded_counter_increased_on_every_healthy_observation": true,
+        "thirty_second_window": {
+          "from_ms": 2445,
+          "to_ms": 33144,
+          "span_ms": 30699,
+          "decoded_frames_from": 15,
+          "decoded_frames_to": 1857
+        },
+        "exact_enumerated_source": {
+          "source": "MainDisplay",
+          "title": "Desktop",
+          "application": "",
+          "process_id": null,
+          "width": 0,
+          "height": 0,
+          "supports_input": true
+        },
+        "candidate_process_exit": 0,
+        "restored_installed_pid": 59676,
+        "installed_app_changed": false,
+        "launch_agent_changed": false,
+        "profile_metadata_unchanged_during_candidate": true,
+        "boundary": "decoded-frame and GPUI-scene observations; no visible presentation or complete Wayland desktop verification"
+      }
+    ],
+    "acceptance": {
+      "source_selection": "passed_on_actual_catalog",
+      "x11_capture_stream_decode_scene": "passed_for_two_bounded_runs",
+      "minimum_thirty_second_decode_scene_interval": "observed_in_both_runs",
+      "process_level_disconnect_reconnect": "observed_new_allocation_and_recapture",
+      "same_process_reconnect": "not_tested",
+      "complete_wayland_desktop_capture": "not_verified",
+      "visible_first_frame": "not_measured",
+      "native_display_completion": "not_measured",
+      "visual": "not_evaluated",
+      "input": "not_tested",
+      "audio": "not_tested",
+      "installed": false,
+      "published": false,
+      "full_acceptance": false
+    }
   }
 }
