@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "source_commit": "80de0721cbd256b5673335569b0b43e0d9a9e7b8",
+  "source_files": {
+    "app/src/desktop/original_owner.rs": {
+      "sha256": "b0b41d42ffa037501fd4883bf266421f8ac6f17320ed52fd74b6ed0137ea7dd9",
+      "mtime_ns": 1791578424596661392
+    },
+    "app/src/restored_acceptance.rs": {
+      "sha256": "cf79e36485f9aea4f3ad90a72d134f9492b7bdf1fa71b992a8ee974af65e72c5",
+      "mtime_ns": 1791578493699801375
+    },
+    "app/src/restored_ui.rs": {
+      "sha256": "92248890277b71f02515cdf325ac73cb08f3fdd0348def294ee19fc175f23c65",
+      "mtime_ns": 1791578546459523502
+    },
+    "remote_core/src/view_commands.rs": {
+      "sha256": "0ddc458d844236b241e51e14d6b22d33c08e2cf9649574600dc35af223331d8f",
+      "mtime_ns": 1791578423567704064
+    }
+  },
+  "tests": {
+    "red_regression": {
+      "test": "restored_ui::tests::display_switcher_uses_real_sources_and_never_invents_display_two",
+      "exit_code": 101,
+      "failed": 1,
+      "boundary": "old implementation invented a main display for an empty catalog; no physical test"
+    },
+    "core": {
+      "command": "CARGO_TARGET_DIR=/Users/jinliang/rust-target cargo test -p remote_core --lib view_commands::tests --offline --locked",
+      "passed": 9,
+      "failed": 0,
+      "filtered_out": 281,
+      "log": "/tmp/remoteplay-source-selection-core-tests.log",
+      "log_sha256": "bfc8d4e385ded951a8c02362494ba8b0e8a2774e26dd51d42a8f5098f853246a"
+    },
+    "app": {
+      "command": "CARGO_TARGET_DIR=/Users/jinliang/rust-target cargo test -p remote_play_app --lib --features gpui-native-video --offline --locked",
+      "passed": 110,
+      "failed": 0,
+      "ignored": 2,
+      "log": "/tmp/remoteplay-source-selection-app-tests.log",
+      "log_sha256": "5dc1fc5fa3b1c05504256977b45a0e294beb528c518b97900db6448629ded65a"
+    },
+    "physical": "not_run_for_this_candidate",
+    "passed_existing_suites": "not repeated; no Python code changed in this fix"
+  },
+  "build": {
+    "head": "80de0721cbd256b5673335569b0b43e0d9a9e7b8",
+    "binary": "/Users/jinliang/rust-target/release/remote_play",
+    "binary_sha256": "5157806cb08557d0386d626e2ac55402825a4d1af0b169f408e5c116205101e9",
+    "source_manifest_sha256": "12715b5742049271dc823190c64dc9ca3aa8494b99258aeca7524ed1d78a4954",
+    "dependency_record": "/Users/jinliang/rust-target/release/remote_play.d",
+    "dependency_record_sha256": "bb26a7e784fc6f877fd47b3c587aace390469ea10a6b0e7e56a7446e52ad813d",
+    "local_emitted_file_inputs": 597,
+    "unmanifested": [],
+    "changed_since_prebuild": [],
+    "selected_sources_consumed": {
+      "app/src/desktop/original_owner.rs": true,
+      "app/src/restored_acceptance.rs": true,
+      "app/src/restored_ui.rs": true,
+      "remote_core/src/view_commands.rs": true
+    },
+    "dirty_android_jni_consumed": false,
+    "compiled_product_info": {
+      "schema": 1,
+      "product": "RemotePlay",
+      "version": "2.0.0-alpha.8",
+      "platform": "macos",
+      "architecture": "aarch64",
+      "default_gui": "restored-original-gpui",
+      "original_gui_compiled": true,
+      "native_video_compiled": true
+    }
+  },
+  "package": {
+    "version": "2.0.0-alpha.8",
+    "build": "20261009.205212",
+    "bundle_id": "com.remoteplay.unified",
+    "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+    "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+    "executable_sha256": "13345e66c9499ece95a7ea52dca44dff26cbd4cb949115d67f24465bf416193f",
+    "info_sha256": "93df1f652855414bdd9f34e820cb97061d388963e0541abe825226061e8a7a97",
+    "signature_verified": true,
+    "notarization_verified": false,
+    "archive": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.205212.zip",
+    "archive_sha256": "f3e1716d6ca30d2411d4c4daa638f9ed359a1bfa47d1463d0a973f03bfbcc729",
+    "size_bytes": 8599856,
+    "provenance_path": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.205212.provenance.json",
+    "provenance_sha256": "1f267ae5a24b309a1955bac7644b37821acb88006c26779f2545d43cf8419b47",
+    "packaging_overlays": {
+      "scripts/package_macos_unified.sh": "5ae20ecd6115946172662f58505f17c4d54e536c3e163caf48006d3b49880b16",
+      "scripts/verify_prebuilt_binary.py": "5c4200bd927052d29344a8ba3894bd3e077cf227ad404b4d49f7b95e61d7ee5a",
+      "VERSION": "96aa1a6e6f2e38f4560b200f1669509bf8ba26782c383a4ee83789e41f2610dd"
+    }
+  },
+  "actual_producer_capture_source_observation": {
+    "device": "HO5",
+    "boundary": "source inspection of prior release inputs, not a new live capture result or independent proof of installed compiler provenance",
+    "enumerator": {
+      "path": ".rp-original-release-20261004/incoming/host/src/capture_sources.rs",
+      "sha256": "6419913b63f26d08c4ebe824153b92d359d563cfb23d1f0d5b96ccd75f939a3f",
+      "operation_id": "3ddac61c-3265-413b-82eb-047a08e22e09",
+      "source": "MainDisplay",
+      "title": "Desktop",
+      "process_id": null
+    },
+    "encoder": {
+      "path": ".rp-original-release-20261004/incoming/host/src/ffmpeg_hevc.rs",
+      "sha256": "cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1",
+      "operation_id": "e58ab764-95d2-43ee-82b6-d68877200ce5",
+      "actual_source_command_branch": "DISPLAY -> x11grab; otherwise kmsgrab /dev/dri/card0",
+      "backend_label_branch": "WAYLAND_DISPLAY -> pipewire/wayland label",
+      "wayland_portal_implementation_in_inspected_branch": false
+    },
+    "system_capture_defaults_changed": false,
+    "permission_requests_made": false
+  },
+  "remote_candidate_validation": {
+    "state": "blocked_before_upload",
+    "requested_destination": "Mac Studio /Users/jinliang/workspace/.rp-source-selection-20261009",
+    "requested_workspace_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196:60ae9a54-29a8-46bc-b71d-a91193e00c35",
+    "blocked_action": "Remote Hosts file_upload of the signed proprietary candidate package",
+    "automatic_approval_review": "rejected",
+    "review_reason": "Sensitive egress of proprietary compiled package; destination and disclosure not explicitly authorized in trusted user messages",
+    "bypassed": false,
+    "explicit_approval_question_presented": true,
+    "response_received": false,
+    "post_rejection_workspace_observation": {
+      "operation_id": "725466e9-b026-4054-866c-c945a08129bd",
+      "active_terminals": 0,
+      "retained_transfers": 0,
+      "active_transfers": 0
+    },
+    "candidate_started_on_studio": false,
+    "new_ho5_build": false,
+    "installer_apply": false,
+    "installed_apps_changed": false,
+    "launch_agents_or_services_changed_in_this_fix_phase": false
+  },
+  "acceptance": {
+    "visual": "not_evaluated",
+    "first_visible_frame": "not_measured",
+    "native_presentation": "not_measured",
+    "sustained_stream": "not_run",
+    "disconnect_recovery": "not_run",
+    "input": "not_tested",
+    "audio": "not_tested",
+    "installed": false,
+    "published": false,
+    "full_acceptance": false
+  },
+  "preservation": {
+    "existing_dirty_paths_exact_bytes": 105,
+    "changes_to_existing_dirty_paths": [],
+    "all_twelve_platform_directions": "not_tested",
+    "published_packages_modified": false,
+    "push": false,
+    "new_target": false,
+    "source_repository_copied": false
+  }
+}
