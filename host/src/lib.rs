@@ -25,6 +25,8 @@ mod window_input;
 
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod capture_backend;
+#[cfg(any(test, target_os = "linux"))]
+mod linux_capture_geometry;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffmpeg_hevc;
 #[cfg(any(target_os = "linux", target_os = "windows"))]

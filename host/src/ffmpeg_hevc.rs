@@ -61,7 +61,7 @@ impl FfmpegHevcSource {
             }
         };
         println!(
-            "[FfmpegHevc] started {width}x{height}@{fps} {bitrate_kbps} kbps ({})",
+            "[FfmpegHevc] started with output bounds {width}x{height}@{fps} {bitrate_kbps} kbps ({})",
             backend
         );
         Ok(Self {
@@ -182,16 +182,14 @@ fn capture_command_using(
     #[cfg(target_os = "linux")]
     {
         if let Ok(display) = std::env::var("DISPLAY") {
-            cmd.args([
-                "-f",
-                "x11grab",
-                "-video_size",
-                &format!("{width}x{height}"),
-                "-framerate",
-                &fps.to_string(),
-                "-i",
-                &display,
-            ]);
+            let region = crate::linux_capture_geometry::capture_region(&display)?;
+            let plan = crate::linux_capture_geometry::X11CapturePlan::new(region, width, height)?;
+            plan.append_args(&mut cmd, &display, fps);
+            println!(
+                "[FfmpegHevc] X11 compatibility plan: root source {}x{} at +{},{}; encoded {}x{} within requested {}x{}",
+                region.width, region.height, region.x, region.y,
+                plan.output_width, plan.output_height, width, height,
+            );
         } else {
             cmd.args([
                 "-f",

@@ -3073,6 +3073,7 @@ dependencies = [
  "tokio",
  "video-toolbox-sys",
  "windows-sys 0.59.0",
+ "x11rb",
 ]
 
 [[package]]

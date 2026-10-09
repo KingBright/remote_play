@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-09 21:43:43 UTC",
+  "base_commit": "d8accbc28931e8de039049a87c365adb1c4457d5",
+  "scope": "Existing Linux X11 compatibility root geometry and full-source scaling only.",
+  "implementation": {
+    "production_source": "selected DISPLAY screen root window",
+    "source_origin": [
+      0,
+      0
+    ],
+    "source_geometry_api": "x11rb GetGeometry",
+    "offsets_enabled_for_new_product_sources": false,
+    "input_coordinate_scope_changed": false,
+    "primary_physical_monitor_selected": false,
+    "source_catalog_changed": false,
+    "linux_kms_fallback_changed": false,
+    "windows_capture_changed": false,
+    "wayland_implemented": false,
+    "gui_changed": false,
+    "protocol_changed": false,
+    "permission_requested": false
+  },
+  "dependency": {
+    "crate": "x11rb",
+    "version": "0.13.2",
+    "exact_pin": true,
+    "default_features": false,
+    "linux_only_in_product": true,
+    "dev_reference_for_tests": true,
+    "package_versions_added_or_updated": 0,
+    "lock_entries_changed": [
+      "host"
+    ],
+    "locked_offline_metadata_exit_code": 0
+  },
+  "tests": {
+    "command": "CARGO_TARGET_DIR=/Users/jinliang/rust-target cargo test -p host --lib linux_capture_geometry::tests --offline --locked -- --include-ignored --nocapture",
+    "host": "local macOS",
+    "existing_target": "/Users/jinliang/rust-target",
+    "session_id": 32427,
+    "exit_code": 0,
+    "passed": 7,
+    "failed": 0,
+    "filtered_out": 55,
+    "final_output_chunk_id": "25d032",
+    "raw_output_scope": "final tool output chunk",
+    "raw_final_output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.62s\n     Running unittests src/lib.rs (/Users/jinliang/rust-target/debug/deps/host-f4ab1eecf78795e9)\n\nrunning 7 tests\ntest linux_capture_geometry::tests::root_source_and_desktop_coordinate_origin_are_preserved ... ok\ntest linux_capture_geometry::tests::missing_or_over_budget_root_never_guesses_requested_dimensions ... ok\ntest linux_capture_geometry::tests::invalid_geometry_and_too_small_output_fail_before_capture ... ok\ntest linux_capture_geometry::tests::portrait_small_and_odd_sources_fit_without_upscaling_or_cropping ... ok\ntest linux_capture_geometry::tests::full_4k_source_is_scaled_instead_of_cropped_to_1080p ... ok\ntest linux_capture_geometry::tests::source_size_and_offset_are_independent_of_encoded_size ... ok\noffline FFmpeg fixture: source 3840x2160, requested 1920x1080, output 1920x1080, all quadrants retained\noffline FFmpeg fixture: source 2560x1600, requested 1280x720, output 1152x720, all quadrants retained\noffline FFmpeg fixture: source 1080x1920, requested 1920x1080, output 606x1080, all quadrants retained\noffline FFmpeg fixture: source 1280x720, requested 1920x1080, output 1280x720, all quadrants retained\noffline FFmpeg fixture: source 1919x1079, requested 1920x1080, output 1918x1078, all quadrants retained\ntest linux_capture_geometry::tests::ffmpeg_scale_preserves_all_four_source_quadrants_and_exact_output_size ... ok\n\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 55 filtered out; finished in 1.27s\n\n",
+    "external_ffmpeg": "ffmpeg 8.0.1",
+    "fixture_timeout_seconds": 10,
+    "fixture_input": "generated RGB quadrants only, never screen/window content",
+    "real_capture_attempted": false,
+    "x11_server_connected_by_tests": false,
+    "physical_acceptance": false
+  },
+  "verified_raw_fixture_cases": [
+    {
+      "source": [
+        3840,
+        2160
+      ],
+      "requested": [
+        1920,
+        1080
+      ],
+      "output": [
+        1920,
+        1080
+      ],
+      "all_four_quadrants_retained": true
+    },
+    {
+      "source": [
+        2560,
+        1600
+      ],
+      "requested": [
+        1280,
+        720
+      ],
+      "output": [
+        1152,
+        720
+      ],
+      "all_four_quadrants_retained": true
+    },
+    {
+      "source": [
+        1080,
+        1920
+      ],
+      "requested": [
+        1920,
+        1080
+      ],
+      "output": [
+        606,
+        1080
+      ],
+      "all_four_quadrants_retained": true
+    },
+    {
+      "source": [
+        1280,
+        720
+      ],
+      "requested": [
+        1920,
+        1080
+      ],
+      "output": [
+        1280,
+        720
+      ],
+      "all_four_quadrants_retained": true
+    },
+    {
+      "source": [
+        1919,
+        1079
+      ],
+      "requested": [
+        1920,
+        1080
+      ],
+      "output": [
+        1918,
+        1078
+      ],
+      "all_four_quadrants_retained": true
+    }
+  ],
+  "preservation": {
+    "unrelated_dirty_paths": 105,
+    "byte_and_status_mismatches": 0,
+    "no_production_rebuild": true,
+    "no_remote_commands_this_phase": true,
+    "no_install_or_service_change": true,
+    "no_permission_or_os_security_change": true,
+    "no_push_or_publication": true
+  },
+  "limits": [
+    "Metadata reader and planner compiled on macOS via cfg(test); Linux-guarded production integration was not freshly built.",
+    "Offline raw FFmpeg scaling is verified, not real capture, HEVC acceptance, native Wayland desktop content, input or actual GPUI presentation.",
+    "X11 root identity is retained and does not establish physical main-display or complete Wayland desktop identity.",
+    "Higher full-source capture cost is unmeasured; native PipeWire adapter is a separate proposal.",
+    "Existing generic source catalog, input-readiness declarations and compressed-AU overload policy remain open; no unrelated implementation was silently changed."
+  ]
+}
