@@ -1,0 +1,196 @@
+{
+  "schema": 1,
+  "source_checkpoint": "b4fadf6f0bba4af232a20a25e9baa58dff0be9a8",
+  "device_inventory_request": "req_3143ad4e80d14826a2d01b9cc119d6b7",
+  "device_inventory_observed_at": 1791567417,
+  "devices": [
+    {
+      "name": "MacBook-M2-Max",
+      "device_id": "ba3bf113-2390-466e-88bc-40d5b4f02884",
+      "online": true,
+      "last_seen": 1791567405
+    },
+    {
+      "name": "Mac-Studio",
+      "device_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196",
+      "online": true,
+      "last_seen": 1791567410
+    },
+    {
+      "name": "HO5",
+      "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+      "online": true,
+      "last_seen": 1791567415
+    },
+    {
+      "name": "cube",
+      "device_id": "f840a7fb-33c3-48bb-b41a-5e81cbde2ea9",
+      "online": false,
+      "last_seen": 1791394743
+    },
+    {
+      "name": "Android-Phone",
+      "device_id": "f4b13b05-1d5d-4460-8517-0fe3be577889",
+      "online": false,
+      "last_seen": null
+    }
+  ],
+  "mac_studio": {
+    "operation_id": "5d0a253c-c1ec-4b66-b185-2ce71900fc39",
+    "exit_code": 0,
+    "output_complete": true,
+    "observed_at": 1791567404,
+    "observations": {
+      "caller_uid": 501,
+      "caller_euid": 501,
+      "caller_user": "jinliang",
+      "configuration_contents_read": false,
+      "os_permission_probe_from_wrong_executable": false,
+      "screen_capture_permission": "unconfirmed in actual running product",
+      "input_permission": "unconfirmed in actual running product",
+      "selected_launcher_metadata": {
+        "label": "com.remoteplay.host",
+        "program": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+        "explicit_user": null,
+        "profile_path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh",
+        "home": null
+      },
+      "files": [
+        {
+          "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh",
+          "uid": 501,
+          "gid": 20,
+          "mode": "0o700",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        },
+        {
+          "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf",
+          "uid": 501,
+          "gid": 20,
+          "mode": "0o600",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        },
+        {
+          "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.secret",
+          "uid": 501,
+          "gid": 20,
+          "mode": "0o600",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        }
+      ],
+      "process": {
+        "exit_code": 0,
+        "output": "23896   501 /Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play\n"
+      }
+    }
+  },
+  "ho5": {
+    "operation_id": "73367db0-d070-44fd-a96b-0eed392a94ce",
+    "exit_code": 0,
+    "output_complete": true,
+    "observed_at": 1791567415,
+    "observations": {
+      "caller_uid": 1000,
+      "caller_euid": 1000,
+      "caller_user": "liang",
+      "selected_profile_path_metadata": {
+        "REMOTE_PLAY_DEVICE_GROUP_DIR": "/home/liang/.config/remote-play-current/mesh"
+      },
+      "environment_query_exit_code": 0,
+      "files": [
+        {
+          "path": "/home/liang/.config/remote-play-current/mesh",
+          "uid": 1000,
+          "gid": 1000,
+          "mode": "0o700",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        },
+        {
+          "path": "/home/liang/.config/remote-play-current/mesh/mesh.conf",
+          "uid": 1000,
+          "gid": 1000,
+          "mode": "0o600",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        },
+        {
+          "path": "/home/liang/.config/remote-play-current/mesh/mesh.secret",
+          "uid": 1000,
+          "gid": 1000,
+          "mode": "0o600",
+          "symlink": false,
+          "readable_by_agent_user": true,
+          "writable_by_agent_user": true
+        }
+      ],
+      "configuration_contents_read": false,
+      "capture_permission": "active Wayland session confirmed, actual product capture/portal consent unconfirmed",
+      "input_permission": "actual product OS injection permissions unconfirmed",
+      "process": {
+        "exit_code": 0,
+        "output": "1520582  1000 remote_play\n"
+      }
+    }
+  },
+  "acl_scope": "Mode, owner and effective os.access read/write checks under the same UID as each running product; extended ACL entries were not enumerated. Product-specific media/OS input consent not inferred.",
+  "no_configuration_contents_read": true,
+  "no_private_keys_read": true,
+  "no_remote_owner_or_acl_changes": true,
+  "macbook_conf_repair": "User reported executing targeted conf chown; metadata confirmation appended from local receipt.",
+  "macbook_secret_repair": "Still root:staff/0600 and unreadable in the latest observation. No sudo retry; separate exact administrator step pending.",
+  "physical_directions_executed": 0,
+  "macbook_after_user_conf_repair": {
+    "observed_at": "2026-10-09T17:34:09.085123+00:00",
+    "caller_uid": 501,
+    "caller_euid": 501,
+    "caller_user": "jinliang",
+    "file_contents_read": false,
+    "files": [
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh",
+        "uid": 501,
+        "gid": 20,
+        "mode": "0o700",
+        "inode": 546060478,
+        "size": 160,
+        "mtime_ns": 1791425104381351160,
+        "symlink": false,
+        "readable": true,
+        "writable": true
+      },
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf",
+        "uid": 501,
+        "gid": 20,
+        "mode": "0o600",
+        "inode": 551706101,
+        "size": 233,
+        "mtime_ns": 1790767363014709605,
+        "symlink": false,
+        "readable": true,
+        "writable": true
+      },
+      {
+        "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.secret",
+        "uid": 0,
+        "gid": 20,
+        "mode": "0o600",
+        "inode": 551706100,
+        "size": 64,
+        "mtime_ns": 1790767363014362975,
+        "symlink": false,
+        "readable": false,
+        "writable": false
+      }
+    ]
+  }
+}

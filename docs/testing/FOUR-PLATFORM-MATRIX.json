@@ -24,7 +24,16 @@
       "exact_certificate_requirement_exit_code": 0,
       "signature_operation_id": "b6b3ef10-d9e1-4515-989f-9af3137ac718",
       "signature_operation_exit_code": 0,
-      "compiled_product_info_flag_present": false
+      "compiled_product_info_flag_present": false,
+      "profile_access": {
+        "process_uid": 501,
+        "directory_mode": "0700",
+        "files_uid_gid": "501:20",
+        "files_mode": "0600",
+        "effective_read_write": true,
+        "capture_input_consent": "not_verified",
+        "operation_id": "5d0a253c-c1ec-4b66-b185-2ce71900fc39"
+      }
     },
     "ho5": {
       "pid": 1520582,
@@ -49,7 +58,17 @@
       "configured_public_manifest_native_video": true,
       "configured_public_manifest_source_id": "67bf20c6295b898e95c803c7898ec7f5e547bb162bae6d3d7c90fe42dfd37c33",
       "public_manifest_operation_id": "b2b85e64-0f89-4652-b26e-cf474c26bd57",
-      "actual_pid_executable_sha256": null
+      "actual_pid_executable_sha256": null,
+      "profile_access": {
+        "process_uid": 1000,
+        "profile_path": "/home/liang/.config/remote-play-current/mesh",
+        "directory_mode": "0700",
+        "files_uid_gid": "1000:1000",
+        "files_mode": "0600",
+        "effective_read_write": true,
+        "capture_input_consent": "not_verified",
+        "operation_id": "73367db0-d070-44fd-a96b-0eed392a94ce"
+      }
     },
     "android": {
       "adb_devices_exit_code": 0,
@@ -76,7 +95,18 @@
       "startup_error": "Io PermissionDenied mesh.conf; root:staff/0600, caller jinliang uid 501",
       "owner_repair_exit_code": 1,
       "owner_repair_error": "sudo requires password; no metadata changed",
-      "startup_evidence": "docs/reviews/2026-10-09/evidence/installed-startup.json"
+      "startup_evidence": "docs/reviews/2026-10-09/evidence/installed-startup.json",
+      "current_profile_preflight": {
+        "process_uid": 501,
+        "conf_uid_gid": "501:20",
+        "conf_mode": "0600",
+        "conf_readable": true,
+        "secret_uid_gid": "0:20",
+        "secret_mode": "0600",
+        "secret_readable": false,
+        "no_launch_after_known_failure": true,
+        "administrator_secret_owner_repair_pending": true
+      }
     },
     "real_device_checkpoint": {
       "physical_directions_executed": 0,
@@ -86,7 +116,14 @@
       "raw_evidence": "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
       "decoded_frame": null,
       "visible_frame": null,
-      "current_blocker": "Canonical installed MacBook app exits before GUI because mesh.conf is root-owned 0600. Exact metadata-only repair cannot run without system administrator authentication; original Computer Use card reported approved."
+      "current_blocker": "User repaired MacBook mesh.conf ownership; matching mesh.secret remains root:staff/0600 and unreadable. No repeated known-failing launch or sudo retry; exact administrator secret owner repair pending."
+    },
+    "profile_access_observation": {
+      "record": "docs/reviews/2026-10-09/evidence/device-profile-access.json",
+      "request_id": "req_3143ad4e80d14826a2d01b9cc119d6b7",
+      "observed_at": 1791567417,
+      "physical_directions_executed": 0,
+      "configuration_contents_read": false
     }
   },
   "directions": [
@@ -654,13 +691,15 @@
       "result": "not_tested",
       "evidence": [
         "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
-        "docs/reviews/2026-10-09/evidence/installed-startup.json"
+        "docs/reviews/2026-10-09/evidence/installed-startup.json",
+        "docs/reviews/2026-10-09/evidence/device-profile-access.json"
       ],
       "blockers": [
         "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
         "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
         "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity.",
-        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed."
+        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed.",
+        "Latest filesystem preflight: MacBook conf owner restored by user but secret still root/0600 and unreadable. Studio UID501 and HO5 UID1000 profiles are private and accessible; actual media/input consent not inferred. Native directions remain unexecuted."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1164,13 +1203,15 @@
       "result": "not_tested",
       "evidence": [
         "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
-        "docs/reviews/2026-10-09/evidence/installed-startup.json"
+        "docs/reviews/2026-10-09/evidence/installed-startup.json",
+        "docs/reviews/2026-10-09/evidence/device-profile-access.json"
       ],
       "blockers": [
         "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
         "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
         "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity.",
-        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed."
+        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed.",
+        "Latest filesystem preflight: MacBook conf owner restored by user but secret still root/0600 and unreadable. Studio UID501 and HO5 UID1000 profiles are private and accessible; actual media/input consent not inferred. Native directions remain unexecuted."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1471,12 +1512,14 @@
       "result": "not_tested",
       "evidence": [
         "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
-        "docs/reviews/2026-10-09/evidence/installed-startup.json"
+        "docs/reviews/2026-10-09/evidence/installed-startup.json",
+        "docs/reviews/2026-10-09/evidence/device-profile-access.json"
       ],
       "blockers": [
         "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
         "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity.",
-        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed."
+        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed.",
+        "Latest filesystem preflight: MacBook conf owner restored by user but secret still root/0600 and unreadable. Studio UID501 and HO5 UID1000 profiles are private and accessible; actual media/input consent not inferred. Native directions remain unexecuted."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1688,12 +1731,14 @@
       "result": "not_tested",
       "evidence": [
         "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
-        "docs/reviews/2026-10-09/evidence/installed-startup.json"
+        "docs/reviews/2026-10-09/evidence/installed-startup.json",
+        "docs/reviews/2026-10-09/evidence/device-profile-access.json"
       ],
       "blockers": [
         "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
         "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity.",
-        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed."
+        "Direct existing signed MacBook startup: exit 1 in 0.212s before window creation, mesh.conf root:staff/0600 denied to uid 501. One exact chown attempt returned sudo password required; file unchanged. HO5 active Wayland session and configured artifact/manifest were verified separately; running binary provenance and actual frames remain unconfirmed.",
+        "Latest filesystem preflight: MacBook conf owner restored by user but secret still root/0600 and unreadable. Studio UID501 and HO5 UID1000 profiles are private and accessible; actual media/input consent not inferred. Native directions remain unexecuted."
       ],
       "core_regressions": {
         "enumeration_identity": {

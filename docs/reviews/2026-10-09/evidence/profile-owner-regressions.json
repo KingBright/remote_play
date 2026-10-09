@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "parent_checkpoint": "b4fadf6f0bba4af232a20a25e9baa58dff0be9a8",
+  "scope": "isolated profile guard/installer regressions; no native product GUI/media/input acceptance",
+  "rust_core": {
+    "command": [
+      "/Users/jinliang/.cargo/bin/cargo",
+      "test",
+      "--locked",
+      "--offline",
+      "-p",
+      "remote_core",
+      "--lib",
+      "mesh::tests"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 4.61,
+    "stop_reason": null,
+    "source_hashes": {
+      "remote_core/src/mesh.rs": "766013ad74e8a6ed455e22e924c970051506f40b181f92cec5ca51c33fb47de2",
+      "remote_core/Cargo.toml": "d6a9a0aedea119d2a9ae2d3a4e41dce5df1afac348b2be306b7f454b87ff0a81",
+      "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+      "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+      ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c",
+      "scripts/install_macos_unified.py": "199b0a8ffa8700412efac4ad94bc54bac16514dc1f8bd1899637abdaad9ba242",
+      "scripts/tests/test_installer_profile_access.py": "eec56ec09dd4532d1e4593ff2d7dd95edc025f7f7ebd72ea084c8003560668e1"
+    },
+    "sources_stable": true,
+    "target_reused": "/Users/jinliang/rust-target",
+    "log": "/tmp/remoteplay-profile-access-final-core-tests.log",
+    "gui_started": false,
+    "real_network_started": false,
+    "cleanup": false,
+    "free_bytes": 108500963328,
+    "passed": 20,
+    "failed": 0,
+    "log_sha256": "55d5d817a7da2ae0ebe01e0058f5d211de091279f8f2a78e0feca1c6d71af5f9",
+    "summary": "20 passed; 0 failed; 265 filtered out"
+  },
+  "app_check": {
+    "command": [
+      "/Users/jinliang/.cargo/bin/cargo",
+      "check",
+      "--locked",
+      "--offline",
+      "-p",
+      "remote_play_app",
+      "--bin",
+      "remote_play"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 3.076,
+    "stop_reason": null,
+    "source_hashes": {
+      "remote_core/src/mesh.rs": "766013ad74e8a6ed455e22e924c970051506f40b181f92cec5ca51c33fb47de2",
+      "remote_core/Cargo.toml": "d6a9a0aedea119d2a9ae2d3a4e41dce5df1afac348b2be306b7f454b87ff0a81",
+      "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+      "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+      ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c",
+      "scripts/install_macos_unified.py": "199b0a8ffa8700412efac4ad94bc54bac16514dc1f8bd1899637abdaad9ba242",
+      "scripts/tests/test_installer_profile_access.py": "eec56ec09dd4532d1e4593ff2d7dd95edc025f7f7ebd72ea084c8003560668e1"
+    },
+    "sources_stable": true,
+    "target_reused": "/Users/jinliang/rust-target",
+    "log": "/tmp/remoteplay-profile-access-final-app-check.log",
+    "gui_started": false,
+    "real_network_started": false,
+    "cleanup": false,
+    "free_bytes": 108387909632,
+    "warnings_scope": "existing unused/import/dead code warnings; not a release/native acceptance claim"
+  },
+  "python_release": {
+    "exit_code": 0,
+    "failed": 0,
+    "sources_stable": true,
+    "source_hashes": {
+      "scripts/install_macos_unified.py": "199b0a8ffa8700412efac4ad94bc54bac16514dc1f8bd1899637abdaad9ba242",
+      "scripts/tests/test_installer_profile_access.py": "eec56ec09dd4532d1e4593ff2d7dd95edc025f7f7ebd72ea084c8003560668e1"
+    },
+    "tests_run": 168,
+    "skipped": 6,
+    "elapsed_seconds": 1.335,
+    "command": [
+      "python3",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "scripts/tests",
+      "-v"
+    ],
+    "native_signing_integration_run": false,
+    "log_sha256": "84f7e665987075742f0b181030e7761d657bfe082f355ef5369eeb7985257715",
+    "passed": 162
+  },
+  "historical_writer_observation": {
+    "observed_at": "2026-10-09T17:37:41.768918+00:00",
+    "path": "/Library/LaunchDaemons/com.remoteplay.mesh.plist",
+    "exists": true,
+    "configuration_bodies_read": false,
+    "owner_uid": 0,
+    "mode": "0o600",
+    "symlink": false,
+    "selected_plist_read": "earlier permission denied; not retried",
+    "service_observation": {
+      "exit_code": 113,
+      "absent_response": true,
+      "selected_lines": []
+    }
+  },
+  "actual_admin_owner_changes_by_agent": false,
+  "real_configuration_contents_read": false,
+  "private_keys_read": false,
+  "gui_started": false,
+  "real_network_started": false,
+  "physical_direction_passed": false,
+  "uid_model_note": "Root/foreign effective identities are test-only simulated metadata, not actual sudo/setuid/chown."
+}

@@ -36,6 +36,12 @@ HO5 active Wayland session and configured public artifact/manifest are identifie
 No physical direction or real first frame has passed. This record
 is separate from the earlier synthetic experiment.
 
+The [profile ownership prevention and per-device access record](reviews/2026-10-09/PROFILE-OWNERSHIP-PREVENTION.md)
+links the current source fix, isolated tests and effective filesystem checks. User
+repaired the MacBook conf owner; secret owner recovery is still pending. Studio/HO5
+profile access is confirmed under their actual UIDs, while native consent remains
+unverified. These code/metadata checks add no passed physical direction.
+
 Core regression cases, with minimal sufficient real sources on each available
 platform, are mandatory:
 

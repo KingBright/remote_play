@@ -278,11 +278,36 @@ def installation_lock(applications: Path):
 
 def canonical_paths() -> tuple[Path, Path, Path, str]:
     home = Path.home(); applications = home / 'Applications'
-    if os.getuid() == 0 or applications.is_symlink() or not applications.is_dir():
+    if os.getuid() == 0 or os.geteuid() == 0 or applications.is_symlink() or not applications.is_dir():
         raise ReleaseRejected('Use the logged-in user and their ordinary Applications directory')
+    validate_user_profile(home, os.getuid())
     target = applications / 'RemotePlay.app'
     plist = home / 'Library/LaunchAgents/com.remoteplay.host.plist'
     return home, target, plist, f'gui/{os.getuid()}'
+
+
+def validate_user_profile(home: Path, uid: int) -> None:
+    """Metadata-only gate. An installer never creates or repairs user credentials."""
+    profile = home / 'Library/Application Support/RemotePlay/NativeMesh'
+    if '..' in home.parts:
+        raise ReleaseRejected('User home contains parent traversal; configuration was not changed')
+    for path in (home, home / 'Applications', home / 'Library',
+                 home / 'Library/Application Support', profile.parent, profile):
+        try: info = path.lstat()
+        except FileNotFoundError: continue
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:
+            raise ReleaseRejected(f'User profile path {path} must be an ordinary directory owned by UID {uid}; no ownership or permissions changed')
+        if path == profile and stat.S_IMODE(info.st_mode) & 0o077:
+            raise ReleaseRejected(f'User profile {path} is not private; permissions were not changed')
+    for path in (profile / 'mesh.conf', profile / 'mesh.secret'):
+        try: info = path.lstat()
+        except FileNotFoundError: continue
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ReleaseRejected(f'Protected profile file {path} must be an ordinary single-link file; configuration was not changed')
+        if info.st_uid != uid:
+            raise ReleaseRejected(f'Protected profile file {path} belongs to UID {info.st_uid}, expected UID {uid}; arrange explicit administrator ownership recovery; configuration was not changed')
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise ReleaseRejected(f'Protected profile file {path} is not private; permissions were not changed')
 
 
 def verify_with_budget(path: Path, policy, deadline: Deadline) -> dict:
@@ -471,6 +496,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             if action == 'already_installed': return plan
             require_system_mesh_absent(deadline)
             validate_processes(executable, current, deadline)
+            validate_user_profile(home, os.getuid())
             preserved = preserve_hashes(home, plist, deadline=deadline)
             tag = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
             backup_root = applications / '.remoteplay-backups' / tag

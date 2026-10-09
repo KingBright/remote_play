@@ -4,10 +4,11 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 pub const MESH_CONFIG_FILE_NAME: &str = "mesh.conf";
 pub const MESH_SECRET_FILE_NAME: &str = "mesh.secret";
@@ -377,6 +378,10 @@ pub trait MeshSecretStore {
     fn load_secret(&self) -> Result<Option<MeshSecret>, MeshStoreError>;
     fn save_secret(&self, secret: &MeshSecret) -> Result<(), MeshStoreError>;
     fn delete_secret(&self) -> Result<(), MeshStoreError>;
+    /// Check access without loading credentials or changing their protection.
+    fn validate_access(&self) -> Result<(), MeshStoreError> {
+        Ok(())
+    }
 }
 
 pub fn default_app_private_mesh_dir() -> PathBuf {
@@ -429,12 +434,11 @@ impl MeshSecretStore for AppPrivateMeshSecretStore {
         MeshSecretStorageKind::AppPrivateFile
     }
     fn load_secret(&self) -> Result<Option<MeshSecret>, MeshStoreError> {
-        match fs::read_to_string(&self.path) {
-            Ok(value) => MeshSecret::new(value.trim())
+        match read_private_file(&self.path)? {
+            Some(value) => MeshSecret::new(value.trim())
                 .map(Some)
                 .map_err(MeshStoreError::InvalidMeshConfig),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(MeshStoreError::io(self.path.clone(), source)),
+            None => Ok(None),
         }
     }
     fn save_secret(&self, secret: &MeshSecret) -> Result<(), MeshStoreError> {
@@ -442,6 +446,10 @@ impl MeshSecretStore for AppPrivateMeshSecretStore {
     }
     fn delete_secret(&self) -> Result<(), MeshStoreError> {
         remove_file_if_exists(&self.path)
+    }
+    fn validate_access(&self) -> Result<(), MeshStoreError> {
+        validate_private_parent(&self.path)?;
+        private_file_metadata(&self.path).map(|_| ())
     }
 }
 
@@ -482,11 +490,16 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
     pub fn secret_store(&self) -> &S {
         &self.secret_store
     }
+    fn validate_access(&self) -> Result<(), MeshStoreError> {
+        validate_private_dir(&self.root_dir)?;
+        private_file_metadata(&self.config_path)?;
+        self.secret_store.validate_access()
+    }
     pub fn load(&self) -> Result<Option<MeshConfig>, MeshStoreError> {
-        let metadata = match fs::read_to_string(&self.config_path) {
-            Ok(value) => value,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(MeshStoreError::io(self.config_path.clone(), source)),
+        self.validate_access()?;
+        let metadata = match read_private_file(&self.config_path)? {
+            Some(value) => value,
+            None => return Ok(None),
         };
         let mut config = decode_mesh_config_metadata(&metadata)?;
         let Some(secret) = self.secret_store.load_secret()? else {
@@ -503,8 +516,15 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
         display_name: impl Into<String>,
     ) -> Result<MeshConfig, MeshStoreError> {
         if let Some(config) = self.load()? {
-            self.save(&config)?; // normalize any pre-v2 metadata in place
+            // Reading a valid identity never rewrites metadata, credentials,
+            // ownership, permissions or ACLs, including legacy metadata.
+            // Canonicalization belongs only to an explicit save operation.
             return Ok(config);
+        }
+        if self.secret_store.load_secret()?.is_some() {
+            return Err(MeshStoreError::InvalidMetadata(
+                "configuration is missing but its existing secret is retained; explicit recovery is required".into(),
+            ));
         }
         let config = MeshConfig::generate(display_name);
         self.save(&config)?;
@@ -533,6 +553,9 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
         config
             .validate()
             .map_err(MeshStoreError::InvalidMeshConfig)?;
+        // Root must not write into a user-owned profile, even if OS access
+        // permits it. Validate both files before changing either of them.
+        self.validate_access()?;
         create_private_dir(&self.root_dir)?;
         self.secret_store.save_secret(&config.network_secret)?;
         write_private_file(
@@ -541,6 +564,7 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
         )
     }
     pub fn delete(&self) -> Result<(), MeshStoreError> {
+        self.validate_access()?;
         remove_file_if_exists(&self.config_path)?;
         self.secret_store.delete_secret()
     }
@@ -549,6 +573,7 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
 #[derive(Debug)]
 pub enum MeshStoreError {
     Io { path: PathBuf, source: io::Error },
+    UnsafeProfile { path: PathBuf, message: String },
     MissingNetworkSecret,
     InvalidMetadata(String),
     InvalidMeshConfig(MeshConfigError),
@@ -562,6 +587,7 @@ impl fmt::Display for MeshStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::UnsafeProfile { path, message } => write!(f, "{}: {message}", path.display()),
             Self::MissingNetworkSecret => {
                 f.write_str("stored device-group config is missing its secret")
             }
@@ -577,7 +603,9 @@ impl Error for MeshStoreError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::InvalidMeshConfig(err) => Some(err),
-            Self::MissingNetworkSecret | Self::InvalidMetadata(_) => None,
+            Self::MissingNetworkSecret | Self::InvalidMetadata(_) | Self::UnsafeProfile { .. } => {
+                None
+            }
         }
     }
 }
@@ -693,11 +721,208 @@ fn decode_hex_nibble(value: u8) -> Result<u8, MeshStoreError> {
     }
 }
 
+fn unsafe_profile(path: &Path, message: impl Into<String>) -> MeshStoreError {
+    MeshStoreError::UnsafeProfile {
+        path: path.to_path_buf(),
+        message: message.into(),
+    }
+}
+#[cfg(all(test, unix))]
+thread_local! {
+    static PROFILE_TEST_UID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(unix)]
+fn profile_uid() -> u32 {
+    #[cfg(test)]
+    if let Some(uid) = PROFILE_TEST_UID.with(|value| value.get()) {
+        return uid;
+    }
+    // Read the actual effective identity, never an overridable UID/HOME variable.
+    unsafe { libc::geteuid() }
+}
+fn check_profile_path(path: &Path) -> Result<(), MeshStoreError> {
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(unsafe_profile(
+            path,
+            "profile paths may not contain parent traversal; nothing changed",
+        ));
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?
+            .join(path)
+    };
+    for ancestor in absolute.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                // macOS /var and /tmp (and Android's system storage prefixes)
+                // can be root-controlled OS links. A profile leaf or a user's
+                // link inside its ancestry is never followed.
+                #[cfg(unix)]
+                if ancestor != absolute && metadata.uid() == 0 {
+                    continue;
+                }
+                return Err(unsafe_profile(
+                    ancestor,
+                    "profile path contains a symlink; nothing changed",
+                ));
+            }
+            Ok(metadata) =>
+            {
+                #[cfg(unix)]
+                if profile_uid() == 0 && metadata.uid() != 0 {
+                    return Err(unsafe_profile(
+                        ancestor,
+                        "root must not initialize or rewrite a profile beneath another user's directory; explicit administrator recovery is required; nothing changed",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(MeshStoreError::io(ancestor.to_path_buf(), source)),
+        }
+    }
+    Ok(())
+}
+fn check_owner(path: &Path, metadata: &fs::Metadata) -> Result<(), MeshStoreError> {
+    #[cfg(unix)]
+    if metadata.uid() != profile_uid() {
+        return Err(unsafe_profile(
+            path,
+            format!(
+                "profile owner UID {} differs from process UID {}; run as its owner and arrange explicit administrator recovery if ownership is wrong; nothing changed",
+                metadata.uid(),
+                profile_uid(),
+            ),
+        ));
+    }
+    Ok(())
+}
+fn validate_private_dir(path: &Path) -> Result<(), MeshStoreError> {
+    check_profile_path(path)?;
+    for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    return Err(unsafe_profile(
+                        ancestor,
+                        "profile parent is not an ordinary directory; nothing changed",
+                    ));
+                }
+                check_owner(ancestor, &metadata)?;
+                #[cfg(unix)]
+                if ancestor == path && metadata.mode() & 0o077 != 0 {
+                    return Err(unsafe_profile(
+                        path,
+                        "profile directory is not private; permissions were not changed",
+                    ));
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(MeshStoreError::io(ancestor.to_path_buf(), source)),
+        }
+    }
+    Err(unsafe_profile(
+        path,
+        "profile has no owned existing parent; nothing changed",
+    ))
+}
+fn validate_private_parent(path: &Path) -> Result<(), MeshStoreError> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        validate_private_dir(parent)
+    } else {
+        validate_private_dir(
+            &env::current_dir().map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?,
+        )
+    }
+}
+fn private_file_metadata(path: &Path) -> Result<Option<fs::Metadata>, MeshStoreError> {
+    check_profile_path(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(MeshStoreError::io(path.to_path_buf(), source)),
+    };
+    check_private_file(path, &metadata)?;
+    Ok(Some(metadata))
+}
+fn check_private_file(path: &Path, metadata: &fs::Metadata) -> Result<(), MeshStoreError> {
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(unsafe_profile(
+            path,
+            "profile entry is not an ordinary file; nothing changed",
+        ));
+    }
+    check_owner(path, metadata)?;
+    #[cfg(unix)]
+    if metadata.nlink() != 1 || metadata.mode() & 0o077 != 0 {
+        return Err(unsafe_profile(
+            path,
+            "profile file must be private and have one link; permissions were not changed",
+        ));
+    }
+    Ok(())
+}
+fn same_profile_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    if (a.dev(), a.ino(), a.uid(), a.mode()) != (b.dev(), b.ino(), b.uid(), b.mode()) {
+        return false;
+    }
+    a.len() == b.len() && a.modified().ok() == b.modified().ok()
+}
+fn read_private_file(path: &Path) -> Result<Option<String>, MeshStoreError> {
+    validate_private_parent(path)?;
+    let Some(before) = private_file_metadata(path)? else {
+        return Ok(None);
+    };
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = options
+        .open(path)
+        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+    let opened = file
+        .metadata()
+        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+    check_private_file(path, &opened)?;
+    if !same_profile_file(&before, &opened)
+        || private_file_metadata(path)?
+            .as_ref()
+            .is_none_or(|now| !same_profile_file(now, &opened))
+    {
+        return Err(unsafe_profile(
+            path,
+            "profile changed while opening; nothing changed",
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+    Ok(Some(text))
+}
 fn create_private_dir(path: &Path) -> Result<(), MeshStoreError> {
-    fs::create_dir_all(path).map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
-    set_private_dir_permissions(path)
+    validate_private_dir(path)?;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+    validate_private_dir(path)
 }
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), MeshStoreError> {
+    validate_private_parent(path)?;
+    let before = private_file_metadata(path)?;
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_private_dir(parent)?;
     }
@@ -705,44 +930,58 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), MeshStoreError> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("device-group-store");
-    let tmp_path = path.with_file_name(format!(".{file_name}.tmp-{}", hex_random::<4>()));
-    let result = fs::write(&tmp_path, bytes)
-        .map_err(|source| MeshStoreError::io(tmp_path.clone(), source))
-        .and_then(|_| set_private_file_permissions(&tmp_path))
-        .and_then(|_| {
-            fs::rename(&tmp_path, path)
-                .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))
-        })
-        .and_then(|_| set_private_file_permissions(path));
+    let temporary = path.with_file_name(format!(".{file_name}.tmp-{}", hex_random::<4>()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(before.as_ref().map(|m| m.mode() & 0o777).unwrap_or(0o600));
+        let mut file = options
+            .open(&temporary)
+            .map_err(|source| MeshStoreError::io(temporary.clone(), source))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|source| MeshStoreError::io(temporary.clone(), source))?;
+        if let Some(previous) = &before {
+            file.set_permissions(previous.permissions())
+                .map_err(|source| MeshStoreError::io(temporary.clone(), source))?;
+        }
+        validate_private_parent(path)?;
+        let current = private_file_metadata(path)?;
+        if !match (&before, &current) {
+            (Some(a), Some(b)) => same_profile_file(a, b),
+            (None, None) => true,
+            _ => false,
+        } {
+            return Err(unsafe_profile(
+                path,
+                "profile changed before saving; existing identity retained",
+            ));
+        }
+        if before.is_some() {
+            fs::rename(&temporary, path)
+                .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+        } else {
+            // Atomic create-only publication: a concurrent first start cannot
+            // replace an identity that appeared after the access check.
+            fs::hard_link(&temporary, path)
+                .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
+            fs::remove_file(&temporary)
+                .map_err(|source| MeshStoreError::io(temporary.clone(), source))?;
+        }
+        Ok(())
+    })();
     if result.is_err() {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&temporary);
     }
     result
 }
 fn remove_file_if_exists(path: &Path) -> Result<(), MeshStoreError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(MeshStoreError::io(path.to_path_buf(), source)),
+    validate_private_parent(path)?;
+    if private_file_metadata(path)?.is_none() {
+        return Ok(());
     }
-}
-#[cfg(unix)]
-fn set_private_dir_permissions(path: &Path) -> Result<(), MeshStoreError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))
-}
-#[cfg(not(unix))]
-fn set_private_dir_permissions(_path: &Path) -> Result<(), MeshStoreError> {
-    Ok(())
-}
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), MeshStoreError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))
-}
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), MeshStoreError> {
-    Ok(())
+    fs::remove_file(path).map_err(|source| MeshStoreError::io(path.to_path_buf(), source))
 }
 fn non_empty_env_path(value: std::ffi::OsString) -> Option<std::ffi::OsString> {
     (!value.to_string_lossy().trim().is_empty()).then_some(value)
@@ -785,6 +1024,8 @@ mod tests {
                 env::temp_dir().join(format!("remote-play-{name}-{}-{id}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&root).unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             Self { root }
         }
     }
@@ -940,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn store_normalizes_legacy_metadata_without_legacy_fields() {
+    fn store_preserves_legacy_metadata_until_explicit_save() {
         let temp = TempTree::new("group-migrate");
         let store = AppPrivateMeshConfigStore::new(&temp.root);
         let config = MeshConfig::generate("Desk");
@@ -957,6 +1198,8 @@ mod tests {
             .unwrap();
         let loaded = store.load_or_generate("Ignored").unwrap();
         assert_eq!(loaded.network_name, config.network_name);
+        assert_eq!(fs::read_to_string(store.config_path()).unwrap(), metadata);
+        store.save(&loaded).unwrap(); // Explicit save, never ordinary startup.
         let normalized = fs::read_to_string(store.config_path()).unwrap();
         assert!(normalized.contains(MESH_CONFIG_METADATA_VERSION));
         assert!(!normalized.contains("initial_peer"));
@@ -989,5 +1232,220 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+    #[cfg(unix)]
+    fn profile_snapshot(path: &Path) -> (u32, u32, u64, std::time::SystemTime, Vec<u8>) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        (
+            metadata.uid(),
+            metadata.mode() & 0o777,
+            metadata.ino(),
+            metadata.modified().unwrap(),
+            fs::read(path).unwrap(),
+        )
+    }
+    #[cfg(unix)]
+    fn with_profile_uid<T>(uid: u32, run: impl FnOnce() -> T) -> T {
+        struct Restore(Option<u32>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                PROFILE_TEST_UID.with(|v| v.set(self.0));
+            }
+        }
+        let previous = PROFILE_TEST_UID.with(|v| v.replace(Some(uid)));
+        let _restore = Restore(previous);
+        run()
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_first_user_start_creates_one_private_identity_and_reuses_it() {
+        let temp = TempTree::new("first-user-profile");
+        let store = AppPrivateMeshConfigStore::new(temp.root.join("new-profile"));
+        let first = store.load_or_generate("First user").unwrap();
+        let config_before = profile_snapshot(store.config_path());
+        let secret_before = profile_snapshot(store.secret_store().path());
+        let second = store
+            .load_or_generate("Must not replace user identity")
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(config_before, profile_snapshot(store.config_path()));
+        assert_eq!(secret_before, profile_snapshot(store.secret_store().path()));
+        assert_eq!(config_before.0, profile_uid());
+        assert_eq!(config_before.1, 0o600);
+        assert_eq!(secret_before.1, 0o600);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_root_install_context_cannot_initialize_user_directory_then_user_can_start() {
+        let temp = TempTree::new("root-install-context");
+        let store = AppPrivateMeshConfigStore::new(temp.root.join("profile"));
+        // Simulate only the caller identity; never setuid/chown or execute sudo.
+        let installer_uid = if profile_uid() == 0 { 1 } else { 0 };
+        let error =
+            with_profile_uid(installer_uid, || store.load_or_generate("Installer")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("explicit administrator recovery")
+        );
+        assert!(!store.root_dir().exists());
+        let user = store.load_or_generate("User").unwrap();
+        assert_eq!(user.display_name, "User");
+        assert_eq!(
+            fs::metadata(store.config_path()).unwrap().uid(),
+            profile_uid()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_foreign_caller_cannot_rewrite_read_or_delete_existing_identity() {
+        let temp = TempTree::new("foreign-profile-context");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let config = store.load_or_generate("User").unwrap();
+        let config_before = profile_snapshot(store.config_path());
+        let secret_before = profile_snapshot(store.secret_store().path());
+        let directory_mode = fs::metadata(&temp.root).unwrap().mode();
+        with_profile_uid(profile_uid().wrapping_add(1), || {
+            assert!(store.load().is_err());
+            assert!(store.load_or_generate("Other").is_err());
+            assert!(store.save(&MeshConfig::generate("Other")).is_err());
+            assert!(store.delete().is_err());
+        });
+        assert_eq!(config_before, profile_snapshot(store.config_path()));
+        assert_eq!(secret_before, profile_snapshot(store.secret_store().path()));
+        assert_eq!(directory_mode, fs::metadata(&temp.root).unwrap().mode());
+        assert_eq!(store.load().unwrap().unwrap(), config);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_existing_read_only_files_and_directory_are_not_widened_by_startup() {
+        let temp = TempTree::new("readonly-profile");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let first = store.load_or_generate("User").unwrap();
+        for path in [store.config_path(), store.secret_store().path()] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o400)).unwrap();
+        }
+        fs::set_permissions(&temp.root, fs::Permissions::from_mode(0o500)).unwrap();
+        let before = (
+            profile_snapshot(store.config_path()),
+            profile_snapshot(store.secret_store().path()),
+        );
+        assert_eq!(store.load_or_generate("Ignored").unwrap(), first);
+        assert_eq!(
+            before,
+            (
+                profile_snapshot(store.config_path()),
+                profile_snapshot(store.secret_store().path())
+            )
+        );
+        assert_eq!(fs::metadata(&temp.root).unwrap().mode() & 0o777, 0o500);
+        fs::set_permissions(&temp.root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_legacy_startup_preserves_both_files_inode_content_and_permissions() {
+        let temp = TempTree::new("legacy-secret-preservation");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let config = store.load_or_generate("User").unwrap();
+        let text = encode_mesh_config_metadata(&config)
+            .replace(MESH_CONFIG_METADATA_VERSION, LEGACY_METADATA_VERSION);
+        write_private_file(store.config_path(), text.as_bytes()).unwrap();
+        fs::set_permissions(store.config_path(), fs::Permissions::from_mode(0o400)).unwrap();
+        let config_before = profile_snapshot(store.config_path());
+        let secret_before = profile_snapshot(store.secret_store().path());
+        assert_eq!(store.load_or_generate("Ignored").unwrap(), config);
+        assert_eq!(config_before, profile_snapshot(store.config_path()));
+        assert_eq!(secret_before, profile_snapshot(store.secret_store().path()));
+        assert_eq!(
+            fs::metadata(store.config_path()).unwrap().mode() & 0o777,
+            0o400
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_orphan_secret_is_retained_instead_of_rotating_membership() {
+        let temp = TempTree::new("orphan-secret");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        store
+            .secret_store()
+            .save_secret(&MeshSecret::generate())
+            .unwrap();
+        let before = profile_snapshot(store.secret_store().path());
+        let error = store.load_or_generate("Do not regenerate").unwrap_err();
+        assert!(error.to_string().contains("existing secret is retained"));
+        assert!(!store.config_path().exists());
+        assert_eq!(before, profile_snapshot(store.secret_store().path()));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_and_secret_symlinks_are_rejected_before_other_file_changes() {
+        use std::os::unix::fs::symlink;
+        for name in [MESH_CONFIG_FILE_NAME, MESH_SECRET_FILE_NAME] {
+            let temp = TempTree::new("profile-file-link");
+            let store = AppPrivateMeshConfigStore::new(temp.root.join("profile"));
+            let config = store.load_or_generate("User").unwrap();
+            let path = store.root_dir().join(name);
+            let target = temp.root.join("unrelated-file");
+            fs::rename(&path, &target).unwrap();
+            symlink(&target, &path).unwrap();
+            let other = if name == MESH_CONFIG_FILE_NAME {
+                store.secret_store().path()
+            } else {
+                store.config_path()
+            };
+            let target_before = profile_snapshot(&target);
+            let other_before = profile_snapshot(other);
+            assert!(store.load_or_generate("Other").is_err());
+            assert!(store.save(&config).is_err());
+            assert!(store.delete().is_err());
+            assert!(
+                fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(target_before, profile_snapshot(&target));
+            assert_eq!(other_before, profile_snapshot(other));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_root_links_parent_links_and_traversal_are_rejected() {
+        use std::os::unix::fs::symlink;
+        let temp = TempTree::new("profile-directory-link");
+        let owned = temp.root.join("owned");
+        create_private_dir(&owned).unwrap();
+        let link = temp.root.join("linked");
+        symlink(&owned, &link).unwrap();
+        for path in [
+            link.clone(),
+            link.join("nested"),
+            temp.root
+                .join("..")
+                .join(temp.root.file_name().unwrap())
+                .join("new"),
+        ] {
+            let store = AppPrivateMeshConfigStore::new(path);
+            assert!(store.load_or_generate("Other").is_err());
+        }
+        assert_eq!(fs::read_dir(&owned).unwrap().count(), 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn profile_hardlinked_secret_and_public_permissions_are_retained_on_rejection() {
+        let temp = TempTree::new("profile-unsafe-files");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        store.load_or_generate("User").unwrap();
+        let alias = temp.root.join("alias");
+        fs::hard_link(store.secret_store().path(), &alias).unwrap();
+        let before = profile_snapshot(store.config_path());
+        assert!(store.load_or_generate("Other").is_err());
+        assert!(store.delete().is_err());
+        assert_eq!(before, profile_snapshot(store.config_path()));
+        fs::remove_file(alias).unwrap();
+        fs::set_permissions(store.config_path(), fs::Permissions::from_mode(0o644)).unwrap();
+        let public_before = profile_snapshot(store.config_path());
+        assert!(store.load_or_generate("Other").is_err());
+        assert_eq!(public_before, profile_snapshot(store.config_path()));
     }
 }

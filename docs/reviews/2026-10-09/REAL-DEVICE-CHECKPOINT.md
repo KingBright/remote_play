@@ -111,3 +111,14 @@ and `b2b85e64-0f89-4652-b26e-cf474c26bd57` all exited 0 with sealed complete out
 These public artifact/manifest facts do not prove the protected running executable,
 actual native presentation, source subscription, input or audio. No true direction
 has started; all twelve cross-platform rows remain `not_tested`.
+
+## Latest profile repair/prevention status
+
+User-reported conf repair was confirmed by metadata: 501:20/0600, same inode,
+length and mtime. The paired secret remains root:staff/0600 and unreadable; no
+known-failing restart or sudo retry was made. The [prevention and device record](PROFILE-OWNERSHIP-PREVENTION.md)
+links the shared initialization fix, 20 Rust and 168 Python regressions, main check
+and per-device access evidence. Studio/HO5 profiles are accessible under UID 501
+and UID 1000 respectively; actual capture/input consent remains separate. No
+physical direction has started. The earlier conf-only command above is historical;
+the current prerequisite is the explicit administrator repair of the secret owner.
