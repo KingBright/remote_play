@@ -1,0 +1,1038 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-09",
+  "source_commit_before_fixture": "b32928412e704e0838dad906ef8d8231c28b93ca",
+  "status": "blocked_before_source_transfer",
+  "linux_compile": {
+    "started": false,
+    "completed": false,
+    "compiler_consumed_transferred_sources": false
+  },
+  "geometry": {
+    "x11_root_metadata_observed": true,
+    "production_constructor_test_executed": false,
+    "desktop_pixels_captured": false,
+    "synthetic_ffmpeg_test_executed_on_linux": false,
+    "actual_hevc_sps_dimensions_verified": false,
+    "native_wayland_coverage_verified": false,
+    "actual_gpui_presentation_verified": false
+  },
+  "device": {
+    "id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545",
+    "source_root": "/var/home/liang/workspace/.rp-original-release-20261004/incoming",
+    "existing_target": "/var/home/liang/workspace/remote_play/target",
+    "minimum_prebuild_free_bytes": 8589934592,
+    "minimum_remaining_free_bytes": 4294967296
+  },
+  "scope": {
+    "changed_files": 17,
+    "reused_files": 71,
+    "changed_source_bytes": 408802,
+    "no_repository_copy": true,
+    "no_new_target": true,
+    "no_gui_compile_or_implementation": true,
+    "manifest_only_workspace_dependencies": "Cargo resolver metadata for app/client/Ely; not a claim of their source or GUI build verification",
+    "rollback_source_only": true
+  },
+  "bundle": {
+    "path": "/tmp/rp-x11-linux-host-delta-20261009.rhsync",
+    "size": 413122,
+    "sha256": "06ef220f13dac5368201cd4756e201fe31764687745a900dc617404bd98e2777",
+    "files": 17
+  },
+  "sync_plan": {
+    "actions": [
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a",
+        "path": ".rp-original-release-20261004/incoming/Cargo.lock",
+        "sha256": "ebb25016ab5f096eeb6a9d4d1625de5be3e8462e0b7d4cf5e672c00c6572e4b6",
+        "size": 219364
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55",
+        "path": ".rp-original-release-20261004/incoming/Cargo.toml",
+        "sha256": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+        "size": 389
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "5580717293efff9b7e7df9a8fb1e7daf1529299871782f45312604b4445df886",
+        "path": ".rp-original-release-20261004/incoming/app/Cargo.toml",
+        "sha256": "761ca4ab21298950752230127dd3e7b7676b9ae3d00ba083084fb0e34afc8637",
+        "size": 2550
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "1394998eda18fc69d34fb929e6637c8afca11428cfec2bb3fb2c428898fe86cf",
+        "path": ".rp-original-release-20261004/incoming/client/Cargo.toml",
+        "sha256": "c2928c039015b2073d1a1eda65dc7fa6a8dc515c55ac64b4678c0bdf322b4682",
+        "size": 1484
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a",
+        "path": ".rp-original-release-20261004/incoming/host/Cargo.toml",
+        "sha256": "5140a6eeb247e5f684086118c3b77e8bbb2ebbb32811513b4f02549c96d8252e",
+        "size": 1189
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/host/src/capture_backend.rs",
+        "sha256": "c31c0e14c0c6e755e8a5f183a5d12dce7b75d6de3fe4df3e00aec7b0d4ad29cf",
+        "size": 2040
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1",
+        "path": ".rp-original-release-20261004/incoming/host/src/ffmpeg_hevc.rs",
+        "sha256": "d854e4b50ea2eecc38fefd7542b70a10685663fe9329afd8dd1fddc5cd3071bc",
+        "size": 16657
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb",
+        "path": ".rp-original-release-20261004/incoming/host/src/lib.rs",
+        "sha256": "1ab3e07ba174a548a477f6be684b16106d6663f890e7b70b5f27426f71da4cb9",
+        "size": 41561
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/host/src/linux_capture_geometry.rs",
+        "sha256": "be48f2fcb0686f980c98c84523427aa2832d1ac9495550a12ec91e98d367443f",
+        "size": 13319
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "e264e1d67d52dd356574182f721ae96aa6baef32e26ffccf294427b82d0dfa0c",
+        "path": ".rp-original-release-20261004/incoming/remote_core/Cargo.toml",
+        "sha256": "d6a9a0aedea119d2a9ae2d3a4e41dce5df1afac348b2be306b7f454b87ff0a81",
+        "size": 691
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "0023e251e5558c6f2986156277497419815ac6dafb16806485c12ed6371fe827",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/lib.rs",
+        "sha256": "70dc79e8b2531570c9201addcbcad356f97a98ff2786dd294efc58dd630829a6",
+        "size": 1995
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "065fa81ac1dae9ea6313d3cbca387c87f0da10886a0d5758157d0016738f929b",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/mesh.rs",
+        "sha256": "766013ad74e8a6ed455e22e924c970051506f40b181f92cec5ca51c33fb47de2",
+        "size": 53549
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/session_tabs.rs",
+        "sha256": "c0cbac59d4325b01602f341ac3795c2b5e7969d174fe0e32a1a70dd0f3094fb5",
+        "size": 28364
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/stream_settings.rs",
+        "sha256": "cd936f5e4642a7d42ea2bc58b1083e0a9c5637d5e514577db6fdf23fffeb5aff",
+        "size": 13181
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/view_commands.rs",
+        "sha256": "0ddc458d844236b241e51e14d6b22d33c08e2cf9649574600dc35af223331d8f",
+        "size": 9235
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "6108f25615ce23cea298c879fc598a0e4bc577e056ab5ae35f38b1d31312694c",
+        "path": ".rp-original-release-20261004/incoming/third_party/screencapturekit/Cargo.toml",
+        "sha256": "ae74dc73b8c63e7747fb5993ebeff4bb4e3cde1e7e165a8aeb9617aeae8886b0",
+        "size": 2823
+      },
+      {
+        "action": "upload",
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/third_party/ely-gpui-component/Cargo.toml",
+        "sha256": "c0c14ffe0a00ea7caa6b3844f3ca70db853e24778a346135898180f64aa3ec01",
+        "size": 411
+      }
+    ],
+    "deletes": false,
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "files": [
+      {
+        "executable": false,
+        "expected_version": "283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a",
+        "path": ".rp-original-release-20261004/incoming/Cargo.lock",
+        "sha256": "ebb25016ab5f096eeb6a9d4d1625de5be3e8462e0b7d4cf5e672c00c6572e4b6",
+        "size": 219364
+      },
+      {
+        "executable": false,
+        "expected_version": "67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55",
+        "path": ".rp-original-release-20261004/incoming/Cargo.toml",
+        "sha256": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
+        "size": 389
+      },
+      {
+        "executable": false,
+        "expected_version": "5580717293efff9b7e7df9a8fb1e7daf1529299871782f45312604b4445df886",
+        "path": ".rp-original-release-20261004/incoming/app/Cargo.toml",
+        "sha256": "761ca4ab21298950752230127dd3e7b7676b9ae3d00ba083084fb0e34afc8637",
+        "size": 2550
+      },
+      {
+        "executable": false,
+        "expected_version": "1394998eda18fc69d34fb929e6637c8afca11428cfec2bb3fb2c428898fe86cf",
+        "path": ".rp-original-release-20261004/incoming/client/Cargo.toml",
+        "sha256": "c2928c039015b2073d1a1eda65dc7fa6a8dc515c55ac64b4678c0bdf322b4682",
+        "size": 1484
+      },
+      {
+        "executable": false,
+        "expected_version": "d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a",
+        "path": ".rp-original-release-20261004/incoming/host/Cargo.toml",
+        "sha256": "5140a6eeb247e5f684086118c3b77e8bbb2ebbb32811513b4f02549c96d8252e",
+        "size": 1189
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/host/src/capture_backend.rs",
+        "sha256": "c31c0e14c0c6e755e8a5f183a5d12dce7b75d6de3fe4df3e00aec7b0d4ad29cf",
+        "size": 2040
+      },
+      {
+        "executable": false,
+        "expected_version": "cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1",
+        "path": ".rp-original-release-20261004/incoming/host/src/ffmpeg_hevc.rs",
+        "sha256": "d854e4b50ea2eecc38fefd7542b70a10685663fe9329afd8dd1fddc5cd3071bc",
+        "size": 16657
+      },
+      {
+        "executable": false,
+        "expected_version": "c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb",
+        "path": ".rp-original-release-20261004/incoming/host/src/lib.rs",
+        "sha256": "1ab3e07ba174a548a477f6be684b16106d6663f890e7b70b5f27426f71da4cb9",
+        "size": 41561
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/host/src/linux_capture_geometry.rs",
+        "sha256": "be48f2fcb0686f980c98c84523427aa2832d1ac9495550a12ec91e98d367443f",
+        "size": 13319
+      },
+      {
+        "executable": false,
+        "expected_version": "e264e1d67d52dd356574182f721ae96aa6baef32e26ffccf294427b82d0dfa0c",
+        "path": ".rp-original-release-20261004/incoming/remote_core/Cargo.toml",
+        "sha256": "d6a9a0aedea119d2a9ae2d3a4e41dce5df1afac348b2be306b7f454b87ff0a81",
+        "size": 691
+      },
+      {
+        "executable": false,
+        "expected_version": "0023e251e5558c6f2986156277497419815ac6dafb16806485c12ed6371fe827",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/lib.rs",
+        "sha256": "70dc79e8b2531570c9201addcbcad356f97a98ff2786dd294efc58dd630829a6",
+        "size": 1995
+      },
+      {
+        "executable": false,
+        "expected_version": "065fa81ac1dae9ea6313d3cbca387c87f0da10886a0d5758157d0016738f929b",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/mesh.rs",
+        "sha256": "766013ad74e8a6ed455e22e924c970051506f40b181f92cec5ca51c33fb47de2",
+        "size": 53549
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/session_tabs.rs",
+        "sha256": "c0cbac59d4325b01602f341ac3795c2b5e7969d174fe0e32a1a70dd0f3094fb5",
+        "size": 28364
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/stream_settings.rs",
+        "sha256": "cd936f5e4642a7d42ea2bc58b1083e0a9c5637d5e514577db6fdf23fffeb5aff",
+        "size": 13181
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/remote_core/src/view_commands.rs",
+        "sha256": "0ddc458d844236b241e51e14d6b22d33c08e2cf9649574600dc35af223331d8f",
+        "size": 9235
+      },
+      {
+        "executable": false,
+        "expected_version": "6108f25615ce23cea298c879fc598a0e4bc577e056ab5ae35f38b1d31312694c",
+        "path": ".rp-original-release-20261004/incoming/third_party/screencapturekit/Cargo.toml",
+        "sha256": "ae74dc73b8c63e7747fb5993ebeff4bb4e3cde1e7e165a8aeb9617aeae8886b0",
+        "size": 2823
+      },
+      {
+        "executable": false,
+        "expected_version": "absent",
+        "path": ".rp-original-release-20261004/incoming/third_party/ely-gpui-component/Cargo.toml",
+        "sha256": "c0c14ffe0a00ea7caa6b3844f3ca70db853e24778a346135898180f64aa3ec01",
+        "size": 411
+      }
+    ],
+    "manifest_id": "2bc530d887312cbb992a5d8e4d34a9bcd24c305a0b7f29595d294d29e1add399",
+    "operation_id": "21be197b-ee55-4960-94cd-36228cc4b1d8",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582937,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 1213,
+        "dispatched_at_ms": 1791582937606,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 550,
+        "queued_at_ms": 1791582937056,
+        "result_at_ms": 1791582938819
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "protocol": 1,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "completed",
+      "failure_boundary": null,
+      "last_confirmed_stage": "gateway_completed_request",
+      "next_action": null,
+      "observed_at": 1791582938,
+      "operation_id": "21be197b-ee55-4960-94cd-36228cc4b1d8",
+      "output_complete": null,
+      "process_exit_code": null,
+      "process_outcome": "not_confirmed",
+      "protocol": 1,
+      "request_id": "req_e07c5a439d6c447790adafc27e2b5ec7",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_e07c5a439d6c447790adafc27e2b5ec7",
+    "state": "planned",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 4,
+        "waiting_resource": 63
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 68
+    }
+  },
+  "upload": {
+    "cleanup_complete": false,
+    "confirmed_bytes": 0,
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "diagnostic": {
+      "authorization_failure_observed": false,
+      "code": "source_address_policy_rejected",
+      "failure_boundary": "source_address_policy",
+      "http_request_started": false,
+      "os_error": null,
+      "side": "device",
+      "source_host": "sdmntprcentralus.oaiusercontent.com",
+      "stage": "source_client_initialization"
+    },
+    "expires_at": 1791669387,
+    "failure_boundary": "source_address_policy",
+    "next_action": "diagnose_original_source",
+    "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582990,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": null,
+        "dispatched_at_ms": 1791582986883,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 505,
+        "queued_at_ms": 1791582986378,
+        "result_at_ms": null
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "pending": false,
+    "progress": {
+      "average_bps": 0,
+      "bytes_done": 0,
+      "confirmed_bytes": null,
+      "elapsed_ms": 2169,
+      "instantaneous_bps": 0,
+      "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+      "phase": "paused",
+      "resumed_bytes": 0,
+      "retry_count": 0,
+      "total_bytes": null,
+      "updated_at": 1791582989
+    },
+    "publication_pending": false,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": false,
+      "execution_state": "paused",
+      "failure_boundary": "source_address_policy",
+      "last_confirmed_stage": "transfer_paused_publication_unconfirmed",
+      "next_action": "diagnose_original_source",
+      "observed_at": 1791582991,
+      "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+      "output_complete": null,
+      "process_exit_code": null,
+      "process_outcome": "not_confirmed",
+      "protocol": 1,
+      "request_id": "req_bb68ca5aa4d04be0bd795cceb0f22ef0",
+      "retry_policy": "resume_original_only_after_connection_and_source_authorization_confirmed",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_bb68ca5aa4d04be0bd795cceb0f22ef0",
+    "resumable": true,
+    "retry_policy": "resume_original_only_after_connection_and_source_authorization_confirmed",
+    "source_authorization": {
+      "error_code": null,
+      "expires_at": 1791583886,
+      "next_action": "observe_original_operation",
+      "protocol": 1,
+      "refresh_supported": true,
+      "source_endpoint": {
+        "host": "sdmntprcentralus.oaiusercontent.com",
+        "port": 443,
+        "scheme": "https"
+      },
+      "state": "available",
+      "transfer_revision": 0
+    },
+    "state": "paused",
+    "total_bytes": null,
+    "transfer_revision": 0
+  },
+  "upload_observation": {
+    "cleanup_complete": false,
+    "confirmed_bytes": 0,
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "diagnostic": {
+      "authorization_failure_observed": false,
+      "code": "source_address_policy_rejected",
+      "failure_boundary": "source_address_policy",
+      "http_request_started": false,
+      "os_error": null,
+      "side": "device",
+      "source_host": "sdmntprcentralus.oaiusercontent.com",
+      "stage": "source_client_initialization"
+    },
+    "expires_at": 1791669387,
+    "failure_boundary": "source_address_policy",
+    "next_action": "diagnose_original_source",
+    "observation": {
+      "changed": true,
+      "cursor": "81505652004ca157932ef78e1fb061d5063b4c28cad7a97322caae7ae38836a8",
+      "observation_protocol": 2,
+      "semantics": "latest_state_not_event_log",
+      "snapshot_consistency": "per_operation",
+      "waited_ms": 1
+    },
+    "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582999,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": null,
+        "dispatched_at_ms": 1791582986883,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 505,
+        "queued_at_ms": 1791582986378,
+        "result_at_ms": null
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "pending": false,
+    "progress": {
+      "average_bps": 0,
+      "bytes_done": 0,
+      "confirmed_bytes": null,
+      "elapsed_ms": 2169,
+      "instantaneous_bps": 0,
+      "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+      "phase": "paused",
+      "resumed_bytes": 0,
+      "retry_count": 0,
+      "total_bytes": null,
+      "updated_at": 1791582989
+    },
+    "publication_pending": false,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durability_scope": "observed_facts_only_not_this_query",
+      "durable": false,
+      "error_code": null,
+      "evidence_complete": false,
+      "evidence_durable": true,
+      "execution_state": "paused",
+      "failure_boundary": "source_address_policy",
+      "last_confirmed_stage": "transfer_paused_publication_unconfirmed",
+      "next_action": "diagnose_original_source",
+      "observed_at": 1791583011,
+      "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+      "output_complete": null,
+      "process_exit_code": null,
+      "process_outcome": "not_confirmed",
+      "protocol": 2,
+      "request_id": "req_ead1e972454d470a9f364c01880c4b60",
+      "request_record_persisted": false,
+      "request_retention": "not_retained_use_original_operation",
+      "retry_policy": "resume_original_only_after_connection_and_source_authorization_confirmed",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_ead1e972454d470a9f364c01880c4b60",
+    "resumable": true,
+    "retry_policy": "resume_original_only_after_connection_and_source_authorization_confirmed",
+    "source_authorization": {
+      "error_code": null,
+      "expires_at": 1791583886,
+      "next_action": "observe_original_operation",
+      "protocol": 1,
+      "refresh_supported": true,
+      "source_endpoint": {
+        "host": "sdmntprcentralus.oaiusercontent.com",
+        "port": 443,
+        "scheme": "https"
+      },
+      "state": "available",
+      "transfer_revision": 0
+    },
+    "state": "paused",
+    "total_bytes": null,
+    "transfer_revision": 0
+  },
+  "metadata": {
+    "compression": {
+      "full_output_available": true,
+      "output_bytes": 5658,
+      "profile": "generic",
+      "raw_bytes": 5658,
+      "saved_tokens": 0
+    },
+    "cursor": 5658,
+    "cursor_format": "sanitized_utf8_v1",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "has_more": false,
+    "next_action": null,
+    "operation_id": "5c28b031-8e6e-4650-a0ec-a413aefd4c86",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582683,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 2132,
+        "dispatched_at_ms": 1791582683003,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 191,
+        "queued_at_ms": 1791582682812,
+        "result_at_ms": 1791582685135
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "output": "{\n  \"free_bytes\": 759794528256,\n  \"environment\": {\n    \"DISPLAY\": \":0\",\n    \"WAYLAND_DISPLAY\": \"wayland-0\",\n    \"XDG_SESSION_TYPE\": \"wayland\",\n    \"CARGO_TARGET_DIR\": null\n  },\n  \"sources\": [\n    {\n      \"path\": \"/var/home/liang/workspace/remote_play\",\n      \"exists\": true,\n      \"target_entries\": [\n        {\n          \"path\": \"/var/home/liang/workspace/remote_play/target\",\n          \"resolved\": \"/var/home/liang/workspace/remote_play/target\",\n          \"exists\": true,\n          \"symlink\": false\n        }\n      ],\n      \"files\": {\n        \"Cargo.toml\": {\n          \"sha256\": \"21a9f9405bfb257e7a815db09c399ec8a62cc69a1c75aa07723ddab3a22910eb\",\n          \"size\": 164,\n          \"mtime_ns\": 1789229877227891383\n        },\n        \"Cargo.lock\": {\n          \"sha256\": \"0d569def81fe9e217c5dd230db8a5eec38cd34f61c35c94b281707ea9f9d8afc\",\n          \"size\": 219691,\n          \"mtime_ns\": 1789229877227891383\n        },\n        \"host/Cargo.toml\": {\n          \"sha256\": \"d3bfadbe022f3b61920f4ee4ce12867764a311b947dae3d7b3749136efd4acfa\",\n          \"size\": 941,\n          \"mtime_ns\": 1789229877230416732\n        },\n        \"host/src/ffmpeg_hevc.rs\": {\n          \"sha256\": \"7e312c66d0115265873635929241c644cabe9ed281303f069d8a2a1a7650783c\",\n          \"size\": 7160,\n          \"mtime_ns\": 1789265254675439725\n        },\n        \"host/src/lib.rs\": {\n          \"sha256\": \"aff368155e315d2fa534683f636d98178589378271fe5ef6760d56b99c621452\",\n          \"size\": 37356,\n          \"mtime_ns\": 1789382726822619298\n        },\n        \".cargo/config.toml\": {\n          \"sha256\": \"bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c\",\n          \"size\": 494,\n          \"mtime_ns\": 1789277008785263443\n        }\n      },\n      \"git rev-parse HEAD\": \"969ca10922eb17e705877b7ca4cf5ce3bec836c1\\n\",\n      \"git status --short\": \"\"\n    },\n    {\n      \"path\": \"/var/home/liang/workspace/.rp-original-release-20261004/incoming\",\n      \"exists\": true,\n      \"target_entries\": [],\n      \"files\": {\n        \"Cargo.toml\": {\n          \"sha256\": \"67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55\",\n          \"size\": 344,\n          \"mtime_ns\": 1791054460798956000\n        },\n        \"Cargo.lock\": {\n          \"sha256\": \"283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a\",\n          \"size\": 243888,\n          \"mtime_ns\": 1791114899951031400\n        },\n        \"host/Cargo.toml\": {\n          \"sha256\": \"d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a\",\n          \"size\": 1003,\n          \"mtime_ns\": 1790692405222986000\n        },\n        \"host/src/ffmpeg_hevc.rs\": {\n          \"sha256\": \"cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1\",\n          \"size\": 14496,\n          \"mtime_ns\": 1790488797123525100\n        },\n        \"host/src/lib.rs\": {\n          \"sha256\": \"c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb\",\n          \"size\": 41411,\n          \"mtime_ns\": 1791002412010633500\n        },\n        \"scripts/refresh_transferred_sources.py\": {\n          \"sha256\": \"4d88c9c2ec6c9182c5800fb654c2b13314c1dbe77a81f78c50fa8ee2b8205cec\",\n          \"size\": 3246,\n          \"mtime_ns\": 1791001767879327300\n        },\n        \".cargo/config.toml\": {\n          \"sha256\": \"bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c\",\n          \"size\": 494,\n          \"mtime_ns\": 1789265633773141100\n        }\n      }\n    },\n    {\n      \"path\": \"/var/home/liang/workspace/.rp-actual-ui-20261004/src\",\n      \"exists\": true,\n      \"target_entries\": [],\n      \"files\": {\n        \"Cargo.toml\": {\n          \"sha256\": \"67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55\",\n          \"size\": 344,\n          \"mtime_ns\": 1791094063861088415\n        },\n        \"Cargo.lock\": {\n          \"sha256\": \"283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a\",\n          \"size\": 243888,\n          \"mtime_ns\": 1791115044998049717\n        },\n        \"host/Cargo.toml\": {\n          \"sha256\": \"d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a\",\n          \"size\": 1003,\n          \"mtime_ns\": 1791094063861088415\n        },\n        \"host/src/ffmpeg_hevc.rs\": {\n          \"sha256\": \"cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1\",\n          \"size\": 14496,\n          \"mtime_ns\": 1791094063861088415\n        },\n        \"host/src/lib.rs\": {\n          \"sha256\": \"c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb\",\n          \"size\": 41411,\n          \"mtime_ns\": 1791094063861088415\n        },\n        \"scripts/refresh_transferred_sources.py\": {\n          \"sha256\": \"4d88c9c2ec6c9182c5800fb654c2b13314c1dbe77a81f78c50fa8ee2b8205cec\",\n          \"size\": 3246,\n          \"mtime_ns\": 1791094063862088379\n        },\n        \".cargo/config.toml\": {\n          \"sha256\": \"bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c\",\n          \"size\": 494,\n          \"mtime_ns\": 1791094063861088415\n        }\n      }\n    }\n  ],\n  \"workspace_target_dirs\": [],\n  \"tools\": {\n    \"cargo\": \"/home/liang/.cargo/bin/cargo\",\n    \"rustc\": \"/home/liang/.cargo/bin/rustc\",\n    \"ffmpeg\": \"/usr/bin/ffmpeg\",\n    \"ffprobe\": \"/usr/bin/ffprobe\",\n    \"xwininfo\": \"/usr/bin/xwininfo\",\n    \"Xvfb\": null\n  },\n  \"service\": \"ActiveState=active\\nSubState=running\\nMainPID=2232948\\nNRestarts=0\\nExecStart={ path=/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play ; argv[]=/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play ; ignore_errors=no ; start_time=[Sat 2026-10-10 04:24:07 CST] ; stop_time=[n/a] ; pid=2232948 ; code=(null) ; status=0/0 }\\n\",\n  \"active_build_processes\": [],\n  \"installed_sha256\": \"4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c\"\n}\n",
+    "output_stream": "combined",
+    "output_view": "compact",
+    "pty": false,
+    "raw_cursor_start": 0,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791582685,
+      "operation_id": "5c28b031-8e6e-4650-a0ec-a413aefd4c86",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_71ac5f872b414749a6c015d78e856f65",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_71ac5f872b414749a6c015d78e856f65",
+    "state": "exited",
+    "terminal": {
+      "created_at": 1791582683,
+      "exit_code": 0,
+      "id": "5c28b031-8e6e-4650-a0ec-a413aefd4c86",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2289095,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791582683,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "terminal_id": "5c28b031-8e6e-4650-a0ec-a413aefd4c86",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 264,
+        "waiting_resource": 5
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 270
+    }
+  },
+  "target_and_independent_geometry": {
+    "compression": {
+      "full_output_available": true,
+      "output_bytes": 7656,
+      "profile": "generic",
+      "raw_bytes": 7656,
+      "saved_tokens": 0
+    },
+    "cursor": 7656,
+    "cursor_format": "sanitized_utf8_v1",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "has_more": false,
+    "next_action": null,
+    "operation_id": "67f8d118-8ee5-4043-ba42-96a86efdf980",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582748,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 1179,
+        "dispatched_at_ms": 1791582747754,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 724,
+        "queued_at_ms": 1791582747030,
+        "result_at_ms": 1791582748933
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "output": "{\n  \".rp-original-release-20261004\": [\n    {\n      \"name\": \"incoming\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"source.tar.gz\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"source-before\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"source-sync.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"regression.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"original-input.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"release-build.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"remoteplay-original-alpha8\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"product-identity.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"deployment.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"package\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"RemotePlay-Linux-x64-2.0.0-alpha.8.tar.gz\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"installed-main-test-profile\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"installed-main-live-stream.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"installed-main-live-stream.progress.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"final-installed-state.json\",\n      \"dir\": false,\n      \"link\": false\n    }\n  ],\n  \".rp-actual-ui-20261004\": [\n    {\n      \"name\": \"src\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"source.tar.gz\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"original-default-tests.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"original-default-build.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"remoteplay-original\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"product-gui-identity.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"profile-helper-build.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"old-renderer-not-activated.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"review-profile\",\n      \"dir\": true,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-window.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-window.progress.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-window.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-x11-window.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-x11-window.progress.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-x11-authorized.log\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-x11-authorized.progress.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"original-ui-actual-ho5.png\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-window-screenshot.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"actual-default-x11-authorized.json\",\n      \"dir\": false,\n      \"link\": false\n    },\n    {\n      \"name\": \"original-gui-input.log\",\n      \"dir\": false,\n      \"link\": false\n    }\n  ],\n  \"/home/liang/rust-target\": {\n    \"exists\": false,\n    \"symlink\": false\n  },\n  \"/var/home/liang/workspace/remote_play/target\": {\n    \"exists\": true,\n    \"symlink\": false,\n    \"entries\": [\n      \"CACHEDIR.TAG\",\n      \"release\",\n      \".rustc_info.json\",\n      \"debug\",\n      \".future-incompat-report.json\"\n    ]\n  },\n  \"/var/home/liang/workspace/.rp-original-release-20261004/target\": {\n    \"exists\": false,\n    \"symlink\": false\n  },\n  \"/var/home/liang/workspace/.rp-actual-ui-20261004/target\": {\n    \"exists\": false,\n    \"symlink\": false\n  },\n  \"/home/liang/.cargo/config.toml\": {\n    \"exists\": true,\n    \"symlink\": false,\n    \"config\": \"[source.crates-io]\\nreplace-with = \\\"rsproxy-sparse\\\"\\n\\n[source.rsproxy-sparse]\\nregistry = \\\"sparse+https://rsproxy.cn/index/\\\"\\n\\n[registries.rsproxy]\\nindex = \\\"https://rsproxy.cn/crates.io-index\\\"\\n\\n[net]\\ngit-fetch-with-cli = true\\n\"\n  },\n  \"cargo -V\": {\n    \"exit_code\": 0,\n    \"output\": \"cargo 1.98.0 (797e8a9bc 2026-08-05)\\n\"\n  },\n  \"rustc -Vv\": {\n    \"exit_code\": 0,\n    \"output\": \"rustc 1.98.0 (88d9e12ae 2026-08-18)\\nbinary: rustc\\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\\ncommit-date: 2026-08-18\\nhost: x86_64-unknown-linux-gnu\\nrelease: 1.98.0\\nLLVM version: 22.1.8\\n\"\n  },\n  \"ffmpeg -version\": {\n    \"exit_code\": 0,\n    \"output\": \"ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers\\nbuilt with gcc 16 (GCC)\\nconfiguration: --arch=x86_64 --bindir=/usr/bin --datadir=/usr/share/ffmpeg --disable-static --disable-stripping --enable-amf --enable-avcodec --enable-avdevice --enable-avfilter --enable-avformat --enable-alsa --enable-bzlib --enable-chromaprint --enable-decklink --enable-frei0r --enable-gcrypt --enable-gmp --enable-gpl --enable-gray --enable-iconv --enable-ladspa --enable-lcms2 --enable-libaom --enable-libaribb24 --enable-libaribcaption --enable-libass --enable-libbluray --enable-libbs2b --enable-libcaca --enable-libcdio --enable-libcodec2 --enable-libdav1d --enable-libdavs2 --enable-libdc1394 --enable-libdrm --enable-libdvdnav --enable-libdvdread --enable-libfdk-aac --enable-libfontconfig --enable-libfreetype --enable-libfribidi --enable-libgme --enable-libgsm --enable-libharfbuzz --enable-libiec61883 --enable-libilbc --enable-libjack --enable-libjxl --enable-libklvanc --enable-libkvazaar --enable-liblc3 --disable-liblensfun --enable-liblcevc-dec --enable-libmodplug --enable-libmp3lame --enable-libmpeghdec --enable-libmysofa --disable-libnpp --enable-liboapv --enable-libopencore-amrnb --enable-libopencore-amrwb --disable-libopencv --enable-libopenh264 --enable-libopenjpeg --enable-libopenmpt --enable-libopus --enable-libplacebo --enable-libpulse --enable-libqrencode --enable-libquirc --enable-librabbitmq --enable-librav1e --enable-librist --enable-librsvg --enable-librtmp --enable-librubberband --enable-libshaderc --disable-libshine --enable-libsmbclient --enable-libsnappy --enable-libsvtav1 --enable-libsoxr --enable-libspeex --enable-libsrt --enable-libssh --disable-libtensorflow --enable-libtesseract --enable-libtheora --disable-libtorch --enable-libtwolame --enable-libuavs3d --enable-libv4l2 --enable-libvidstab --enable-libvo-amrwbenc --enable-libvorbis --enable-libvpx --enable-libvvenc --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxavs --enable-libxcb --enable-libxcb-shape --enable-libxcb-shm --enable-libxcb-xfixes --enable-libxevd --enable-libxeve --enable-libxml2 --enable-libxvid --enable-libzimg --enable-libzmq --enable-libzvbi -\"\n  },\n  \"xwininfo -root -stats\": {\n    \"exit_code\": 0,\n    \"output\": \"\\nxwininfo: Window id: 0x412 (the root window) (has no name)\\n\\n  Absolute upper-left X:  0\\n  Absolute upper-left Y:  0\\n  Relative upper-left X:  0\\n  Relative upper-left Y:  0\\n  Width: 3840\\n  Height: 2160\\n  Depth: 24\\n  Visual: 0x23\\n  Visual Class: TrueColor\\n  Border width: 0\\n  Class: InputOutput\\n  Colormap: 0x22 (installed)\\n  Bit Gravity State: ForgetGravity\\n  Window Gravity State: NorthWestGravity\\n  Backing Store State: NotUseful\\n  Save Under State: no\\n  Map State: IsViewable\\n  Override Redirect State: no\\n  Corners:  +0+0  -0+0  -0-0  +0-0\\n  -geometry 3840x2160+0+0\\n\\n\"\n  }\n}\n",
+    "output_stream": "combined",
+    "output_view": "compact",
+    "pty": false,
+    "raw_cursor_start": 0,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791582749,
+      "operation_id": "67f8d118-8ee5-4043-ba42-96a86efdf980",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_2d141ad002dc4ab0895f176950dc5f11",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_2d141ad002dc4ab0895f176950dc5f11",
+    "state": "exited",
+    "terminal": {
+      "created_at": 1791582748,
+      "exit_code": 0,
+      "id": "67f8d118-8ee5-4043-ba42-96a86efdf980",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2289799,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791582748,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "terminal_id": "67f8d118-8ee5-4043-ba42-96a86efdf980",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 502,
+        "waiting_resource": 4
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 507
+    }
+  },
+  "rollback": {
+    "compression": {
+      "full_output_available": true,
+      "output_bytes": 175,
+      "profile": "generic",
+      "raw_bytes": 175,
+      "saved_tokens": 0
+    },
+    "cursor": 175,
+    "cursor_format": "sanitized_utf8_v1",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "has_more": false,
+    "next_action": null,
+    "operation_id": "3ca61632-bfcb-49e3-a3bf-f19b215799fa",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791582923,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 1425,
+        "dispatched_at_ms": 1791582922970,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 132,
+        "queued_at_ms": 1791582922838,
+        "result_at_ms": 1791582924395
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "output": "{\"backup_root\": \"/var/home/liang/workspace/.rp-source-picture-20261009/x11-source-rollback\", \"backed_up\": 11, \"new_files\": 6, \"source_changes\": 0, \"free_bytes\": 759785926656}\n",
+    "output_stream": "combined",
+    "output_view": "compact",
+    "pty": false,
+    "raw_cursor_start": 0,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791582924,
+      "operation_id": "3ca61632-bfcb-49e3-a3bf-f19b215799fa",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_11f500f168e640149225c962bce796d1",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_11f500f168e640149225c962bce796d1",
+    "state": "exited",
+    "terminal": {
+      "created_at": 1791582923,
+      "exit_code": 0,
+      "id": "3ca61632-bfcb-49e3-a3bf-f19b215799fa",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2291825,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791582924,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "terminal_id": "3ca61632-bfcb-49e3-a3bf-f19b215799fa",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 208,
+        "waiting_resource": 5
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 215
+    }
+  },
+  "dns": {
+    "compression": {
+      "full_output_available": true,
+      "output_bytes": 252,
+      "profile": "generic",
+      "raw_bytes": 252,
+      "saved_tokens": 0
+    },
+    "cursor": 252,
+    "cursor_format": "sanitized_utf8_v1",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "has_more": false,
+    "next_action": null,
+    "operation_id": "2ed95817-666a-494c-b201-a2a120d3a6d1",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791583028,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 1812,
+        "dispatched_at_ms": 1791583028374,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 1141,
+        "queued_at_ms": 1791583027233,
+        "result_at_ms": 1791583030186
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "output": "{\"host\": \"sdmntprcentralus.oaiusercontent.com\", \"addresses\": [{\"address\": \"198.18.0.25\", \"is_global\": false, \"is_private\": true}, {\"address\": \"fc00::f\", \"is_global\": false, \"is_private\": true}], \"http_requested\": false, \"configuration_changed\": false}\n",
+    "output_stream": "combined",
+    "output_view": "compact",
+    "pty": false,
+    "raw_cursor_start": 0,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791583030,
+      "operation_id": "2ed95817-666a-494c-b201-a2a120d3a6d1",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_31107bf4729b45f6a7aac20b2b6dd319",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_31107bf4729b45f6a7aac20b2b6dd319",
+    "state": "exited",
+    "terminal": {
+      "created_at": 1791583028,
+      "exit_code": 0,
+      "id": "2ed95817-666a-494c-b201-a2a120d3a6d1",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2292978,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791583028,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "terminal_id": "2ed95817-666a-494c-b201-a2a120d3a6d1",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 172,
+        "waiting_resource": 5
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 178
+    }
+  },
+  "final_remote_preservation": {
+    "compression": {
+      "full_output_available": true,
+      "output_bytes": 4686,
+      "profile": "generic",
+      "raw_bytes": 4686,
+      "saved_tokens": 0
+    },
+    "cursor": 4686,
+    "cursor_format": "sanitized_utf8_v1",
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "has_more": false,
+    "next_action": null,
+    "operation_id": "67310258-041c-43d4-9bb3-b207c9238fbe",
+    "operation_lifecycle": {
+      "device_receipt_delivery": {
+        "blocked": 0,
+        "oldest_created_at": null,
+        "pending": 0,
+        "protocol": 1,
+        "reported_at": 1791583090,
+        "sending": 0
+      },
+      "gateway": {
+        "clock": "gateway_unix_ms_same_host",
+        "dispatch_to_result_ms": 3366,
+        "dispatched_at_ms": 1791583088572,
+        "note": "gateway segments use one host clock; never subtract these timestamps from agent_monotonic timings",
+        "queue_ms": 81,
+        "queued_at_ms": 1791583088491,
+        "result_at_ms": 1791583091938
+      },
+      "protocol": 1,
+      "receipt_delivery_scope": "device-wide queue snapshot; operation result presence is authoritative for this operation"
+    },
+    "output": "{\n  \"source_files\": [\n    {\n      \"path\": \".rp-original-release-20261004/incoming/Cargo.lock\",\n      \"before\": \"283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a\",\n      \"actual\": \"283a4c70c9e0b5b5b6bc958af9f18f5dd07bf612ab724b1c2496901f9d09159a\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/Cargo.toml\",\n      \"before\": \"67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55\",\n      \"actual\": \"67872bb0a59ac19a0d0f8ef79b0da9abcb64af2173e3846d6c58cc54f0fdec55\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/app/Cargo.toml\",\n      \"before\": \"5580717293efff9b7e7df9a8fb1e7daf1529299871782f45312604b4445df886\",\n      \"actual\": \"5580717293efff9b7e7df9a8fb1e7daf1529299871782f45312604b4445df886\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/client/Cargo.toml\",\n      \"before\": \"1394998eda18fc69d34fb929e6637c8afca11428cfec2bb3fb2c428898fe86cf\",\n      \"actual\": \"1394998eda18fc69d34fb929e6637c8afca11428cfec2bb3fb2c428898fe86cf\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/host/Cargo.toml\",\n      \"before\": \"d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a\",\n      \"actual\": \"d26b233dcbd64651049174917115c6c0c18178ae22a3f8afbdd4fb32f564bc3a\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/host/src/capture_backend.rs\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/host/src/ffmpeg_hevc.rs\",\n      \"before\": \"cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1\",\n      \"actual\": \"cb2131560fbf1b948c55695eb34a3901edc34b28c12a291643c883a89167b0a1\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/host/src/lib.rs\",\n      \"before\": \"c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb\",\n      \"actual\": \"c87af90e6cbca29cded71c2065d075ccc97d2a5ebb3a3ee0bee3134988a24ffb\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/host/src/linux_capture_geometry.rs\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/Cargo.toml\",\n      \"before\": \"e264e1d67d52dd356574182f721ae96aa6baef32e26ffccf294427b82d0dfa0c\",\n      \"actual\": \"e264e1d67d52dd356574182f721ae96aa6baef32e26ffccf294427b82d0dfa0c\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/src/lib.rs\",\n      \"before\": \"0023e251e5558c6f2986156277497419815ac6dafb16806485c12ed6371fe827\",\n      \"actual\": \"0023e251e5558c6f2986156277497419815ac6dafb16806485c12ed6371fe827\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/src/mesh.rs\",\n      \"before\": \"065fa81ac1dae9ea6313d3cbca387c87f0da10886a0d5758157d0016738f929b\",\n      \"actual\": \"065fa81ac1dae9ea6313d3cbca387c87f0da10886a0d5758157d0016738f929b\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/src/session_tabs.rs\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/src/stream_settings.rs\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/remote_core/src/view_commands.rs\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/third_party/screencapturekit/Cargo.toml\",\n      \"before\": \"6108f25615ce23cea298c879fc598a0e4bc577e056ab5ae35f38b1d31312694c\",\n      \"actual\": \"6108f25615ce23cea298c879fc598a0e4bc577e056ab5ae35f38b1d31312694c\",\n      \"unchanged\": true\n    },\n    {\n      \"path\": \".rp-original-release-20261004/incoming/third_party/ely-gpui-component/Cargo.toml\",\n      \"before\": \"absent\",\n      \"actual\": \"absent\",\n      \"unchanged\": true\n    }\n  ],\n  \"rollback_manifest_sha256\": \"109d094bcde2fe8e67c6f4265c75e8b116c45eaf6f5ded479eb730e295c2ef4c\",\n  \"upload_path_exists\": false,\n  \"installed_sha256\": \"4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c\",\n  \"service\": \"ActiveState=active\\nSubState=running\\nMainPID=2232948\\nNRestarts=0\\n\",\n  \"direct_ffmpeg_children\": [],\n  \"active_build_processes\": [],\n  \"existing_target\": \"/var/home/liang/workspace/remote_play/target\",\n  \"target_exists\": true,\n  \"free_bytes\": 759784591360\n}\n",
+    "output_stream": "combined",
+    "output_view": "compact",
+    "pty": false,
+    "raw_cursor_start": 0,
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791583092,
+      "operation_id": "67310258-041c-43d4-9bb3-b207c9238fbe",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_eaaca16d61bf422aad26d00c1c47ce75",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "request_id": "req_eaaca16d61bf422aad26d00c1c47ce75",
+    "state": "exited",
+    "terminal": {
+      "created_at": 1791583090,
+      "exit_code": 0,
+      "id": "67310258-041c-43d4-9bb3-b207c9238fbe",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2293676,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791583090,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "terminal_id": "67310258-041c-43d4-9bb3-b207c9238fbe",
+    "timing": {
+      "clock": "agent_monotonic",
+      "phase_ms": {
+        "completed": 0,
+        "queued": 0,
+        "running": 246,
+        "waiting_resource": 67
+      },
+      "scope": "this execution attempt; not cross-machine wall-clock subtraction",
+      "total_ms": 315
+    }
+  },
+  "recovery": {
+    "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+    "manifest_id": "2bc530d887312cbb992a5d8e4d34a9bcd24c305a0b7f29595d294d29e1add399",
+    "resume_permitted_only_after_original_source_policy_and_connection_are_confirmed": true,
+    "no_alternate_upload_or_shell_file_bodies_used": true,
+    "no_network_or_security_changes": true,
+    "source_mtimes_not_refreshed_because_transfer_not_complete": true,
+    "wayland_proposal_not_implemented": true
+  },
+  "pending_test": {
+    "path": "host/src/ffmpeg_hevc.rs",
+    "test": "ffmpeg_hevc::tests::linux_x11_command_reads_root_metadata_without_capturing",
+    "ignored_by_default": true,
+    "linux_only": true,
+    "executed": false,
+    "expected_input_env": "RP_X11_EXPECTED_ROOT=independently observed WIDTHxHEIGHT; DISPLAY must exist",
+    "calls_actual_production_constructor": true,
+    "spawns_capture": false
+  }
+}

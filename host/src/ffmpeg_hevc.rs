@@ -187,8 +187,14 @@ fn capture_command_using(
             plan.append_args(&mut cmd, &display, fps);
             println!(
                 "[FfmpegHevc] X11 compatibility plan: root source {}x{} at +{},{}; encoded {}x{} within requested {}x{}",
-                region.width, region.height, region.x, region.y,
-                plan.output_width, plan.output_height, width, height,
+                region.width,
+                region.height,
+                region.x,
+                region.y,
+                plan.output_width,
+                plan.output_height,
+                width,
+                height,
             );
         } else {
             cmd.args([
@@ -326,6 +332,48 @@ fn take_access_unit(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires DISPLAY and an independently observed RP_X11_EXPECTED_ROOT; metadata only"]
+    fn linux_x11_command_reads_root_metadata_without_capturing() {
+        let display = std::env::var("DISPLAY").expect("explicit X11 display required");
+        let expected = std::env::var("RP_X11_EXPECTED_ROOT")
+            .expect("independently observed root geometry required");
+        let (width, height) = expected.split_once('x').expect("expected WIDTHxHEIGHT");
+        let expected = (
+            width.parse::<u32>().unwrap(),
+            height.parse::<u32>().unwrap(),
+        );
+        let source = crate::linux_capture_geometry::capture_region(&display).unwrap();
+        assert_eq!((source.x, source.y), (0, 0));
+        assert_eq!((source.width, source.height), expected);
+        let plan = crate::linux_capture_geometry::X11CapturePlan::new(source, 1920, 1080).unwrap();
+
+        // Exercise the real Linux command constructor, never Command::spawn.
+        let command = capture_command(1920, 1080, 60, 6000).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        let input_size = format!("{}x{}", source.width, source.height);
+        let input = format!("{display}+0,0");
+        let filter = format!("scale=w={}:h={}", plan.output_width, plan.output_height);
+        for (flag, value) in [
+            ("-video_size", input_size.as_str()),
+            ("-i", input.as_str()),
+            ("-vf", filter.as_str()),
+            ("-c:v", "libx265"),
+            ("-pix_fmt", "yuv420p"),
+        ] {
+            assert!(args.windows(2).any(|pair| pair == [flag, value]));
+        }
+        assert_eq!(
+            crate::capture_backend::ffmpeg_input_format(&command),
+            "x11grab"
+        );
+        println!("metadata-only Linux command verified: {command:?}");
+    }
 
     #[test]
     fn replacement_drops_previous_capture_before_factory_runs() {
