@@ -49,6 +49,7 @@ fn connection_failure(device: &str, attempt: u64, scope: ShareScope, message: St
 }
 
 pub(crate) type FrameSlot = Arc<Mutex<Option<Arc<MacDecodedVideoFrame>>>>;
+pub(crate) type SourceViewBinding = remote_core::view_commands::ViewConnectionBinding<WorkspaceConnection, ShareScope>;
 
 #[derive(Clone)]
 pub(crate) struct FileViewBinding {
@@ -153,6 +154,7 @@ pub(crate) struct ViewSnapshot {
     pub role: RoleState,
     pub devices: Vec<AppDevice>,
     pub sources: Arc<Vec<CaptureSourceInfo>>,
+    pub source_binding: Option<SourceViewBinding>,
     pub active_source: CaptureSource,
     pub pending_source: Option<CaptureSource>,
     pub supports_input: bool,
@@ -275,6 +277,7 @@ impl OriginalOwner {
                 )),
                 devices,
                 sources: Arc::new(Vec::new()),
+                source_binding: None,
                 active_source: CaptureSource::MainDisplay,
                 pending_source: None,
                 supports_input: false,
@@ -299,6 +302,7 @@ impl OriginalOwner {
                 role,
                 devices,
                 sources: e.sources.clone(),
+                source_binding: Some(SourceViewBinding::new(&s.conn, remote_core::shared_files::current_share_scope())),
                 active_source: s.source,
                 pending_source: s.pending.map(|_| s.request.source),
                 supports_input: s.supports_input && s.connected,
@@ -319,6 +323,7 @@ impl OriginalOwner {
                 role,
                 devices,
                 sources: Arc::new(Vec::new()),
+                source_binding: None,
                 active_source: CaptureSource::MainDisplay,
                 pending_source: None,
                 supports_input: false,
@@ -646,15 +651,25 @@ impl OriginalOwner {
                 && failed.attempt == error.attempt && error.scope == remote_core::shared_files::current_share_scope())
     }
     pub async fn request_capture_sources(&self) -> Result<(), Error> {
+        let binding = self.source_view_binding().ok_or("No active connection")?;
+        self.request_bound_capture_sources(&binding).await
+    }
+    pub fn source_view_binding(&self) -> Option<SourceViewBinding> {
+        let p = self.pool.lock().unwrap();
+        p.active().map(|e| SourceViewBinding::new(&e.session.conn, remote_core::shared_files::current_share_scope()))
+    }
+    pub fn source_binding_is_current(&self, binding: &SourceViewBinding) -> bool {
+        let p = self.pool.lock().unwrap();
+        p.active().is_some_and(|e| binding.matches(&e.session.conn, remote_core::shared_files::current_share_scope()))
+    }
+    pub async fn request_bound_capture_sources(&self, binding: &SourceViewBinding) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
-
-        let s = &mut p.active_mut().ok_or("No active connection")?.session;
-        if !s.control(SessionCommand::ListSources {
-            request_id: 900_001,
-        }) {
-            return Err("Control queue is busy".into());
-        }
-        Ok(())
+        let e = p.active_mut().ok_or("No active connection")?;
+        let connection = e.session.conn.clone();
+        binding.apply(&connection, remote_core::shared_files::current_share_scope(), || {
+            if e.session.control(SessionCommand::ListSources { request_id: 900_001 }) { Ok(()) }
+            else { Err("Control queue is busy".into()) }
+        }).ok_or("Selected connection changed; source discovery was not sent")?
     }
     pub async fn switch_capture_source(
         &self,
@@ -664,10 +679,20 @@ impl OriginalOwner {
         fps: u32,
         bitrate: u32,
     ) -> Result<(), Error> {
+        let binding = self.source_view_binding().ok_or("No active connection")?;
+        self.switch_bound_capture_source(&binding, source, w, h, fps, bitrate).await
+    }
+    pub async fn switch_bound_capture_source(
+        &self, binding: &SourceViewBinding, source: CaptureSource,
+        w: u32, h: u32, fps: u32, bitrate: u32,
+    ) -> Result<(), Error> {
         protocol::validate_video_settings(w, h, fps, bitrate)?;
         let mut p = self.pool.lock().unwrap();
         let e = p.active_mut().ok_or("No active connection")?;
-        Self::switch_session_source(e, source, w, h, fps, bitrate)
+        let connection = e.session.conn.clone();
+        binding.apply(&connection, remote_core::shared_files::current_share_scope(), ||
+            Self::switch_session_source(e, source, w, h, fps, bitrate)
+        ).ok_or("Selected connection changed; source was not switched")?
     }
     fn switch_session_source(
         e: &mut ViewSession,

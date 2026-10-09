@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed small three-slice regressions. No Cargo, GUI, network, or cache cleanup."""
+"""Fixed small GUI model regressions. No Cargo, GUI, network, or cache cleanup."""
 import argparse
 import hashlib
 import io
@@ -42,6 +42,12 @@ EXPECTED = {
         "cancelling_retry_and_clearing_do_not_restore_failed_target_or_old_response",
         "failed_retry_respects_background_connection_capacity",
     ],
+    "view_commands": [
+        "queued_source_work_rejects_another_allocation_even_with_same_device_and_source_ids",
+        "source_binding_expires_on_network_change_or_connection_drop_without_retaining_resource",
+        "latest_source_command_fences_queued_work_and_old_errors_while_discovery_is_independent",
+        "selection_round_trip_and_cancel_do_not_revive_old_source_command_receipts",
+    ],
     "stream_settings": [
         "drafts_survive_projection_without_changing_committed_values_or_emitting_effects",
         "invalid_custom_values_preserve_committed_settings_and_have_no_side_effects",
@@ -61,6 +67,7 @@ SOURCES = [
     "app/src/product_components/text_input.rs", "remote_core/src/lib.rs",
     "remote_core/src/role.rs", "remote_core/src/discovery.rs",
     "remote_core/src/session_tabs.rs", "remote_core/src/stream_settings.rs",
+    "remote_core/src/view_commands.rs",
     "protocol/src/lib.rs", "Cargo.toml", "Cargo.lock", "app/Cargo.toml",
     "scripts/tests/test_desktop_gui_single_backend.py",
     "scripts/tests/test_desktop_gui_identity.py", "scripts/verify_desktop_gui.py",
@@ -115,7 +122,7 @@ def main():
 
     preserve()
     before = hashes()
-    output = Path(tempfile.mkdtemp(prefix="remoteplay-gui-three-slice-"))
+    output = Path(tempfile.mkdtemp(prefix="remoteplay-gui-slices-"))
     assert root not in output.parents, "temporary output must stay outside the repository"
     assert shutil.disk_usage(output).free >= RESERVE
 
@@ -152,7 +159,7 @@ def main():
     harness = "extern crate self as remote_core;\nextern crate self as protocol;\n"
     harness += "use std::net::SocketAddr;\nuse discovery::DiscoveryScope;\nuse role::RolePeer;\n"
     harness += "pub mod role {\n" + role + "\n}\npub mod discovery {\n" + scope + "\n}\n" + validator + "\n" + device
-    for module, path in [("device_list", "app/src/desktop/device_list.rs"), ("session_tabs", "remote_core/src/session_tabs.rs"), ("stream_settings", "remote_core/src/stream_settings.rs")]:
+    for module, path in [("device_list", "app/src/desktop/device_list.rs"), ("session_tabs", "remote_core/src/session_tabs.rs"), ("stream_settings", "remote_core/src/stream_settings.rs"), ("view_commands", "remote_core/src/view_commands.rs")]:
         harness += f"#[path={json.dumps(str(root / path), ensure_ascii=False)}] mod {module};\n"
     source = output / "three_slice_models.rs"
     source.write_text(harness)
@@ -163,7 +170,7 @@ def main():
     listed = run([str(binary), "--list"], "rust-list.log")
     discovered = re.findall(r"^(.+): test$", listed, re.M)
     expected = {f"{module}::tests::{name}" for module, names in EXPECTED.items() for name in names}
-    assert len(discovered) == len(set(discovered)) == len(expected) == 27
+    assert len(discovered) == len(set(discovered)) == len(expected) == 31
     assert set(discovered) == expected, set(discovered) ^ expected
     rust_results = []
     for number, name in enumerate(sorted(expected), 1):

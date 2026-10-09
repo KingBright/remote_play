@@ -12,7 +12,7 @@ use crate::desktop::instance::Instance;
 use crate::desktop::device_list::{
     DeviceListAction, DeviceListEffect, DeviceListState,
 };
-use crate::desktop::original_owner::{FrameSlot, OriginalOwner};
+use crate::desktop::original_owner::{FrameSlot, OriginalOwner, SourceViewBinding};
 use crate::original_design::{full_idle_canvas_stage, stream_status_capsule_card};
 use crate::{
     AppDevice, HostStats, MacDecodedVideoFrame, MeshPairingControl, MeshPairingMessageKind,
@@ -279,6 +279,8 @@ struct RestoredDashboard {
     active_tab: DrawerTab,
     device_list_state: DeviceListState,
     session_commands: SessionCommandState,
+    source_commands: SessionCommandState,
+    discovery_commands: SessionCommandState,
     scale_mode: ViewportScaleMode,
     telemetry_hud_collapsed: bool,
     input_locked: bool,
@@ -355,6 +357,8 @@ impl RestoredDashboard {
             active_tab: DrawerTab::Devices,
             device_list_state: DeviceListState::default(),
             session_commands: SessionCommandState::default(),
+            source_commands: SessionCommandState::default(),
+            discovery_commands: SessionCommandState::default(),
             scale_mode,
             telemetry_hud_collapsed: prefs.ui.telemetry_hud_collapsed,
             input_locked: true,
@@ -414,6 +418,7 @@ impl RestoredDashboard {
             role: snapshot.role,
             devices: snapshot.devices,
             capture_sources: snapshot.sources,
+            source_binding: snapshot.source_binding,
             active_capture_source: snapshot.active_source,
             pending_capture_source: snapshot.pending_source,
             active_capture_supports_input: snapshot.supports_input,
@@ -508,6 +513,7 @@ impl RestoredDashboard {
             self.status = "Disconnect current sessions before changing the device network.".into();
             return;
         }
+        self.invalidate_source_commands();
         if let Some(control) = &self.mesh_pairing {
             self.session_commands.begin();
             self.owner.clear_failed_connection();
@@ -520,6 +526,7 @@ impl RestoredDashboard {
             self.status = "Disconnect current sessions before changing the device network.".into();
             return;
         }
+        self.invalidate_source_commands();
         let Some(control) = &self.mesh_pairing else {
             return;
         };
@@ -600,11 +607,22 @@ impl RestoredDashboard {
     }
 
     fn request_capture_sources(&mut self, cx: &mut Context<Self>) {
+        let Some(binding) = self.owner.source_view_binding() else { return; };
+        self.request_bound_capture_sources(binding, cx);
+    }
+    fn invalidate_source_commands(&mut self) {
+        self.source_commands.begin(); self.discovery_commands.begin();
+    }
+    fn request_bound_capture_sources(&mut self, binding: SourceViewBinding, cx: &mut Context<Self>) {
+        if !self.owner.source_binding_is_current(&binding) { return; }
+        let ticket = self.discovery_commands.begin();
         let owner = self.owner.clone();
-        let view = cx.weak_entity();
-        cx.spawn(async move |_this, cx| {
-            if let Err(err) = owner.request_capture_sources().await {
+        cx.spawn(async move |view, cx| {
+            if !view.update(cx, |this, _| this.discovery_commands.is_current(ticket)
+                && this.owner.source_binding_is_current(&binding)).unwrap_or(false) { return; }
+            if let Err(err) = owner.request_bound_capture_sources(&binding).await {
                 let _ = view.update(cx, |this, cx| {
+                    if !this.discovery_commands.is_current(ticket) || !owner.source_binding_is_current(&binding) { return; }
                     this.status = format!("Source discovery failed: {err}");
                     cx.notify();
                 });
@@ -615,10 +633,13 @@ impl RestoredDashboard {
 
     fn start_capture_source_switch(
         &mut self,
+        binding: Option<SourceViewBinding>,
         source: protocol::session::CaptureSource,
         label: String,
         cx: &mut Context<Self>,
     ) {
+        let Some(binding) = binding.filter(|binding| self.owner.source_binding_is_current(binding)) else { return; };
+        let ticket = self.source_commands.begin();
         for event in self.pointer_input.release_events() {
             self.owner.queue_viewing_input(event);
         }
@@ -627,16 +648,17 @@ impl RestoredDashboard {
         self.toolbar_hovered = false;
         self.last_toolbar_activity = Instant::now();
         let owner = self.owner.clone();
-        let (width, height) = self.stream_settings.values().resolution();
-        let fps = self.stream_settings.values().fps;
-        let bitrate = self.stream_settings.values().bitrate_kbps;
-        let view = cx.weak_entity();
-        cx.spawn(async move |_this, cx| {
+        cx.spawn(async move |view, cx| {
+            let Some(values) = view.update(cx, |this, _| {
+                (this.source_commands.is_current(ticket) && this.owner.source_binding_is_current(&binding))
+                    .then(|| this.stream_settings.values())
+            }).unwrap_or(None) else { return; };
             if let Err(err) = owner
-                .switch_capture_source(source, width, height, fps, bitrate)
+                .switch_bound_capture_source(&binding, source, values.width, values.height, values.fps, values.bitrate_kbps)
                 .await
             {
                 let _ = view.update(cx, |this, cx| {
+                    if !this.source_commands.is_current(ticket) || !owner.source_binding_is_current(&binding) { return; }
                     this.status = format!("Switch to {label} failed: {err}");
                     cx.notify();
                 });
@@ -1644,6 +1666,7 @@ impl Render for RestoredDashboard {
                         host_stats.as_ref(),
                         self.owner.clone(),
                         &snapshot.capture_sources,
+                        snapshot.source_binding.as_ref(),
                         snapshot.active_capture_source,
                         snapshot.pending_capture_source,
                         snapshot.capture_source_error.as_deref(),
@@ -1916,6 +1939,7 @@ fn floating_control_island(
     _host_stats: Option<&HostStats>,
     owner: Arc<OriginalOwner>,
     capture_sources: &[protocol::session::CaptureSourceInfo],
+    source_binding: Option<&SourceViewBinding>,
     active_capture_source: protocol::session::CaptureSource,
     pending_capture_source: Option<protocol::session::CaptureSource>,
     capture_source_error: Option<&str>,
@@ -2012,6 +2036,7 @@ fn floating_control_island(
                     )
                     .child(display_switcher_control(
                         capture_sources,
+                        source_binding,
                         active_capture_source,
                         pending_capture_source,
                         show_apps_menu,
@@ -2187,6 +2212,7 @@ fn floating_control_island(
         .when(show_apps_menu, |this: Stateful<Div>| {
             this.child(capture_source_menu(
                 capture_sources,
+                source_binding,
                 active_capture_source,
                 pending_capture_source,
                 capture_source_error,
@@ -2253,6 +2279,7 @@ fn capture_source_is_selected(
 
 fn display_switcher_control(
     sources: &[protocol::session::CaptureSourceInfo],
+    source_binding: Option<&SourceViewBinding>,
     active_source: protocol::session::CaptureSource,
     pending_source: Option<protocol::session::CaptureSource>,
     show_apps_menu: bool,
@@ -2270,6 +2297,7 @@ fn display_switcher_control(
         .bg(cx.theme().surface.sunken);
 
     for (index, source) in displays.into_iter().enumerate() {
+        let binding = source_binding.cloned();
         let view = view.clone();
         let label = if source.supports_input {
             format!("Display {}", index + 1)
@@ -2296,7 +2324,7 @@ fn display_switcher_control(
             .on_click(move |_event, _window, cx| {
                 let label = action_label.clone();
                 let _ = view.update(cx, |this, cx| {
-                    this.start_capture_source_switch(source_id, label, cx);
+                    this.start_capture_source_switch(binding.clone(), source_id, label, cx);
                     cx.notify();
                 });
             })
@@ -2305,6 +2333,7 @@ fn display_switcher_control(
     }
 
     let view = view.clone();
+    let binding = source_binding.cloned();
     control.child(
         command_button(
             "island_display_apps",
@@ -2321,13 +2350,14 @@ fn display_switcher_control(
         .tooltip(tooltip("Switch displays or application windows").build())
         .on_click(move |_event, _window, cx| {
             let _ = view.update(cx, |this, cx| {
+                let Some(binding) = binding.clone().filter(|binding| this.owner.source_binding_is_current(binding)) else { return; };
                 this.owner.release_input();
                 this.pointer_input = PointerInputTracker::default();
                 this.show_apps_menu = !this.show_apps_menu;
                 this.toolbar_revealed = true;
                 this.last_toolbar_activity = Instant::now();
                 if this.show_apps_menu {
-                    this.request_capture_sources(cx);
+                    this.request_bound_capture_sources(binding, cx);
                 }
                 cx.notify();
             });
@@ -2338,6 +2368,7 @@ fn display_switcher_control(
 
 fn capture_source_menu(
     sources: &[protocol::session::CaptureSourceInfo],
+    source_binding: Option<&SourceViewBinding>,
     active_source: protocol::session::CaptureSource,
     pending_source: Option<protocol::session::CaptureSource>,
     error: Option<&str>,
@@ -2402,6 +2433,7 @@ fn capture_source_menu(
     }
 
     for (index, source) in displays.into_iter().enumerate() {
+        let binding = source_binding.cloned();
         let view = view.clone();
         let source_id = source.source;
         let label = if source.supports_input {
@@ -2429,7 +2461,7 @@ fn capture_source_menu(
             .on_click(move |_event, _window, cx| {
                 let label = action_label.clone();
                 let _ = view.update(cx, |this, cx| {
-                    this.start_capture_source_switch(source_id, label, cx);
+                    this.start_capture_source_switch(binding.clone(), source_id, label, cx);
                     cx.notify();
                 });
             })
@@ -2447,6 +2479,7 @@ fn capture_source_menu(
                 .child("APPLICATION WINDOWS"),
         );
         for (index, source) in windows.into_iter().enumerate() {
+            let binding = source_binding.cloned();
             let view = view.clone();
             let source_id = source.source;
             let title = source.title.clone();
@@ -2475,7 +2508,7 @@ fn capture_source_menu(
                 .on_click(move |_event, _window, cx| {
                     let label = action_label.clone();
                     let _ = view.update(cx, |this, cx| {
-                        this.start_capture_source_switch(source_id, label, cx);
+                        this.start_capture_source_switch(binding.clone(), source_id, label, cx);
                         cx.notify();
                     });
                 })
@@ -2914,6 +2947,7 @@ impl RestoredDashboard {
 
     fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
         let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
+        self.invalidate_source_commands();
         let ticket = self.session_commands.begin();
         match effect {
             SessionTabsEffect::Select(id) => self.owner.select(id),
@@ -2954,6 +2988,7 @@ impl RestoredDashboard {
         let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
         match effect {
             DeviceListEffect::ConnectStream(device_id) => {
+                self.invalidate_source_commands();
                 let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
                 self.reset_host_stats();
@@ -2983,6 +3018,7 @@ impl RestoredDashboard {
                 }).detach();
             }
             DeviceListEffect::ConnectFiles(device_id) => {
+                self.invalidate_source_commands();
                 let ticket = self.session_commands.begin();
                 self.owner.release_input(); self.drawer_open=true; self.active_tab=DrawerTab::Files;
                 self.status="Connecting files without starting video".into();
@@ -4622,6 +4658,7 @@ struct DashboardSnapshot {
     role: RoleState,
     devices: Vec<AppDevice>,
     capture_sources: Arc<Vec<protocol::session::CaptureSourceInfo>>,
+    source_binding: Option<SourceViewBinding>,
     active_capture_source: protocol::session::CaptureSource,
     pending_capture_source: Option<protocol::session::CaptureSource>,
     active_capture_supports_input: bool,
