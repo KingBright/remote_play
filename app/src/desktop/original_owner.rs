@@ -1052,6 +1052,10 @@ impl OriginalOwner {
                 "surface_counters":n.frame.stats().snapshot(),"surface_error":n.frame.stats().last_error.lock().unwrap().clone()
             }))).unwrap_or(native);
             serde_json::json!({"connected":s.connected,"peer_responsive":s.conn.peer_is_responsive(),
+                "supports_input":s.supports_input,"input_eligible":s.can_input(),
+                "request_audio":s.request.audio,"volume":s.volume,"muted":s.muted,
+                "paused":s.paused,"background_paused":s.background_paused,
+                "activity_pending":s.media_activity_pending(),
                 "decoder_status":s.media.as_ref().and_then(|m|m.decode_status.try_lock().ok().map(|v|v.clone())),
                 "decoder_needs_keyframe":s.stats.video_decoder_needs_keyframe.load(std::sync::atomic::Ordering::Acquire),
                 "native_frame":native,"device_id":s.key,"name":s.name,"connection_id":s.conn.id,"target":s.conn.target.to_string(),"route":s.route,

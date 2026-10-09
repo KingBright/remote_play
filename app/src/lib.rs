@@ -926,6 +926,16 @@ impl UnifiedRuntimeHandle {
     pub fn background_task_count(&self) -> usize {
         self.owner.task_count() + self.media_sink_tasks.len()
     }
+
+    /// Attach an already constructed workspace service owner. Media remains
+    /// session-owned, as in the original GUI; this creates no second runtime.
+    pub fn from_workspace_owner(owner: Arc<UnifiedServiceOwner>) -> Self {
+        Self {
+            owner, stats: Statistics::new(), host_stats: None, viewer_frame: None,
+            viewer_media_status: UnifiedViewerMediaStatus::Disabled,
+            mesh_pairing: None, _viewer_media: None, media_sink_tasks: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

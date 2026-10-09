@@ -63,6 +63,26 @@ pub async fn run_restored_gui(
         config.enable_passive_host = false;
     }
     let runtime = Arc::new(start_unified_runtime(config).await?);
+    run_original_dashboard(runtime, Some(instance), activation)
+}
+
+/// Bounded integration entry for the same production dashboard and renderer.
+/// Callers supply one service owner and an isolated profile, never another UI.
+pub fn run_restored_workspace_runtime(
+    runtime: Arc<UnifiedRuntimeHandle>, profile: &std::path::Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let Some(mut instance) = Instance::acquire_for_renderer(profile, crate::gui_backend::ORIGINAL_RENDERER)? else {
+        return Err("Workspace renderer already owns this profile".into());
+    };
+    let activation = Arc::new(AtomicBool::new(false));
+    let signal = activation.clone();
+    instance.attach_callback(move || { signal.store(true, Ordering::Release); })?;
+    run_original_dashboard(runtime, Some(instance), activation)
+}
+
+fn run_original_dashboard(
+    runtime: Arc<UnifiedRuntimeHandle>, instance: Option<Instance>, activation: Arc<AtomicBool>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let startup_error = Arc::new(Mutex::new(None));
     let init_error = startup_error.clone();
     crate::desktop::foreground_runtime::run(move || {
@@ -78,7 +98,7 @@ pub async fn run_restored_gui(
                 crate::product_components::theme::install(
                     product_window_appearance(),
                     remote_play_themes(), cx);
-                open_restored_window(runtime, Some(instance), activation, None, cx);
+                open_restored_window(runtime, instance, activation, None, cx);
             })
     })?;
     if let Some(error) = startup_error.lock().map_err(|_| "GUI startup error lock poisoned")?.take() {
@@ -974,6 +994,18 @@ impl RestoredDashboard {
         };
         if self.quitting {
             return true;
+        }
+        // Passive observations only; a fixture must use real product controls.
+        // No command file can select a source, connect, unlock or inject input.
+        if std::env::var_os("RP_LOOPBACK_PRODUCT_OBSERVATIONS").is_some() {
+            let tabs = self.owner.session_tabs();
+            let observation = serde_json::json!({"elapsed_ms":self.started.elapsed().as_millis(),
+                "render_calls":self.render_calls,"status":self.status,"drawer_open":self.drawer_open,
+                "source_menu_open":self.show_apps_menu,"input_locked":self.input_locked,
+                "current_frame":self.current_frame.as_ref().map(|f|serde_json::json!({"width":f.width(),"height":f.height()})),
+                "can_reconnect":tabs.can_reconnect,"state":self.owner.diagnostic_snapshot()});
+            let path = std::path::Path::new(&output).with_extension("progress.json");
+            let _ = std::fs::write(path, serde_json::to_vec_pretty(&observation).unwrap());
         }
         if self.test_sequence.is_some(){return self.sequence_acceptance_tick(&output,seconds,cx);}
         if !self.test_connect_started
