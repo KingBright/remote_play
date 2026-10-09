@@ -1,0 +1,305 @@
+{
+  "schema": 1,
+  "observed_at_utc": "2026-10-09T19:29:47.478596+00:00",
+  "scope": "Codex app update recovery and supplied-matrix consistency only; no physical acceptance, rebuild, signing replay, install, secret read or sudo",
+  "head_before_matrix_fix": "41907af787f2e7243311f403ffee3b18155402cb",
+  "artifacts": [
+    {
+      "kind": "signed_package",
+      "path": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.181822.zip",
+      "size_bytes": 8570191,
+      "sha256": "441d0d66e3092b7024f6111fdf6596a68f3979a027e80b623f45014a88425838",
+      "matches_receipt": true
+    },
+    {
+      "kind": "provenance",
+      "path": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.181822.provenance.json",
+      "size_bytes": 408350,
+      "sha256": "30b0eb23675441b54f5fa4bc7a89ab961c242a70f7ea7524166eb141f8d72082",
+      "matches_receipt": true
+    },
+    {
+      "kind": "prebuild_rollback_binary",
+      "path": "/tmp/remoteplay-sign-package-41907af-20261009/rollback-prebuild/remote_play",
+      "sha256": "cf29e5ef6aa0d04d38e17386cace555ee43b90734fb2201ecc8dce577f5d209b",
+      "matches_receipt": true
+    }
+  ],
+  "old_operations": {
+    "build-operation.json": {
+      "sha256": "34dd516bf89d6711f90d18f80f79a4786db671d531b1b893c151fc5e01a3021d",
+      "status": "completed",
+      "exit_code": null,
+      "archive": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.181822.zip",
+      "expected_archive_sha256": "441d0d66e3092b7024f6111fdf6596a68f3979a027e80b623f45014a88425838",
+      "installed": false,
+      "published": false
+    },
+    "package-preparation-receipt.json": {
+      "sha256": "96b951d862edd133a3a4dd270aeae5efa2320c9d627069299aa013dc0b3297d8",
+      "status": "signed_package_prepared_not_installed",
+      "exit_code": null,
+      "archive": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.181822.zip",
+      "expected_archive_sha256": "441d0d66e3092b7024f6111fdf6596a68f3979a027e80b623f45014a88425838",
+      "installed": false,
+      "published": false
+    },
+    "small-receipt.json": {
+      "sha256": "3ab030ea37bfb37946535296aa5c446c9e8916d935b493a91db21c7419b6a9a3",
+      "status": "signed_package_prepared_not_installed",
+      "exit_code": null,
+      "archive": "/Users/jinliang/rust-target/package/macos/RemotePlay-macos-arm64-2.0.0-alpha.8-20261009.181822.zip",
+      "expected_archive_sha256": "441d0d66e3092b7024f6111fdf6596a68f3979a027e80b623f45014a88425838",
+      "installed": false,
+      "published": false
+    },
+    "release-build.json": {
+      "sha256": "3c9f4f3cca3db9498992c141c0cc7b4e273f4fc8cc578661d63266ff7b8d6405",
+      "status": null,
+      "exit_code": 0,
+      "archive": null,
+      "expected_archive_sha256": null,
+      "installed": null,
+      "published": null
+    },
+    "production-package.json": {
+      "sha256": "cacf94e02473b54ac0076f43a3deb4910706f98935d97ae2067e81763b699d8b",
+      "status": null,
+      "exit_code": 0,
+      "archive": null,
+      "expected_archive_sha256": null,
+      "installed": null,
+      "published": null
+    },
+    "native-signature-tests.json": {
+      "sha256": "21830a2e73317913e68c5cac24a216d287a910fdec5160bb76a7afa6ab1a5ea1",
+      "status": null,
+      "exit_code": 0,
+      "archive": null,
+      "expected_archive_sha256": null,
+      "installed": null,
+      "published": null
+    }
+  },
+  "profile_metadata": [
+    {
+      "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh",
+      "type": "directory",
+      "uid": 501,
+      "gid": 20,
+      "mode": "0700",
+      "nlink": 5,
+      "inode": 546060478,
+      "size": 160,
+      "mtime_ns": 1791425104381351160,
+      "effective_access": {
+        "read": true,
+        "write": true,
+        "traverse": true
+      }
+    },
+    {
+      "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.conf",
+      "type": "regular_file",
+      "uid": 501,
+      "gid": 20,
+      "mode": "0600",
+      "nlink": 1,
+      "inode": 551706101,
+      "size": 233,
+      "mtime_ns": 1790767363014709605,
+      "effective_access": {
+        "read": true,
+        "write": true,
+        "traverse": false
+      }
+    },
+    {
+      "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.secret",
+      "type": "regular_file",
+      "uid": 0,
+      "gid": 20,
+      "mode": "0600",
+      "nlink": 1,
+      "inode": 551706100,
+      "size": 64,
+      "mtime_ns": 1790767363014362975,
+      "effective_access": {
+        "read": false,
+        "write": false,
+        "traverse": false
+      }
+    },
+    {
+      "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/desktop-instance.lock",
+      "type": "regular_file",
+      "uid": 501,
+      "gid": 20,
+      "mode": "0600",
+      "nlink": 1,
+      "inode": 551643090,
+      "size": 0,
+      "mtime_ns": 1790763712163160888,
+      "effective_access": {
+        "read": true,
+        "write": true,
+        "traverse": false
+      }
+    }
+  ],
+  "normal_uid": 501,
+  "normal_gid": 20,
+  "secret_owner_fixed": false,
+  "compatible_upgrade": "compatible_upgrade",
+  "signed_rollback_matches_previous": true,
+  "matrix_bug_before_fix": {
+    "scope": "offline copied fixture only; live matrix unchanged; fixture intentionally contradicts existing untested evidence",
+    "live_matrix_sha256": "7c66ea19a06c392c6245b40acc4cad83c7621c1016d469c0a2cfe143ba8f8725",
+    "checks": [
+      {
+        "optimized": false,
+        "exit_code": 2,
+        "stdout": "{\"structure_valid\": false, \"error\": \"('cross_platform:android->macos_silicon', 'executed result needs evidence')\"}",
+        "stderr": ""
+      },
+      {
+        "optimized": true,
+        "exit_code": 0,
+        "stdout": "{\"structure_valid\": true, \"cross_platform_directions\": 12, \"cross_platform_results\": {\"failed\": 0, \"not_tested\": 0, \"partial\": 0, \"passed\": 12, \"unsupported\": 0}, \"all_cross_platform_accepted\": true, \"scope\": \"supplied data consistency only; no independent verification/release authorization\"}",
+        "stderr": ""
+      }
+    ]
+  },
+  "matrix_checks_after_fix": {
+    "scope": "offline validator checks only; no new physical acceptance",
+    "checks": [
+      {
+        "optimized": false,
+        "strict": false,
+        "exit_code": 0,
+        "report": {
+          "structure_valid": true,
+          "cross_platform_directions": 12,
+          "cross_platform_results": {
+            "failed": 0,
+            "not_tested": 12,
+            "partial": 0,
+            "passed": 0,
+            "unsupported": 0
+          },
+          "all_cross_platform_accepted": false,
+          "scope": "supplied data consistency only; no independent verification/release authorization"
+        }
+      },
+      {
+        "optimized": false,
+        "strict": true,
+        "exit_code": 1,
+        "report": {
+          "structure_valid": true,
+          "cross_platform_directions": 12,
+          "cross_platform_results": {
+            "failed": 0,
+            "not_tested": 12,
+            "partial": 0,
+            "passed": 0,
+            "unsupported": 0
+          },
+          "all_cross_platform_accepted": false,
+          "scope": "supplied data consistency only; no independent verification/release authorization"
+        }
+      },
+      {
+        "optimized": true,
+        "strict": false,
+        "exit_code": 0,
+        "report": {
+          "structure_valid": true,
+          "cross_platform_directions": 12,
+          "cross_platform_results": {
+            "failed": 0,
+            "not_tested": 12,
+            "partial": 0,
+            "passed": 0,
+            "unsupported": 0
+          },
+          "all_cross_platform_accepted": false,
+          "scope": "supplied data consistency only; no independent verification/release authorization"
+        }
+      },
+      {
+        "optimized": true,
+        "strict": true,
+        "exit_code": 1,
+        "report": {
+          "structure_valid": true,
+          "cross_platform_directions": 12,
+          "cross_platform_results": {
+            "failed": 0,
+            "not_tested": 12,
+            "partial": 0,
+            "passed": 0,
+            "unsupported": 0
+          },
+          "all_cross_platform_accepted": false,
+          "scope": "supplied data consistency only; no independent verification/release authorization"
+        }
+      },
+      {
+        "fixture": "intentionally inconsistent supplied result",
+        "optimized": false,
+        "exit_code": 2,
+        "report": {
+          "structure_valid": false,
+          "error": "('cross_platform:android->macos_silicon', 'executed result needs evidence')"
+        }
+      },
+      {
+        "fixture": "intentionally inconsistent supplied result",
+        "optimized": true,
+        "exit_code": 2,
+        "report": {
+          "structure_valid": false,
+          "error": "('cross_platform:android->macos_silicon', 'executed result needs evidence')"
+        }
+      }
+    ],
+    "source_hashes": {
+      "scripts/check_platform_matrix.py": "285fa9905d16f43de7eef47af29eb06d77eccb9eddba17d47bba392b7d60b4ec",
+      "scripts/tests/test_platform_matrix.py": "0aa5353f176a80d275b590adb84cda78718ba68e944e5d1b03105f27498b47a8",
+      "docs/testing/FOUR-PLATFORM-MATRIX.json": "7c66ea19a06c392c6245b40acc4cad83c7621c1016d469c0a2cfe143ba8f8725"
+    },
+    "physical_cross_platform_executed": 0,
+    "signed_package_not_modified": true
+  },
+  "targeted_tests": {
+    "command": [
+      "/opt/homebrew/opt/python@3.14/bin/python3.14",
+      "-B",
+      "-m",
+      "unittest",
+      "scripts.tests.test_platform_matrix",
+      "-v"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.02,
+    "source_hashes": {
+      "scripts/check_platform_matrix.py": "285fa9905d16f43de7eef47af29eb06d77eccb9eddba17d47bba392b7d60b4ec",
+      "scripts/tests/test_platform_matrix.py": "0aa5353f176a80d275b590adb84cda78718ba68e944e5d1b03105f27498b47a8",
+      "docs/testing/FOUR-PLATFORM-MATRIX.json": "7c66ea19a06c392c6245b40acc4cad83c7621c1016d469c0a2cfe143ba8f8725"
+    },
+    "source_bytes_unchanged": true,
+    "log": "/tmp/remoteplay-matrix-resume-tests-20261009.log",
+    "log_sha256": "67cf384c5b5938b476e95414ea81d29a0a3ae7b05db985373a57ce09774ed2cb",
+    "scope": "offline matrix fixtures only; no GUI, capture, network, build, private file access or deployment"
+  },
+  "new_tests_passed": 9,
+  "live_matrix_bytes_unchanged": true,
+  "physical_cross_platform_executed": 0,
+  "prepared_package_compiled_source_files_still_match": true,
+  "actual_emitted_dependency_file_count": 596,
+  "native_swift_directory_source_children_verified": true,
+  "validator_not_in_package_build_inputs": true,
+  "original_dirty_paths_unchanged_at_resume": 105,
+  "remaining_blocker": "existing root-owned mesh.secret; administrator recovery wait preserved"
+}
