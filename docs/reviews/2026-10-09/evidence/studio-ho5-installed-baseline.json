@@ -1,0 +1,849 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-09",
+  "scope": "Installed October-4 alpha.8 real-device baseline; not acceptance of prepared October-9 candidate or the full twelve-direction matrix",
+  "repository_head_at_test": "98dbd8275199f1732d98bed5859494203a72e0c0",
+  "aggregate_status": "partial",
+  "actual_visible_presentation": "not_measured",
+  "actual_first_visible_frame_time_ms": null,
+  "audio_acceptance": "not_tested",
+  "input_acceptance": "not_tested",
+  "long_duration_acceptance": "not_tested",
+  "candidate": {
+    "build": "20261009.181822",
+    "package_sha256": "441d0d66e3092b7024f6111fdf6596a68f3979a027e80b623f45014a88425838",
+    "installed": false,
+    "tested": false,
+    "published": false
+  },
+  "matrix_updated": false,
+  "matrix_file_sha256_before_test": "7c66ea19a06c392c6245b40acc4cad83c7621c1016d469c0a2cfe143ba8f8725",
+  "installed": {
+    "studio": {
+      "version": "2.0.0-alpha.8",
+      "build": "20261004.80",
+      "executable": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+      "sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+      "public_node_id": "7878a72c723a4e2bd5a6898eeb2f0238"
+    },
+    "ho5": {
+      "version": "2.0.0-alpha.8",
+      "build_source_id_from_installed_public_manifest": "67bf20c6295b898e95c803c7898ec7f5e547bb162bae6d3d7c90fe42dfd37c33",
+      "executable_configured_by_service": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+      "sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+      "public_node_id": "6a32a19406b9e02dcbad058cd1cced30",
+      "running_executable_hash_from_proc": "not_available"
+    }
+  },
+  "compiled_product_observations": [
+    {
+      "operation_id": "c2ff8264-64a3-4153-80ee-4afec1b430df",
+      "tool_receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791576482,
+        "operation_id": "c2ff8264-64a3-4153-80ee-4afec1b430df",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_990dde1c438a46eaa7fbb48efb9867fc",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "observation": {
+        "command": "existing installed --product-info-json",
+        "exit_code": 0,
+        "compiled_product_info": {
+          "schema": 1,
+          "product": "RemotePlay",
+          "version": "2.0.0-alpha.8",
+          "platform": "linux",
+          "architecture": "x86_64",
+          "default_gui": "restored-original-gpui",
+          "original_gui_compiled": true,
+          "native_video_compiled": true,
+          "diagnostic_gui_requires_opt_in": true
+        },
+        "profile_or_window_started": false
+      }
+    },
+    {
+      "operation_id": "2ce5cd21-9384-4fc4-b330-2cfd4e408a13",
+      "tool_receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791576489,
+        "operation_id": "2ce5cd21-9384-4fc4-b330-2cfd4e408a13",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_d3c94112f6f246fa824128ded1b7dca0",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "observation": {
+        "command": "existing installed --product-info-json",
+        "exit_code": 0,
+        "compiled_product_info": {
+          "schema": 1,
+          "product": "RemotePlay",
+          "version": "2.0.0-alpha.8",
+          "platform": "macos",
+          "architecture": "aarch64",
+          "default_gui": "restored-original-gpui",
+          "original_gui_compiled": true,
+          "native_video_compiled": true,
+          "diagnostic_gui_requires_opt_in": true
+        },
+        "profile_or_window_started": false
+      }
+    }
+  ],
+  "attempts": [
+    {
+      "id": "studio-own-window-request",
+      "operation_id": "6b4853b0-0e60-427b-8d7b-714db382a32b",
+      "remote_path": ".rp-live-baseline-20261009/studio-to-ho5-run1-driver.json",
+      "remote_file_sha256": "7e382d5623cc6a9351dd4d80a1f40b04dc17388b42a5caf193e3d0f91d4b564d",
+      "receipt": {
+        "scope": "installed Oct-4 alpha.8 baseline only; not new 20261009 package acceptance",
+        "producer": "Mac Studio",
+        "viewer": "HO5",
+        "started_at": "2026-10-09T20:17:57.377294+00:00",
+        "before": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "1520582"
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1386406
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1386405
+          }
+        ],
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "selected_source_request": {
+          "device": "7878a72c723a4e2bd5a6898eeb2f0238",
+          "kind": "Window",
+          "window_id": 13773,
+          "pid": 23896,
+          "title": "RemotePlay",
+          "title_origin": "compiled product default; hook must verify real enumerated source exactly"
+        },
+        "permissions_requested": false,
+        "private_profile_contents_read_by_tools": false,
+        "user_service_unit_changed": false,
+        "stop_exit": 0,
+        "stopped_state": {
+          "ActiveState": "inactive",
+          "SubState": "dead",
+          "MainPID": "0"
+        },
+        "test_pid": 2228159,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 452,
+          "elapsed_ms": 45030,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "decoder_status": null,
+                "decoder_needs_keyframe": false,
+                "native_frame": null,
+                "device_id": "7878a72c723a4e2bd5a6898eeb2f0238",
+                "name": "Mac Studio",
+                "connection_id": 2747111177,
+                "target": "127.0.0.1:48349",
+                "route": "Relay",
+                "source": "MainDisplay",
+                "decoded_frames": 0,
+                "decode_errors": 0,
+                "confirmed": false,
+                "scene_submitted_frame": false,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "restore_exit": 0,
+        "after": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2229024"
+        },
+        "profile_after_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422767
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422766
+          }
+        ],
+        "ended_at": "2026-10-09T20:18:43.212323+00:00"
+      }
+    },
+    {
+      "id": "studio-owned-window-A",
+      "operation_id": "f2612242-1930-4194-9a4b-30643c425ecf",
+      "remote_path": ".rp-live-baseline-20261009/studio-to-ho5-run2-driver.json",
+      "remote_file_sha256": "826c4ea2117bcd17c911bcd82c4ecbc66ce70399508aa05a0c9bae55c275e74b",
+      "receipt": {
+        "scope": "installed Oct-4 alpha.8 baseline only; not new 20261009 package acceptance",
+        "producer": "Mac Studio",
+        "viewer": "HO5",
+        "started_at": "2026-10-09T20:22:10.011106+00:00",
+        "before": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2229024"
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422784
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422783
+          }
+        ],
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "selected_source_request": {
+          "device": "7878a72c723a4e2bd5a6898eeb2f0238",
+          "kind": "Window",
+          "window_id": 14299,
+          "pid": 51140,
+          "title": "RemotePlay scoped-window acceptance",
+          "title_origin": "owned native fixture metadata; hook verifies actual enumerated source exactly"
+        },
+        "permissions_requested": false,
+        "private_profile_contents_read_by_tools": false,
+        "user_service_unit_changed": false,
+        "stop_exit": 0,
+        "stopped_state": {
+          "ActiveState": "inactive",
+          "SubState": "dead",
+          "MainPID": "0"
+        },
+        "test_pid": 2231341,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 767,
+          "elapsed_ms": 30024,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "decoder_status": "",
+                "decoder_needs_keyframe": false,
+                "native_frame": {
+                  "generation": 1,
+                  "coded": [
+                    544,
+                    416
+                  ],
+                  "visible": [
+                    0,
+                    0,
+                    540,
+                    412
+                  ],
+                  "cpu_pixel_bytes": 0,
+                  "exact_frame_submitted": false,
+                  "surface_counters": [
+                    30,
+                    737,
+                    736,
+                    0,
+                    0,
+                    0
+                  ],
+                  "surface_error": null
+                },
+                "device_id": "7878a72c723a4e2bd5a6898eeb2f0238",
+                "name": "Mac Studio",
+                "connection_id": 1573440878,
+                "target": "127.0.0.1:37685",
+                "route": "Relay",
+                "source": "Window(14299)",
+                "decoded_frames": 749,
+                "decode_errors": 0,
+                "confirmed": true,
+                "scene_submitted_frame": true,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "restore_exit": 0,
+        "after": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2231775"
+        },
+        "profile_after_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422808
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422807
+          }
+        ],
+        "ended_at": "2026-10-09T20:22:40.321604+00:00"
+      }
+    },
+    {
+      "id": "studio-owned-window-B-reconnect",
+      "operation_id": "83e8ab9c-e383-4e05-9097-daa1bee0722d",
+      "remote_path": ".rp-live-baseline-20261009/studio-to-ho5-run3-driver.json",
+      "remote_file_sha256": "e748f2fe249f4b02fee6e447ecca43b1594caa7b271bf106b9252257b6c19a39",
+      "receipt": {
+        "scope": "installed Oct-4 alpha.8 baseline only; not new 20261009 package acceptance",
+        "producer": "Mac Studio",
+        "viewer": "HO5",
+        "started_at": "2026-10-09T20:23:36.813574+00:00",
+        "before": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2231775"
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422823
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422822
+          }
+        ],
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "selected_source_request": {
+          "device": "7878a72c723a4e2bd5a6898eeb2f0238",
+          "kind": "Window",
+          "window_id": 14300,
+          "pid": 51140,
+          "title": "RemotePlay scoped-window acceptance",
+          "title_origin": "owned native fixture metadata; hook verifies actual enumerated source exactly"
+        },
+        "permissions_requested": false,
+        "private_profile_contents_read_by_tools": false,
+        "user_service_unit_changed": false,
+        "stop_exit": 0,
+        "stopped_state": {
+          "ActiveState": "inactive",
+          "SubState": "dead",
+          "MainPID": "0"
+        },
+        "test_pid": 2232498,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 714,
+          "elapsed_ms": 30032,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "decoder_status": "",
+                "decoder_needs_keyframe": false,
+                "native_frame": {
+                  "generation": 1,
+                  "coded": [
+                    544,
+                    416
+                  ],
+                  "visible": [
+                    0,
+                    0,
+                    540,
+                    412
+                  ],
+                  "cpu_pixel_bytes": 0,
+                  "exact_frame_submitted": false,
+                  "surface_counters": [
+                    32,
+                    696,
+                    695,
+                    0,
+                    0,
+                    0
+                  ],
+                  "surface_error": null
+                },
+                "device_id": "7878a72c723a4e2bd5a6898eeb2f0238",
+                "name": "Mac Studio",
+                "connection_id": 3811600736,
+                "target": "127.0.0.1:58582",
+                "route": "Relay",
+                "source": "Window(14300)",
+                "decoded_frames": 737,
+                "decode_errors": 0,
+                "confirmed": true,
+                "scene_submitted_frame": true,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "restore_exit": 0,
+        "after": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948"
+        },
+        "profile_after_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422841
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "gid": 1000,
+            "mode": "0o600",
+            "inode": 1422840
+          }
+        ],
+        "ended_at": "2026-10-09T20:24:07.205410+00:00"
+      }
+    },
+    {
+      "id": "ho5-main-display-selection-blocked",
+      "operation_id": "05662ede-98aa-423b-920b-f32ff41acb8f",
+      "remote_path": ".rp-live-baseline-20261009/ho5-to-studio-run1-driver.json",
+      "remote_file_sha256": "b4cc986a59ee53f09860f19ffe85723b97857575930597f652f9c0dbfeec6d1a",
+      "receipt": {
+        "scope": "installed Oct-4 alpha.8 baseline only; not new 20261009 package acceptance",
+        "producer": "HO5",
+        "viewer": "Mac Studio",
+        "started_at": "2026-10-09T20:26:11.793194+00:00",
+        "before": {
+          "label": "com.remoteplay.host",
+          "launchctl_exit": 0,
+          "pid": 23896
+        },
+        "profile_before_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 358926414
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 358926413
+          }
+        ],
+        "installed_binary_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "requested_device": "6a32a19406b9e02dcbad058cd1cced30",
+        "source_selection_boundary": "old restored GPUI hook can connect/request sources but selects Window only; no supported MainDisplay automation; external helper AX not granted",
+        "source_selection_exercised": false,
+        "permissions_requested": false,
+        "private_profile_contents_read_by_tools": false,
+        "launch_agent_file_changed": false,
+        "normal_stop_exit": 0,
+        "product_pids_after_stop": [],
+        "test_pid": 52006,
+        "test_exit": 0,
+        "gui_receipt": {
+          "version": "2.0.0-alpha.8",
+          "renderer": "restored-original-gpui",
+          "render_calls": 200,
+          "elapsed_ms": 30080,
+          "state": {
+            "pending": 0,
+            "sessions": [
+              {
+                "connected": true,
+                "peer_responsive": true,
+                "decoder_status": null,
+                "decoder_needs_keyframe": false,
+                "native_frame": null,
+                "device_id": "6a32a19406b9e02dcbad058cd1cced30",
+                "name": "HO5",
+                "connection_id": 926781910,
+                "target": "127.0.0.1:52969",
+                "route": "Relay",
+                "source": "MainDisplay",
+                "decoded_frames": 0,
+                "decode_errors": 0,
+                "confirmed": false,
+                "scene_submitted_frame": false,
+                "input_locked": true,
+                "error": "",
+                "video_error": null,
+                "files_listed": 0,
+                "transfers": 0
+              }
+            ]
+          },
+          "frame_boundary": "gpui_scene_submission",
+          "actual_display_completion_measured": false,
+          "screen_capture_started_locally": false,
+          "input_injected": false,
+          "full_acceptance": false
+        },
+        "restore_exit": 0,
+        "after": {
+          "label": "com.remoteplay.host",
+          "launchctl_exit": 0,
+          "pid": 52066
+        },
+        "profile_after_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354333
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "gid": 20,
+            "mode": "0o600",
+            "inode": 359354332
+          }
+        ],
+        "ended_at": "2026-10-09T20:26:43.309018+00:00"
+      }
+    }
+  ],
+  "native_counter_order": [
+    "imports",
+    "draws_submitted",
+    "gpu_completed",
+    "sync_busy",
+    "queue_full",
+    "rejected"
+  ],
+  "native_counter_source": {
+    "path": ".rp-original-release-20261004/incoming/third_party/gpui-ce/src/native_video.rs",
+    "sha256": "31c244cb0c4e9a0719289ad7a1ad9c1e9c09d24a33f7f82f7f08fba1c9b10364",
+    "operation_id": "cf16af4f-1784-4197-abd9-6f39d997e58a"
+  },
+  "source_selection_and_hook_boundaries": [
+    {
+      "path": ".rp-original-release-20261004/incoming/app/src/restored_ui.rs",
+      "sha256": "09407754a7b89a5d63625b710d8ed6b7510fab3b6ce865c39c857ad0da047997",
+      "connect": "connect_silent_files; explicitly requests capture sources; no automatic desktop stream",
+      "source_selection": "requires exact Window ID, process ID and title; no MainDisplay hook",
+      "output_boundary": "gpui_scene_submission, not display scanout",
+      "full_acceptance": false
+    },
+    {
+      "path": ".rp-original-release-20261004/incoming/host/src/capture_sources.rs",
+      "sha256": "6419913b63f26d08c4ebe824153b92d359d563cfb23d1f0d5b96ccd75f939a3f",
+      "linux_sources": "MainDisplay/Desktop only",
+      "operation_id": "3ddac61c-3265-413b-82eb-047a08e22e09"
+    },
+    {
+      "path": ".rp-original-release-20261004/incoming/host/src/service.rs",
+      "sha256": "f0db37156453ca4240ad70a0ac33f45a49417c22e78d5733d9a28ac53e8a430d",
+      "window_capture": "macOS only",
+      "operation_id": "02e99cc1-52bd-4f68-906d-2e7129a1f012"
+    }
+  ],
+  "owned_fixture": {
+    "ready_remote_path": ".rp-live-baseline-20261009/owned-source/ready.json",
+    "ready_remote_sha256": "149f2878248da246d705e34822306b5361604f6942e8612eeb8bd5b981506d7f",
+    "ready": {
+      "stage": "owned_fixture_ready",
+      "pid": 51140,
+      "state": {
+        "A": {
+          "clicks": 0,
+          "closed": false,
+          "frame": [
+            150,
+            448,
+            540,
+            412
+          ],
+          "id": 14299,
+          "key_window": false,
+          "keys": 0,
+          "last_key": "",
+          "last_point": []
+        },
+        "B": {
+          "clicks": 0,
+          "closed": false,
+          "frame": [
+            800,
+            448,
+            540,
+            412
+          ],
+          "id": 14300,
+          "key_window": false,
+          "keys": 0,
+          "last_key": "",
+          "last_point": []
+        },
+        "command": "",
+        "pid": 51140,
+        "tick": 0
+      },
+      "title": "RemotePlay scoped-window acceptance",
+      "fixture_binary_sha256": "9be22a7169ca385e76fad8569bd9e0d977cbe4c427b25771b7ebf5d941060b03",
+      "automatic_exit_seconds": 180,
+      "input_injected": false,
+      "permissions_requested": false,
+      "at": "2026-10-09T20:21:14.575267+00:00"
+    },
+    "closure": {
+      "stage": "owned_fixture_closed",
+      "pid": 51140,
+      "exit": 0,
+      "at": "2026-10-09T20:24:14.588542+00:00"
+    },
+    "operation_id": "32a3cf9c-627c-4c9a-a0da-05e9558796d7"
+  },
+  "public_ho5_identity_lookup": {
+    "operation_id": "44eccd56-db9f-461f-a09d-7f5633f3e1cc",
+    "observation": {
+      "device": "HO5",
+      "public_node_id_reported_by_installed_application": [
+        "6a32a19406b9e02dcbad058cd1cced30"
+      ],
+      "maintenance_exit": 0,
+      "scope": "existing profile only; application maintenance path, no GUI/network runtime",
+      "existing_identity_files_required_before_execution": true,
+      "private_profile_contents_read_by_tools": false,
+      "credentials_emitted": false
+    }
+  },
+  "final_owners": [
+    {
+      "operation_id": "a9d5c8a9-fcba-40fe-bb2c-bf187f470456",
+      "tool_receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791577662,
+        "operation_id": "a9d5c8a9-fcba-40fe-bb2c-bf187f470456",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_21e5ec009ce548e196b70d3b5ddeac01",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "observation": {
+        "device": "HO5",
+        "at": "2026-10-09T20:27:42.083241+00:00",
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948",
+          "NRestarts": "0"
+        },
+        "runtime_renderer_identity": {
+          "schema": 1,
+          "renderer": "restored-original-gpui",
+          "pid": null
+        },
+        "installed_binary_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "profile_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 1000,
+            "mode": "0o600"
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 1000,
+            "mode": "0o600"
+          }
+        ],
+        "private_profile_contents_read": false
+      }
+    },
+    {
+      "operation_id": "c65e0d20-96e2-4a4e-82fc-8ace05bf47f1",
+      "tool_receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791577670,
+        "operation_id": "c65e0d20-96e2-4a4e-82fc-8ace05bf47f1",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_7b0ceb93f4034017b74793ca45766d3d",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "observation": {
+        "device": "Mac Studio",
+        "at": "2026-10-09T20:27:49.756259+00:00",
+        "launch_agent": {
+          "label": "com.remoteplay.host",
+          "launchctl_exit": 0,
+          "pid": 52066
+        },
+        "runtime_renderer_identity": {
+          "schema": 1,
+          "renderer": "restored-original-gpui",
+          "pid": null
+        },
+        "installed_binary_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "owned_fixture_pids": [],
+        "profile_metadata": [
+          {
+            "name": "mesh.conf",
+            "uid": 501,
+            "mode": "0o600"
+          },
+          {
+            "name": "mesh.secret",
+            "uid": 501,
+            "mode": "0o600"
+          }
+        ],
+        "private_profile_contents_read": false
+      }
+    }
+  ],
+  "preservation": {
+    "pre_existing_dirty_paths": 105,
+    "all_pre_existing_bytes_and_status_preserved_before_documentation": true,
+    "private_profile_bytes_read_by_tools": false,
+    "OS_permissions_requested": false,
+    "OS_security_modified": false,
+    "service_unit_or_launch_agent_files_edited": false,
+    "installed_binaries_changed": false,
+    "unrelated_services_stopped": false,
+    "macbook_recovery_wait_preserved": true,
+    "passed_builds_or_offline_regressions_repeated": false
+  },
+  "limitations": [
+    "Real decoded frames and GPU completion counters do not prove visible monitor presentation; no screenshot or human visual review was obtained.",
+    "The last held decoded frame was not yet marked exact_frame_submitted in both successful receipts; positive prior draw and GPU-completion counts are retained.",
+    "Thirty-second cumulative receipts establish bounded decoding/submission, not a timed first visible frame or long-duration acceptance.",
+    "Reconnect used fresh installed GUI processes and a different source window; same-process disconnect/reconnect is not yet tested.",
+    "HO5-to-Studio established a real responsive connection but no MainDisplay stream was started; no inference that HO5 capture is broken.",
+    "External Studio Code-Agent/Python helper AX and screen-capture preflight were false; these are not RemotePlay product permission results. No new permission was requested.",
+    "Old application startup/maintenance may rewrite its existing profile files; inode changes are recorded, UID and private modes remain correct. No credential contents were inspected/exported by tools."
+  ]
+}
