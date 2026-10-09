@@ -19,7 +19,12 @@
       "build": "20261004.80",
       "sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
       "operation_id": "a9b35718-b78a-4899-b4dd-a304ab0d9be5",
-      "exit_code": 0
+      "exit_code": 0,
+      "signature_integrity_exit_code": 0,
+      "exact_certificate_requirement_exit_code": 0,
+      "signature_operation_id": "b6b3ef10-d9e1-4515-989f-9af3137ac718",
+      "signature_operation_exit_code": 0,
+      "compiled_product_info_flag_present": false
     },
     "ho5": {
       "pid": 1520582,
@@ -31,7 +36,13 @@
       "metadata_read_operation": "8b1900f6-f477-48d6-b721-908827d84989",
       "metadata_read_exit_code": 1,
       "metadata_error": "Permission denied /proc/1520582/exe",
-      "incorrect_unit_query": "remoteplay.service was absent; do not infer RemotePlay inactive from that query"
+      "incorrect_unit_query": "remoteplay.service was absent; do not infer RemotePlay inactive from that query",
+      "configured_executable_path": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+      "configured_path_is_not_runtime_provenance": true,
+      "user_service_operation_id": "7edce8e9-dfcb-4419-938b-d87e05f7d512",
+      "user_service_exit_code": 0,
+      "active_display_details": "unconfirmed; show-session returned empty output",
+      "incorrect_system_scope_query": "System-scope remote-play-current.service is inactive; actual user service is active/running."
     },
     "android": {
       "adb_devices_exit_code": 0,
@@ -42,6 +53,26 @@
     "windows": {
       "agent_online": false,
       "running_app_version": null
+    },
+    "macbook": {
+      "path": "/Users/jinliang/Applications/RemotePlay.app",
+      "version": "2.0.0",
+      "build": "20260930.7",
+      "sha256": "27f4e4f6f7e9cbbbfbf2125f45293b946a5c76bfab1734410b3cd9c9fb5771d0",
+      "running_pid": null,
+      "signature_integrity_exit_code": 0,
+      "exact_certificate_requirement_exit_code": 0,
+      "compiled_product_info_flag_present": false,
+      "evidence": "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json"
+    },
+    "real_device_checkpoint": {
+      "physical_directions_executed": 0,
+      "computer_use_status": "user_reported_approved_recovery_timeout_no_window_binding",
+      "approval_manager_handle": "manager:1dd13b5ff994418c871a3db1bd305548:2",
+      "record": "docs/reviews/2026-10-09/REAL-DEVICE-CHECKPOINT.md",
+      "raw_evidence": "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json",
+      "decoded_frame": null,
+      "visible_frame": null
     }
   },
   "directions": [
@@ -607,10 +638,13 @@
         "notes": "No current direction executed."
       },
       "result": "not_tested",
-      "evidence": [],
+      "evidence": [
+        "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json"
+      ],
       "blockers": [
         "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
-        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
+        "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1112,10 +1146,13 @@
         "notes": "No current direction executed."
       },
       "result": "not_tested",
-      "evidence": [],
+      "evidence": [
+        "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json"
+      ],
       "blockers": [
         "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
-        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
+        "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1414,9 +1451,12 @@
         "notes": "No current direction executed."
       },
       "result": "not_tested",
-      "evidence": [],
+      "evidence": [
+        "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json"
+      ],
       "blockers": [
-        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt."
+        "Installed Mac-Studio build 20261004.80 is identified but current source candidate not deployed; no current paired transport/source/permission acceptance receipt.",
+        "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity."
       ],
       "core_regressions": {
         "enumeration_identity": {
@@ -1455,7 +1495,19 @@
           "status": "not_tested",
           "notes": "No executed current-candidate receipt."
         }
-      }
+      },
+      "device_direction_attempts": [
+        {
+          "producer": "MacBook-M2-Max",
+          "viewer": "Mac-Studio",
+          "result": "not_tested"
+        },
+        {
+          "producer": "Mac-Studio",
+          "viewer": "MacBook-M2-Max",
+          "result": "not_tested"
+        }
+      ]
     },
     {
       "id": "same_platform:windows->windows",
@@ -1614,9 +1666,12 @@
         "notes": "No current direction executed."
       },
       "result": "not_tested",
-      "evidence": [],
+      "evidence": [
+        "docs/reviews/2026-10-09/evidence/real-device-checkpoint.json"
+      ],
       "blockers": [
-        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown."
+        "HO5 current service is active with PID 1520582; /proc executable identification returned PermissionError, exit 1. No privilege/security change; binary version unknown.",
+        "Real-device phase: no direction executed. Existing Computer Use app access card was reported approved; same canonical app binding recovery returned -10005 timeoutReached, no window or local process. Capture/input permissions remain unconfirmed; no duplicate card, alternative UI path, deployment or new identity."
       ],
       "core_regressions": {
         "enumeration_identity": {

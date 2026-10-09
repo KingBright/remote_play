@@ -26,6 +26,12 @@ links the raw small receipts, exact source/artifact hashes, environment, method,
 observations, limitations and reproduction commands. This is the repository entry
 for the current experiment, without copying targets, binaries or all logs.
 
+The [real-device checkpoint](reviews/2026-10-09/REAL-DEVICE-CHECKPOINT.md) records
+MacBook/Mac Studio exact installed signature/version observations and HO5 user-service
+state. The existing Computer Use card was reported approved; same-app recovery timed
+out with no window. No physical direction or real first frame has passed. This record
+is separate from the earlier synthetic experiment.
+
 Core regression cases, with minimal sufficient real sources on each available
 platform, are mandatory:
 

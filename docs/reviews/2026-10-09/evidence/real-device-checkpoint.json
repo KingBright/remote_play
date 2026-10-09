@@ -1,0 +1,176 @@
+{
+  "schema": 1,
+  "source_checkpoint": "2d3e85414ebf3f523224c58e4dd0d6bc9a0fe15e",
+  "scope": "Read-only real-device inventory and blocked product UI selection; no physical direction executed, no frame or input acceptance.",
+  "observed_at_utc": "2026-10-09",
+  "physical_directions_executed": 0,
+  "decoded_frames_observed": null,
+  "visible_frames_observed": null,
+  "persisted_screenshots": [],
+  "permissions": {
+    "screen_capture": "unknown; not requested or changed",
+    "accessibility_input": "unknown; not requested or changed",
+    "computer_use": {
+      "status": "user_reported_approved_recovery_timeout_no_window_binding",
+      "card_text": "Allow Computer Use to use \"RemotePlay\"?",
+      "manager_handle": "manager:1dd13b5ff994418c871a3db1bd305548:2",
+      "message_handle": "Sentinel_00c2ed3431288191adad4afa6cee8b77",
+      "exact_target": "/Users/jinliang/Applications/RemotePlay.app",
+      "call": "cua.getApp(canonical installed app path)",
+      "configured_tool_timeout_ms": 10000,
+      "configured_promise_timeout_ms": 5000,
+      "observed_tool_wall_seconds": 2715.6563,
+      "result": "bounded installed-app selection timeout",
+      "approval_granted": null,
+      "replayed": false,
+      "bypassed": false,
+      "note": "The original approval was reported granted by the user. The original binding was absent. One same-target binding recovery returned server timeout without a window; do not equate the chat approval or app inventory with a successful tool binding. No further replay, restart or alternate UI control.",
+      "approval_reported_by_user": true,
+      "approval_tool_confirmation": null,
+      "recovery": {
+        "original_binding_available": false,
+        "inventory_running": false,
+        "same_target_selection_result": "Computer Use server error -10005: timeoutReached",
+        "same_target_selection_wall_seconds": 5.962,
+        "subsequent_pgrep_exit_code": 1,
+        "subsequent_remote_play_pids": [],
+        "new_access_card_requested": false,
+        "alternate_ui_control_used": false
+      }
+    }
+  },
+  "macbook": {
+    "observed_at": "2026-10-09T16:17:00.452748+00:00",
+    "bundle_path": "/Users/jinliang/Applications/RemotePlay.app",
+    "version": "2.0.0",
+    "build": "20260930.7",
+    "binary_sha256": "27f4e4f6f7e9cbbbfbf2125f45293b946a5c76bfab1734410b3cd9c9fb5771d0",
+    "signature_integrity_exit_code": 0,
+    "exact_certificate_requirement_exit_code": 0,
+    "designated_requirement": "identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"",
+    "console_user": "jinliang",
+    "pgrep_exit_code": 1,
+    "running_pid": null,
+    "product_info_flag_present": false
+  },
+  "mac_studio": {
+    "observed_at": "2026-10-09T16:17:08.000459+00:00",
+    "bundle_path": "/Users/jinliang/Applications/RemotePlay.app",
+    "version": "2.0.0",
+    "build": "20261004.80",
+    "binary_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+    "checks": [
+      {
+        "kind": "integrity",
+        "exit_code": 0,
+        "output": ""
+      },
+      {
+        "kind": "identity",
+        "exit_code": 0,
+        "output": ""
+      },
+      {
+        "kind": "designated",
+        "exit_code": 0,
+        "output": "designated => identifier \"com.remoteplay.unified\" and certificate leaf = H\"8eaa97365d97b8a987cdf1232430eddf9aba8ecf\"\nExecutable=/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play\nIdentifier=com.remoteplay.unified\nFormat=app bundle with Mach-O thin (arm64)\nCodeDirectory v=20400 size=58703 flags=0x0(none) hashes=1828+3 location=embedded\nSignature size=1684\nAuthority=RemotePlay Local\nSigned Time=Oct 4, 2026 at 20:17:30\nInfo.plist entries=12\nTeamIdentifier=not set\nSealed Resources version=2 rules=13 files=2\n"
+      },
+      {
+        "kind": "pgrep",
+        "exit_code": 0,
+        "output": "23896\n"
+      },
+      {
+        "kind": "stat",
+        "exit_code": 0,
+        "output": "jinliang\n"
+      }
+    ],
+    "product_info_flag_present": false,
+    "operation_id": "b6b3ef10-d9e1-4515-989f-9af3137ac718",
+    "exit_code": 0,
+    "output_complete": true
+  },
+  "ho5": {
+    "operation_id": "7edce8e9-dfcb-4419-938b-d87e05f7d512",
+    "exit_code": 0,
+    "output_complete": true,
+    "public_observations": [
+      {
+        "command": [
+          "systemctl",
+          "--user",
+          "show",
+          "remote-play-current.service",
+          "--property=ActiveState,SubState,MainPID,FragmentPath"
+        ],
+        "exit_code": 0,
+        "output": "ActiveState=active\nSubState=running\nFragmentPath=/home/liang/.config/systemd/user/remote-play-current.service\nMainPID=1520582\n"
+      },
+      {
+        "command": [
+          "loginctl",
+          "show-session",
+          "2",
+          "--property=Active,State,Type,Class,Display,Remote,Leader"
+        ],
+        "exit_code": 0,
+        "output": ""
+      },
+      {
+        "command": [
+          "ps",
+          "-p",
+          "1520582",
+          "-o",
+          "pid=,uid=,comm="
+        ],
+        "exit_code": 0,
+        "output": "1520582  1000 remote_play\n"
+      },
+      {
+        "service_path": "/var/home/liang/.config/systemd/user/remote-play-current.service",
+        "lines": [
+          "ExecStart=/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play"
+        ]
+      }
+    ],
+    "configured_service_executable": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+    "configured_path_is_not_running_binary_provenance": true,
+    "running_binary_version": null,
+    "running_binary_sha256": null,
+    "prior_process_read_error": "Permission denied /proc/1520582/exe; no privilege escalation used",
+    "display_session_details": "loginctl list-sessions reported liang seat0 tty2; show-session returned empty output, so active display/type remains unconfirmed"
+  },
+  "method_corrections": [
+    {
+      "method": "initial codesign -R check",
+      "exit_code": 1,
+      "error": "Inline requirement omitted leading '=' and was treated as filename; this result is invalid, not a signer failure.",
+      "replacement": "codesign --verify --strict -R '=identifier ... and certificate leaf = H\"...\"' on the same public app",
+      "macbook_corrected_exit_code": 0,
+      "mac_studio_corrected_exit_code": 0
+    },
+    {
+      "method": "system-scope unit query",
+      "result": "inactive/dead/blank path",
+      "error": "RemotePlay is a user service. System-scope query does not describe that process.",
+      "replacement_operation": "7edce8e9-dfcb-4419-938b-d87e05f7d512",
+      "user_service_state": "active/running",
+      "pid": 1520582
+    }
+  ],
+  "unchanged_blockers": {
+    "windows_cube": "RemoteHosts offline; not re-polled or woken",
+    "android": "RemoteHosts offline and previous USB unauthorized; no repeat approval/pairing/install requested"
+  },
+  "preservation": {
+    "no_build": true,
+    "no_loopback_rerun": true,
+    "no_new_identity": true,
+    "no_private_config_or_key_read": true,
+    "no_deployment": true,
+    "no_security_or_TCC_change": true,
+    "unrelated_paths": 105
+  }
+}
