@@ -2845,16 +2845,26 @@ impl RestoredDashboard {
                 );
             if should_update {
                 let owner = self.owner.clone();
-                let connection = owner.active_connection();
+                // Commit to a pending handshake synchronously; capturing None and
+                // yielding would lose settings or apply them to a newer device intent.
+                let connection = match owner.prepare_stream_settings_update(effect.values) {
+                    Ok(Some(connection)) => connection,
+                    Ok(None) => { cx.notify(); return; }
+                    Err(error) => {
+                        if effect.report_error {
+                            self.stream_settings.reduce(StreamSettingsAction::UpdateFailed(
+                                effect.receipt, error.to_string(),
+                            ));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
                 cx.spawn(async move |view, cx| {
                     let current = view
                         .update(cx, |this, _| {
                             this.stream_settings.effect_is_current(effect.receipt)
-                                && this
-                                    .owner
-                                    .active_connection()
-                                    .as_ref().map(Arc::as_ptr)
-                                    == connection.as_ref().map(Arc::as_ptr)
+                                && this.owner.stream_settings_binding_is_current(&connection)
                         })
                         .unwrap_or(false);
                     if !current {
@@ -2863,6 +2873,7 @@ impl RestoredDashboard {
                     let values = effect.values;
                     let result = owner
                         .update_stream_settings(
+                            &connection,
                             values.width,
                             values.height,
                             values.fps,
@@ -2873,12 +2884,7 @@ impl RestoredDashboard {
                         && let Err(error) = result
                     {
                         let _ = view.update(cx, |this, cx| {
-                            if this
-                                .owner
-                                .active_connection()
-                                .as_ref().map(Arc::as_ptr)
-                                == connection.as_ref().map(Arc::as_ptr)
-                            {
+                            if this.owner.stream_settings_binding_is_current(&connection) {
                                 this.stream_settings
                                     .reduce(StreamSettingsAction::UpdateFailed(
                                         effect.receipt,
@@ -2931,10 +2937,16 @@ impl RestoredDashboard {
                 let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
                 self.reset_host_stats();
-                let options = StreamStartOptions { width: self.stream_settings.values().resolution().0, height: self.stream_settings.values().resolution().1, fps: self.stream_settings.values().fps, bitrate_kbps: self.stream_settings.values().bitrate_kbps };
                 let owner = self.owner.clone();
                 cx.spawn(async move |view, cx| {
-                    if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
+                    let Some(options) = view.update(cx, |this, _| {
+                        if !this.session_commands.is_current(ticket) { return None; }
+                        let values = this.stream_settings.values();
+                        Some(StreamStartOptions {
+                            width: values.width, height: values.height,
+                            fps: values.fps, bitrate_kbps: values.bitrate_kbps,
+                        })
+                    }).unwrap_or(None) else { return; };
                     let result = owner.connect_device(&device_id, options, crate::unix_now_ms()).await;
                     let _ = view.update(cx, |this, cx| {
                         if !this.session_commands.is_current(ticket) { return; }

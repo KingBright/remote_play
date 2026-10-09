@@ -42,6 +42,9 @@ EXPECTED = {
         "invalid_custom_values_preserve_committed_settings_and_have_no_side_effects",
         "presets_preserve_other_values_and_sync_only_the_matching_draft",
         "editing_next_draft_keeps_committed_effect_valid_but_rejects_its_late_error",
+        "connecting_request_consumes_latest_commit_without_consuming_unapplied_drafts",
+        "pending_settings_are_isolated_by_device_and_reconnect_generation",
+        "cancelled_failed_and_cleared_requests_cannot_retain_or_create_settings",
     ],
 }
 SOURCES = [
@@ -65,7 +68,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--preservation-ledger", type=Path,
-        help="Optional authorized repository-relative status/SHA-256 ledger to verify; not required for the 35 tests",
+        help="Optional authorized repository-relative status/SHA-256 ledger to verify; not required for the fixed test suite",
     )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
@@ -154,7 +157,7 @@ def main():
     listed = run([str(binary), "--list"], "rust-list.log")
     discovered = re.findall(r"^(.+): test$", listed, re.M)
     expected = {f"{module}::tests::{name}" for module, names in EXPECTED.items() for name in names}
-    assert len(discovered) == len(set(discovered)) == len(expected) == 19
+    assert len(discovered) == len(set(discovered)) == len(expected) == 22
     assert set(discovered) == expected, set(discovered) ^ expected
     rust_results = []
     for number, name in enumerate(sorted(expected), 1):

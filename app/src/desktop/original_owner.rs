@@ -15,6 +15,7 @@ use remote_core::{
         SessionTabsState, SessionTabsViewModel,
     },
     shared_files::ShareScope,
+    stream_settings::{PendingStreamSettingsState, StreamSettingsValues},
     workspace_session::WorkspaceConnection,
 };
 use std::{
@@ -62,6 +63,7 @@ impl Drop for ViewSession {
 struct Pool {
     sessions: Vec<ViewSession>,
     tabs: SessionTabsState,
+    pending_settings: PendingStreamSettingsState,
     message: String,
     receive_dir: PathBuf,
     talkback: Option<(u32, client::TalkbackRuntimeControl)>,
@@ -75,6 +77,21 @@ impl Pool {
     fn active_mut(&mut self) -> Option<&mut ViewSession> {
         let index = self.tabs.active_index(self.sessions.len())?;
         self.sessions.get_mut(index)
+    }
+    /// Called when the form commits, before yielding to async execution. A handshake
+    /// cannot attach with old settings between taking its binding and scheduling work.
+    fn prepare_stream_settings_update(
+        &mut self,
+        values: StreamSettingsValues,
+    ) -> Result<Option<Weak<WorkspaceConnection>>, Error> {
+        protocol::validate_video_settings(values.width, values.height, values.fps, values.bitrate_kbps)?;
+        if let Some(connecting) = self.tabs.connecting() {
+            if !self.pending_settings.update(&connecting.peer.device_id, connecting.attempt, values) {
+                return Err("Connection settings expired; retry the selected device".into());
+            }
+            return Ok(None);
+        }
+        Ok(self.active().map(|entry| Arc::downgrade(&entry.session.conn)))
     }
 }
 
@@ -111,6 +128,7 @@ impl OriginalOwner {
             pool: Mutex::new(Pool {
                 sessions: Vec::new(),
                 tabs: SessionTabsState::default(),
+                pending_settings: PendingStreamSettingsState::default(),
                 message: "Ready".into(),
                 receive_dir: prefs.receive_dir,
                 talkback: None,
@@ -361,6 +379,10 @@ impl OriginalOwner {
             options.fps,
             options.bitrate_kbps,
         )?;
+        let initial_settings = StreamSettingsValues {
+            width: options.width, height: options.height,
+            fps: options.fps, bitrate_kbps: options.bitrate_kbps,
+        };
         let device = self
             .backend
             .runtime()
@@ -418,6 +440,9 @@ impl OriginalOwner {
                     return Ok(());
                 }
                 OpenDecision::AlreadyPending => {
+                    if let Some(connecting) = p.tabs.connecting().cloned() {
+                        p.pending_settings.update(key, connecting.attempt, initial_settings);
+                    }
                     let previous = p.tabs.selected_index();
                     if let Some(e) = p.sessions.get_mut(previous) {
                         e.session.release_input();
@@ -430,6 +455,7 @@ impl OriginalOwner {
                 OpenDecision::GenerationExhausted => return Err("Connection generation exhausted".into()),
                 OpenDecision::Start(attempt) => attempt,
             };
+            p.pending_settings.begin(key, attempt, initial_settings);
             let previous = p.tabs.selected_index();
             if let Some(e) = p.sessions.get_mut(previous) {
                 e.session.release_input();
@@ -451,7 +477,8 @@ impl OriginalOwner {
         }
         let mut p = self.pool.lock().unwrap();
         let count = p.sessions.len();
-        let completion = p.tabs.complete(key, attempt, connected.is_some(), count);
+        let settings = p.pending_settings.take(key, attempt);
+        let completion = p.tabs.complete(key, attempt, connected.is_some() && settings.is_some(), count);
         if completion == Completion::Cancelled {
             drop(connected);
             return Err("Connection request was cancelled or superseded".into());
@@ -466,6 +493,9 @@ impl OriginalOwner {
             if selected { p.message = message.clone(); }
             return Err(message.into());
         };
+        let Some(settings) = settings else {
+            return Err("Connection settings expired; retry the selected device".into());
+        };
         let mut session =
             OriginalGuiSession::new(key.into(), device.display_name, route, conn, events);
         #[cfg(any(all(target_os = "windows", feature = "native-windows-video"), all(target_os = "linux", feature = "native-linux-video")))]
@@ -473,10 +503,10 @@ impl OriginalOwner {
             session.prefer_native_video = true;
         }
         session.request.audio = audio;
-        session.request.width = options.width;
-        session.request.height = options.height;
-        session.request.fps = options.fps;
-        session.request.bitrate_kbps = options.bitrate_kbps;
+        session.request.width = settings.width;
+        session.request.height = settings.height;
+        session.request.fps = settings.fps;
+        session.request.bitrate_kbps = settings.bitrate_kbps;
         session.set_clipboard(p.clipboard_preference);
         if video {
             session.start_video();
@@ -500,6 +530,9 @@ impl OriginalOwner {
     }
     pub async fn disconnect_active(&self) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
+        if let Some(connecting) = p.tabs.connecting().cloned() {
+            p.pending_settings.take(&connecting.peer.device_id, connecting.attempt);
+        }
         let count = p.sessions.len();
         if let Some(index) = p.tabs.disconnect(count) {
             p.sessions.remove(index);
@@ -548,6 +581,16 @@ impl OriginalOwner {
         protocol::validate_video_settings(w, h, fps, bitrate)?;
         let mut p = self.pool.lock().unwrap();
         let e = p.active_mut().ok_or("No active connection")?;
+        Self::switch_session_source(e, source, w, h, fps, bitrate)
+    }
+    fn switch_session_source(
+        e: &mut ViewSession,
+        source: CaptureSource,
+        w: u32,
+        h: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<(), Error> {
         if !matches!(source, CaptureSource::MainDisplay)
             && !e.session.sources.iter().any(|s| s.source == source)
         {
@@ -569,15 +612,35 @@ impl OriginalOwner {
         *e.frame.lock().unwrap() = None;
         Ok(())
     }
+    /// None means committed for the pending handshake, or preferences-only while idle.
+    /// An established connection returns its exact allocation identity for async work.
+    pub fn prepare_stream_settings_update(
+        &self,
+        values: StreamSettingsValues,
+    ) -> Result<Option<Weak<WorkspaceConnection>>, Error> {
+        self.pool.lock().unwrap().prepare_stream_settings_update(values)
+    }
+    pub fn stream_settings_binding_is_current(&self, binding: &Weak<WorkspaceConnection>) -> bool {
+        self.pool.lock().unwrap().active()
+            .is_some_and(|entry| super::same_connection(binding, &entry.session.conn))
+    }
     pub async fn update_stream_settings(
         &self,
+        binding: &Weak<WorkspaceConnection>,
         w: u32,
         h: u32,
         fps: u32,
         bitrate: u32,
     ) -> Result<(), Error> {
-        let source = self.snapshot().active_source;
-        self.switch_capture_source(source, w, h, fps, bitrate).await
+        protocol::validate_video_settings(w, h, fps, bitrate)?;
+        let mut p = self.pool.lock().unwrap();
+        let e = p.active_mut()
+            .filter(|entry| super::same_connection(binding, &entry.session.conn))
+            .ok_or("Selected connection changed; settings were not sent")?;
+        // Identity check and source mutation share the same lock. A switch between
+        // the UI's check and execution must never send settings to another device.
+        let source = e.session.source;
+        Self::switch_session_source(e, source, w, h, fps, bitrate)
     }
     pub fn queue_viewing_input(&self, event: InputEvent) -> bool {
         let mut p = self.pool.lock().unwrap();
@@ -912,6 +975,7 @@ impl OriginalOwner {
     pub fn close_all(&self) {
         let mut p = self.pool.lock().unwrap();
         p.tabs.clear();
+        p.pending_settings.clear();
         p.sessions.clear();
         if let Some((_, c)) = p.talkback.take() {
             c.stop();
@@ -927,6 +991,47 @@ impl Drop for OriginalOwner {
 #[cfg(test)]
 mod restoration_regression_tests {
     use super::*;
+    fn pending_pool() -> Pool {
+        Pool {
+            sessions: Vec::new(), tabs: SessionTabsState::default(),
+            pending_settings: PendingStreamSettingsState::default(),
+            message: String::new(), receive_dir: PathBuf::new(),
+            talkback: None, clipboard_preference: false,
+        }
+    }
+    fn begin(pool: &mut Pool, key: &str, values: StreamSettingsValues) -> u64 {
+        let plan = pool.tabs.plan_open(SessionPeer {
+            device_id: key.into(), name: key.into(), endpoint: "127.0.0.1:1".parse().unwrap(),
+        }, None, 0);
+        let OpenDecision::Start(attempt) = plan.decision else { panic!("new request expected") };
+        pool.pending_settings.begin(key, attempt, values);
+        attempt
+    }
+    fn values() -> StreamSettingsValues {
+        StreamSettingsValues { width: 1920, height: 1080, fps: 60, bitrate_kbps: 10_000 }
+    }
+
+    #[test]
+    fn connecting_settings_commit_without_an_active_connection_and_follow_selected_attempt() {
+        let mut pool = pending_pool();
+        let first = begin(&mut pool, "a", values());
+        let selected = begin(&mut pool, "b", values());
+        let latest = StreamSettingsValues { width: 3840, height: 2160, fps: 120, ..values() };
+        assert!(pool.active().is_none());
+        assert!(pool.prepare_stream_settings_update(latest).unwrap().is_none());
+        assert_eq!(pool.pending_settings.take("a", first), Some(values()));
+        assert_eq!(pool.pending_settings.take("b", selected), Some(latest));
+    }
+    #[test]
+    fn invalid_pending_update_preserves_request_and_missing_generation_fails_closed() {
+        let mut pool = pending_pool();
+        let attempt = begin(&mut pool, "a", values());
+        assert!(pool.prepare_stream_settings_update(StreamSettingsValues { fps: 0, ..values() }).is_err());
+        assert_eq!(pool.pending_settings.take("a", attempt), Some(values()));
+        assert!(pool.prepare_stream_settings_update(values()).is_err());
+        pool.tabs.disconnect(0);
+        assert!(pool.prepare_stream_settings_update(values()).unwrap().is_none());
+    }
     #[test]
     fn stale_file_view_rejects_new_connection_and_network_even_with_same_labels() {
         let first = Arc::new("same device");

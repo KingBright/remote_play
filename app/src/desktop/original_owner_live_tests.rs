@@ -2,7 +2,7 @@
 //! test windows are captured; no full desktop, input, audio, clipboard or files.
 use super::*;
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshConfig};
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 #[ignore = "requires explicit authorized profile and two own named synthetic windows"]

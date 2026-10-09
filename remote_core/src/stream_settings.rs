@@ -1,4 +1,5 @@
 //! Stream form state and effects; execution and persistence stay in the adapter.
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamSettingsValues {
@@ -161,6 +162,41 @@ impl StreamSettingsState {
     }
 }
 
+/// Latest committed settings per in-flight connection, not a renderer or network identity.
+/// The Owner consumes these before attaching a successful handshake's session.
+#[derive(Default)]
+pub struct PendingStreamSettingsState {
+    requests: BTreeMap<String, (u64, StreamSettingsValues)>,
+}
+impl PendingStreamSettingsState {
+    pub fn begin(&mut self, device: &str, attempt: u64, values: StreamSettingsValues) {
+        self.requests.insert(device.to_owned(), (attempt, values));
+    }
+    pub fn update(&mut self, device: &str, attempt: u64, values: StreamSettingsValues) -> bool {
+        let Some((generation, current)) = self.requests.get_mut(device) else {
+            return false;
+        };
+        if *generation != attempt {
+            return false;
+        }
+        *current = values;
+        true
+    }
+    pub fn take(&mut self, device: &str, attempt: u64) -> Option<StreamSettingsValues> {
+        if self
+            .requests
+            .get(device)
+            .is_none_or(|(generation, _)| *generation != attempt)
+        {
+            return None;
+        }
+        self.requests.remove(device).map(|(_, values)| values)
+    }
+    pub fn clear(&mut self) {
+        self.requests.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +313,57 @@ mod tests {
             state.project().error,
             Some("Enter positive whole numbers for FPS and kbps.")
         );
+    }
+
+    #[test]
+    fn connecting_request_consumes_latest_commit_without_consuming_unapplied_drafts() {
+        let mut pending = PendingStreamSettingsState::default();
+        let mut form = state();
+        pending.begin("a", 1, form.values());
+        form.reduce(StreamSettingsAction::EditFps("75".into()));
+        let resolution = form
+            .reduce(StreamSettingsAction::SelectResolution(3840, 2160))
+            .unwrap();
+        assert!(pending.update("a", 1, resolution.values));
+        let custom = form.reduce(StreamSettingsAction::ApplyCustom).unwrap();
+        assert!(pending.update("a", 1, custom.values));
+        form.reduce(StreamSettingsAction::EditFps("invalid next draft".into()));
+        let committed = pending.take("a", 1).unwrap();
+        assert_eq!(committed, custom.values);
+        assert_eq!(committed.resolution(), (3840, 2160));
+        assert_eq!(committed.fps, 75);
+        assert!(!pending.update("a", 1, values()));
+    }
+
+    #[test]
+    fn pending_settings_are_isolated_by_device_and_reconnect_generation() {
+        let mut pending = PendingStreamSettingsState::default();
+        let latest = StreamSettingsValues {
+            fps: 120,
+            ..values()
+        };
+        pending.begin("a", 1, values());
+        pending.begin("b", 2, values());
+        assert!(pending.update("b", 2, latest));
+        assert_eq!(pending.take("a", 1), Some(values()));
+        pending.begin("b", 3, values());
+        assert!(!pending.update("b", 2, latest));
+        assert_eq!(pending.take("b", 2), None);
+        assert_eq!(pending.take("b", 3), Some(values()));
+    }
+
+    #[test]
+    fn cancelled_failed_and_cleared_requests_cannot_retain_or_create_settings() {
+        let mut pending = PendingStreamSettingsState::default();
+        assert!(!pending.update("missing", 1, values()));
+        pending.begin("a", 1, values());
+        assert_eq!(pending.take("a", 1), Some(values()));
+        assert_eq!(pending.take("a", 1), None);
+        pending.begin("a", 2, values());
+        pending.begin("b", 3, values());
+        pending.clear();
+        assert!(!pending.update("a", 2, values()));
+        assert_eq!(pending.take("a", 2), None);
+        assert_eq!(pending.take("b", 3), None);
     }
 }
