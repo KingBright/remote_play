@@ -1,0 +1,574 @@
+{
+  "schema_version": 1,
+  "checkpoint_before_change": "4f702dbd239211951036d8d933a146006145989b",
+  "recorded_at": "2026-10-09T21:28:28Z",
+  "scope": "Bounded owned-window observation and source audit; truthful FFmpeg input-format logging only.",
+  "acceptance": {
+    "image_pair_status": "not_obtained",
+    "failure_boundary": "blocked_before_safe_capture",
+    "same_time_source_viewer_images": null,
+    "source_frame_sha256": null,
+    "viewer_frame_sha256": null,
+    "source_luminance": null,
+    "viewer_luminance": null,
+    "physical_primary_display_identity": "unknown",
+    "complete_wayland_desktop_content": "unknown",
+    "black_frame_excluded": false,
+    "frozen_frame_excluded": false,
+    "xwayland_partial_content_excluded": false,
+    "actual_gpui_visible_presentation": "unknown",
+    "actual_display_completion_measured": false,
+    "full_acceptance": false,
+    "explanation": "The owned native Wayland surface is not selectable by the existing product. The external Studio helper has no capture grant and the existing GPUI product has no bounded presented-image export. No unscoped desktop pixels were read. Fixture mapping/drawing, prior decoding and GPUI scene counters do not prove visible content."
+  },
+  "prior_actual_product_evidence": {
+    "path": "source-selection-milestone.json",
+    "sha256": "b3db87b228e939d165dfd910f2b5da77b57b4918fb0708f5a962340b53bb5d17",
+    "source_catalog": {
+      "source": "MainDisplay",
+      "title": "Desktop",
+      "process_id": null,
+      "width": 0,
+      "height": 0,
+      "supports_input": true
+    },
+    "actual_ffmpeg_operation_id": "ca18f5cb-4279-42d0-84c1-ec9f249e8325",
+    "observed_input": {
+      "format": "x11grab",
+      "display": ":0",
+      "video_size": "1920x1080",
+      "framerate": 60
+    },
+    "current_root_metadata_not_simultaneous_with_prior_run": true,
+    "prior_runs_not_repeated": true
+  },
+  "linux_capability_inventory": {
+    "operation_id": "2a989eae-775d-4d60-8f3d-ecce94a24cb9",
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durability_scope": "observed_facts_only_not_this_query",
+      "durable": false,
+      "error_code": null,
+      "evidence_complete": true,
+      "evidence_durable": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791581112,
+      "operation_id": "2a989eae-775d-4d60-8f3d-ecce94a24cb9",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 2,
+      "request_id": "req_72176dab6a054b2cb92180a3e1e64b84",
+      "request_record_persisted": false,
+      "request_retention": "not_retained_use_original_operation",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "terminal": {
+      "created_at": 1791580654,
+      "exit_code": 0,
+      "id": "2a989eae-775d-4d60-8f3d-ecce94a24cb9",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 2267348,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791580654,
+      "working_directory": "/var/home/liang/workspace",
+      "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+    },
+    "output": {
+      "python": "/usr/bin/python3",
+      "uid": 1000,
+      "display_environment": {
+        "DISPLAY": ":0",
+        "WAYLAND_DISPLAY": "wayland-0",
+        "XDG_SESSION_TYPE": "wayland"
+      },
+      "available_commands": {
+        "gdbus": "/usr/bin/gdbus",
+        "ffmpeg": "/usr/bin/ffmpeg",
+        "xwininfo": "/usr/bin/xwininfo",
+        "xprop": "/usr/bin/xprop",
+        "xdotool": "/usr/bin/xdotool",
+        "grim": null,
+        "gnome-screenshot": null,
+        "wtype": null
+      },
+      "modules": {
+        "gi": true,
+        "cairo": true,
+        "PIL": true
+      },
+      "gtk_version": "4.0",
+      "owned_existing_fixture_paths": []
+    }
+  },
+  "studio_external_helper_preflight": {
+    "operation_id": "04bfa924-747f-4d47-8ca5-c6fc3b703979",
+    "receipt": {
+      "business_state": "not_evaluated",
+      "durable": true,
+      "error_code": null,
+      "evidence_complete": true,
+      "execution_state": "exited",
+      "failure_boundary": null,
+      "last_confirmed_stage": "process_exited",
+      "next_action": null,
+      "observed_at": 1791580665,
+      "operation_id": "04bfa924-747f-4d47-8ca5-c6fc3b703979",
+      "output_complete": true,
+      "process_exit_code": 0,
+      "process_outcome": "succeeded",
+      "protocol": 1,
+      "request_id": "req_5b295d66197c4243b59593aec2fc6ebd",
+      "retry_policy": "do_not_replay_completed_operation",
+      "stale": false,
+      "transport_complete": true,
+      "user_action": "none"
+    },
+    "terminal": {
+      "created_at": 1791580664,
+      "exit_code": 0,
+      "id": "04bfa924-747f-4d47-8ca5-c6fc3b703979",
+      "log_format": 1,
+      "output_complete": true,
+      "output_truncated": false,
+      "process_id": 60958,
+      "pty": false,
+      "state": "exited",
+      "updated_at": 1791580664,
+      "working_directory": "/Users/jinliang/workspace",
+      "workspace_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196:60ae9a54-29a8-46bc-b71d-a91193e00c35"
+    },
+    "output": {
+      "uid": 501,
+      "helper_ax_trusted": false,
+      "helper_screen_capture_preflight": false,
+      "permission_request_made": false,
+      "known_task_stage_capture_or_fixture_files": [
+        "/Users/jinliang/workspace/.rp-focus-resume-20260930/WindowControlFixture"
+      ]
+    }
+  },
+  "owned_wayland_window": {
+    "operation_id": "39a15e4d-69b1-41c5-b6ce-c35b579e7b9d",
+    "process_exit_code": 0,
+    "remote_receipt_path": ".rp-source-picture-20261009/owned-wayland-boundary.json",
+    "remote_receipt_sha256": "4ca2c58cfd3e2adb710523d7c2ab724d871a5e07531fad64c91ee5a707b21da9",
+    "read_operation_id": "db7e4e18-4416-49b3-92ae-b2554246c1f7",
+    "read_complete": true,
+    "raw": {
+      "started_at": "2026-10-09T21:21:13.975680+00:00",
+      "pid": 2269810,
+      "uid": 1000,
+      "test_window_title": "RemotePlay owned Wayland picture validation",
+      "capture_attempted": false,
+      "desktop_pixels_read": false,
+      "permissions_requested": false,
+      "input_injected": false,
+      "draw_observations": [
+        {
+          "tick": 1,
+          "draw_count": 1,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0",
+          "is_x11_surface": false
+        },
+        {
+          "tick": 2,
+          "draw_count": 2,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 3,
+          "draw_count": 3,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 4,
+          "draw_count": 4,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 5,
+          "draw_count": 5,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 6,
+          "draw_count": 6,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 7,
+          "draw_count": 7,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 8,
+          "draw_count": 8,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 9,
+          "draw_count": 9,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 10,
+          "draw_count": 10,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 11,
+          "draw_count": 11,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 12,
+          "draw_count": 12,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 13,
+          "draw_count": 13,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 14,
+          "draw_count": 14,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 15,
+          "draw_count": 15,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        },
+        {
+          "tick": 16,
+          "draw_count": 16,
+          "mapped": true,
+          "width": 640,
+          "height": 360,
+          "surface_type": "GdkWaylandToplevel",
+          "display_type": "GdkWaylandDisplay",
+          "display_name": "wayland-0"
+        }
+      ],
+      "portal_read_only_properties": {
+        "version": {
+          "value": 5
+        },
+        "AvailableSourceTypes": {
+          "value": 7
+        },
+        "AvailableCursorModes": {
+          "value": 7
+        }
+      },
+      "mutter_read_error": {
+        "type": "Error",
+        "message": "g-dbus-error-quark: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable (2)"
+      },
+      "x11_root_geometry": {
+        "Width": 3840,
+        "Height": 2160
+      },
+      "application_exit": 0,
+      "draw_count": 16,
+      "ended_at": "2026-10-09T21:21:22.110466+00:00",
+      "image_pair_status": "not_obtained",
+      "failure_boundary": "Native Wayland owned window has no X11 source ID; installed host only exposes MainDisplay using x11grab. Studio external helper preflight is denied, and existing GPUI binary has no bounded rendered-frame image export. No unscoped desktop screenshot was substituted."
+    },
+    "method": "GTK4 native Wayland 640x360 owned window, 500 ms tick with moving bar, 16 ticks; 12 s fallback shutdown. Drawing callbacks are not scanout measurements.",
+    "portal_calls": "Read-only DBus Properties.Get(version, AvailableSourceTypes, AvailableCursorModes) only. No CreateSession/SelectSources/Start/OpenPipeWireRemote."
+  },
+  "source_audit": [
+    {
+      "path": "host/src/ffmpeg_hevc.rs",
+      "boundary": "Linux chooses x11grab whenever DISPLAY is set, otherwise kmsgrab; no portal or PipeWire input. Requested stream size is supplied as X11 input video_size, with no Linux full-desktop scale filter."
+    },
+    {
+      "path": "host/src/capture_sources.rs",
+      "boundary": "Linux exposes only generic MainDisplay/Desktop with width=height=0 and supports_input=true; it does not verify physical primary-display identity or enumerate owned windows."
+    },
+    {
+      "path": "host/src/service.rs",
+      "boundary": "MainDisplay subscribe skips catalog validation and defaults input support true. Handshake window_capture is macOS-only. Linux desktop input lazily opens uinput; permission/readiness was not tested."
+    },
+    {
+      "path": "host/src/linux_capture.rs",
+      "boundary": "Public LinuxVideoCapturer emits empty placeholder frame buffers and does not implement PipeWire/X11 capture."
+    },
+    {
+      "path": "host/src/linux_video_encode.rs",
+      "boundary": "Live encoder starts FfmpegHevcSource and pulls its HEVC stream; submit_frame ignores the placeholder LinuxVideoFrame. Placeholder bytes do not explain the prior real FFmpeg decoded picture."
+    },
+    {
+      "path": "app/src/restored_ui.rs",
+      "boundary": "Bounded progress receipt measures current frame and GPUI scene submission, not an exported rendered image or actual display completion."
+    },
+    {
+      "path": "app/examples/capture_restored_window.rs",
+      "boundary": "Existing uncompiled helper requires exact RemotePlay review Window/title/PID from the peer catalog and exports helper-decoded RGBA, not the actual GPUI window. Product capture excludes its own PID. No helper binary was built."
+    }
+  ],
+  "change": {
+    "paths": [
+      "host/src/capture_backend.rs",
+      "host/src/ffmpeg_hevc.rs",
+      "host/src/lib.rs"
+    ],
+    "behavior": "Derive FFmpeg logging label from -f before the first -i of the actual command; never infer pipewire/wayland from WAYLAND_DISPLAY.",
+    "known_labels": [
+      "x11grab",
+      "kmsgrab",
+      "gdigrab",
+      "unknown"
+    ],
+    "capture_command_changed": false,
+    "source_catalog_changed": false,
+    "capability_wire_fields_changed": false,
+    "input_changed": false,
+    "renderer_changed": false,
+    "system_capture_defaults_changed": false,
+    "new_dependency": false,
+    "built_production_binary": false,
+    "remote_compile": false,
+    "deployed": false,
+    "published": false
+  },
+  "tests": {
+    "command": "CARGO_TARGET_DIR=/Users/jinliang/rust-target cargo test -p host --lib capture_backend::tests --offline --locked",
+    "execution_host": "local macOS",
+    "existing_target_reused": true,
+    "local_exec_session": 85091,
+    "final_output_chunk": "80218d",
+    "exit_code": 0,
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 52,
+    "test_names": [
+      "capture_backend::tests::wayland_environment_does_not_turn_x11_input_into_pipewire",
+      "capture_backend::tests::actual_input_formats_are_kept_separate_from_encoded_output",
+      "capture_backend::tests::missing_or_unimplemented_input_never_claims_a_capture_backend"
+    ],
+    "product_capture_or_ffmpeg_spawned": false,
+    "warning": "Pre-existing unused PermissionsExt import in remote_core/src/mesh.rs.",
+    "boundaries": [
+      "Parser module compiled/tested on macOS via cfg(test).",
+      "Linux/Windows production integration not freshly compiled or deployed.",
+      "No full release or already-passed suite repeated."
+    ]
+  },
+  "final_installed_state": {
+    "studio": {
+      "operation_id": "b12303fe-3270-4be7-9831-84aa5d4543eb",
+      "receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791581154,
+        "operation_id": "b12303fe-3270-4be7-9831-84aa5d4543eb",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_0e563bb7538b498e98114ddf891e54e8",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "terminal": {
+        "created_at": 1791581152,
+        "exit_code": 0,
+        "id": "b12303fe-3270-4be7-9831-84aa5d4543eb",
+        "log_format": 1,
+        "output_complete": true,
+        "output_truncated": false,
+        "process_id": 62567,
+        "pty": false,
+        "state": "exited",
+        "updated_at": 1791581153,
+        "working_directory": "/Users/jinliang/workspace",
+        "workspace_id": "8af88e35-f316-4dd9-9810-fa5bd3a22196:60ae9a54-29a8-46bc-b71d-a91193e00c35"
+      },
+      "output": {
+        "observed_at": "2026-10-09T21:25:53.514400+00:00",
+        "uid": 501,
+        "installed_executable": "/Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+        "installed_executable_sha256": "bfb517967a3171c9ce1b3e6814e8a0167470b7a7cc4a795a9ab7e2dec2e67f5b",
+        "launchctl_exit": 0,
+        "launchctl_selected_fields": [
+          "state = running",
+          "program = /Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+          "pid = 59676",
+          "state = active",
+          "state = active"
+        ],
+        "known_product_process": "59676   501    20 /Users/jinliang/Applications/RemotePlay.app/Contents/MacOS/remote_play",
+        "canonical_modified_by_this_phase": false
+      }
+    },
+    "ho5": {
+      "operation_id": "0bec2e4c-4467-4647-838d-57dd1275dae2",
+      "receipt": {
+        "business_state": "not_evaluated",
+        "durable": true,
+        "error_code": null,
+        "evidence_complete": true,
+        "execution_state": "exited",
+        "failure_boundary": null,
+        "last_confirmed_stage": "process_exited",
+        "next_action": null,
+        "observed_at": 1791581162,
+        "operation_id": "0bec2e4c-4467-4647-838d-57dd1275dae2",
+        "output_complete": true,
+        "process_exit_code": 0,
+        "process_outcome": "succeeded",
+        "protocol": 1,
+        "request_id": "req_b14db7b2133341a6af48c3703c966253",
+        "retry_policy": "do_not_replay_completed_operation",
+        "stale": false,
+        "transport_complete": true,
+        "user_action": "none"
+      },
+      "terminal": {
+        "created_at": 1791581160,
+        "exit_code": 0,
+        "id": "0bec2e4c-4467-4647-838d-57dd1275dae2",
+        "log_format": 1,
+        "output_complete": true,
+        "output_truncated": false,
+        "process_id": 2272885,
+        "pty": false,
+        "state": "exited",
+        "updated_at": 1791581160,
+        "working_directory": "/var/home/liang/workspace",
+        "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545"
+      },
+      "output": {
+        "observed_at": "2026-10-09T21:26:00.497220+00:00",
+        "uid": 1000,
+        "installed_executable": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+        "owned_fixture_pid": 2269810,
+        "installed_executable_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+        "owned_fixture_process_alive": false,
+        "systemctl_exit": 0,
+        "service": {
+          "ActiveState": "active",
+          "SubState": "running",
+          "MainPID": "2232948",
+          "NRestarts": "0"
+        },
+        "known_product_process": "2232948  1000  1000 /home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+        "direct_ffmpeg_child_pids": [],
+        "pgrep_exit": 1,
+        "service_modified_by_this_phase": false
+      }
+    }
+  },
+  "preservation": {
+    "unrelated_dirty_paths": 105,
+    "byte_and_status_mismatches": 0,
+    "status_check_used_untracked_files_all": true,
+    "index_initially_empty": true,
+    "index_lock_initially_absent": true,
+    "prior_signed_candidate_and_rollback_untouched": true,
+    "profile_or_membership_mutated_by_tools": false,
+    "private_configuration_or_credentials_read": false,
+    "os_security_or_tcc_changed": false,
+    "permissions_requested": false,
+    "matrix_changed": false,
+    "matrix_sha256": "7c66ea19a06c392c6245b40acc4cad83c7621c1016d469c0a2cfe143ba8f8725"
+  },
+  "followup_status": "Proposal only: truthful source/backend/readiness semantics, reviewed native portal selection with user consent and native buffer pipeline, then time-correlated owned source/presented-viewer images. No portal permission or new capture architecture implemented."
+}

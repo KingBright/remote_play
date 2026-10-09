@@ -23,6 +23,8 @@ mod video_encode;
 #[cfg(target_os = "macos")]
 mod window_input;
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod capture_backend;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod ffmpeg_hevc;
 #[cfg(any(target_os = "linux", target_os = "windows"))]

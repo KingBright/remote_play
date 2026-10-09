@@ -35,6 +35,7 @@ impl FfmpegHevcSource {
         bitrate_kbps: u32,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut command = capture_command(width, height, fps, bitrate_kbps)?;
+        let backend = crate::capture_backend::ffmpeg_input_format(&command);
         // Keep startup/codec failures in the host's existing diagnostic log.
         command
             .stdin(Stdio::null())
@@ -61,7 +62,7 @@ impl FfmpegHevcSource {
         };
         println!(
             "[FfmpegHevc] started {width}x{height}@{fps} {bitrate_kbps} kbps ({})",
-            capture_backend_name()
+            backend
         );
         Ok(Self {
             child: Mutex::new(Some(child)),
@@ -127,16 +128,6 @@ impl Drop for FfmpegHevcSource {
         {
             let _ = reader.join();
         }
-    }
-}
-
-fn capture_backend_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "gdigrab"
-    } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        "pipewire/wayland"
-    } else {
-        "x11grab"
     }
 }
 
