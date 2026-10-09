@@ -689,10 +689,31 @@ impl OriginalOwner {
         protocol::validate_video_settings(w, h, fps, bitrate)?;
         let mut p = self.pool.lock().unwrap();
         let e = p.active_mut().ok_or("No active connection")?;
+        let expected = remote_core::view_commands::enumerated_source(&e.session.sources, source)
+            .cloned().ok_or("Selected source is missing or ambiguous in the current catalog")?;
+        Self::switch_bound_session_source(e, binding, &expected, w, h, fps, bitrate)
+    }
+    pub async fn switch_bound_enumerated_source(
+        &self, binding: &SourceViewBinding, expected: &CaptureSourceInfo,
+        w: u32, h: u32, fps: u32, bitrate: u32,
+    ) -> Result<(), Error> {
+        protocol::validate_video_settings(w, h, fps, bitrate)?;
+        let mut p = self.pool.lock().unwrap();
+        let e = p.active_mut().ok_or("No active connection")?;
+        Self::switch_bound_session_source(e, binding, expected, w, h, fps, bitrate)
+    }
+    fn switch_bound_session_source(
+        e: &mut ViewSession, binding: &SourceViewBinding, expected: &CaptureSourceInfo,
+        w: u32, h: u32, fps: u32, bitrate: u32,
+    ) -> Result<(), Error> {
+        if !e.session.connected { return Err("Selected connection is disconnected".into()); }
         let connection = e.session.conn.clone();
-        binding.apply(&connection, remote_core::shared_files::current_share_scope(), ||
-            Self::switch_session_source(e, source, w, h, fps, bitrate)
-        ).ok_or("Selected connection changed; source was not switched")?
+        // The pool lock covers catalog/allocation validation and the mutation.
+        let source = remote_core::view_commands::apply_enumerated_source(
+            binding, &connection, remote_core::shared_files::current_share_scope(),
+            expected, &e.session.sources, |source| source,
+        ).ok_or("Selected connection or source catalog changed; source was not switched")?;
+        Self::switch_session_source(e, source, w, h, fps, bitrate)
     }
     fn switch_session_source(
         e: &mut ViewSession,

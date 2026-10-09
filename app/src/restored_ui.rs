@@ -281,6 +281,8 @@ struct RestoredDashboard {
     render_calls: u64,
     test_connect_started: bool,
     test_source_started: bool,
+    test_source_request: Option<Result<sequence_acceptance::SourceRequest, String>>,
+    test_selected_source: Option<protocol::session::CaptureSourceInfo>,
     test_sequence:Option<Result<sequence_acceptance::Sequence,String>>,
     current_frame: Option<Arc<MacDecodedVideoFrame>>,
     presentation_frame: FrameSlot,
@@ -360,6 +362,8 @@ impl RestoredDashboard {
             render_calls: 0,
             test_connect_started: false,
             test_source_started: false,
+            test_source_request: sequence_acceptance::SourceRequest::from_env(),
+            test_selected_source: None,
             test_sequence:sequence_acceptance::Sequence::from_env(),
             current_frame: None,
             presentation_frame: Arc::new(Mutex::new(None)),
@@ -654,11 +658,15 @@ impl RestoredDashboard {
     fn start_capture_source_switch(
         &mut self,
         binding: Option<SourceViewBinding>,
-        source: protocol::session::CaptureSource,
+        source: protocol::session::CaptureSourceInfo,
         label: String,
         cx: &mut Context<Self>,
-    ) {
-        let Some(binding) = binding.filter(|binding| self.owner.source_binding_is_current(binding)) else { return; };
+    ) -> bool {
+        let Some(binding) = binding.filter(|binding| self.owner.source_binding_is_current(binding)) else { return false; };
+        let catalog = self.owner.snapshot().sources;
+        if remote_core::view_commands::enumerated_source(&catalog, source.source) != Some(&source) {
+            return false;
+        }
         let ticket = self.source_commands.begin();
         for event in self.pointer_input.release_events() {
             self.owner.queue_viewing_input(event);
@@ -674,7 +682,7 @@ impl RestoredDashboard {
                     .then(|| this.stream_settings.values())
             }).unwrap_or(None) else { return; };
             if let Err(err) = owner
-                .switch_bound_capture_source(&binding, source, values.width, values.height, values.fps, values.bitrate_kbps)
+                .switch_bound_enumerated_source(&binding, &source, values.width, values.height, values.fps, values.bitrate_kbps)
                 .await
             {
                 let _ = view.update(cx, |this, cx| {
@@ -685,6 +693,7 @@ impl RestoredDashboard {
             }
         })
         .detach();
+        true
     }
 
     fn sync_input_session(&mut self, role: &RoleState, cx: &mut Context<Self>) {
@@ -1022,59 +1031,37 @@ impl RestoredDashboard {
         {
             self.test_connect_started = true;
             self.pause_when_inactive = false;
+            let ticket = self.session_commands.begin();
             let owner = self.owner.clone();
             cx.spawn(async move |view, cx| {
+                if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
                 let result = owner.connect_silent_files(&key).await;
-                if result.is_ok() {
-                    let _ = owner.request_capture_sources().await;
-                }
                 let _ = view.update(cx, |this, cx| {
+                    if !this.session_commands.is_current(ticket) { return; }
                     if let Err(e) = result {
                         this.status = e.to_string();
+                    } else {
+                        this.request_capture_sources(cx);
                     }
                     cx.notify();
                 });
             })
             .detach();
         }
-        if self.test_connect_started
-            && !self.test_source_started
-            && let (Ok(title), Some(id), Some(pid)) = (
-                std::env::var("REMOTE_PLAY_RESTORED_TEST_TITLE"),
-                std::env::var("REMOTE_PLAY_RESTORED_TEST_WINDOW")
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok()),
-                std::env::var("REMOTE_PLAY_RESTORED_TEST_PID")
-                    .ok()
-                    .and_then(|v| v.parse::<i32>().ok()),
-            )
-        {
+        if self.test_connect_started && !self.test_source_started {
             let state = self.owner.snapshot();
-            if state.sources.iter().any(|s| {
-                s.source == protocol::session::CaptureSource::Window(id)
-                    && s.process_id == Some(pid)
-                    && s.title == title
-            }) {
-                self.test_source_started = true;
-                let owner = self.owner.clone();
-                cx.spawn(async move |view, cx| {
-                    let r = owner
-                        .switch_capture_source(
-                            protocol::session::CaptureSource::Window(id),
-                            1280,
-                            720,
-                            30,
-                            6000,
-                        )
-                        .await;
-                    let _ = view.update(cx, |this, cx| {
-                        if let Err(e) = r {
-                            this.status = e.to_string();
+            let requested_device = std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").ok();
+            if state.role.session().is_some_and(|session| Some(&session.peer.device_id) == requested_device.as_ref()) {
+                match self.test_source_request.clone() {
+                    Some(Ok(request)) => if let Some(source) = request.select(&state.sources) {
+                        if self.start_capture_source_switch(state.source_binding, source.clone(), source.title.clone(), cx) {
+                            self.test_selected_source = Some(source);
+                            self.test_source_started = true;
                         }
-                        cx.notify();
-                    });
-                })
-                .detach();
+                    },
+                    Some(Err(error)) => self.status = format!("Source selector rejected: {error}"),
+                    None => {},
+                }
             }
         }
         // Explicit bounded visual-review state only; never active in normal usage.
@@ -1099,6 +1086,7 @@ impl RestoredDashboard {
             self.quitting = true;
             let result = serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"renderer":"restored-original-gpui",
                 "render_calls":self.render_calls,"elapsed_ms":self.started.elapsed().as_millis(),"state":self.owner.diagnostic_snapshot(),
+                "source_selection":{"enumerated_match":self.test_selected_source,"command_queued":self.test_source_started,"status":self.status},
                 "frame_boundary":"gpui_scene_submission","actual_display_completion_measured":false,
                 "screen_capture_started_locally":false,"input_injected":false,"full_acceptance":false});
             if let Err(e) = std::fs::write(&output, serde_json::to_vec_pretty(&result).unwrap()) {
@@ -1119,6 +1107,7 @@ impl RestoredDashboard {
         self.presentation_frame.lock().unwrap().take();self.bound_source=None;
         self.pointer_input=PointerInputTracker::default();self.input_locked=true;
         self.test_connect_started=false;self.test_source_started=false;
+        self.test_selected_source=None;
     }
     fn sequence_acceptance_tick(&mut self,output:&str,seconds:u64,cx:&mut Context<Self>)->bool {
         let pending=self.test_sequence.take().expect("sequence state present");
@@ -2283,17 +2272,6 @@ fn display_capture_sources(
         };
         (primary_rank, id)
     });
-    if displays.is_empty() {
-        displays.push(protocol::session::CaptureSourceInfo {
-            source: protocol::session::CaptureSource::MainDisplay,
-            title: "Main display".into(),
-            application: String::new(),
-            process_id: None,
-            width: 0,
-            height: 0,
-            supports_input: true,
-        });
-    }
     displays
 }
 
@@ -2337,7 +2315,6 @@ fn display_switcher_control(
             format!("Display {} · view", index + 1)
         };
         let action_label = label.clone();
-        let source_id = source.source;
         let is_selected = capture_source_is_selected(selected, &source, index);
         control = control.child(
             command_button(
@@ -2356,7 +2333,7 @@ fn display_switcher_control(
             .on_click(move |_event, _window, cx| {
                 let label = action_label.clone();
                 let _ = view.update(cx, |this, cx| {
-                    this.start_capture_source_switch(binding.clone(), source_id, label, cx);
+                    this.start_capture_source_switch(binding.clone(), source.clone(), label, cx);
                     cx.notify();
                 });
             })
@@ -2467,7 +2444,6 @@ fn capture_source_menu(
     for (index, source) in displays.into_iter().enumerate() {
         let binding = source_binding.cloned();
         let view = view.clone();
-        let source_id = source.source;
         let label = if source.supports_input {
             format!("Display {}", index + 1)
         } else {
@@ -2493,7 +2469,7 @@ fn capture_source_menu(
             .on_click(move |_event, _window, cx| {
                 let label = action_label.clone();
                 let _ = view.update(cx, |this, cx| {
-                    this.start_capture_source_switch(binding.clone(), source_id, label, cx);
+                    this.start_capture_source_switch(binding.clone(), source.clone(), label, cx);
                     cx.notify();
                 });
             })
@@ -2540,7 +2516,7 @@ fn capture_source_menu(
                 .on_click(move |_event, _window, cx| {
                     let label = action_label.clone();
                     let _ = view.update(cx, |this, cx| {
-                        this.start_capture_source_switch(binding.clone(), source_id, label, cx);
+                        this.start_capture_source_switch(binding.clone(), source.clone(), label, cx);
                         cx.notify();
                     });
                 })
@@ -4828,6 +4804,16 @@ mod input_tests {
 
     #[test]
     fn display_switcher_uses_real_sources_and_never_invents_display_two() {
+        assert!(display_capture_sources(&[]).is_empty());
+        assert!(display_capture_sources(&[protocol::session::CaptureSourceInfo {
+            source: protocol::session::CaptureSource::Window(3),
+            title: "Only a window".into(),
+            application: String::new(),
+            process_id: Some(7),
+            width: 640,
+            height: 480,
+            supports_input: false,
+        }]).is_empty());
         let one = vec![protocol::session::CaptureSourceInfo {
             source: protocol::session::CaptureSource::MainDisplay,
             title: "Physical display".into(),
