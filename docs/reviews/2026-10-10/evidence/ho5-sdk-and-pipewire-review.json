@@ -1,0 +1,355 @@
+{
+  "schema": 1,
+  "scope": "HO5 SDK/source readiness observations and focused PipeWire review; no Linux build or product acceptance implied",
+  "parent_commit": "a5e45ac51da69cf9408fc22890be9524b8758109",
+  "observation_operations": [
+    {
+      "id": "5f9f87e6-1b8f-4a7f-bc7e-daab9cc224f1",
+      "utc": "2026-10-10T03:13:21Z",
+      "exit": 0,
+      "purpose": "system SDK and DNS"
+    },
+    {
+      "id": "bce083aa-bb6a-4240-a269-34342cfdc4e1",
+      "utc": "2026-10-10T03:14:12Z",
+      "exit": 0,
+      "purpose": "existing source target and container metadata"
+    },
+    {
+      "id": "6b4b2ef8-7925-423c-89b5-744cb3364b6b",
+      "exit": 1,
+      "purpose": "container rootfs read; PermissionError; stopped"
+    },
+    {
+      "id": "292fab63-965d-4fa4-a37d-ba951af14ef1",
+      "utc": "2026-10-10T03:16:04Z",
+      "exit": 0,
+      "purpose": "filtered existing OSTree deployments; no mutations"
+    },
+    {
+      "id": "42de4279-9b4c-415d-8b9c-af6bea451607",
+      "utc": "2026-10-10T03:19:56Z",
+      "exit": 0,
+      "purpose": "known user SDK paths and current service properties"
+    }
+  ],
+  "device_observation": {
+    "request_id": "req_2be02dc31a50445296df791be066d602",
+    "observed_at_epoch": 1791601944,
+    "devices": [
+      {
+        "id": "ba3bf113-2390-466e-88bc-40d5b4f02884",
+        "name": "MacBook-M2-Max",
+        "online": true,
+        "last_seen": 1791601938,
+        "platform": "macos",
+        "agent_version": "0.10.25",
+        "product_version": "not_verified_this_turn"
+      },
+      {
+        "id": "8af88e35-f316-4dd9-9810-fa5bd3a22196",
+        "name": "Mac-Studio",
+        "online": true,
+        "last_seen": 1791601943,
+        "platform": "macos",
+        "agent_version": "0.10.25",
+        "product_version": "not_verified_this_turn"
+      },
+      {
+        "id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+        "name": "HO5",
+        "online": true,
+        "last_seen": 1791601940,
+        "platform": "linux",
+        "agent_version": "0.10.25",
+        "product_version": "not_verified_this_turn"
+      },
+      {
+        "id": "f840a7fb-33c3-48bb-b41a-5e81cbde2ea9",
+        "name": "cube",
+        "online": false,
+        "last_seen": 1791394743,
+        "platform": "windows",
+        "agent_version": "0.10.25",
+        "product_version": "not_verified_this_turn"
+      },
+      {
+        "id": "f4b13b05-1d5d-4460-8517-0fe3be577889",
+        "name": "Android-Phone",
+        "online": false,
+        "last_seen": null,
+        "platform": null,
+        "agent_version": null,
+        "product_version": "not_verified_this_turn"
+      }
+    ]
+  },
+  "ho5": {
+    "system": {
+      "os_release": "NAME=\"Bazzite\"\nVERSION=\"44.20260921.0 (Kinoite)\"\nRELEASE_TYPE=stable\nID=bazzite\nID_LIKE=\"fedora\"\nVERSION_ID=44\nVERSION_CODENAME=\"Kinoite\"\nPRETTY_NAME=\"Bazzite\"\nANSI_COLOR=\"0;38;2;138;43;226\"\nLOGO=bazzite-logo\nCPE_NAME=\"cpe:/o:universal-blue:bazzite:44\"\nDEFAULT_HOSTNAME=\"bazzite\"\nHOME_URL=\"https://bazzite.gg\"\nDOCUMENTATION_URL=\"https://docs.bazzite.gg\"\nSUPPORT_URL=\"https://discord.bazzite.gg\"\nBUG_REPORT_URL=\"https://github.com/ublue-os/bazzite/issues/\"\nSUPPORT_END=2027-05-19\nVARIANT=\"Kinoite\"\nVARIANT_ID=bazzite\nOSTREE_VERSION='44.20260921.0'\nBUILD_ID=\"Stable (F44.20260921)\"\nBOOTLOADER_NAME=\"Bazzite Stable (F44.20260921)\"\nIMAGE_ID=\"bazzite-44.20260921\"\n",
+      "uid": 1000,
+      "proc_security": [
+        "CapEff:\t0000000000000000",
+        "NoNewPrivs:\t1"
+      ],
+      "free_bytes": 759744372736,
+      "tools": {
+        "rpm-ostree": "/usr/bin/rpm-ostree",
+        "dnf": "/usr/bin/dnf",
+        "dnf5": "/usr/bin/dnf5",
+        "rpm": "/usr/bin/rpm",
+        "toolbox": "/usr/bin/toolbox",
+        "distrobox": "/usr/bin/distrobox",
+        "podman": "/usr/bin/podman",
+        "docker": null,
+        "gcc": "/usr/bin/gcc",
+        "g++": "/usr/bin/g++",
+        "cc": "/usr/bin/cc",
+        "clang": null,
+        "clang++": null,
+        "ld": "/usr/bin/ld",
+        "lld": null,
+        "pkg-config": "/usr/bin/pkg-config",
+        "cargo": "/home/liang/.cargo/bin/cargo",
+        "rustc": "/home/liang/.cargo/bin/rustc",
+        "cmake": null,
+        "ninja": null
+      },
+      "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+      "installed_sdk_query": {
+        "exit": 14,
+        "stdout": "未安装软件包 pipewire-devel \npipewire-libs-1.6.9-1.fc44.x86_64\npipewire-libs-1.6.9-1.fc44.i686\n未安装软件包 alsa-lib-devel \n未安装软件包 clang \n未安装软件包 clang-libs \n未安装软件包 llvm-devel \ngcc-16.2.1-2.fc44.x86_64\ngcc-c++-16.2.1-2.fc44.x86_64\npkgconf-pkg-config-2.5.1-1.fc44.x86_64\n未安装软件包 libxkbcommon-devel \n未安装软件包 wayland-devel \n未安装软件包 libX11-devel \n未安装软件包 libxcb-devel \n未安装软件包 mesa-libEGL-devel \n未安装软件包 mesa-libGL-devel \n未安装软件包 fontconfig-devel \n未安装软件包 freetype-devel \n未安装软件包 vulkan-loader-devel \n",
+        "stderr": ""
+      },
+      "pkg_config": {
+        "libpipewire-0.3": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package libpipewire-0.3 was not found in the pkg-config search path.\nPerhaps you should add the directory containing `libpipewire-0.3.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'libpipewire-0.3' not found\n"
+        },
+        "libspa-0.2": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package libspa-0.2 was not found in the pkg-config search path.\nPerhaps you should add the directory containing `libspa-0.2.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'libspa-0.2' not found\n"
+        },
+        "alsa": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package alsa was not found in the pkg-config search path.\nPerhaps you should add the directory containing `alsa.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'alsa' not found\n"
+        },
+        "xkbcommon": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package xkbcommon was not found in the pkg-config search path.\nPerhaps you should add the directory containing `xkbcommon.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'xkbcommon' not found\n"
+        },
+        "wayland-client": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package wayland-client was not found in the pkg-config search path.\nPerhaps you should add the directory containing `wayland-client.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'wayland-client' not found\n"
+        },
+        "xcb": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package xcb was not found in the pkg-config search path.\nPerhaps you should add the directory containing `xcb.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'xcb' not found\n"
+        },
+        "egl": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package egl was not found in the pkg-config search path.\nPerhaps you should add the directory containing `egl.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'egl' not found\n"
+        },
+        "fontconfig": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package fontconfig was not found in the pkg-config search path.\nPerhaps you should add the directory containing `fontconfig.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'fontconfig' not found\n"
+        },
+        "freetype2": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package freetype2 was not found in the pkg-config search path.\nPerhaps you should add the directory containing `freetype2.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'freetype2' not found\n"
+        },
+        "vulkan": {
+          "exit": 1,
+          "stdout": "",
+          "stderr": "Package vulkan was not found in the pkg-config search path.\nPerhaps you should add the directory containing `vulkan.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'vulkan' not found\n"
+        }
+      }
+    },
+    "ostree": {
+      "observed_utc": "2026-10-10T03:16:04Z",
+      "transaction": null,
+      "booted": {
+        "version": "44.20260921",
+        "checksum": "9c4755a6e38e11675d1c31697480046e87d9aa2d729c33ffd36993e6c018a16b"
+      },
+      "staged": {
+        "version": "44.20261006.1",
+        "checksum": "8caa6b9a1b942de706362b327d6ac2361463c42fb1954ddf72c4ac293c8d8c7e"
+      },
+      "requested_packages": [
+        "fcitx5",
+        "fcitx5-chinese-addons",
+        "fcitx5-configtool",
+        "mpv",
+        "mpv-libs"
+      ]
+    },
+    "source": {
+      "root": "/var/home/liang/workspace/remote_play",
+      "head": "969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+      "tracked_status_clean": true,
+      "target": "/var/home/liang/workspace/remote_play/target",
+      "latest_local_slice_transferred": false,
+      "configured_target_dir": null,
+      "lock_file_presence_is_not_lock_ownership": true
+    },
+    "container": {
+      "name": "antigravity-box",
+      "image": "docker.io/library/ubuntu:26.04",
+      "record_found": true,
+      "sdk_unverified": true,
+      "rootfs_read_error": "PermissionError",
+      "started": false,
+      "modified": false,
+      "alternate_host_selected": false
+    },
+    "process": {
+      "observed_utc": "2026-10-10T03:19:56Z",
+      "service": "remote-play-current.service",
+      "scope": "user",
+      "state": "active/running",
+      "pid": 2232948,
+      "configured_executable_path": "/home/liang/.local/opt/remoteplay/2.0.0-alpha.8/remote_play",
+      "actual_version": null,
+      "actual_executable_sha256": null
+    },
+    "dns": {
+      "observed_utc": "2026-10-10T03:13:21Z",
+      "domain": "sdmntprcentralus.oaiusercontent.com",
+      "addresses": [
+        "198.18.0.25",
+        "fc00::f"
+      ],
+      "all_public": false,
+      "new_human_admin_receipt_found": false,
+      "protected_configuration_read": false,
+      "network_changed": false,
+      "dns_apply_executed_by_this_task": false,
+      "actual_protected_config_state": "not_read"
+    },
+    "original_transfer": {
+      "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+      "state": "paused",
+      "confirmed_bytes": 0,
+      "failure_boundary": "source_address_policy",
+      "source_authorization": "required",
+      "resumed": false
+    },
+    "user_sdk": {
+      "existing_alsa_pc": true,
+      "existing_alsa_pc_has_include_flags": false,
+      "checked_known_clang_cmake_pipewire_spa_alsa_header_paths_found": false
+    },
+    "sdk_proposal": {
+      "status": "draft_for_parent_review_not_executed",
+      "package_layering": true,
+      "packages": [
+        "pipewire-devel",
+        "alsa-lib-devel",
+        "clang",
+        "clang-libs",
+        "cmake",
+        "libxkbcommon-x11-devel",
+        "fontconfig-devel",
+        "freetype-devel"
+      ],
+      "existing_staged_os_update_disclosed": true,
+      "apply_live": false,
+      "automatic_reboot": false,
+      "reboot_required_for_normal_layering": true,
+      "package_resolution_verified": false
+    }
+  },
+  "acceptance": {
+    "linux_native_worker_compiled": false,
+    "linux_gpui_branch_compiled": false,
+    "system_picker_executed": false,
+    "actual_frame_captured": false,
+    "presented_frame_verified": false,
+    "input_audio_verified": false,
+    "release_deployment": false
+  },
+  "sources": [
+    "https://docs.pipewire.org/group__spa__buffer.html",
+    "https://docs.pipewire.org/structspa__data.html",
+    "https://docs.pipewire.org/structspa__chunk.html",
+    "https://docs.pipewire.org/group__pw__core.html",
+    "https://docs.bazzite.gg/Installing_and_Managing_Software/rpm-ostree/",
+    "https://packages.fedoraproject.org/pkgs/pipewire/pipewire-devel/fedora-44.html",
+    "https://packages.fedoraproject.org/pkgs/alsa-lib/alsa-lib-devel/fedora-44.html",
+    "https://packages.fedoraproject.org/pkgs/libxkbcommon/libxkbcommon-x11-devel/fedora-44.html"
+  ],
+  "focused_review": {
+    "finding": "SPA EMPTY chunk permits recycled storage to be treated as current pixels unless rejected before raw slice creation",
+    "severity": "invalid-frame / stale-image exposure",
+    "fix": "validate_chunk_flags before native slice creation and shared CopyContract; reject CORRUPTED and EMPTY raw bits",
+    "changed_source_hashes": {
+      "host/src/linux_pipewire.rs": "95e256218b62bb05d9d7dc590cb32568479aadef9d6fc63a3e28b6623154bebd",
+      "host/src/linux_pipewire/native.rs": "c1b61d70be8fd54a66c2d18d44a167ee57c83c3a8e1d8157126350c39eb05e3f",
+      "host/src/linux_pipewire/tests.rs": "1be33059ad510242dc02a8486ec2ab8c9b814cc0425584515af36cc9e74746d2"
+    },
+    "fd_contract_review": "OwnedFd handed once to connect_fd_rc; official C API states automatic close on disconnect/error; physical FD reclamation unverified",
+    "mapping_review": "MemPtr/MemFd+READABLE+non-null chunk/data+bounded maxsize; mapoffset not re-added; readonly slices only while dequeued buffer held; actual mapping size/pointer validity relies on PipeWire MAP_BUFFERS native contract",
+    "bounds_review": "plane count, stride, offset/size, crop, total budget and arithmetic validated before owned copies; ring wrap, unsupported transform/format fail closed",
+    "revocation_review": "synchronous cancellation gates prepare, publish, commit and AU delivery; worker done revokes lease; physical callback/disconnect timing unverified"
+  },
+  "tests": {
+    "platform": "aarch64-apple-darwin",
+    "command": [
+      "/Users/jinliang/.cargo/bin/cargo",
+      "test",
+      "-p",
+      "host",
+      "--lib",
+      "linux_pipewire::tests",
+      "--offline",
+      "--locked"
+    ],
+    "exit_code": 0,
+    "passed": 11,
+    "new_tests": 1,
+    "elapsed_seconds": 7.61,
+    "target_reused": "/Users/jinliang/rust-target",
+    "source_hashes": {
+      "host/Cargo.toml": "4cf13f6be1356c4b00ddb0028e015095ae67089019a080b5480e7a625371e55a",
+      "host/src/lib.rs": "5a2b3e02eadee200ab9bdfee4f73ae612705cfa554889715a82884e6500cc807",
+      "host/src/service.rs": "f8c2de159eda853b808a595cc2d035d4f97408bda0522731b1b27289b62028dc",
+      "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+      "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+      "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+      "host/src/linux_pipewire.rs": "95e256218b62bb05d9d7dc590cb32568479aadef9d6fc63a3e28b6623154bebd",
+      "host/src/linux_pipewire/native.rs": "c1b61d70be8fd54a66c2d18d44a167ee57c83c3a8e1d8157126350c39eb05e3f",
+      "host/src/linux_pipewire/tests.rs": "1be33059ad510242dc02a8486ec2ab8c9b814cc0425584515af36cc9e74746d2",
+      "host/src/linux_portal/runtime.rs": "c583f54703cbbd22b9c5ece6ee709e2a410791f967dc9a86b7e44dd132dbb4d9",
+      "host/src/linux_portal/runtime/tests.rs": "76832dcc92efb99cb764bbab60463605c5c47e08db69a2256c7a24bafd24236e",
+      "host/src/linux_video_encode.rs": "633b524706c23ff693a4ad3e9c36ea1651af9bfbb9be10e14481c86b8943cb32",
+      "app/src/lib.rs": "bb486967d297d33f2fea2b509543785084a9a0e0d365602933b6943e580e8340",
+      "app/src/restored_ui.rs": "4321f25d06d3ae316676453f56961003a77c24ba7f4c8dc79eec0efb7e409979",
+      "app/src/desktop/mod.rs": "953f2de6607f2a6001b9a7c19f1e04bc864039957cb7eeb35a4f23aab153d522",
+      "app/src/desktop/local_share.rs": "8c7c33d634160ba4b0c013f357ffd87bd19b79f47904c1fbd0234df1c0a47202",
+      "app/src/desktop/local_share/linux.rs": "2dc848d787e64c9fad85333cfe61f4f968e595b93d6b472066755f0760d9d2ad",
+      "app/src/desktop/local_share/tests.rs": "c0740138d390192cdf360c592858e6f218f3bb38d0c1104ab5fe32cbf0401eae",
+      "host/src/linux_portal.rs": "6d66e11f36db93153f99aef8bbe2aa6106e63b3d83933e50f7ed92d51b661752",
+      "Cargo.lock": "e816ae3e5c8559fc66c84a23c67d61cefd1f7867785d4f9b4a7735862f7a60a0"
+    },
+    "sources_stable": true,
+    "native_linux_callback_compiled": false,
+    "covered_current_sources": [
+      "host/src/linux_pipewire.rs",
+      "host/src/linux_pipewire/tests.rs"
+    ],
+    "log_sha256": "c6d5f17e64401f122d217a6a8813fe3b647697e40268cf7b8fa9c9c95fcfdba2",
+    "raw_receipt_sha256": "d934dd898bdc226548372a4843df11726573e6cc3c82b1051eb57d26c6bf2a81",
+    "product_gui_started": false,
+    "system_capture_started": false
+  }
+}

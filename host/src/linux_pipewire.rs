@@ -28,10 +28,22 @@ pub(crate) struct CopyContract {
 /// Only mapped CPU memory is admitted. A DMA-BUF descriptor is not a byte slice.
 pub(crate) struct MappedChunk<'a> {
     pub bytes: &'a [u8],
+    pub flags: i32,
     pub mapping_offset: u32,
     pub offset: u32,
     pub size: u32,
     pub stride: i32,
+}
+
+/// SPA EMPTY is neutral media, not evidence that the mapped bytes contain
+/// pixels. Recycled storage may still contain a previous window's image.
+pub(crate) fn validate_chunk_flags(flags: i32) -> Result<(), WorkerError> {
+    // SPA_CHUNK_FLAG_CORRUPTED (bit 0) and SPA_CHUNK_FLAG_EMPTY (bit 1).
+    // libspa 0.10.1 names only CORRUPTED, but retains the other raw bits.
+    if flags & 0b11 != 0 {
+        return Err(WorkerError::Buffer);
+    }
+    Ok(())
 }
 
 impl CopyContract {
@@ -93,6 +105,9 @@ impl CopyContract {
             return Err(WorkerError::Revision);
         }
         let mut format = self.format.ok_or(WorkerError::Format)?;
+        for chunk in chunks {
+            validate_chunk_flags(chunk.flags)?;
+        }
         format.crop = crop;
         format.transform = transform;
         let planes = split_planes(format, chunks).map_err(|_| WorkerError::Buffer)?;

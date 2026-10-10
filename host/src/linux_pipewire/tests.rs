@@ -24,10 +24,38 @@ fn setup(generation: u64) -> (CopyContract, Arc<FrameMailbox>) {
 fn chunk(bytes: &[u8], stride: i32) -> MappedChunk<'_> {
     MappedChunk {
         bytes,
+        flags: 0,
         mapping_offset: 4096,
         offset: 0,
         size: bytes.len() as u32,
         stride,
+    }
+}
+
+#[test]
+fn neutral_or_corrupted_chunk_rejects_recycled_pixels_before_copy() {
+    let (mut contract, mailbox) = setup(1);
+    contract
+        .renegotiate(Some(format(PixelFormat::Nv12)))
+        .unwrap();
+    // Structurally valid storage still contains pixels from its previous use.
+    let recycled = [9; 12];
+    assert_eq!(copy(&contract, &recycled).unwrap().planes[0], [9; 8]);
+    for flags in [0b01, 0b10, 0b11] {
+        let result = contract.copy(
+            1,
+            &[MappedChunk {
+                flags,
+                ..chunk(&recycled, 4)
+            }],
+            None,
+            Transform::Identity,
+            None,
+            None,
+            0,
+        );
+        assert!(matches!(result, Err(WorkerError::Buffer)));
+        assert!(!mailbox.is_closed()); // The native caller owns stream teardown.
     }
 }
 fn copy(contract: &CopyContract, bytes: &[u8]) -> Result<OwnedFrame, WorkerError> {

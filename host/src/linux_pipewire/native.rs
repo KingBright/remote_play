@@ -1,6 +1,6 @@
 //! Linux SDK-backed implementation. No default PipeWire socket is opened.
 //! All native objects and borrowed buffers live on one dedicated worker thread.
-use super::{CopyContract, MappedChunk, WorkerError};
+use super::{CopyContract, MappedChunk, WorkerError, validate_chunk_flags};
 use crate::linux_frame::{
     Crop, FrameFormat, FrameMailbox, MAX_FRAME_BYTES, OwnedFrame, PixelFormat, SourceColor,
     Transform,
@@ -298,9 +298,10 @@ fn run(
                         return Err(WorkerError::Buffer);
                     }
                     let chunk = data.chunk();
-                    if chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED) {
-                        return Err(WorkerError::Buffer);
-                    }
+                    // Reject neutral/recycled storage before forming a byte
+                    // slice, even when size and stride look like a real frame.
+                    let flags = chunk.flags().bits();
+                    validate_chunk_flags(flags)?;
                     // MAP_BUFFERS supplies data.data at the mapping's mapoffset.
                     // Read-only slices allow legitimate overlapping plane mappings;
                     // no unchecked offset is added and no native pointer escapes.
@@ -309,6 +310,7 @@ fn run(
                     };
                     chunks.push(MappedChunk {
                         bytes,
+                        flags,
                         mapping_offset: raw.mapoffset,
                         offset: chunk.offset(),
                         size: chunk.size(),
