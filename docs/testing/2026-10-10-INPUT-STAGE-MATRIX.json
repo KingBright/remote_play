@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "date": "2026-10-10",
+  "updated_at_utc": "2026-10-10T14:02:22Z",
   "evidence_boundary": "user observation, private target fixtures, native compilation, isolated installation, actual presentation and physical input are separate",
   "platforms": [
     "macos",
@@ -226,19 +227,49 @@
     }
   ],
   "current_os_facts": {
-    "linux": "Active Wayland RemotePlay window and portal services; mapped executable access denied by OS; no current captured/presented frame receipt",
-    "macos": "Parent verified daily MacBook alpha.7 and Studio alpha.8 with pinned signing; joint candidate has not replaced those daily apps",
-    "windows": "Needs fresh device/installed-process inventory",
-    "android": "Needs fresh device/USB authorization and role inventory"
+    "linux": "HO5 current user service remains active/running with zero restarts; installed executable and unit hashes unchanged. OS denies mapped-executable access. Active session status is unknown; final candidate has not replaced current",
+    "macos": "Daily MacBook alpha.7 and Studio alpha.8 were previously verified with pinned signing. Signed joint input candidate build 20261010.1082 was handed to the Mac task; no resulting daily upgrade receipt is available here",
+    "windows": "Registered cube agent was offline at the fresh 2026-10-10 inventory; installed process/version and physical tests remain unknown. Agent state does not prove OS power state",
+    "android": "Registered Android agent was offline with no heartbeat in the fresh inventory; USB authorization, installed version and directed roles remain unknown"
+  },
+  "inventory_observed_at_utc": "2026-10-10T13:39:54Z",
+  "linux_delivery": {
+    "approved_input_commit": "56a09bb8d62a2ca6fd0aa20be070e12935e70b43",
+    "remote_base_commit": "0f858a51773a5b5309291a78f6ef48f683255682",
+    "remote_commit_is_approved_input_commit": false,
+    "matched_source_files": 17,
+    "source_patch_sha256": "0a94f9f84a19b9cb5c00dc2e17eb67e5357eb43b2413237f2f4dd8dda7a14c31",
+    "source_snapshot_sha256": "4ef98e373d933ea4e4a87f64a9bd230090b5c30c5452b8214c5fa22fd546799e",
+    "binary_sha256": "5dd7e1005395a30268cf99cfe347640f40aab65e6cf24aa32fb2505c55bed3f7",
+    "build_identity_sha256": "3ba025f11a0deca36cfcf786454c2ee2c6e136bd2061e7a7474ea099d5df6519",
+    "candidate_manifest_sha256": "d03f676d86050f6c4b0cf77456ed6982caffee803d4c6386f21634157f9e6409",
+    "candidate_status": "verified_build_candidate",
+    "actual_product_rebuilt": true,
+    "reused_target": true,
+    "dynamic_dependencies_verified": true,
+    "rollback_copies_hash_verified": true,
+    "rollback_transaction_exercised": false,
+    "normal_current_upgrade_applied": false,
+    "active_session_status": "unknown",
+    "actual_running_image_verified": false,
+    "live_portal_control_grant": false,
+    "physical_input_verified": false,
+    "release_receipt_minted": false,
+    "release_authorized": false,
+    "detail": "2026-10-10-HO5-LINUX-DELIVERY.md"
   },
   "software_evidence": {
     "linux_backend": "Real RemoteDesktop + ScreenCast session adapter; fixed private-bus target effects tested. No live desktop response was fabricated",
+    "linux_binary": "Fixed source rebuilt in existing HO5 release target; actual product artifact fresh=false, embedded original GPUI/native Linux identity and ldd passed. Old binary, wrong source/configuration and runtime-sidecar relabel attempts reject. No GUI, Portal grant or service upgrade started",
     "gpui": "Single original GPUI/Ely implementation; explicit local Display + control action",
     "macos": "Selected display IDs route to for_display; geometry capability and actual process permissions remain separate. Source/GUI patches through a770d95419191f99e7c6ebffbea84e066dbf8817 integrated; physical effects pending",
-    "isolated_macos_install": "Parent reports 24/24 joint lifecycle fixture checks, including SIGSTOP health failure and rollback; this is not a cross-platform video/input result"
+    "isolated_macos_install": "Parent reports 24/24 earlier build-1081 joint lifecycle fixture checks, including SIGSTOP health failure and rollback; these do not validate new build 1082 or cross-platform video/input"
   },
   "physical_checks_remaining": [
-    "normal local portal approval on a matching staged Linux product",
+    "confirm HO5 current has no active remote session or transfer before normal authorized upgrade",
+    "verify actual running candidate image and service health after a safe current upgrade",
+    "verify discovery and signaling with an identified current receiver",
+    "normal local portal approval on the matching Linux product",
     "actual window/display presentation receipts",
     "viewer control role and focus",
     "target text/pointer/button effects; keys released after disconnect",

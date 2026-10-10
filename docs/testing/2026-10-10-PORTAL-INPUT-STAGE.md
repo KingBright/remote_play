@@ -73,7 +73,8 @@ has changed.
 | HO5 App library / entry | 114 passed, 1 ignored / 1 passed | Complete native Linux App regressions; includes Ely share controls |
 | HO5 Ely share controls | 3 passed, 0 ignored, 0 failed | Existing target reused; no native visual acceptance |
 | Release scripts | 241 total: 234 passed, 7 skipped, 0 failures/errors | `python3 -m unittest discover -s scripts/tests -v` |
-| Earlier joint Mac regression | 267 total: 260 passed, 7 skipped, 0 failures/errors | Earlier joint identity/lifecycle scope; not this platform input matrix |
+| Joint Mac input regression | Host 138 passed/1 ignored; App 116 passed/2 ignored; Python 267 total, 260 passed/7 skipped; 5 native signing fixtures passed | Same shared input integrated with separate Mac GUI/background lifecycle; physical input remains pending |
+| HO5 fixed release candidate | Built in 3m 53s; original GPUI/native Linux identity and dynamic dependencies passed | Existing target reused, product actually rebuilt; no current upgrade or physical acceptance |
 
 Fixed tests check target pointer position, click-selected focus between two
 test windows, inserted text, scrolling, release of keys/buttons/modifiers,
@@ -106,11 +107,18 @@ OS denied reading its mapped executable. Read-only capability properties report
 RemoteDesktop v2, available device mask 7, and ScreenCast v5; these properties
 do not grant any session permissions. There is no current presented-frame
 or target-input receipt. Historical FFmpeg/placeholder sidecar startup logs do
-not prove a current frame. Windows/Android require fresh inventory and directed
-tests. Audio, files, direct/relay paths and long-duration physical acceptance
-remain untested in this stage. The denied legacy system-service stop was not
+not prove a current frame. The fresh inventory found the registered Windows and
+Android agents offline; installed versions, USB authorization and directed
+physical tests remain unknown. Audio, files, direct/relay paths and long-duration
+physical acceptance remain untested in this stage. The denied legacy system-service stop was not
 retried; production services, OS permissions and launch configuration were not
 changed by this input work.
+
+The [fixed HO5 delivery](2026-10-10-HO5-LINUX-DELIVERY.md) records the actual
+compiled candidate, source binding, unchanged current service and verified
+rollback copies. The current upgrade is paused while live session/transfer
+activity remains unknown. Signed Mac input build 1082 has been handed to its
+native upgrade task; the earlier 24/24 fixture result belongs to build 1081.
 
 Next physical acceptance must use an identity-matched staged executable, normal
 local control consent, the viewer's control role and focus, and an observable
