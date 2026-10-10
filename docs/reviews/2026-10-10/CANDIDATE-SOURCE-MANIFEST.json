@@ -1544,6 +1544,13 @@
       "source": "unchanged-committed-source"
     },
     {
+      "path": "scripts/gui_launch_lifecycle.py",
+      "mode": "100644",
+      "bytes": 3600,
+      "sha256": "a1d6af3849adf67f151233ab07fe6aa87f5019d31a1300d30cf16839519d4255",
+      "source": "launch-lifecycle-followup"
+    },
+    {
       "path": "scripts/install_macos_unified.py",
       "mode": "100644",
       "sha256": "199b0a8ffa8700412efac4ad94bc54bac16514dc1f8bd1899637abdaad9ba242",
@@ -1661,6 +1668,13 @@
       "sha256": "6e8d6f6c6fd8a0bcee62894fca2d4881f68274817f528fb8ea9441ac5e0d008a",
       "bytes": 3922,
       "source": "unchanged-committed-source"
+    },
+    {
+      "path": "scripts/tests/test_gui_launch_lifecycle.py",
+      "mode": "100644",
+      "bytes": 2959,
+      "sha256": "1b2e57c4be0e92021ca90f7d3de55c15f5d66020bc0b28d2bd09b7ebf16c25f6",
+      "source": "launch-lifecycle-followup"
     },
     {
       "path": "scripts/tests/test_ho5_dns_bootstrap.py",
@@ -6570,14 +6584,17 @@
       "source": "unchanged-committed-source"
     }
   ],
-  "file_count": 938,
-  "source_digest_sha256": "f56f3d4ea2534573719ff24c7e8974ad4c63dec8b09c316fa85d8a67e7071bdf",
+  "file_count": 940,
+  "source_digest_sha256": "ebf66ad7c83018eb80de285eb7c964da78b6f73c3423956a44656db6752d28d0",
   "digest_format": "sorted path TAB Git-mode TAB sha256 TAB bytes LF",
   "excluded_from_digest": [
     "docs/testing/MAC-HO5-ACCEPTANCE-CONTRACT.md",
     "docs/reviews/2026-10-10/CANDIDATE-SOURCE-HANDOFF.md",
     "docs/reviews/2026-10-10/CANDIDATE-SOURCE-MANIFEST.json",
-    "docs/reviews/2026-10-10/evidence/candidate-source-handoff.json"
+    "docs/reviews/2026-10-10/evidence/candidate-source-handoff.json",
+    "docs/reviews/2026-10-10/HO5-CANDIDATE-VALIDATION.md",
+    "docs/reviews/2026-10-10/MACBOOK-UI-IDENTITY-INCIDENT.md",
+    "docs/reviews/2026-10-10/evidence/ho5-candidate-validation.json"
   ],
   "pre_existing_dirty_paths": [
     {
@@ -7316,5 +7333,14 @@
       "reason": "separate Android work; preserve locally"
     }
   ],
-  "preserved_dirty_count_after_commit": 88
+  "preserved_dirty_count_after_commit": 88,
+  "validation_followup": {
+    "base_commit": "90fcce0a474abcd29369f216e331d7d240fecc30",
+    "rust_source_unchanged": true,
+    "new_support_paths": [
+      "scripts/gui_launch_lifecycle.py",
+      "scripts/tests/test_gui_launch_lifecycle.py"
+    ],
+    "linux_rust_checks_on_commit": "90fcce0a474abcd29369f216e331d7d240fecc30"
+  }
 }
