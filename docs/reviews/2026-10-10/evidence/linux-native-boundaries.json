@@ -37,12 +37,24 @@
       "status": "passed",
       "tests": 6,
       "system_operations": "ordinary-user public fixtures only; no sudo"
+    },
+    "ho5_native_sdk_visible_in_current_shell": {
+      "operation": "8ce94560-a2bd-4f79-95ab-96e3d44b3d7f",
+      "exit_code": 0,
+      "libpipewire-0.3_pkg_config": false,
+      "libspa-0.2_pkg_config": false,
+      "clang_on_path": false,
+      "system_packages_installed": false,
+      "build_started": false,
+      "limit": "does not rule out a preexisting SDK/container; verify legitimate original build environment before selecting dependencies"
     }
   },
   "worktree_preservation": {
     "baseline_dirty_paths": 105,
     "baseline_ledger": "/tmp/remoteplay-ely-preservation.json",
-    "unrelated_hash_changes": []
+    "unrelated_hash_changes": [],
+    "post_commit_exact_baseline_status_restored": true,
+    "removed_only_task_created_bytecode_files": 3
   },
   "build": {
     "target": "/Users/jinliang/rust-target",
@@ -55,7 +67,8 @@
       "engraph_cli",
       "engraph_mcp"
     ],
-    "other_build_interrupted": false
+    "other_build_interrupted": false,
+    "final_free_gib": 80
   },
   "ho5_dns_script": {
     "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
@@ -119,5 +132,6 @@
       "native rollback",
       "Linux D-Bus/PipeWire/raw encoder/session/GUI integration"
     ]
-  }
+  },
+  "implementation_checkpoint": "a8f853738154b610debaca177f73909e88f08524"
 }

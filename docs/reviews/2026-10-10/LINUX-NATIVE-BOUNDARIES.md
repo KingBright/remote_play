@@ -30,3 +30,5 @@
 5. Linux native 编译与经正常系统选择后的物理源/实际 GPUI 截图、暂停/撤销/输入/音频/画质/性能/长时验收。全部尚未通过，也未升级已安装应用。
 
 HO5 的管理员 DNS 变更仍需用户在本机终端认证；暂停传输确认字节仍为 0，原 source 包没有完成下载/同步、changed-file mtime refresh 或新 native build。批准不等于实际缺失的 root executor。MacBook `mesh.secret` 只查元数据：uid=0、gid=20、mode=0600，普通非链接文件，当前执行 uid=501；没有读取密钥、chown、启动或升级应用。该单文件修正仍需本机管理员能力。
+
+阶段实现检查点为 `a8f853738154b610debaca177f73909e88f08524`（10 个明确文件，30 个新用例；16 Rust、14 Python）。提交后元数据检查 `8ce94560-a2bd-4f79-95ab-96e3d44b3d7f` 显示当前 HO5 宿主环境的 `pkg-config --modversion libpipewire-0.3/libspa-0.2` 均不能解析开发条目，PATH 找不到 clang。这不是所有已有 SDK/容器都不存在的证明；须先确认原有合法构建环境的依赖，不能直接推断旧 native build 使用当前宿主 shell 或自行安装系统包。检测未启动构建或修改系统包。最终本地空闲约 80 GiB；只删除本轮生成的 3 个 bytecode 文件后，status 路径、状态和文件哈希均回到原 105 项基线。
