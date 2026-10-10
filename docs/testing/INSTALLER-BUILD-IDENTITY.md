@@ -120,10 +120,42 @@ changing the running fixture App/plist. The initial negative fixture was rejecte
 earlier by AppleDouble archive layout; that failed assertion and receipt are
 retained privately. All test jobs were removed.
 
-No combined lifecycle-plus-embedding observed-build signed release and release
-manifest has been supplied yet. The new release-state transaction's full positive
-native signed-product upgrade/rollback remains pending that artifact; its unit
-hooks and the legacy native fixture must not be presented as that acceptance.
+The producer subsequently handed off the combined observed-build product from
+`f6cbe7b627663185e0a0064901c8d2d1bd7b03cf`, signed build `20261010.1081`.
+Its independently supplied handoff digest, observed compiler output/receipt,
+source snapshot, compiled identity, signed bytes, archive and external manifest
+were verified before any fixture operation. The five input expectations were
+passed to the unchanged production installer, with no mocked validation hooks.
+
+`scripts/acceptance/joint_identity_launchd_review.py` passed **24 native checks**:
+identity-bound upgrade and exact manifest state persistence, signed older-build
+and wrong-manifest rejection without stopping the backend, actual GUI render and
+timed normal exit without respawn, backend-only launchd recovery, and actual
+health failure with complete App/plist/release-state rollback and verified native
+backend connectivity. Local-only signed builds `1080` and `1082` use the same
+independently verified raw observed compiler output, receipt and pinned signer;
+the installed current `1081` archive is the exact handed candidate. These build
+variants are fixtures, not newly observed source compilations or published releases.
+
+The health failure is a real SIGSTOP of the independently observed owned `1082`
+backend after authenticated IPC proves it owns the profile lock. The production
+health check fails, then production rollback restores the exact prior state.
+launchd can terminate the stopped process before SIGCONT; the helper requires
+either generation-verified SIGCONT or a kernel ESRCH existence check. The final
+run observed real SIGSTOP and kernel-confirmed exit, not an assumed SIGCONT.
+An observer error during bootout was retained and was not used as proof of exit.
+The final restarted backend's mapped image, authenticated PID, source/build
+identity and exact independently anchored `1081` manifest all passed again.
+
+The first run stopped before upgrade because the fixture's socket path was
+104 bytes, beyond Darwin's null-terminated address limit. The next run completed
+real rollback but failed its overly strict SIGCONT assertion. Both failed receipts
+were retained; their labels were removed. The final helper uses a shorter private
+root, bounds socket length and explicitly verifies termination. The final label
+was independently confirmed unloaded with no matching fixture process.
+
+This closes the full native signed-product release-state transaction acceptance.
+It does not extend the older hook-based tests into media or input acceptance.
 Daily App/plist hashes and the shared checkout's original changes are preserved.
 Manual close-button CUA approval remains unanswered; no new card/tool bypass,
 real login/reboot, physical two-device acceptance or production deployment ran.

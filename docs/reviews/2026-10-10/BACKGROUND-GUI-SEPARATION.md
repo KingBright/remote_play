@@ -119,9 +119,16 @@ reason to alter file groups. Atomic replacement now checks the original group;
 the manual GUI gap probe does not inherit the service's headless environment.
 The first manual-close UI approval remains pending; no alternate UI tool was used.
 
-Still required: formal product packaging and source/build identity acceptance
-under the pinned existing signing identity, actual
-native close-button/quit interaction and login/reboot without opening GUI,
+The combined observed-build candidate from
+`f6cbe7b627663185e0a0064901c8d2d1bd7b03cf`, signed build `20261010.1081`,
+subsequently passed all 24 real identity-bound installation checks. Independent
+compiler/receipt/source/manifest anchors, native mapped backend, exact release
+state persistence, older-build and wrong-manifest rejection, and a real SIGSTOP
+health failure followed by verified complete rollback were exercised without
+replacing any validation hook. This establishes the joint candidate's private
+installation transaction, not production installation or publication.
+
+Still required: actual native close-button/quit interaction and login/reboot without opening GUI,
 two-Mac connection/video/input/file/pairing/relay acceptance, and Windows/Linux
 role support. No OS permission or credential changes are needed or authorized by
 the fixture evidence. The installed alpha.7 service still has KeepAlive=true and
@@ -161,6 +168,6 @@ launch-agent arguments and authenticated service PID, then the independently
 hashed native observer verifies the loaded background image. Frontend launch
 and running-image acceptance remain a separate observation. See
 [INSTALLER-BUILD-IDENTITY.md](../../testing/INSTALLER-BUILD-IDENTITY.md) for the
-five input fields, exact release-state rollback contract, 24 native fixture checks
-and the still-pending positive native signed-product release-state transaction.
+five input fields, exact release-state rollback contract, older native fixture
+checks and the completed 24-check joint signed-product release-state transaction.
 No missing source/compiled evidence is defaulted to passed.
