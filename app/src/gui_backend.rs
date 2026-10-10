@@ -13,6 +13,8 @@ pub struct ProductInfo {
     pub default_gui: &'static str,
     pub original_gui_compiled: bool,
     pub native_video_compiled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_identity: Option<serde_json::Value>,
 }
 
 pub fn product_info() -> ProductInfo {
@@ -27,6 +29,7 @@ pub fn product_info() -> ProductInfo {
         native_video_compiled: cfg!(all(target_os = "macos", feature = "gpui-restoration"))
             || cfg!(all(target_os = "linux", feature = "native-linux-video"))
             || cfg!(all(target_os = "windows", feature = "native-windows-video")),
+        build_identity: crate::build_identity::compiled(),
     }
 }
 
