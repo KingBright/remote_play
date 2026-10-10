@@ -283,6 +283,24 @@ def product_info(binary: Path, expected: dict, expected_binary_sha: str) -> dict
     return info
 
 
+def verify_candidate(repo: Path, binary: Path, expected: dict, expected_binary_sha: str) -> dict:
+    """Verify a linked product in an existing cache without minting a release receipt."""
+    validate_identity(expected, expected['source']['commit'], expected['identity_sha256'])
+    source = source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256'])
+    require(identity(source, expected['configuration']) == expected, 'Candidate source snapshot differs from reviewed bytes')
+    require(toolchain_digest() == expected['configuration']['toolchain_sha256'] and
+            environment_digest() == expected['configuration']['environment_sha256'],
+            'Candidate compiler configuration differs from reviewed build')
+    info = product_info(binary, expected, expected_binary_sha)
+    require(source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256']) == source,
+            'Candidate source changed during verification')
+    return {'schema': 1, 'kind': 'verified-build-candidate', 'build_identity': expected,
+            'binary_sha256': expected_binary_sha, 'binary_bytes': binary.stat().st_size,
+            'product_info': info, 'build_identity_verified': True,
+            'release_authorized': False, 'visual_acceptance': 'not_evaluated',
+            'stream_acceptance': 'not_evaluated'}
+
+
 def authorized_mac_app(app: Path) -> dict:
     from macos_release_guard import load_policy, verify_app, ReleaseRejected
     try:
@@ -640,6 +658,13 @@ def main() -> None:
     build.add_argument('--identity-sha256', required=True, help='SHA-256 of the prepared JSON file from independent handoff')
     build.add_argument('--target', type=Path, required=True)
     build.add_argument('--output', type=Path, required=True)
+    candidate = commands.add_parser('verify-candidate')
+    candidate.add_argument('--repo', type=Path, required=True)
+    candidate.add_argument('--binary', type=Path, required=True)
+    candidate.add_argument('--expected-binary-sha256', required=True)
+    candidate.add_argument('--identity', type=Path, required=True)
+    candidate.add_argument('--identity-file-sha256', required=True)
+    candidate.add_argument('--output', type=Path, required=True)
     seal = commands.add_parser('seal')
     seal.add_argument('--stage', type=Path, required=True)
     seal.add_argument('--build-receipt', type=Path, required=True)
@@ -681,6 +706,11 @@ def main() -> None:
         elif args.command == 'build':
             result = observed_build(args.repo, read_json(args.identity, args.identity_sha256), args.target)
             result = {'build_receipt_sha256': write_new(args.output, result), 'build': result}
+        elif args.command == 'verify-candidate':
+            result = verify_candidate(args.repo, args.binary,
+                                      read_json(args.identity, args.identity_file_sha256),
+                                      args.expected_binary_sha256)
+            result = {'candidate_receipt_sha256': write_new(args.output, result), 'candidate': result}
         elif args.command == 'seal':
             result = seal_tree(args.stage, read_json(args.build_receipt, args.build_receipt_sha256),
                                args.expected_commit, args.expected_identity_sha256, compiler_binary=args.compiler_binary)

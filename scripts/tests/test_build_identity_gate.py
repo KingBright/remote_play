@@ -172,6 +172,42 @@ class BuildIdentityGateTests(unittest.TestCase):
         self.assertEqual(info['build_identity'], self.identity)
         self.assertEqual(execute.call_args.args[0], [str(self.binary), '--product-info-json'])
 
+    def test_existing_cache_candidate_binds_source_config_and_binary_without_a_release_receipt(self):
+        with patch.object(gate, 'toolchain_digest', return_value='a' * 64), \
+             patch.object(gate, 'environment_digest', return_value='b' * 64), \
+             patch.object(gate, 'product_info', return_value=self.info):
+            result = gate.verify_candidate(self.repo, self.binary, self.identity, gate.hash_file(self.binary))
+        self.assertEqual(result['kind'], 'verified-build-candidate')
+        self.assertEqual(result['binary_sha256'], gate.hash_file(self.binary))
+        self.assertTrue(result['build_identity_verified'])
+        self.assertFalse(result['release_authorized'])
+        with self.assertRaises(gate.IdentityRejected):
+            gate.seal_tree(self.stage, result, self.commit, self.identity['identity_sha256'])
+
+    def test_candidate_old_binary_and_wrong_gui_are_rejected(self):
+        for info in (dict(self.info, build_identity=None), dict(self.info, default_gui='egui-diagnostic')):
+            with self.subTest(info=info['default_gui']), \
+                 patch.object(gate, 'toolchain_digest', return_value='a' * 64), \
+                 patch.object(gate, 'environment_digest', return_value='b' * 64), \
+                 patch.object(gate, 'product_info', side_effect=lambda b, e, h: gate.validate_product_info(info, e)):
+                with self.assertRaises(gate.IdentityRejected):
+                    gate.verify_candidate(self.repo, self.binary, self.identity, gate.hash_file(self.binary))
+
+    def test_candidate_wrong_configuration_is_refused_before_metadata_execution(self):
+        with patch.object(gate, 'toolchain_digest', return_value='f' * 64), \
+             patch.object(gate, 'product_info') as execute:
+            with self.assertRaises(gate.IdentityRejected):
+                gate.verify_candidate(self.repo, self.binary, self.identity, gate.hash_file(self.binary))
+        execute.assert_not_called()
+
+    def test_candidate_wrong_source_snapshot_is_refused_before_metadata_execution(self):
+        source = deepcopy(self.source); source['snapshot_sha256'] = 'f' * 64
+        expected = gate.identity(source, self.config)
+        with patch.object(gate, 'product_info') as execute:
+            with self.assertRaises(gate.IdentityRejected):
+                gate.verify_candidate(self.repo, self.binary, expected, gate.hash_file(self.binary))
+        execute.assert_not_called()
+
     def test_valid_package_binds_all_payload_but_never_authorizes_release(self):
         self.seal(); result = self.verify_package(self.zip())
         self.assertTrue(result['package_integrity_verified'])
