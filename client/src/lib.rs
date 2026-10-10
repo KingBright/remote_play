@@ -65,7 +65,7 @@ use remote_platform::MacClipboardProvider;
 #[cfg(target_os = "windows")]
 use remote_platform::WindowsClipboardProvider;
 
-pub use mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
+pub use mesh_pairing::{MeshPairingBackend, MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
 pub use remote_core::client_session::{HostStats, SharedHostStats};
 pub use transfer_center::{TransferCancelTarget, TransferEntrySnapshot};
 

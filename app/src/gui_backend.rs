@@ -13,6 +13,9 @@ pub struct ProductInfo {
     pub default_gui: &'static str,
     pub original_gui_compiled: bool,
     pub native_video_compiled: bool,
+    pub separated_lifecycle: bool,
+    pub background_entry: Option<&'static str>,
+    pub frontend_entry: Option<&'static str>,
 }
 
 pub fn product_info() -> ProductInfo {
@@ -27,6 +30,9 @@ pub fn product_info() -> ProductInfo {
         native_video_compiled: cfg!(all(target_os = "macos", feature = "gpui-restoration"))
             || cfg!(all(target_os = "linux", feature = "native-linux-video"))
             || cfg!(all(target_os = "windows", feature = "native-windows-video")),
+        separated_lifecycle: cfg!(all(target_os = "macos", feature = "gpui-restoration")),
+        background_entry: cfg!(all(target_os = "macos", feature = "gpui-restoration")).then_some("--background-service"),
+        frontend_entry: cfg!(all(target_os = "macos", feature = "gpui-restoration")).then_some("--gui"),
     }
 }
 
