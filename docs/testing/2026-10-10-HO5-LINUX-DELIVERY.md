@@ -113,3 +113,35 @@ build 1082 was handed to its separate native upgrade task; the older 24/24 Mac
 fixture result belongs to build 1081. Windows/Android registered-agent state
 does not establish installed versions or physical acceptance. Audio, transfer,
 direct/relay, source switching and sustained-session checks remain pending.
+
+## Live product-entry investigation after maintenance
+
+The current service remained healthy while its existing loopback `show` entry
+received a four-byte activation request. No new profile or runtime was launched.
+That protocol has no acknowledgement, so visible activation is not established.
+
+Live D-Bus reads confirmed the ScreenCast and RemoteDesktop methods and their
+previously reported capabilities. Corrected Portal tree introspection exposed
+no session/request path under the current process's unique sender. This tree
+is not an all-sessions API, so it does not prove every internal grant is absent.
+The current profile has no Portal/restore-token filename. Compiled source uses
+view-only ScreenCast persistence mode 0 and requests neither persistence nor
+restoration for controlled RemoteDesktop. These are configuration observations,
+not a successful or rejected restoration request; OS permission storage was
+not read or changed.
+
+This execution environment exposes no CUA/remote-desktop click tool. The existing
+accessibility registry returned six applications, all successfully mapped to
+PIDs, with neither the current product nor a KDE Portal dialog registered.
+No product share button was invoked through that interface. The initial
+introspection error was resolved by the successful direct registry read; it was
+not reported as a Portal authorization denial.
+
+The interaction stops at the GUI-entry capability boundary. No receiver was
+occupied, no product sharing request was submitted, and no actual KDE selector,
+choice list, input-permission prompt or response was observed. Session signaling,
+source enumeration and first-frame/presentation acceptance therefore remain
+unverified. A parent-side approved CUA session must operate HO5 and coordinate
+an idle receiver before continuing the normal product flow. The user was asked
+what actually appears after the `show` request; there is no evidenced KDE-confirm
+step to ask for yet. Exact operation receipts remain in the private local handoff.
