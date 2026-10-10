@@ -6,7 +6,7 @@ Unsigned/ad-hoc installations require explicit manual recovery, not an automatic
 """
 from __future__ import annotations
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import math
 import stat
 from datetime import datetime, timezone
@@ -21,14 +21,21 @@ import subprocess
 import tempfile
 import time
 import uuid
+import installer_scope
+from background_lifecycle_plan import plan as background_plan, LifecyclePlanRejected
 from macos_release_guard import ReleaseRejected, check_upgrade, load_policy, run, sha256, verified_archive, verify_app
 
 LABEL = 'com.remoteplay.host'
 SYSTEM_MESH = 'system/com.remoteplay.mesh'
 
 
+def service_label():
+    scope = installer_scope.current()
+    return scope.label if scope else LABEL
+
+
 def service_state(domain: str, *, deadline=None) -> dict:
-    result = subprocess.run(['/bin/launchctl', 'print', domain + '/' + LABEL], capture_output=True, text=True, timeout=deadline.timeout(15) if deadline else 15)
+    result = subprocess.run(['/bin/launchctl', 'print', domain + '/' + service_label()], capture_output=True, text=True, timeout=deadline.timeout(15) if deadline else 15)
     if result.returncode:
         # Only the documented not-found response counts as absence, not an arbitrary error.
         if 'Could not find service' in result.stderr:
@@ -44,6 +51,9 @@ def service_state(domain: str, *, deadline=None) -> dict:
 
 def system_mesh_state(*, deadline=None) -> dict:
     """Observe one external system service; never manage it or echo raw output."""
+    if installer_scope.current():
+        return {'status': 'not_applicable', 'loaded': False, 'running': False, 'pid': None,
+                'scope': 'independent_fixture_profile_and_loopback_ports', 'management': 'not_managed'}
     base = {'domain': 'system', 'label': 'com.remoteplay.mesh',
             'management': 'not_managed_by_user_installer'}
     unknown = dict(base, status='unavailable', loaded=None, running=None, pid=None)
@@ -70,6 +80,7 @@ def system_mesh_state(*, deadline=None) -> dict:
 
 
 def system_mesh_blocker(observation: dict) -> str | None:
+    if installer_scope.current() and observation.get('status') == 'not_applicable': return None
     if observation.get('status') == 'not_loaded' and observation.get('loaded') is False:
         return None
     if observation.get('status') == 'observed' and observation.get('loaded') is True:
@@ -86,12 +97,13 @@ def require_system_mesh_absent(deadline, observation=None) -> dict:
         raise ReleaseRejected('Cannot determine ' + SYSTEM_MESH + ' absence; refusing application mutation')
     return current
 
-def preserve_hashes(home: Path, plist: Path, *, deadline=None) -> dict:
-    paths = [plist] if plist.is_file() else []
+def preserve_hashes(home: Path, plist: Path, *, deadline=None, lifecycle_change=False) -> dict:
+    paths = [plist] if plist.is_file() and not lifecycle_change else []
     directory = home / 'Library/Application Support/RemotePlay/NativeMesh'
     # The single-instance lock and UDP activation endpoint belong to a process,
     # so a legitimate restart recreates them. Everything else remains protected.
     runtime_files = {'desktop-instance.addr', 'desktop-instance.lock', 'desktop-instance.renderer.json'}
+    if lifecycle_change: runtime_files.add('background-service.enabled')
     paths += [p for p in directory.glob('*') if p.is_file() and p.name not in runtime_files]
     # Only local comparison. Never print config contents, secret values, or invitations.
     return {str(p): sha256(p, check=deadline.check if deadline else None) for p in paths}
@@ -102,7 +114,7 @@ def validate_service(plist: Path, executable: Path, state: dict) -> None:
         if plist.is_symlink():
             raise ReleaseRejected('Launch-agent file is a symlink')
         data = plistlib.loads(plist.read_bytes())
-        if data.get('Label') != LABEL or data.get('ProgramArguments') != [str(executable)]:
+        if data.get('Label') != service_label() or data.get('ProgramArguments') not in ([str(executable)], [str(executable), '--background-service']):
             raise ReleaseRejected('Launch agent points to another path or unexpected arguments; reconcile manually')
         if 'Program' in data and data['Program'] != str(executable):
             raise ReleaseRejected('Conflicting launch-agent executable')
@@ -187,7 +199,8 @@ PHASES = TERMINAL_PHASES | {
     'new_verified', 'start_requested', 'started', 'health_requested',
     'rollback_stop_requested', 'rollback_candidate_move_requested',
     'rollback_old_restore_requested', 'rollback_start_requested',
-    'recovery_required',
+    'recovery_required', 'lifecycle_write_requested', 'lifecycle_written',
+    'rollback_lifecycle_requested',
 }
 UNCERTAIN_PHASES = {'stop_requested', 'start_requested',
                     'rollback_stop_requested', 'rollback_start_requested'}
@@ -277,12 +290,13 @@ def installation_lock(applications: Path):
 
 
 def canonical_paths() -> tuple[Path, Path, Path, str]:
-    home = Path.home(); applications = home / 'Applications'
+    scope = installer_scope.current()
+    home = scope.home if scope else Path.home(); applications = home / 'Applications'
     if os.getuid() == 0 or os.geteuid() == 0 or applications.is_symlink() or not applications.is_dir():
         raise ReleaseRejected('Use the logged-in user and their ordinary Applications directory')
     validate_user_profile(home, os.getuid())
     target = applications / 'RemotePlay.app'
-    plist = home / 'Library/LaunchAgents/com.remoteplay.host.plist'
+    plist = home / ('Library/LaunchAgents/' + service_label() + '.plist')
     return home, target, plist, f'gui/{os.getuid()}'
 
 
@@ -343,6 +357,8 @@ def journal_paths(document: dict, target: Path) -> tuple[Path, Path]:
         if not isinstance(before.get('loaded'), bool): raise ValueError('service')
         if before['loaded'] and before.get('program') != str(target / 'Contents/MacOS/remote_play'):
             raise ValueError('service path')
+        if document.get('service_label', LABEL) != service_label(): raise ValueError('service label')
+        if 'lifecycle' in document: validate_lifecycle_journal(document, plist_path=canonical_paths()[2])
         return candidate, backup
     except (KeyError, TypeError, ValueError) as error:
         raise ReleaseRejected('Invalid installer journal paths or preconditions') from error
@@ -359,7 +375,189 @@ def durable_rename(source: Path, destination: Path) -> None:
 def stop_service(domain: str, plist: Path, executable: Path, deadline: Deadline) -> None:
     current = service_state(domain, deadline=deadline)
     validate_service(plist, executable, current)
-    if current['loaded']: deadline.run(['/bin/launchctl', 'bootout', domain + '/' + LABEL])
+    if current['loaded']: deadline.run(['/bin/launchctl', 'bootout', domain + '/' + service_label()])
+
+
+def profile_directory(home: Path) -> Path:
+    return home / 'Library/Application Support/RemotePlay/NativeMesh'
+
+
+def product_capabilities(executable: Path, version: str, deadline: Deadline) -> dict:
+    # The caller must verify the app under the pinned signing policy first.
+    before = sha256(executable, check=deadline.check)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}
+    result = subprocess.run([str(executable), '--product-info-json'], env=env,
+                            capture_output=True, text=True, timeout=deadline.timeout(15))
+    if result.returncode or len(result.stdout) > 16384:
+        raise ReleaseRejected('Signed candidate did not return bounded product capabilities')
+    try:
+        info = json.loads(result.stdout)
+        from verify_desktop_gui import validate
+        validate(info, 'macos', version)
+    except (ValueError, TypeError, RuntimeError) as error:
+        raise ReleaseRejected('Candidate product capabilities are invalid') from error
+    if sha256(executable, check=deadline.check) != before:
+        raise ReleaseRejected('Candidate executable changed during role verification')
+    if (info.get('separated_lifecycle') is not True
+            or info.get('background_entry') != '--background-service'
+            or info.get('frontend_entry') != '--gui'):
+        raise ReleaseRejected('Candidate cannot preserve separate background/GUI lifecycle')
+    return info
+
+
+def lifecycle_migration(plist: Path, executable: Path, source: Path,
+                        candidate_info: dict, home: Path, deadline: Deadline) -> dict:
+    if not plist.is_file() or plist.is_symlink():
+        raise ReleaseRejected('Background migration requires the existing canonical launch agent')
+    raw = plist.read_bytes()
+    plist_meta = plist.lstat()
+    if (plist_meta.st_uid != os.getuid() or plist_meta.st_nlink != 1
+            or stat.S_IMODE(plist_meta.st_mode) not in (0o600, 0o644) or len(raw) > 65536):
+        raise ReleaseRejected('Launch-agent ownership/mode is unsafe; no permissions changed')
+    data = plistlib.loads(raw)
+    profile = profile_directory(home)
+    if not profile.is_dir():
+        raise ReleaseRejected('Background migration requires the existing private device profile')
+    for name in ('background-service.enabled', 'background.sock'):
+        path = profile / name
+        if not path.exists() and not path.is_symlink(): continue
+        meta = path.lstat()
+        kind_ok = stat.S_ISREG(meta.st_mode) and meta.st_size == 0 if name.endswith('enabled') else stat.S_ISSOCK(meta.st_mode)
+        if not kind_ok or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
+            raise ReleaseRejected('Existing lifecycle process state is unsafe; no repair attempted')
+    if data.get('EnvironmentVariables', {}).get('REMOTE_PLAY_DEVICE_GROUP_DIR') != str(profile):
+        raise ReleaseRejected('Launch-agent device profile is not canonical; reconcile explicitly')
+    info = product_capabilities(source / 'Contents/MacOS/remote_play', candidate_info['version'], deadline)
+    try: proposal = background_plan(data, str(executable), info, expected_label=service_label())
+    except LifecyclePlanRejected as error: raise ReleaseRejected(str(error)) from error
+    after = plistlib.dumps(proposal['after'], sort_keys=False)
+    return {'before_bytes': raw, 'after_bytes': after, 'mode': stat.S_IMODE(plist_meta.st_mode), 'gid': plist_meta.st_gid,
+            'profile': profile, 'marker_before': (profile / 'background-service.enabled').exists(),
+            'socket_before': (profile / 'background.sock').exists()}
+
+
+def atomic_plist(path: Path, data: bytes, expected_sha256: str, mode: int, gid: int) -> None:
+    meta = path.lstat()
+    if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+            or meta.st_gid != gid or meta.st_nlink != 1
+            or stat.S_IMODE(meta.st_mode) != mode or sha256(path) != expected_sha256):
+        raise ReleaseRejected('Launch agent changed outside migration; refusing replacement')
+    fd, temporary = tempfile.mkstemp(prefix='.remoteplay-agent-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            if os.fstat(output.fileno()).st_gid != gid:
+                raise ReleaseRejected('Atomic replacement would change launch-agent group; no permissions changed')
+            os.fchmod(output.fileno(), mode)
+            output.write(data); output.flush(); os.fsync(output.fileno())
+        if sha256(path) != expected_sha256: raise ReleaseRejected('Launch agent changed before atomic replacement')
+        os.replace(temporary, path); fsync_directory(path.parent)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def prepare_lifecycle_backup(migration: dict, backup_root: Path, plist: Path) -> dict:
+    import hashlib
+    backup = backup_root / 'launch-agent.before.plist'
+    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as output:
+        output.write(migration['before_bytes']); output.flush(); os.fsync(output.fileno())
+    fsync_directory(backup_root)
+    return {'plist': str(plist), 'backup_plist': str(backup), 'mode': migration['mode'], 'gid': migration['gid'],
+            'before_sha256': hashlib.sha256(migration['before_bytes']).hexdigest(),
+            'after_sha256': hashlib.sha256(migration['after_bytes']).hexdigest(),
+            'profile': str(migration['profile']), 'marker_before': migration['marker_before'],
+            'socket_before': migration['socket_before']}
+
+
+def ensure_role_marker(profile: Path) -> None:
+    path = profile / 'background-service.enabled'
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        meta = path.lstat()
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_nlink != 1
+                or meta.st_size != 0 or stat.S_IMODE(meta.st_mode) != 0o600):
+            raise ReleaseRejected('Unsafe background launch-role marker')
+        return
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    fsync_directory(profile)
+
+
+def validate_lifecycle_journal(document: dict, *, plist_path: Path) -> None:
+    value = document['lifecycle']
+    expected = {'plist', 'backup_plist', 'mode', 'gid', 'before_sha256', 'after_sha256',
+                'profile', 'marker_before', 'socket_before'}
+    backup_root = Path(document['backup']).parent
+    document_home = plist_path.parents[2]
+    if (not isinstance(value, dict) or set(value) != expected
+            or value['plist'] != str(plist_path)
+            or value['backup_plist'] != str(backup_root / 'launch-agent.before.plist')
+            or value['profile'] != str(profile_directory(document_home))
+            or type(value['mode']) is not int or value['mode'] not in (0o600, 0o644)
+            or type(value['gid']) is not int or value['gid'] < 0
+            or any(not re.fullmatch('[0-9a-f]{64}', value[k]) for k in ('before_sha256', 'after_sha256'))
+            or any(type(value[k]) is not bool for k in ('marker_before', 'socket_before'))):
+        raise ReleaseRejected('Invalid lifecycle migration journal')
+    backup = Path(value['backup_plist']); private_regular_file(backup)
+    if sha256(backup) != value['before_sha256']:
+        raise ReleaseRejected('Original launch-agent backup changed')
+
+
+@contextmanager
+def idle_profile(profile: Path, deadline: Deadline):
+    """Hold the existing process lock while moving app/plist/role state."""
+    path = profile / 'desktop-instance.lock'
+    if not profile.exists():
+        yield; return
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        meta = os.fstat(fd)
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                or meta.st_nlink != 1 or meta.st_ino != path.lstat().st_ino):
+            raise ReleaseRejected('Unsafe profile runtime lock')
+        for attempt in range(30):
+            try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+            except BlockingIOError:
+                if attempt == 29: raise ReleaseRejected('Old runtime still owns the profile; no second host started')
+                deadline.sleep(.1)
+        yield
+    finally: os.close(fd)
+
+
+def restore_lifecycle(document: dict, plist: Path, deadline: Deadline) -> None:
+    if 'lifecycle' not in document: return
+    validate_lifecycle_journal(document, plist_path=plist)
+    value = document['lifecycle']; current = sha256(plist)
+    if current not in (value['before_sha256'], value['after_sha256']):
+        raise ReleaseRejected('Launch agent was concurrently edited; retain app and plist backups')
+    if current != value['before_sha256']:
+        atomic_plist(plist, Path(value['backup_plist']).read_bytes(), current, value['mode'], value['gid'])
+    profile = Path(value['profile'])
+    for name, existed in [('background-service.enabled', value['marker_before']), ('background.sock', value['socket_before'])]:
+        path = profile / name
+        if existed or (not path.exists() and not path.is_symlink()): continue
+        meta = path.lstat()
+        kind_ok = stat.S_ISREG(meta.st_mode) and meta.st_size == 0 if name.endswith('enabled') else stat.S_ISSOCK(meta.st_mode)
+        if not kind_ok or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
+            raise ReleaseRejected('New lifecycle process state changed; no unsafe cleanup performed')
+        deadline.check(); path.unlink(); fsync_directory(profile)
+
+
+def background_health(executable: Path, profile: Path, expected_pid: int, expected_sha256: str, deadline: Deadline) -> dict:
+    env = {k: v for k, v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}
+    env['REMOTE_PLAY_DEVICE_GROUP_DIR'] = str(profile)
+    for attempt in range(20):
+        result = subprocess.run([str(executable), '--background-status-json'], env=env,
+                                capture_output=True, text=True, timeout=deadline.timeout(10))
+        try: info = json.loads(result.stdout) if result.returncode == 0 and len(result.stdout) <= 16384 else {}
+        except ValueError: info = {}
+        if (info.get('role') == 'background-service' and info.get('pid') == expected_pid
+                and info.get('executable_sha256') == expected_sha256 and info.get('profile') == str(profile)):
+            return {'background_role_verified': True, 'pid': expected_pid,
+                    'executable_sha256': expected_sha256, 'gui_started_by_service': False}
+        deadline.sleep(.25)
+    raise ReleaseRejected('Updated process did not expose the expected background service identity')
 
 
 def clean_staging(candidate: Path) -> None:
@@ -400,20 +598,25 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
         current = service_state(domain, deadline=deadline)
         validate_service(plist, target / 'Contents/MacOS/remote_play', current)
         validate_processes(target / 'Contents/MacOS/remote_play', current, deadline)
-        if current['loaded'] and observed['target'] != old:
+        if current['loaded'] and (observed['target'] != old or 'lifecycle' in document):
             checkpoint(journal, document, 'rollback_stop_requested')
-            deadline.run(['/bin/launchctl', 'bootout', domain + '/' + LABEL])
+            deadline.run(['/bin/launchctl', 'bootout', domain + '/' + service_label()])
             checkpoint(journal, document, 'service_stopped')
-    if observed['target'] == new:
-        checkpoint(journal, document, 'rollback_candidate_move_requested')
-        deadline.check(); durable_rename(target, candidate)
-        checkpoint(journal, document, 'old_moved')
-    if not target.exists():
-        checkpoint(journal, document, 'rollback_old_restore_requested')
-        deadline.check(); durable_rename(backup, target)
-        checkpoint(journal, document, 'service_stopped')
-    if identity(verify_with_budget(target, policy, deadline)) != old:
-        raise ReleaseRejected('Restored app does not match pinned previous app')
+    profile_guard = idle_profile(profile_directory(plist.parents[2]), deadline) if phase != 'prepared' else nullcontext()
+    with profile_guard:
+        if 'lifecycle' in document and phase != 'prepared':
+            checkpoint(journal, document, 'rollback_lifecycle_requested')
+            restore_lifecycle(document, plist, deadline)
+        if observed['target'] == new:
+            checkpoint(journal, document, 'rollback_candidate_move_requested')
+            deadline.check(); durable_rename(target, candidate)
+            checkpoint(journal, document, 'old_moved')
+        if not target.exists():
+            checkpoint(journal, document, 'rollback_old_restore_requested')
+            deadline.check(); durable_rename(backup, target)
+            checkpoint(journal, document, 'service_stopped')
+        if identity(verify_with_budget(target, policy, deadline)) != old:
+            raise ReleaseRejected('Restored app does not match pinned previous app')
     if phase != 'prepared' and document['service_before']['loaded']:
         current = service_state(domain, deadline=deadline)
         validate_service(plist, target / 'Contents/MacOS/remote_play', current)
@@ -461,7 +664,8 @@ def recover_interrupted(*, deadline_seconds: float = 120) -> dict:
             raise
 
 
-def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300) -> dict:
+def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300,
+            separate_background: bool = False) -> dict:
     deadline = Deadline(deadline_seconds); policy = load_policy()
     home, target, plist, domain = canonical_paths()
     applications = target.parent; executable = target / 'Contents/MacOS/remote_play'
@@ -475,12 +679,22 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
         action = check_upgrade(previous, candidate_info)
         state = service_state(domain, deadline=deadline)
         validate_service(plist, executable, state)
+        migration = lifecycle_migration(plist, executable, source, candidate_info, home, deadline) if separate_background else None
+        service_document = plistlib.loads(plist.read_bytes()) if plist.is_file() else {}
+        background_mode = service_document.get('ProgramArguments') == [str(executable), '--background-service']
+        if background_mode and migration is None:
+            product_capabilities(source / 'Contents/MacOS/remote_play', candidate_info['version'], deadline)
+        if action == 'already_installed' and migration is not None and migration['before_bytes'] != migration['after_bytes']:
+            action = 'migrate_background_lifecycle'
         system = system_mesh_state(deadline=deadline)
         blocker = system_mesh_blocker(system) if action != 'already_installed' else None
         plan = {'action': action, 'target': str(target), 'previous': previous, 'candidate': candidate_info,
                 'will_restart_only_remoteplay': state['loaded'] and action != 'already_installed' and not blocker, 'permissions_modified': False,
                 'capture_health': 'not_tested_by_installer', 'applied': False,
-                'system_mesh': system, 'apply_blockers': [blocker] if blocker else []}
+                'system_mesh': system, 'apply_blockers': [blocker] if blocker else [],
+                'lifecycle_migration_requested': separate_background,
+                'service_role_after': 'background-service' if migration or background_mode else 'preserved',
+                'isolated_fixture': installer_scope.current() is not None}
         if not apply: return plan
         if action != 'already_installed': require_system_mesh_absent(deadline, system)
         with installation_lock(applications):
@@ -493,16 +707,21 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             current = service_state(domain, deadline=deadline)
             validate_service(plist, executable, current)
             if current != state: raise ReleaseRejected('Service changed during preflight')
+            if migration is not None:
+                import hashlib
+                if sha256(plist) != hashlib.sha256(migration['before_bytes']).hexdigest():
+                    raise ReleaseRejected('Launch agent changed during migration preflight')
             if action == 'already_installed': return plan
             require_system_mesh_absent(deadline)
             validate_processes(executable, current, deadline)
             validate_user_profile(home, os.getuid())
-            preserved = preserve_hashes(home, plist, deadline=deadline)
+            preserved = preserve_hashes(home, plist, deadline=deadline, lifecycle_change=migration is not None)
             tag = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
             backup_root = applications / '.remoteplay-backups' / tag
             if backup_root.parent.is_symlink(): raise ReleaseRejected('Backup directory is a symlink')
             backup_root.mkdir(parents=True, mode=0o700)
             backup = backup_root / 'RemotePlay.app'
+            lifecycle = prepare_lifecycle_backup(migration, backup_root, plist) if migration is not None else None
             staging_root = Path(tempfile.mkdtemp(prefix='.remoteplay-update-', dir=applications))
             candidate = staging_root / 'RemotePlay.app'
             def copy_file(source_path, destination_path):
@@ -518,33 +737,44 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             document = {'schema': 1, 'operation_id': str(uuid.uuid4()), 'target': str(target),
                         'staging': str(candidate), 'backup': str(backup),
                         'previous': identity(previous), 'candidate': identity(candidate_info),
-                        'service_before': state, 'deadline_seconds': deadline_seconds,
+                        'service_before': state, 'service_label': service_label(), 'deadline_seconds': deadline_seconds,
                         'recovery_budget_seconds': 120}
+            if lifecycle is not None: document['lifecycle'] = lifecycle
             checkpoint(journal, document, 'prepared')
             try:
                 checkpoint(journal, document, 'stop_requested')
                 stop_service(domain, plist, executable, deadline)
                 checkpoint(journal, document, 'service_stopped')
-                checkpoint(journal, document, 'move_old_requested')
-                deadline.check(); durable_rename(target, backup)
-                checkpoint(journal, document, 'old_moved')
-                checkpoint(journal, document, 'move_new_requested')
-                deadline.check(); durable_rename(candidate, target)
-                checkpoint(journal, document, 'new_installed')
-                checkpoint(journal, document, 'verify_new_requested')
-                if identity(verify_with_budget(target, policy, deadline)) != identity(candidate_info):
-                    raise ReleaseRejected('Installed candidate changed')
-                checkpoint(journal, document, 'new_verified')
+                with idle_profile(profile_directory(home), deadline):
+                    checkpoint(journal, document, 'move_old_requested')
+                    deadline.check(); durable_rename(target, backup)
+                    checkpoint(journal, document, 'old_moved')
+                    checkpoint(journal, document, 'move_new_requested')
+                    deadline.check(); durable_rename(candidate, target)
+                    checkpoint(journal, document, 'new_installed')
+                    checkpoint(journal, document, 'verify_new_requested')
+                    if identity(verify_with_budget(target, policy, deadline)) != identity(candidate_info):
+                        raise ReleaseRejected('Installed candidate changed')
+                    checkpoint(journal, document, 'new_verified')
+                    if migration is not None:
+                        checkpoint(journal, document, 'lifecycle_write_requested')
+                        atomic_plist(plist, migration['after_bytes'], lifecycle['before_sha256'], lifecycle['mode'], lifecycle['gid'])
+                        ensure_role_marker(migration['profile'])
+                        checkpoint(journal, document, 'lifecycle_written')
                 if state['loaded']:
                     checkpoint(journal, document, 'start_requested')
                     deadline.run(['/bin/launchctl', 'bootstrap', domain, str(plist)])
                     checkpoint(journal, document, 'started')
                 checkpoint(journal, document, 'health_requested')
                 final = wait_running(domain, executable, state['pid'], deadline=deadline) if state['loaded'] else {'running': False}
-                if preserve_hashes(home, plist, deadline=deadline) != preserved:
+                if state['loaded'] and (migration is not None or background_mode):
+                    final.update(background_health(executable, profile_directory(home), final['pid'], candidate_info['executable_sha256'], deadline))
+                if preserve_hashes(home, plist, deadline=deadline, lifecycle_change=migration is not None) != preserved:
                     raise ReleaseRejected('Network or launch configuration changed during upgrade')
                 plan.update(applied=True, service=final, configuration_unchanged=True,
-                            backup=str(backup), operation_id=document['operation_id'])
+                            backup=str(backup), operation_id=document['operation_id'],
+                            launch_policy_changed=migration is not None,
+                            rollback_includes_original_launch_agent=migration is not None)
                 atomic_json(backup_root / 'receipt.json', plan)
                 checkpoint(journal, document, 'completed')
             except Exception as error:
@@ -570,15 +800,23 @@ if __name__ == '__main__':
     parser.add_argument('archive', type=Path, nargs='?')
     parser.add_argument('--apply', action='store_true', help='Apply a compatible upgrade; default only checks')
     parser.add_argument('--recover', action='store_true', help='Explicitly restore the pinned previous app from an interrupted transaction')
+    parser.add_argument('--separate-background', action='store_true', help='Journal an explicit background-only launch-agent migration and app+plist rollback')
+    parser.add_argument('--isolated-fixture-root', type=Path, help='Explicit private disposable fixture scope; never changes production paths')
+    parser.add_argument('--test-service-label', help='Independent com.remoteplay.lifecycle-test.<uuid> label; requires the fixture root')
     parser.add_argument('--deadline-seconds', type=float, default=None, help='Cooperative budget; defaults to 300 for apply/plan, 120 for recovery')
     args = parser.parse_args()
     if args.recover and (args.apply or args.archive): parser.error('--recover cannot be combined with an archive or --apply')
+    if args.recover and args.separate_background: parser.error('--recover cannot change forward launch policy')
+    if bool(args.isolated_fixture_root) != bool(args.test_service_label): parser.error('Fixture root and independent test label must be specified together')
     if not args.recover and args.archive is None: parser.error('archive is required unless --recover is selected')
     try:
-        if args.recover:
-            result = recover_interrupted(deadline_seconds=120 if args.deadline_seconds is None else args.deadline_seconds)
-        else:
-            result = install(args.archive, args.apply, deadline_seconds=300 if args.deadline_seconds is None else args.deadline_seconds)
+        scope = installer_scope.isolated(args.isolated_fixture_root, args.test_service_label) if args.isolated_fixture_root else nullcontext()
+        with scope:
+            if args.recover:
+                result = recover_interrupted(deadline_seconds=120 if args.deadline_seconds is None else args.deadline_seconds)
+            else:
+                result = install(args.archive, args.apply, deadline_seconds=300 if args.deadline_seconds is None else args.deadline_seconds,
+                                 separate_background=args.separate_background)
         print('MACOS_INSTALL_RECEIPT ' + json.dumps(result), flush=True)
     except Exception as error:
         import sys

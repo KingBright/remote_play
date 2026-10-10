@@ -1,9 +1,9 @@
 # Background service and independent GUI lifecycle
 
 This isolated implementation is based on
-`c4d7031e29e5aa11d18c92e8954603debd394194`. It does not modify the shared
-shared product checkout, its 88 remaining changes, the installed
-MacBook app, launchd, Remote Hosts, other devices, TCC or persistent user keys.
+`c4d7031e29e5aa11d18c92e8954603debd394194`. It preserves the shared
+product checkout's 88 pre-existing changes. It does not modify the installed
+MacBook app, daily launch agent, Remote Hosts, other devices, TCC or persistent user keys.
 The RP source task handed ownership of this independent implementation to this
 task and explicitly said it would not start/replace a Mac app.
 
@@ -46,8 +46,8 @@ The final review executable SHA-256 is
 It is an unsigned development fixture, not an installed or signed release.
 
 Application library tests: 115 passed, 2 existing ignored cases. Release Python
-checks: 193 total, successful with 6 existing signing/platform skips. Four new
-launch-policy migration/rollback tests reject env-only separation, preserve the
+checks after installer integration: 206 total, 200 passed and 6 existing
+signing/platform skips. Four launch-policy migration/rollback tests reject env-only separation, preserve the
 existing profile/display identity, and refuse concurrent rollback edits. Private
 socket/frame/mismatched-executable tests and actual frontend ownership tests pass;
 frontend attach/drop leaves identity file inode, size and mtime unchanged.
@@ -85,16 +85,80 @@ The headless environment is supplementary; compiled explicit role capabilities
 are required. Rollback requires both the previous signed app and original plist,
 not only one component. The planner executes no system operation.
 
-No production installer changes or launch-agent migration have been applied.
-The existing installer currently requires ProgramArguments `[executable]` and
-preserves the plist hash; it needs a reviewed journaled role/plist migration and
-compatible rollback integration before deployment. Old signed candidates lack
-the new roles and cannot safely be used with the proposed new plist.
+The guarded installer now offers an explicit `--separate-background` plan/apply
+option. It verifies the signed candidate's real role capabilities before stopping
+anything, backs up the original raw plist privately, and holds the profile lock
+while moving the signed App and atomically changing the launch role and marker.
+The journal binds app identity, service label, plist hashes and original mode/group.
+Background health checks bind the actual service PID, executable hash and profile.
+Rollback restores the prior signed App and exact original plist, preserves the
+prior marker state, holds the profile lock across the App/plist restoration,
+and restarts only that service. Unknown command outcomes,
+concurrent edits and tampered backups refuse automatic replay.
 
-Still required: signed packaging under the pinned existing identity, actual
-native close-button/quit interaction, real launchd crash recovery, login/reboot
-without opening GUI, guarded single-instance upgrade and app+plist rollback,
+The opt-in fixture mode is confined to a fresh private temporary root and an
+independent `com.remoteplay.lifecycle-test.<uuid>` label. It uses the unchanged
+pinned signing policy. Three disposable signed fixture archives exercised actual
+launchd migration and known-failure rollback. No daily installation changed.
+Old signed candidates lacking the new roles remain ineligible for the new plist.
+
+The complete real launchd fixture passed: GUI normal exit through the existing
+integration hook without respawn; background authentication before/after exit;
+SIGKILL of the verified owned service followed by launchd recovery of only the
+background; duplicate host refusal; default GUI refusal during a controlled
+unloaded gap; reattachment after service recovery; and signed upgrade failure
+restoring the exact previous App/plist tuple and working connectivity. Identity
+bytes and launch-agent owner/group/mode were preserved. All test labels were
+removed. Raw roots, labels, PIDs, ports, logs and receipts remain local.
+The final revalidation used a mode-0644 launch agent beside mode-0600 role
+markers and preserved those distinct modes through migration and rollback.
+
+Initial retained failures identified macOS directory-group inheritance and an
+acceptance-helper environment mistake. Neither was a permissions failure or a
+reason to alter file groups. Atomic replacement now checks the original group;
+the manual GUI gap probe does not inherit the service's headless environment.
+The first manual-close UI approval remains pending; no alternate UI tool was used.
+
+Still required: formal product packaging and source/build identity acceptance
+under the pinned existing signing identity, actual
+native close-button/quit interaction and login/reboot without opening GUI,
 two-Mac connection/video/input/file/pairing/relay acceptance, and Windows/Linux
 role support. No OS permission or credential changes are needed or authorized by
 the fixture evidence. The installed alpha.7 service still has KeepAlive=true and
 HEADLESS=0; its existing restart behavior has not been silently disabled.
+
+## Build-identity integration boundary
+
+The independent source task published `bd242a4381abe63ac51589c27aab7c17e18b30d3`
+with `scripts/build_identity_gate.py` and `docs/testing/BUILD-IDENTITY-GATE.md`.
+This task inspected that exact committed tooling without modifying its five
+owned files or the shared worktree. The lifecycle branch's local original
+`69b7a5f26b567af27cd52f2625f989ae8e2c9151` maps to the sanitized publication
+commit `ffe96bcd5f6ebe47b6a55cb5a3329f726cc42348`; the original reference remains
+local and is not published through this branch.
+
+The current product does not embed that gate's generated immutable build
+identity. The current signed lifecycle fixtures have no independently pinned
+release manifest. Lifecycle acceptance therefore does not establish the gate's
+source/build/package/loaded-image chain, and this installer does not yet enforce
+that chain in production.
+
+The smallest coordinated integration must first embed the generated module in
+ProductInfo and have the authoritative packager preserve the observed build
+receipt and seal an external `remoteplay-release-manifest.json`. The existing
+archive signing guard rejects that additional archive-root file, so it needs a
+narrow reviewed allowance plus independent manifest validation before extraction.
+The installer can then verify the archive against the independently supplied
+commit, build-identity digest and manifest digest before any stop, journal and
+back up the canonical manifest/expectations with the App/plist, install them
+under the same profile lock, and restore all components on a known failure.
+
+The current `verify_install` API deliberately requires the configured frontend
+arguments `--gui`. The launch agent here correctly runs `--background-service`.
+Calling that API with invented frontend arguments would give false launcher
+evidence. A separate background-role adapter must use the actual observed
+launch-agent arguments and authenticated service PID, then the independently
+hashed native observer must verify the loaded background image. Frontend launch
+and running-image acceptance remain a separate observation. These coordinated
+product, packaging and role-adapter steps are still pending; none was bypassed
+or represented as completed by the fixture tests.

@@ -16,8 +16,8 @@ class LifecyclePlanRejected(ValueError):
     pass
 
 
-def plan(document: dict, executable: str, product_info: dict) -> dict:
-    if (document.get('Label') != 'com.remoteplay.host'
+def plan(document: dict, executable: str, product_info: dict, *, expected_label='com.remoteplay.host') -> dict:
+    if (document.get('Label') != expected_label
             or document.get('ProgramArguments') not in
             ([executable], [executable, '--background-service'])
             or document.get('Program', executable) != executable):
