@@ -1,80 +1,33 @@
 #!/usr/bin/env bash
+# Production-only packaging. Missing pinned identity is an error, never ad-hoc fallback.
 set -euo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-
-APP_NAME="${REMOTE_PLAY_APP_NAME:-RemotePlay Unified}"
-BUNDLE_ID="${REMOTE_PLAY_BUNDLE_ID:-com.remoteplay.unified}"
-VERSION="${REMOTE_PLAY_VERSION:-0.1.0}"
-
-TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-PACKAGE_DIR="$ROOT_DIR/target/package/macos"
-APP_DIR="$PACKAGE_DIR/${APP_NAME}.app"
-CONTENTS_DIR="$APP_DIR/Contents"
-MACOS_DIR="$CONTENTS_DIR/MacOS"
-RESOURCES_DIR="$CONTENTS_DIR/Resources"
-ZIP_PATH="$PACKAGE_DIR/${APP_NAME}-macos-arm64.zip"
-
-mkdir -p "$PACKAGE_DIR"
-
-echo "Building remote_play release binary..."
-cargo build --release -p remote_play_app --bin remote_play
-
-echo "Preparing app bundle at $APP_DIR"
-rm -rf "$APP_DIR" "$ZIP_PATH"
-if [[ "$APP_NAME" != "RemotePlay" ]]; then
-    rm -rf "$PACKAGE_DIR/RemotePlay.app" "$PACKAGE_DIR/RemotePlay-macos-arm64.zip"
-fi
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
-cp "$TARGET_DIR/release/remote_play" "$MACOS_DIR/remote_play"
-
-chmod +x "$MACOS_DIR/remote_play"
-
-xattr -cr "$APP_DIR" || true
-
-cat > "$CONTENTS_DIR/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>remote_play</string>
-    <key>CFBundleIdentifier</key>
-    <string>${BUNDLE_ID}</string>
-    <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>RemotePlay uses the microphone when talkback is enabled.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>RemotePlay captures the screen when this Mac is being controlled.</string>
-</dict>
-</plist>
-PLIST
-
-if security find-identity -v -p codesigning | grep -q "RemotePlay Local"; then
-    echo "Signing with RemotePlay Local identity..."
-    codesign --force --deep --sign "RemotePlay Local" --identifier "$BUNDLE_ID" "$APP_DIR"
+[[ "${REMOTE_PLAY_APP_NAME:-RemotePlay}" == "RemotePlay" ]] || { echo "Release app identity cannot be overridden" >&2; exit 1; }
+[[ "${REMOTE_PLAY_BUNDLE_ID:-com.remoteplay.unified}" == "com.remoteplay.unified" ]] || { echo "Release bundle ID cannot be overridden" >&2; exit 1; }
+# Check before a long build and before touching any previous package.
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" preflight
+VERSION="${REMOTE_PLAY_VERSION:-$(cat "$ROOT_DIR/VERSION")}"
+SUFFIX="$(python3 -c 'import re,sys; m=re.search(r"alpha\.(\d+)$",sys.argv[1]); print(m[1] if m else 0)' "$VERSION")"
+BUILD_NUMBER="${REMOTE_PLAY_BUILD_NUMBER:-$(date -u +%Y%m%d).$SUFFIX}"
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps --locked | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+python3 - "$VERSION" <<'CHECK_VERSION'
+from pathlib import Path
+import sys,tomllib
+version=tomllib.loads(Path('app/Cargo.toml').read_text())['package']['version']
+if sys.argv[1] != version or Path('VERSION').read_text().strip() != version:
+    raise SystemExit('Release tag, VERSION, and compiled crate version must agree')
+CHECK_VERSION
+BINARY="$TARGET_DIR/release/remote_play"
+if [[ -n "${REMOTE_PLAY_PREBUILT_BINARY:-}" ]]; then
+  # Remote builders return an artifact, never a private signing key. Retain all
+  # product/version/signing gates and require the exact verified build digest.
+  BINARY="$(python3 "$ROOT_DIR/scripts/verify_prebuilt_binary.py" \
+    --binary "$REMOTE_PLAY_PREBUILT_BINARY" --sha256 "${REMOTE_PLAY_PREBUILT_SHA256:-}")"
 else
-    echo "Signing ad-hoc..."
-    codesign --force --deep -s - "$APP_DIR"
+  cargo build --release -p remote_play_app --bin remote_play --features gpui-restoration --locked -j "${CARGO_BUILD_JOBS:-2}"
 fi
-codesign --verify --deep --strict "$APP_DIR"
-xattr -cr "$APP_DIR" || true
-
-echo "Creating zip package..."
-(cd "$PACKAGE_DIR" && COPYFILE_DISABLE=1 zip -qry "$(basename "$ZIP_PATH")" "$(basename "$APP_DIR")")
-shasum -a 256 "$ZIP_PATH"
-echo "$ZIP_PATH"
+python3 "$ROOT_DIR/scripts/verify_desktop_gui.py" --binary "$BINARY" --platform macos --version "$VERSION"
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" package \
+  --binary "$BINARY" --output "$TARGET_DIR/package/macos" \
+  --version "$VERSION" --build "$BUILD_NUMBER"

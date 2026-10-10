@@ -1,0 +1,231 @@
+{
+  "schema": 1,
+  "base_head": "7b703fa542f9506df717a402445721fce7fbf882",
+  "local_regression": {
+    "command": "PYTHONDONTWRITEBYTECODE=1 RP_SIGNING_INTEGRATION=0 python3 -m unittest discover -s scripts/tests -v",
+    "ran": 191,
+    "skipped": 6,
+    "log_summary": "OK (skipped=6)",
+    "log_sha256": "cd4f12e62d72f54c7e3adef2f74f6bd75531b692ceac1100501aa27ba8f7bdda",
+    "process_exit_receipt": "original exec completion not recovered; unittest final success summary recovered",
+    "scope": "working tree before candidate commit, including separate uncommitted Android release tests",
+    "modules": {
+      "test_artifact_lifecycle_adoption": 11,
+      "test_compare_performance": 18,
+      "test_desktop_gui_identity": 8,
+      "test_desktop_gui_single_backend": 8,
+      "test_ho5_dns_bootstrap": 6,
+      "test_installer_hardening": 41,
+      "test_installer_profile_access": 9,
+      "test_macos_installation_diagnostics": 18,
+      "test_macos_release_guard": 37,
+      "test_platform_matrix": 9,
+      "test_prebuilt_binary": 4,
+      "test_repair_ho5_dns": 8,
+      "test_source_refresh": 6,
+      "test_verify_release_apk": 8
+    },
+    "native_signing_integration": "not run"
+  },
+  "prior_source_tests": {
+    "source_refresh": {
+      "ran": 6,
+      "exit_code": 0
+    },
+    "rust_pipewire_pure_contract": {
+      "ran": 11,
+      "exit_code": 0,
+      "scope": "macOS pure Rust contract tests; Linux cfg not established"
+    }
+  },
+  "ho5": {
+    "workspace": "/var/home/liang/workspace/remote_play",
+    "source_before": "969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+    "ready_observation_operation": "07f3daa5-96dc-4523-b1cd-f917060ca73f",
+    "ready": {
+      "observed_at_utc": "2026-10-10T07:57:24Z",
+      "boot_id": "2788a001-2ddf-453b-b616-b58198a9ae3f",
+      "uptime_seconds": 391.61,
+      "security": [
+        "CapEff:\t0000000000000000",
+        "NoNewPrivs:\t1"
+      ],
+      "free_bytes": 760968556544,
+      "ostree_exit": 0,
+      "transaction": null,
+      "deployments": [
+        {
+          "booted": true,
+          "staged": false,
+          "checksum": "f540a61bc44714e48d98cd23935f4f3f554e5f3c24c7bcb82ef9cb568cb03032",
+          "version": "44.20261006.1",
+          "packages": [
+            "alsa-lib-devel",
+            "clang",
+            "clang-libs",
+            "cmake",
+            "fcitx5",
+            "fcitx5-chinese-addons",
+            "fcitx5-configtool",
+            "fontconfig-devel",
+            "freetype-devel",
+            "libxkbcommon-x11-devel",
+            "mpv",
+            "mpv-libs",
+            "pipewire-devel"
+          ],
+          "requested-packages": [
+            "alsa-lib-devel",
+            "clang",
+            "clang-libs",
+            "cmake",
+            "fcitx5",
+            "fcitx5-chinese-addons",
+            "fcitx5-configtool",
+            "fontconfig-devel",
+            "freetype-devel",
+            "libxkbcommon-x11-devel",
+            "mpv",
+            "mpv-libs",
+            "pipewire-devel"
+          ]
+        },
+        {
+          "booted": false,
+          "staged": false,
+          "checksum": "9c4755a6e38e11675d1c31697480046e87d9aa2d729c33ffd36993e6c018a16b",
+          "version": "44.20260921",
+          "packages": [
+            "fcitx5",
+            "fcitx5-chinese-addons",
+            "fcitx5-configtool",
+            "mpv",
+            "mpv-libs"
+          ],
+          "requested-packages": [
+            "fcitx5",
+            "fcitx5-chinese-addons",
+            "fcitx5-configtool",
+            "mpv",
+            "mpv-libs"
+          ]
+        }
+      ],
+      "packages": {
+        "exit": 0,
+        "stdout": "pipewire-devel-1.6.9-1.fc44.x86_64\nalsa-lib-devel-1.2.16.1-1.fc44.x86_64\nclang-22.1.8-4.fc44.x86_64\nclang-libs-22.1.8-4.fc44.x86_64\ncmake-4.3.0-1.fc44.x86_64\nlibxkbcommon-x11-devel-1.13.1-2.fc44.x86_64\nfontconfig-devel-2.17.0-4.fc44.x86_64\nfreetype-devel-2.14.3-1.fc44.x86_64\n",
+        "stderr": ""
+      },
+      "pkgconfig": {
+        "libpipewire-0.3": {
+          "exit": 0,
+          "stdout": "1.6.9\n",
+          "stderr": ""
+        },
+        "libspa-0.2": {
+          "exit": 0,
+          "stdout": "0.2\n",
+          "stderr": ""
+        },
+        "alsa": {
+          "exit": 0,
+          "stdout": "1.2.16.1\n",
+          "stderr": ""
+        },
+        "xkbcommon": {
+          "exit": 0,
+          "stdout": "1.13.1\n",
+          "stderr": ""
+        },
+        "xkbcommon-x11": {
+          "exit": 0,
+          "stdout": "1.13.1\n",
+          "stderr": ""
+        },
+        "fontconfig": {
+          "exit": 0,
+          "stdout": "2.17.0\n",
+          "stderr": ""
+        },
+        "freetype2": {
+          "exit": 0,
+          "stdout": "26.6.20\n",
+          "stderr": ""
+        }
+      },
+      "tools": {
+        "cargo": "/home/liang/.cargo/bin/cargo",
+        "rustc": "/home/liang/.cargo/bin/rustc",
+        "gcc": "/usr/bin/gcc",
+        "g++": "/usr/bin/g++",
+        "cc": "/usr/bin/cc",
+        "ar": "/usr/bin/ar",
+        "ld": "/usr/bin/ld",
+        "clang": "/usr/bin/clang",
+        "cmake": "/usr/bin/cmake",
+        "make": "/usr/bin/make",
+        "ffmpeg": "/usr/bin/ffmpeg",
+        "ffprobe": "/usr/bin/ffprobe"
+      },
+      "clang": {
+        "exit": 0,
+        "stdout": "clang version 22.1.8 (Fedora 22.1.8-4.fc44)\nTarget: x86_64-redhat-linux-gnu\nThread model: posix\nInstalledDir: /usr/bin\nConfiguration file: /etc/clang/x86_64-redhat-linux-gnu-clang.cfg\n",
+        "stderr": ""
+      },
+      "rustc": {
+        "exit": 0,
+        "stdout": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8\n",
+        "stderr": ""
+      },
+      "headers": {
+        "/usr/include/pipewire-0.3/pipewire/pipewire.h": true,
+        "/usr/include/spa-0.2/spa/param/video/raw.h": true,
+        "/usr/include/alsa/asoundlib.h": true
+      },
+      "libclang": [
+        "/usr/lib64/libclang.so.22.1",
+        "/usr/lib64/libclang.so.22.1.8"
+      ],
+      "resolver": {
+        "addresses": [
+          "104.18.43.204",
+          "172.64.144.52",
+          "2606:4700:440b::ac40:9034",
+          "2a06:98c1:310d::6812:2bcc"
+        ],
+        "all_public": true
+      }
+    },
+    "source_sdk_observation_operation": "56fdd1ed-c6c4-4260-8a9c-cdf90470d129",
+    "source_sdk": {
+      "origin": "https://github.com/KingBright/remote_play.git",
+      "origin_expected": true,
+      "head": "969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+      "branch": "main",
+      "status": "",
+      "target_exists": true,
+      "index_lock": false,
+      "ffmpeg_pkgconfig": {
+        "libavcodec": {
+          "exit": 1,
+          "output": "Package libavcodec was not found in the pkg-config search path.\nPerhaps you should add the directory containing `libavcodec.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'libavcodec' not found"
+        },
+        "libavutil": {
+          "exit": 1,
+          "output": "Package libavutil was not found in the pkg-config search path.\nPerhaps you should add the directory containing `libavutil.pc'\nto the PKG_CONFIG_PATH environment variable\nPackage 'libavutil' not found"
+        }
+      },
+      "ffmpeg_headers": [],
+      "ffmpeg_libraries": [
+        "\tlibavutil.so.60 (libc6,x86-64) => /usr/lib64/libavutil.so.60",
+        "\tlibavcodec.so.62 (libc6,x86-64) => /usr/lib64/libavcodec.so.62"
+      ],
+      "build_processes": []
+    }
+  },
+  "git_push": "pending; verify remote branch full SHA after commit",
+  "linux_compile": "pending after Git delivery",
+  "native_presentation": "pending",
+  "deployment": "pending",
+  "mac_windows_physical_acceptance": "not running; local MacBook ownership repair is separate"
+}

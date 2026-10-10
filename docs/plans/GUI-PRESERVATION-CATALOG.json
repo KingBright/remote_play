@@ -1,0 +1,407 @@
+{
+  "schema": 1,
+  "baseline_rule": "union of original product UI, current functional fixes, Android and native services; not alpha.7 UI alone",
+  "inventory_complete_claim": false,
+  "approval_status": "approved_for_implementation_by_user_2026-10-01; acceptance pending",
+  "features": [
+    {
+      "id": "original_design",
+      "title": "原版画面主体、字体、配色、卡片与细边框",
+      "scope": "desktop",
+      "source_references": [
+        "app/src/ui.rs",
+        "app/src/design_system.rs",
+        "app/src/original_design.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "device_drawer",
+      "title": "设备抽屉、分组与网络管理",
+      "scope": "desktop",
+      "source_references": [
+        "app/src/ui.rs",
+        "app/src/desktop/mod.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "compact_controls",
+      "title": "胶囊、顶边唤出、延时隐藏和点击隔离",
+      "scope": "desktop",
+      "source_references": [
+        "app/src/ui.rs",
+        "app/src/desktop/mod.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "popout_pip",
+      "title": "独立窗口及画中画",
+      "scope": "original-desktop",
+      "source_references": [
+        "app/src/ui.rs",
+        "app/src/workspace_ui.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "telemetry",
+      "title": "真实遥测与连接/来源/错误状态",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/telemetry.rs",
+        "remote_core/src/stats.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "media_settings",
+      "title": "分辨率、帧率、码率、适配/填充和偏好",
+      "scope": "all-clients",
+      "source_references": [
+        "app/src/preferences.rs",
+        "app/src/ui.rs",
+        "protocol/src/session.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "network_membership",
+      "title": "创建/加入既有网络、邀请码/二维码和身份保留",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/mesh.rs",
+        "remote_core/src/pairing_qr.rs",
+        "client/src/mesh_pairing.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "route_discovery",
+      "title": "LAN/P2P/Relay发现及路由状态",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/discovery.rs",
+        "remote_core/src/p2p.rs",
+        "remote_core/src/routed_relay.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "target_isolation",
+      "title": "并发与断开A再连B的设备/画面/输入隔离",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/workspace_session.rs",
+        "remote_core/src/routed_relay.rs",
+        "app/src/desktop/mod.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "session_reconnect",
+      "title": "失效连接淘汰及明确重连入口",
+      "scope": "all-clients",
+      "source_references": [
+        "app/src/desktop/mod.rs",
+        "remote_core/src/workspace_session.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "active_roles",
+      "title": "主动拉取、查看、控制和已有发布角色",
+      "scope": "capability-gated",
+      "source_references": [
+        "app/src/lib.rs",
+        "remote_core/src/role.rs",
+        "remote_client_bridge/src/publisher_bridge.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "display_sources",
+      "title": "主屏、副屏发现和切换",
+      "scope": "capability-gated-hosts",
+      "source_references": [
+        "host/src/capture_sources.rs",
+        "host/src/service.rs",
+        "app/src/desktop/model.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "application_sources",
+      "title": "应用窗口枚举、刷新、选择、关闭和只读状态",
+      "scope": "macos-host/compatible-viewers",
+      "source_references": [
+        "host/src/capture_sources.rs",
+        "host/src/capture.rs",
+        "app/src/desktop/mod.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "window_input",
+      "title": "窗口目标、移动缩放、焦点及来源版本",
+      "scope": "macos-host/compatible-viewers",
+      "source_references": [
+        "host/src/window_input.rs",
+        "host/src/input_injector.rs",
+        "protocol/src/session.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "desktop_input",
+      "title": "点击、拖拽、滚轮、键盘及焦点衔接",
+      "scope": "desktop-clients",
+      "source_references": [
+        "app/src/desktop/input_path_tests.rs",
+        "app/src/desktop/mod.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "modifiers_lock",
+      "title": "组合键、粘滞键、控制锁与紧急释放",
+      "scope": "all-clients",
+      "source_references": [
+        "protocol/src/lib.rs",
+        "app/src/desktop/model.rs",
+        "android/app/src/main/java/com/remoteplay/client/ui/StickyKeyController.kt"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "pause_background",
+      "title": "暂停、后台恢复和静止桌面心跳",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/media_pause.rs",
+        "app/src/desktop/model.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "clipboard",
+      "title": "既有剪贴板同步和相关文件通道",
+      "scope": "capability-gated",
+      "source_references": [
+        "remote_core/src/clipboard_runtime.rs",
+        "remote_core/src/clipboard_file_runtime.rs",
+        "client/src/lib.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "file_push",
+      "title": "文件选取、发送、进度与真实完成状态",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/file_transfer_runtime.rs",
+        "client/src/transfer_center.rs",
+        "app/src/desktop/requests.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "file_pull",
+      "title": "共享清单、分页、主动取回、校验和接收目录",
+      "scope": "all-clients",
+      "source_references": [
+        "remote_core/src/shared_files.rs",
+        "remote_core/src/file_transfer_runtime/shared_exchange.rs",
+        "app/src/desktop/requests.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "transfer_lifecycle",
+      "title": "取消、错误、历史清理及任务释放",
+      "scope": "all-clients",
+      "source_references": [
+        "client/src/transfer_center.rs",
+        "remote_core/src/file_transfer.rs",
+        "remote_core/src/file_transfer_runtime.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "audio_playback",
+      "title": "系统声音、音量、静音及同步",
+      "scope": "capability-gated",
+      "source_references": [
+        "client/src/audio_player.rs",
+        "host/src/audio_capture.rs",
+        "app/src/desktop/model.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "talkback",
+      "title": "已实现的对讲、麦克风开关与状态",
+      "scope": "capability-gated",
+      "source_references": [
+        "client/src/talkback.rs",
+        "app/src/ui.rs",
+        "app/src/lib.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "mobile_viewport",
+      "title": "双指焦点缩放、平移、复位和逆映射",
+      "scope": "android",
+      "source_references": [
+        "android/app/src/main/java/com/remoteplay/client/ui/ViewportTransform.kt",
+        "android/app/src/main/java/com/remoteplay/client/ui/RemoteViewportGestures.kt"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "mobile_input",
+      "title": "双指滚动、长按右键、软键盘和既有IME",
+      "scope": "android",
+      "source_references": [
+        "android/app/src/main/java/com/remoteplay/client/ui/MobileViewportScreen.kt",
+        "android/app/src/main/java/com/remoteplay/client/ui/StickyKeyController.kt"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "mobile_lifecycle",
+      "title": "横竖屏、后台恢复、Surface与解码器释放",
+      "scope": "android",
+      "source_references": [
+        "android/app/src/main/java/com/remoteplay/client/ui/RemoteVideoSurface.kt",
+        "android/app/src/main/java/com/remoteplay/client/ui/MobileViewportScreen.kt"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "mobile_console",
+      "title": "手机设备管理、导航与文件工作区",
+      "scope": "android",
+      "source_references": [
+        "android/app/src/main/java/com/remoteplay/client/ui/MobileConsoleScreen.kt",
+        "android/app/src/main/java/com/remoteplay/client/ui/WorkspaceScreen.kt"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "singleton_lifecycle",
+      "title": "单实例、唤回、后台继续和明确退出",
+      "scope": "desktop",
+      "source_references": [
+        "app/src/desktop/instance.rs",
+        "app/src/main.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "native_frames",
+      "title": "原生视频资源、帧槽和释放顺序",
+      "scope": "platform-adapters",
+      "source_references": [
+        "client/src/video_decode.rs",
+        "client/src/portable_video.rs",
+        "remote_core/src/latest_frame.rs",
+        "app/src/desktop/original_presenter.rs"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "security_release",
+      "title": "鉴权、稳定签名、覆盖升级和回滚",
+      "scope": "all-release-targets",
+      "source_references": [
+        "remote_core/src/session_crypto.rs",
+        "scripts/macos_release_guard.py",
+        "scripts/install_macos_unified.py",
+        "scripts/verify_release_apk.py"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    },
+    {
+      "id": "third_party",
+      "title": "Windows默认观看及UU共存保护",
+      "scope": "windows",
+      "source_references": [
+        "app/src/desktop/mod.rs",
+        "scripts/package_windows_unified.ps1"
+      ],
+      "preserve_existing_behavior": true,
+      "evidence_level": "source references only, not new functional acceptance",
+      "migration_acceptance": "pending"
+    }
+  ],
+  "known_gaps": [
+    "Full restored product UI is not installed.",
+    "Linux/Windows native video presentation needs implementation and measurement.",
+    "Application-window hosting/input is not uniformly implemented across all host OS.",
+    "Android physical interaction and arbitrary Unicode injection are not fully accepted.",
+    "Sequential real GUI switching and long-duration acceptance remain distinct from simultaneous-stream testing."
+  ]
+}
