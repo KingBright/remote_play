@@ -475,6 +475,8 @@ impl RestoredDashboard {
             pending_capture_source: snapshot.pending_source,
             active_capture_supports_input: snapshot.supports_input,
             capture_source_error: snapshot.error,
+            input_status: snapshot.input_status,
+            input_eligible: snapshot.input_eligible,
         }
     }
 
@@ -1612,6 +1614,10 @@ impl Render for RestoredDashboard {
         let active_session = role.session().cloned();
         let theme = cx.theme().clone();
         let show_drawer = self.drawer_open;
+        let input_hint = matches!(role, RoleState::Viewing(_)).then(|| {
+            remote_input_hint(&snapshot.input_status, snapshot.input_eligible,
+                self.input_focus.is_focused(window), show_drawer || self.show_apps_menu)
+        }).flatten();
         let is_fullscreen = window.is_fullscreen();
         let compact = f32::from(window.viewport_size().width) < 1200.0;
         let host_stats = self.host_stats_snapshot(&role);
@@ -1725,6 +1731,16 @@ impl Render for RestoredDashboard {
                 },
             )
             .child(self.session_switcher(cx))
+            .children(input_hint.map(|message| {
+                div().id("remote_input_status_notice").absolute()
+                    .bottom(px(16.0)).left(px(20.0)).right(px(20.0))
+                    .flex().justify_center()
+                    .child(div().occlude().max_w(px(720.0)).px_3().py_2()
+                        .bg(color_glass_card()).border_1().border_color(color_border_fine())
+                        .rounded(px(8.0)).text_size(px(11.0)).text_color(theme.content.secondary)
+                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                        .child(message))
+            }))
             .child(self.paint_acknowledgement())
             .child(drawer_trigger_capsule(
                 &snapshot.devices,
@@ -2193,11 +2209,11 @@ fn floating_control_island(
                             .child(if !capture_supports_input {
                                 if compact { "View" } else { "View Only" }
                             } else if compact {
-                                if input_locked { "Locked" } else { "Input" }
+                                if input_locked { "Enable" } else { "Control on" }
                             } else if input_locked {
-                                "Input Locked"
+                                "Enable control"
                             } else {
-                                "Input Active"
+                                "Control enabled"
                             })
                         })
                         .child(scale_mode_control(scale_mode, cx)),
@@ -3153,6 +3169,8 @@ fn drawer_security_tab(
     let talkback_enabled = side_services.talkback.enabled;
     let clipboard_sync_enabled = side_services.clipboard_sync.enabled;
     let file_transfer_enabled = side_services.file_transfer.enabled;
+    let snapshot = owner.snapshot();
+    let input_available = snapshot.supports_input && matches!(snapshot.role, RoleState::Viewing(_));
 
     div()
         .flex()
@@ -3167,12 +3185,14 @@ fn drawer_security_tab(
         )
         .child(security_toggle_row(
             "Keyboard & Pointer Input",
-            "Send this device's input to the remote session",
+            if input_available { "Enable control, then click the remote picture to focus keyboard input" }
+            else { "Selected source cannot accept input. Choose an input-enabled source or check host Accessibility" },
             !input_locked,
-            true,
+            input_available,
             {
                 let view = view.clone();
                 move |cx| {
+                    if !input_available { return; }
                     let _ = view.update(cx, |this, cx| {
                         this.set_input_locked(!input_locked);
                         cx.notify();
@@ -4750,6 +4770,20 @@ struct DashboardSnapshot {
     pending_capture_source: Option<protocol::session::CaptureSource>,
     active_capture_supports_input: bool,
     capture_source_error: Option<String>,
+    input_status: String,
+    input_eligible: bool,
+}
+
+fn remote_input_hint(status: &str, eligible: bool, focused: bool, local_overlay: bool) -> Option<String> {
+    if local_overlay {
+        Some("Remote input is paused while a local menu is open. Close the drawer or source menu to continue".into())
+    } else if !eligible {
+        Some(status.into())
+    } else if !focused {
+        Some("Control enabled. Click the remote picture to send keyboard input".into())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -4763,6 +4797,16 @@ mod input_tests {
         should_reveal_toolbar,
     };
     use crate::HostStats;
+
+    #[test]
+    fn blocked_input_reason_remains_visible_without_enabling_control() {
+        for reason in ["View only: click Enable control", "Host source is view-only", "RemotePlay needs Accessibility"] {
+            assert_eq!(super::remote_input_hint(reason, false, true, false).as_deref(), Some(reason));
+        }
+        assert!(super::remote_input_hint("enabled", true, false, false).unwrap().contains("Click the remote picture"));
+        assert!(super::remote_input_hint("enabled", true, true, true).unwrap().contains("local menu"));
+        assert!(super::remote_input_hint("enabled", true, true, false).is_none());
+    }
     use gpui::{
         AppContext, Context, FocusHandle, InteractiveElement, IntoElement, Keystroke, Modifiers,
         MouseButton, NavigationDirection, ParentElement, Render, Styled, TestAppContext, Window,

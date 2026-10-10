@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 pub struct MacInputInjector {
     source: CGEventSource,
+    display_id: Option<u32>,
     window: Option<crate::window_input::WindowTarget>,
-    window_pointer: Mutex<Option<(u16, u16)>>,
+    target_pointer: Mutex<Option<(u16, u16)>>,
     pressed_buttons: AtomicU8,
     active_modifiers: AtomicU8,
     pressed_keys: Mutex<BTreeSet<u16>>,
@@ -26,13 +27,21 @@ unsafe impl Sync for MacInputInjector {}
 
 impl MacInputInjector {
     pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::for_display(CGDisplay::main().id)
+    }
+
+    /// Bind normalized input to the actual selected display, including its
+    /// global logical origin. The shared host must pass the captured display ID.
+    pub fn for_display(id: u32) -> Result<Self, Box<dyn Error + Send + Sync>> {
         require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
+        display_bounds(id)?;
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| "Failed to create CGEventSource")?;
         Ok(Self {
             source,
+            display_id: Some(id),
             window: None,
-            window_pointer: Mutex::new(None),
+            target_pointer: Mutex::new(None),
             pressed_buttons: AtomicU8::new(0),
             active_modifiers: AtomicU8::new(0),
             pressed_keys: Mutex::new(BTreeSet::new()),
@@ -46,8 +55,9 @@ impl MacInputInjector {
             .map_err(|_| "Cannot create window input source")?;
         Ok(Self {
             source,
+            display_id: None,
             window: Some(window),
-            window_pointer: Mutex::new(None),
+            target_pointer: Mutex::new(None),
             pressed_buttons: AtomicU8::new(0),
             active_modifiers: AtomicU8::new(0),
             pressed_keys: Mutex::new(BTreeSet::new()),
@@ -76,16 +86,33 @@ impl MacInputInjector {
         if let Some(window) = &self.window {
             if let (Ok(bounds), Some((x, y))) = (
                 window.bounds(),
-                *self.window_pointer.lock().expect("window pointer lock"),
+                *self.target_pointer.lock().expect("source pointer lock"),
             ) {
                 return normalized_pointer_location(x, y, bounds);
             }
             return CGPoint::new(0., 0.);
         }
+        if let Some(id) = self.display_id {
+            if let Ok(bounds) = display_bounds(id) {
+                if let Some((x, y)) = *self.target_pointer.lock().expect("source pointer lock") {
+                    return normalized_pointer_location(x, y, bounds);
+                }
+                return clamp_display_pointer(current_pointer_location(&self.source), bounds);
+            }
+        }
         current_pointer_location(&self.source)
     }
     fn prepare_window_event(&self, event: &InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
         let Some(window) = &self.window else {
+            display_bounds(self.display_id.ok_or("Input display is not bound")?)?;
+            if matches!(event, InputEvent::MouseDown(_) | InputEvent::MouseScroll { .. })
+                && self.target_pointer.lock().map_err(|_| "Source pointer lock poisoned")?.is_none() {
+                return Err("Pointer location for the selected display is unconfirmed. Click inside its remote picture before control".into());
+            }
+            if let InputEvent::Touch { normalized_x, normalized_y, .. } = event
+                && (!normalized_x.is_finite() || !normalized_y.is_finite()) {
+                return Err("Invalid touch coordinates".into());
+            }
             return Ok(());
         };
         window.bounds()?;
@@ -99,9 +126,9 @@ impl MacInputInjector {
             event,
             InputEvent::MouseDown(_) | InputEvent::MouseScroll { .. }
         ) && self
-            .window_pointer
+            .target_pointer
             .lock()
-            .expect("window pointer lock")
+            .expect("source pointer lock")
             .is_none()
         {
             return Err("Click inside the selected remote window before using its pointer".into());
@@ -130,9 +157,9 @@ impl MacInputInjector {
                     )
                 }
                 _ => self
-                    .window_pointer
+                    .target_pointer
                     .lock()
-                    .expect("window pointer lock")
+                    .expect("source pointer lock")
                     .ok_or("Pointer position missing")?,
             };
             window.check_pointer(point.0, point.1)?;
@@ -153,9 +180,9 @@ impl MacInputInjector {
         }
         if matches!(event, InputEvent::MouseScroll { .. }) {
             let (x, y) = self
-                .window_pointer
+                .target_pointer
                 .lock()
-                .expect("window pointer lock")
+                .expect("source pointer lock")
                 .ok_or("Pointer position missing")?;
             window.check_pointer(x, y)?;
         }
@@ -186,7 +213,12 @@ impl MacInputInjector {
             }
             InputEvent::MouseMove { dx, dy } => {
                 let current_pos = self.pointer_position();
-                let new_pos = CGPoint::new(current_pos.x + dx as f64, current_pos.y + dy as f64);
+                let mut new_pos = CGPoint::new(current_pos.x + dx as f64, current_pos.y + dy as f64);
+                if let Some(id) = self.display_id {
+                    let Ok(bounds) = display_bounds(id) else { return; };
+                    new_pos = clamp_display_pointer(new_pos, bounds);
+                    *self.target_pointer.lock().expect("source pointer lock") = Some(pointer_coordinates(new_pos, bounds));
+                }
                 if let Ok(cg_event) = CGEvent::new_mouse_event(
                     self.source.clone(),
                     pointer_event_type(self.pressed_buttons.load(Ordering::Relaxed)),
@@ -201,18 +233,21 @@ impl MacInputInjector {
                     let Ok(bounds) = window.bounds() else {
                         return;
                     };
-                    *self.window_pointer.lock().expect("window pointer lock") = Some((x, y));
+                    *self.target_pointer.lock().expect("source pointer lock") = Some((x, y));
                     if !window.focused() || window.check_pointer(x, y).is_err() {
                         return;
                     }
                     bounds
                 } else {
-                    CGDisplay::main().bounds()
+                    let Some(id) = self.display_id else { return; };
+                    let Ok(bounds) = display_bounds(id) else { return; };
+                    *self.target_pointer.lock().expect("source pointer lock") = Some((x, y));
+                    bounds
                 };
                 self.post_pointer_move(normalized_pointer_location(x, y, bounds));
             }
             InputEvent::MouseDown(button) => {
-                if self.window.is_some() {
+                if self.window.is_some() || self.display_id.is_some() {
                     self.post_pointer_move(self.pointer_position());
                 }
                 self.post_mouse_button(button, true);
@@ -221,7 +256,7 @@ impl MacInputInjector {
                 self.post_mouse_button(button, false);
             }
             InputEvent::MouseScroll { delta_x, delta_y } => {
-                if self.window.is_some() {
+                if self.window.is_some() || self.display_id.is_some() {
                     self.post_pointer_move(self.pointer_position());
                 }
                 if let Ok(cg_event) = CGEvent::new_scroll_event(
@@ -248,12 +283,14 @@ impl MacInputInjector {
                     };
                     bounds
                 } else {
-                    CGDisplay::main().bounds()
+                    let Some(id) = self.display_id else { return; };
+                    let Ok(bounds) = display_bounds(id) else { return; };
+                    bounds
                 };
                 let x = (normalized_x.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
                 let y = (normalized_y.clamp(0.0, 1.0) * f32::from(u16::MAX)) as u16;
-                if self.window.is_some() {
-                    *self.window_pointer.lock().expect("window pointer lock") = Some((x, y));
+                if self.window.is_some() || self.display_id.is_some() {
+                    *self.target_pointer.lock().expect("source pointer lock") = Some((x, y));
                 }
                 let pos = normalized_pointer_location(x, y, bounds);
                 self.post_pointer_move(pos);
@@ -363,6 +400,34 @@ fn require_post_event_access(allowed: bool) -> Result<(), Box<dyn Error + Send +
     } else {
         Err("The running signed RemotePlay host lacks input-posting permission. Verify its App identity and enable RemotePlay in System Settings > Privacy & Security > Accessibility".into())
     }
+}
+
+fn display_bounds(id: u32) -> Result<core_graphics::geometry::CGRect, Box<dyn Error + Send + Sync>> {
+    let display = CGDisplay::new(id);
+    validate_display_bounds(display.bounds(), display.is_online(), display.is_active())
+}
+
+fn validate_display_bounds(bounds: core_graphics::geometry::CGRect, online: bool, active: bool)
+    -> Result<core_graphics::geometry::CGRect, Box<dyn Error + Send + Sync>> {
+    if !online || !active {
+        return Err("Selected display is no longer active. Reselect an available source on the host".into());
+    }
+    if ![bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height].iter().all(|n| n.is_finite())
+        || bounds.size.width < 1. || bounds.size.height < 1. {
+        return Err("Selected display geometry is unavailable. Reselect its source before enabling control".into());
+    }
+    Ok(bounds)
+}
+
+fn clamp_display_pointer(point: CGPoint, bounds: core_graphics::geometry::CGRect) -> CGPoint {
+    CGPoint::new(point.x.clamp(bounds.origin.x, bounds.origin.x + bounds.size.width - 0.5),
+                 point.y.clamp(bounds.origin.y, bounds.origin.y + bounds.size.height - 0.5))
+}
+
+fn pointer_coordinates(point: CGPoint, bounds: core_graphics::geometry::CGRect) -> (u16, u16) {
+    let point = clamp_display_pointer(point, bounds);
+    ((((point.x - bounds.origin.x) / bounds.size.width) * f64::from(u16::MAX)).round() as u16,
+     (((point.y - bounds.origin.y) / bounds.size.height) * f64::from(u16::MAX)).round() as u16)
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -539,5 +604,34 @@ mod tests {
 
         let bottom_right = normalized_pointer_location(u16::MAX, u16::MAX, bounds);
         assert_eq!((bottom_right.x, bottom_right.y), (1699.5, 1099.5));
+    }
+
+    #[test]
+    fn selected_display_mapping_retains_negative_origins_and_logical_dimensions() {
+        use core_graphics::geometry::{CGRect, CGSize};
+        // A Retina source is normalized before transmission; injection uses
+        // Quartz logical coordinates, not the encoded pixel dimensions.
+        for bounds in [CGRect::new(&CGPoint::new(-1728., 0.), &CGSize::new(1728., 1117.)),
+                       CGRect::new(&CGPoint::new(0., -1080.), &CGSize::new(1920., 1080.)),
+                       CGRect::new(&CGPoint::new(1920., 120.), &CGSize::new(1080., 1920.))] {
+            validate_display_bounds(bounds, true, true).unwrap();
+            let first = normalized_pointer_location(0, 0, bounds);
+            let last = normalized_pointer_location(u16::MAX, u16::MAX, bounds);
+            assert_eq!((first.x, first.y), (bounds.origin.x, bounds.origin.y));
+            assert_eq!((last.x, last.y), (bounds.origin.x + bounds.size.width - 0.5, bounds.origin.y + bounds.size.height - 0.5));
+            let clamped = clamp_display_pointer(CGPoint::new(-10000., 10000.), bounds);
+            assert_eq!((clamped.x, clamped.y), (bounds.origin.x, bounds.origin.y + bounds.size.height - 0.5));
+        }
+    }
+
+    #[test]
+    fn inactive_or_invalid_display_never_falls_back_to_main_display() {
+        use core_graphics::geometry::{CGRect, CGSize};
+        let valid = CGRect::new(&CGPoint::new(-1920., 0.), &CGSize::new(1920., 1080.));
+        assert!(validate_display_bounds(valid, false, true).is_err());
+        assert!(validate_display_bounds(valid, true, false).is_err());
+        for size in [CGSize::new(0., 1080.), CGSize::new(f64::NAN, 900.), CGSize::new(900., f64::INFINITY)] {
+            assert!(validate_display_bounds(CGRect::new(&CGPoint::new(0., 0.), &size), true, true).is_err());
+        }
     }
 }

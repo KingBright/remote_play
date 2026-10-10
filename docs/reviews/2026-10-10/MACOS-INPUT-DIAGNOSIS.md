@@ -121,3 +121,48 @@ distinguish actual effects from acknowledgement. Existing manual CUA approval
 is still pending; no alternative injection/UI route was used to bypass it.
 Studio permission state and actual target effect remain unverified. Production
 installation, remote deployment, login/reboot and publication did not run.
+
+## Continued visible-state and selected-display preparation
+
+The original session's current input eligibility and reason now reach the GUI
+as explicit snapshot fields. A persistent small notice remains visible when
+input is blocked, even while the floating toolbar is hidden. It distinguishes
+source capability, view-only mode, local overlays and missing keyboard focus,
+and preserves the actual host permission error. The control button says
+`Enable control`; the permissions drawer disables its input toggle for a source
+that cannot accept input. Nothing automatically unlocks a session. Messages
+describe the session's current state rather than blaming the user's actions.
+
+The macOS module adds
+`MacInputInjector::for_display(id: u32) -> Result<Self, Box<dyn Error + Send + Sync>>`.
+It keeps the selected display ID, validates its live active/online status and
+finite logical rectangle, and maps normalized coordinates to that display's
+global origin. Relative movement is bounded to its rectangle. Pointer press and
+scroll require a confirmed point for that target, rather than using an unrelated
+local pointer position; absolute and touch coordinates update that point.
+Missing or disconnected displays return an error rather than using the main
+display. The existing main-display constructor uses the same implementation.
+
+This is a prepared platform interface, not enabled secondary-display support.
+Shared host integration remains with the parent task because the Linux owner
+is editing the same target dispatcher. Exact required sites in
+`host/src/service.rs`: `InputTarget`, `input_target_for`,
+`LazyInputInjector::inject_target` and its existing target-release path. Bind a
+display ID at source admission and call the new constructor only on macOS.
+The macOS branch of `host/src/capture_sources.rs` must retain its conservative
+capability until this binding and its regression checks are integrated. No wire
+protocol change is required by this prepared interface.
+
+Six selected-platform input tests pass, including negative/above/right origins,
+portrait logical rectangles, invalid/offline display refusal and permission
+denial. The continued application input filter passes 23 tests. These remain
+code regressions; there is still no actual target-effect receipt for two Macs.
+
+The user subsequently authorized a routine same-permission MacBook upgrade
+after a new final artifact includes lifecycle, immutable identity and the latest
+input changes. Preparation and artifact verification may proceed independently.
+The old installation has no read-only active-session diagnostic endpoint, so a
+safe switch point is being confirmed before any stop. An unanswered activity
+question is not permission to interrupt an unknown live media/input session.
+Studio and HO5 installation, OS/TCC changes, public Git push and manual CUA
+remain outside that upgrade step.

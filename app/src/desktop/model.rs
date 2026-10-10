@@ -371,9 +371,12 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         } else if !self.confirmed || self.pending.is_some() {
             "Waiting for the host to confirm this source"
         } else if !self.supports_input {
-            "This source is view-only on this host; its window input is not available"
+            match self.source {
+                CaptureSource::Window(_) => "This host cannot control the selected window. Check RemotePlay Accessibility on that host or choose an input-enabled source",
+                CaptureSource::MainDisplay | CaptureSource::Display(_) => "This host provides the selected display for viewing only. Choose an input-enabled source; display control requires a compatible host",
+            }
         } else if self.paused || self.background_paused || self.activity_pending.is_some() {
-            "Control is disabled while video is paused or resuming"
+            "Remote control paused. Resume video and wait for a frame from this source"
         } else if self
             .stats
             .video_decoder_needs_keyframe

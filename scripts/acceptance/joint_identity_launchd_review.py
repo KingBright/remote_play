@@ -96,8 +96,12 @@ def main():
         fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'w') as out: json.dump(receipt, out, indent=2); out.write('\n')
     save()
-    old = fixture_package(h, build, evidence / 'old-build', '20261010.1080')
-    failing = fixture_package(h, build, evidence / 'failure-build', '20261010.1082')
+    components = h['signing']['build'].split('.')
+    gate.require(len(components) == 2 and all(part.isdecimal() for part in components)
+                 and int(components[1]) > 0, 'Independent handed build must have a positive numeric fixture generation')
+    prefix, number = components[0], int(components[1])
+    old = fixture_package(h, build, evidence / 'old-build', f'{prefix}.{number-1}')
+    failing = fixture_package(h, build, evidence / 'failure-build', f'{prefix}.{number+1}')
     receipt['fixture_variants'] = [{k:v for k,v in item.items() if k != 'expectations'} for item in (old, failing)]
     current = adapter.Expectations(h['source_commit'], h['build_identity_sha256'], h['manifest_sha256'],
                                    h['native_observer'], h['native_observer_sha256'])
@@ -275,7 +279,7 @@ def main():
             os.kill(upgraded['pid'],signal.SIGKILL)
             recovered=wait_running(upgraded['pid']);backend(upgraded_value)
             receipt['checks']['launchd_recovers_verified_backend_only']=only_backend(recovered) and wait_connection()
-            # Stop only the independently observed 1082 process once. The real
+            # Stop only the independently observed later-build process once. The real
             # background IPC health check fails, then the real installer rolls
             # back App/plist/manifest/expectations and verifies restored backend.
             worker=threading.Thread(target=signal_fault,daemon=True);worker.start()
