@@ -1,4 +1,6 @@
-# Linux Wayland 采集适配最小方案（待确认），2026-10-09
+# Linux Wayland 采集适配最小方案，2026-10-09
+
+2026-10-10 实施批准记录：主会话核实本人消息 `Sentinel_5ec2772cca9c81918b15c592d595c18c`，精确回复整组申请 `Sentinel_dbe19fceb4e081918803eb200df29752`：“批准以上全部的申请”。其中包含本方案的最小 portal/PipeWire 适配，保留 GPUI、公共协议及其他三端，初版 persist_mode=0。该批准不赋予通道实际缺失的管理员执行能力。下文保留 10-09 原提案与当时检查状态；实际实施及未验边界见 [10-10 阶段记录](../reviews/2026-10-10/LINUX-NATIVE-BOUNDARIES.md)。
 
 本轮已完成 X11 根窗口尺寸与整幅缩放的小修，见 [回归报告](../reviews/2026-10-09/X11-CAPTURE-GEOMETRY.md)。以下方案仅供审阅，未添加 portal/PipeWire 依赖、未运行选择器、未修改默认后端或权限。
 

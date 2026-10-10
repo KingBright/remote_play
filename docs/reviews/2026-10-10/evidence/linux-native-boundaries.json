@@ -1,0 +1,123 @@
+{
+  "kind": "implementation_boundary_checkpoint_not_product_acceptance",
+  "baseline_head": "bcc6c59df764e62d75f63a169baefa3a53ea2c88",
+  "approval": {
+    "human_message": "Sentinel_5ec2772cca9c81918b15c592d595c18c",
+    "exact_reply_to": "Sentinel_dbe19fceb4e081918803eb200df29752",
+    "scope": "Linux portal/PipeWire minimal plan, GPUI/public protocol/other three retained, persist=0; same-scope authorization persists"
+  },
+  "files": {
+    "host/src/linux_frame.rs": "8d6e468bccbb75f9e90e57a40fdeebbddde99cea0a2bea1f7e4fd3cc01512630",
+    "host/src/linux_portal.rs": "b7827812a5e196320fef4e915cb70ddafe198921af797fed5e2c2a9f9727a3b3",
+    "scripts/repair_ho5_portal_transfer_dns.py": "9ab92b5ed2368172abc089db26b39ed94317a3c2bf5389c8e03d8ecbcce453c4",
+    "scripts/tests/test_repair_ho5_dns.py": "aaeaaf7719fa0c4235afca226e62c0b65ab532660b4f526b3e7fc4bec296bfde",
+    "scripts/tests/test_ho5_dns_bootstrap.py": "b4795539cb7abe503e323c56f8ed2846c34cf2c19d54223b2162534a35e23b7c"
+  },
+  "checks": {
+    "linux_frame": {
+      "status": "passed",
+      "tests": 7,
+      "execution_platform": "local macOS",
+      "physical_pipewire": false
+    },
+    "linux_portal": {
+      "status": "passed",
+      "tests": 9,
+      "invocations": "8 portal tests + 1 new source-kind test",
+      "execution_platform": "local macOS",
+      "dbus_picker": false,
+      "cargo_elapsed_including_shared_lock": "13m02s"
+    },
+    "ho5_dns_script": {
+      "status": "passed",
+      "tests": 8,
+      "system_operations": "mock_only"
+    },
+    "ho5_dns_bootstrap": {
+      "status": "passed",
+      "tests": 6,
+      "system_operations": "ordinary-user public fixtures only; no sudo"
+    }
+  },
+  "worktree_preservation": {
+    "baseline_dirty_paths": 105,
+    "baseline_ledger": "/tmp/remoteplay-ely-preservation.json",
+    "unrelated_hash_changes": []
+  },
+  "build": {
+    "target": "/Users/jinliang/rust-target",
+    "new_target_created": false,
+    "initial_free_gib": 84,
+    "minimum_preflight_gib": 8,
+    "retained_floor_gib": 4,
+    "shared_lock_holder_other_project": [
+      "engraph_core",
+      "engraph_cli",
+      "engraph_mcp"
+    ],
+    "other_build_interrupted": false
+  },
+  "ho5_dns_script": {
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545",
+    "path": "/var/home/liang/workspace/.rp-source-picture-20261009/repair-ho5-exact-dns.py",
+    "sha256": "9ab92b5ed2368172abc089db26b39ed94317a3c2bf5389c8e03d8ecbcce453c4",
+    "confirmed_change_set": "e4327e54-72a5-4dcd-b125-ca94eac3dab0",
+    "state": "completed",
+    "administrator_steps_executed": false,
+    "expected_original_configuration_sha256": "4217b7c50bc8032d5f5f854a2e73edc0167851cd3dd013f6b9e3953634337435",
+    "configuration_sha256_rechecked_this_turn": false,
+    "blocked_readonly_preflight": "auto-review rejected full privileged configuration read solely for hashing; not executed; no alternate path or retry",
+    "edit_recovery": {
+      "original_operation": "05c84775-d50c-4df6-bc98-c4d45b73cc19",
+      "error": "INVALID_ARGUMENT, full content not accepted for edit",
+      "file_unchanged_confirmed_by": "738a1bab-e559-412e-bf65-a5061945d613",
+      "corrected_request": "CAS old_text/new_text after observed terminal failure and unchanged file version"
+    },
+    "source_transfer_operation": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+    "confirmed_source_bytes": 0,
+    "transfer_resumed": false
+  },
+  "macbook_secret_metadata": {
+    "device_id": "ba3bf113-2390-466e-88bc-40d5b4f02884",
+    "operation": "abdf71b8-d664-4eb6-b4e1-c6cb20b7dee3",
+    "observed_at_utc": "2026-10-10T00:48:29+00:00",
+    "path": "/Users/jinliang/Library/Application Support/RemotePlay/NativeMesh/mesh.secret",
+    "uid": 0,
+    "gid": 20,
+    "mode": "0600",
+    "regular": true,
+    "symlink": false,
+    "execution_uid": 501,
+    "secret_bytes_read": false,
+    "chown_performed": false,
+    "maintenance_prepare_operation": "8913cdba-3b74-44ed-8f6d-f0dcfc030132",
+    "administrator_authorization": "not_checked_not_granted",
+    "prepared_request_id": "7b5d07fd-713b-4746-bd85-47b101d0a1a8",
+    "prepared_expires_at": 1791593631,
+    "cancel_operation": "a1abe98b-1406-49ab-a7c9-b5e65105c60c",
+    "cancel_outcome": "INVALID_ARGUMENT, not confirmed cancelled; no run/approve performed"
+  },
+  "acceptance": {
+    "live_portal": "not_implemented",
+    "pipewire_worker": "not_implemented",
+    "raw_hevc": "not_implemented",
+    "local_gpui_share": "not_implemented",
+    "linux_native_build": "not_run",
+    "actual_presentation": "unknown",
+    "input_audio_quality_performance": "unknown",
+    "installed_apps_changed": false,
+    "release_authorized": false
+  },
+  "security_review": {
+    "skill": "/Users/jinliang/.codex/skills/security-review/SKILL.md",
+    "scope": "user-readable root script entry, byte identity and module imports, fixed config edit, nonce/scope/revision ownership",
+    "root_entry_fix": "single isolated Python administrator process verifies and executes same bounded regular-file bytes; O_NOFOLLOW|O_NONBLOCK, -I; no helper installed",
+    "remaining_gaps": [
+      "actual sudo authorization",
+      "live service/config binding",
+      "native rollback",
+      "Linux D-Bus/PipeWire/raw encoder/session/GUI integration"
+    ]
+  }
+}
