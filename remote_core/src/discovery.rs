@@ -22,7 +22,7 @@ const CAP_FILE_TRANSFER: u32 = 1 << 2;
 const CAP_CLIPBOARD_SYNC: u32 = 1 << 3;
 const CAP_TALKBACK: u32 = 1 << 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiscoveryScope {
     Lan,
     P2p,
@@ -30,7 +30,7 @@ pub enum DiscoveryScope {
     Relay,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryCapabilities {
     pub can_stream: bool,
     pub can_view: bool,
@@ -81,7 +81,7 @@ impl DiscoveryCapabilities {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryAnnouncement {
     pub network_name: String,
     pub device_id: String,
@@ -204,7 +204,7 @@ impl DiscoveryAnnouncement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveredPeer {
     pub announcement: DiscoveryAnnouncement,
     pub source: SocketAddr,
@@ -258,7 +258,7 @@ pub struct DiscoveryRouteOverride {
     pub scope: DiscoveryScope,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryPeerSnapshot {
     peers: Vec<DiscoveredPeer>,
 }

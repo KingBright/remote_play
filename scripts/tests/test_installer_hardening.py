@@ -50,6 +50,9 @@ class InstallerFixture(unittest.TestCase):
         self.archive = Path(self.temp.name) / 'candidate.zip'
         self.archive.write_bytes(b'synthetic archive, never executed')
         for obj, name, value in [(installer.Path, 'home', lambda: self.home),
+                                 # Synthetic signer/archive hooks here test transaction mechanics.
+                                 # Real fail-closed expectation checks have separate integration tests.
+                                 (installer.release_identity, 'require_context', lambda *a, **k: None),
                                  (installer, 'verify_app', self.verify),
                                  (installer, 'verified_archive', self.archive_view),
                                  (installer, 'service_state', self.service_state),

@@ -33,6 +33,25 @@ impl Instance {
         }
         Self::acquire_mode(directory, Some(renderer))
     }
+    /// Window-only ownership is separate from the service's network/profile lock.
+    /// The caller must authenticate a running background service before using it.
+    pub(crate) fn acquire_frontend(directory: &Path) -> Result<Option<Self>, String> {
+        let directory = directory.join("gui-state");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            if let Err(error) = builder.create(&directory) {
+                if error.kind() != io::ErrorKind::AlreadyExists { return Err(error.to_string()); }
+            }
+            let meta = directory.symlink_metadata().map_err(|e| e.to_string())?;
+            if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } || meta.permissions().mode() & 0o077 != 0 {
+                return Err("Frontend process-state directory is unsafe".into());
+            }
+        }
+        Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)
+    }
     pub fn acquire_headless(directory: &Path) -> Result<Option<Self>, String> {
         Self::acquire_mode(directory, None)
     }
@@ -128,6 +147,8 @@ impl Instance {
             task: None,
         }))
     }
+    pub(crate) fn is_frontend(&self) -> bool { self.info.parent().is_some_and(|p| p.ends_with("gui-state")) }
+
     /// Same lock/activation protocol for every renderer. The callback only signals
     /// its own GUI; it must not start another network or capture runtime.
     pub(crate) fn attach_callback(&mut self, wake: impl Fn() + Send + 'static) -> io::Result<()> {

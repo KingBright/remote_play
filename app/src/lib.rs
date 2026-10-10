@@ -1,3 +1,6 @@
+pub mod entrypoint;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod background_service;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod design_system;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1422,6 +1425,8 @@ impl Drop for UnifiedDiscoveryRuntime {
 
 pub struct UnifiedServiceOwner {
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
+    #[cfg(unix)]
+    frontend_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
@@ -1592,6 +1597,8 @@ impl UnifiedServiceOwner {
 
         Ok(Self {
             runtime,
+            #[cfg(unix)]
+            frontend_epoch: None,
             p2p_runtime,
             relay_runtime,
             discovery_runtime,
@@ -1613,6 +1620,20 @@ impl UnifiedServiceOwner {
     pub fn runtime(&self) -> Arc<Mutex<UnifiedAppRuntime>> {
         self.runtime.clone()
     }
+
+    /// Frontend adapter: consume service-owned routes without binding discovery,
+    /// registering a relay/P2P node, starting a host, or writing a profile.
+    #[cfg(unix)]
+    pub async fn from_background_snapshot(rx: watch::Receiver<DiscoveryPeerSnapshot>) -> Result<Self, UnifiedServiceOwnerError> {
+        let mut owner = Self::start(UnifiedServiceOwnerConfig::default()).await?;
+        owner.tasks.push(spawn_discovery_snapshot_bridge(owner.runtime.clone(), rx.clone()));
+        owner.discovery_snapshot_rx = Some(rx);
+        owner.frontend_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(0)));
+        Ok(owner)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn frontend_epoch(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> { self.frontend_epoch.clone() }
 
     pub fn discovery_snapshot_rx(&self) -> Option<watch::Receiver<DiscoveryPeerSnapshot>> {
         self.discovery_snapshot_rx.clone()
