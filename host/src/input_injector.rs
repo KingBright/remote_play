@@ -407,6 +407,13 @@ fn display_bounds(id: u32) -> Result<core_graphics::geometry::CGRect, Box<dyn Er
     validate_display_bounds(display.bounds(), display.is_online(), display.is_active())
 }
 
+/// Geometry capability only. Permission is checked by the constructor and
+/// every injected event so an OS denial uses the existing INPUT_UNAVAILABLE
+/// error path instead of being mistaken for an unimplemented display target.
+pub(crate) fn display_input_capable(id: u32) -> bool {
+    display_bounds(id).is_ok()
+}
+
 fn validate_display_bounds(bounds: core_graphics::geometry::CGRect, online: bool, active: bool)
     -> Result<core_graphics::geometry::CGRect, Box<dyn Error + Send + Sync>> {
     if !online || !active {

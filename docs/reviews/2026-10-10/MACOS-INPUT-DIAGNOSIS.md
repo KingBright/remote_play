@@ -143,6 +143,12 @@ local pointer position; absolute and touch coordinates update that point.
 Missing or disconnected displays return an error rather than using the main
 display. The existing main-display constructor uses the same implementation.
 
+`display_input_capable(id: u32) -> bool` exposes geometry capability to the
+macOS source catalog. It deliberately does not claim an OS permission grant;
+the constructor/event preflight returns the explicit permission error through
+the existing session error path. Use this catalog helper only after the shared
+dispatcher actually preserves and consumes the selected display ID.
+
 This is a prepared platform interface, not enabled secondary-display support.
 Shared host integration remains with the parent task because the Linux owner
 is editing the same target dispatcher. Exact required sites in
