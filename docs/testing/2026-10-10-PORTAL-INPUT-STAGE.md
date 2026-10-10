@@ -1,4 +1,4 @@
-# Linux Portal input stage — 2026-10-10
+# Linux Portal and Mac selected-source input stage — 2026-10-10
 
 The Linux source now has a consented RemoteDesktop input path, wired into the
 existing original GPUI/Ely application and the common host subscription service.
@@ -41,10 +41,22 @@ grant and returns an error instead of reporting successful input release.
 Recreating a completed stream on the same grant preserves the lease after
 teardown. Existing X11 and platform-specific input paths remain present.
 
-The macOS permission-error source patch from
-`bd7dfa21bab7a088b6858a894bc39e8b578c36c0` is included. Its diagnostic document was
-not copied. Additional macOS display-geometry adaptation is separately owned
-and must use this common dispatch/lifecycle boundary when its API is delivered.
+The macOS source/GUI patches through
+`a770d95419191f99e7c6ebffbea84e066dbf8817` are integrated with the common service.
+Each selected display retains its actual ID and reaches
+`MacInputInjector::for_display(id)`, including negative origins and portrait
+logical coordinates; there is no selected-display fallback to the main screen.
+Catalog geometry capability is distinct from the running process's read-only
+post-event permission check and the Accessibility check for window control.
+Subscription replies require current readiness; denied input reports its actual
+reason while retaining video. Constructors and each event recheck permission.
+The user can explicitly reselect a denied source after correcting the host
+condition, then wait for its current frame and enable control. Neither a
+readiness check nor reselecting the source automatically unlocks the viewer.
+Destroyed-window cleanup releases owned presses and clears remembered pointer
+state; new input remains bound to the selected window/PID. GPUI shows persistent
+blocked-state/focus hints and explicit control actions. Private diagnostic
+documents were not copied into this checkpoint.
 No network protocol, persistent identity, dependency version or signing policy
 has changed.
 
@@ -52,11 +64,13 @@ has changed.
 
 | Check | Result | Meaning |
 | --- | --- | --- |
-| Local macOS Host regression | 133 passed, 1 ignored, 0 failed | Includes private-bus Linux adapter and shared dispatch, plus macOS permission error tests |
+| Local macOS Host regression | 138 passed, 1 ignored, 0 failed | Includes private-bus Linux adapter, selected-display dispatch and independent permission readiness |
+| Local macOS App library / entry | 113 passed, 2 ignored / 1 passed | Full original GPUI suite on the primary branch; no physical presentation/input claim |
 | Local original GPUI product | `cargo check -p remote_play_app --locked` passed | Compilation, no product window started |
 | Local Ely share controls | 3 passed, 0 ignored, 0 failed | GPUI test-context clicks, selection cancellation and disabled repetition |
 | HO5 Host regression | 92 passed, 2 ignored, 0 failed | Native Linux compilation and fixed target effects; no desktop consent fabricated |
 | HO5 original GPUI/native video | Native configuration check passed | Compilation separate from actual presentation |
+| HO5 App library / entry | 114 passed, 1 ignored / 1 passed | Complete native Linux App regressions; includes Ely share controls |
 | HO5 Ely share controls | 3 passed, 0 ignored, 0 failed | Existing target reused; no native visual acceptance |
 | Release scripts | 241 total: 234 passed, 7 skipped, 0 failures/errors | `python3 -m unittest discover -s scripts/tests -v` |
 | Earlier joint Mac regression | 267 total: 260 passed, 7 skipped, 0 failures/errors | Earlier joint identity/lifecycle scope; not this platform input matrix |

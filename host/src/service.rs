@@ -114,6 +114,8 @@ fn validate_host_video_settings(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputTarget {
     Desktop,
+    #[cfg(target_os = "macos")]
+    Display { id: u32 },
     Window { id: u32, pid: i32 },
     #[cfg(all(unix, any(test, target_os = "linux")))]
     Portal,
@@ -127,11 +129,36 @@ fn input_target_for(
         return None;
     }
     match source {
-        CaptureSource::MainDisplay | CaptureSource::Display(_) => Some(InputTarget::Desktop),
+        CaptureSource::MainDisplay => Some(InputTarget::Desktop),
+        CaptureSource::Display(id) => {
+            #[cfg(target_os = "macos")]
+            { Some(InputTarget::Display { id }) }
+            #[cfg(not(target_os = "macos"))]
+            { let _ = id; Some(InputTarget::Desktop) }
+        }
         CaptureSource::Window(id) => pid
             .filter(|pid| *pid > 0)
             .map(|pid| InputTarget::Window { id, pid }),
     }
+}
+
+// Read-only readiness, separate from catalog geometry capability. This never
+// requests consent or posts an event. Constructors/events recheck permission.
+#[cfg(target_os = "macos")]
+fn mac_input_status(target: InputTarget) -> Result<(), String> {
+    crate::input_injector::post_event_access_status().map_err(|e| e.to_string())?;
+    match target {
+        InputTarget::Desktop => crate::input_injector::display_input_status(
+            core_graphics::display::CGDisplay::main().id,
+        ),
+        InputTarget::Display { id } => crate::input_injector::display_input_status(id),
+        InputTarget::Window { .. } => {
+            if crate::window_input::permission_available() { Ok(()) }
+            else { Err("The running RemotePlay host needs Accessibility permission for selected-window control; verify its signed App identity, then reselect the source".into()) }
+        }
+        #[cfg(test)]
+        InputTarget::Portal => return Err("Portal input requires its exact consented session".into()),
+    }.map_err(|e| e.to_string())
 }
 
 struct Subscription {
@@ -146,6 +173,8 @@ struct Subscription {
     audio_active: bool,
     supports_input: bool,
     input_target: Option<InputTarget>,
+    #[cfg(target_os = "macos")]
+    input_probe: fn(InputTarget) -> Result<(), String>,
     last_input_error: Option<Instant>,
     source_revision: u32,
     video_sequence: Arc<std::sync::atomic::AtomicU16>,
@@ -156,11 +185,19 @@ struct Subscription {
 }
 impl Subscription {
     fn supports_input_now(&self) -> bool {
+        self.input_status().is_ok()
+    }
+    fn input_status(&self) -> Result<(), String> {
+        if !self.supports_input || self.input_target.is_none() {
+            return Err("Input is not supported for the selected capture source".into());
+        }
         #[cfg(all(unix, any(test, target_os = "linux")))]
         if let Some(capture) = &self.native_capture {
-            return self.supports_input && capture.input_available();
+            return capture.input_status().map_err(|e| e.to_string());
         }
-        self.supports_input && self.input_target.is_some()
+        #[cfg(target_os = "macos")]
+        (self.input_probe)(self.input_target.unwrap())?;
+        Ok(())
     }
 }
 impl Drop for Subscription {
@@ -656,6 +693,8 @@ impl Connection {
                 audio_active,
                 supports_input,
                 input_target,
+                #[cfg(target_os = "macos")]
+                input_probe: mac_input_status,
                 last_input_error: None,
                 source_revision,
                 video_sequence,
@@ -669,7 +708,7 @@ impl Connection {
         Ok(SessionCommand::Subscribed {
             id,
             audio_owner,
-            supports_input,
+            supports_input: self.subscriptions[&id].supports_input_now(),
         })
     }
 
@@ -818,14 +857,9 @@ async fn inject(
     event: InputEvent,
 ) {
     if !peer.can_input(id) {
-        #[cfg(all(unix, any(test, target_os = "linux")))]
-        if let Some(capture) = peer.subscriptions.get(&id).and_then(|s| s.native_capture.as_ref()) {
-            if let Err(error) = capture.input_status() {
-                input_error(peer, udp, addr, id, &error.to_string()).await;
-            }
-            return;
-        }
-        input_error(peer, udp, addr, id, "Input is not supported for the selected capture source").await;
+        let reason = peer.subscriptions.get(&id).and_then(|s| s.input_status().err())
+            .unwrap_or_else(|| "Selected source is inactive; resume its video before enabling control".into());
+        input_error(peer, udp, addr, id, &reason).await;
         return;
     }
     let Some(target) = peer.subscriptions.get(&id).and_then(|s| s.input_target) else {
@@ -876,6 +910,12 @@ async fn input_error(peer: &mut Connection, udp: &UdpSender, addr: SocketAddr, i
     }
 }
 
+async fn report_input_readiness(peer: &mut Connection, udp: &UdpSender, addr: SocketAddr, id: u32) {
+    let reason = peer.subscriptions.get(&id).filter(|s| s.supports_input)
+        .and_then(|s| s.input_status().err());
+    if let Some(reason) = reason { input_error(peer, udp, addr, id, &reason).await; }
+}
+
 type BoundInjector = (InputTarget, Box<dyn InputInjector + Send + Sync>);
 #[derive(Default)]
 struct LazyInputInjector(std::sync::Mutex<Option<BoundInjector>>);
@@ -908,6 +948,10 @@ impl LazyInputInjector {
                         Box::new(crate::windows_input::WindowsInputInjector::new()?)
                     }
                 }
+                #[cfg(target_os = "macos")]
+                InputTarget::Display { id } => Box::new(
+                    crate::input_injector::MacInputInjector::for_display(id)?
+                ),
                 InputTarget::Window { id, pid } => {
                     #[cfg(target_os = "macos")]
                     {
@@ -1134,8 +1178,12 @@ async fn run_host_service_inner(
                                         Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let accepted = result.is_ok();
                                     let reply = result.unwrap_or_else(|reason| SessionCommand::Error { request_id: id, reason });
                                     send_session(&udp_sender, addr, reply).await;
+                                    if accepted && let Some(peer) = peers.get_mut(&addr) {
+                                        report_input_readiness(peer, &udp_sender, addr, id).await;
+                                    }
                                 }
                                 SessionCommand::SwitchSource { id, request_id, source } => {
                                     // Never carry a held button/key across capture sources.
@@ -1144,7 +1192,11 @@ async fn run_host_service_inner(
                                         Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let accepted = result.is_ok();
                                     send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason })).await;
+                                    if accepted && let Some(peer) = peers.get_mut(&addr) {
+                                        report_input_readiness(peer, &udp_sender, addr, id).await;
+                                    }
                                 }
                                 SessionCommand::Unsubscribe { id } => {
                                     if input_owner.owner == Some((addr,id)) { let _ = input_owner.release(&injector).await; }
@@ -1331,6 +1383,8 @@ mod failure_admission_tests {
                 audio_active: false,
                 supports_input: true,
                 input_target: Some(InputTarget::Desktop),
+                #[cfg(target_os = "macos")]
+                input_probe: |_| Ok(()),
                 last_input_error: None,
                 source_revision: 10,
                 video_sequence: Arc::new(std::sync::atomic::AtomicU16::new(37)),
@@ -1341,6 +1395,23 @@ mod failure_admission_tests {
             },
             stopped,
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn geometry_capability_never_substitutes_for_actual_input_permission() {
+        let (mut subscription, _) = mock_subscription(CaptureSource::Display(77));
+        subscription.input_target = Some(InputTarget::Display { id: 77 });
+        assert!(subscription.supports_input_now());
+        subscription.input_probe = |_| Err("running host input-posting permission denied".into());
+        assert!(subscription.supports_input);
+        assert!(!subscription.supports_input_now());
+        assert!(subscription.input_status().unwrap_err().contains("permission denied"));
+        // Rechecking real readiness permits recovery, without changing the
+        // catalog capability, source revision, or viewer control lock.
+        subscription.input_probe = |_| Ok(());
+        assert!(subscription.supports_input_now());
+        assert_eq!(subscription.source_revision, 10);
     }
 
     #[cfg(unix)]
@@ -1855,5 +1926,16 @@ mod input_target_tests {
             input_target_for(CaptureSource::MainDisplay, None, true),
             Some(InputTarget::Desktop)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn each_selected_display_keeps_its_actual_id_and_rejects_unscoped_input() {
+        for id in [1, 77, u32::MAX] {
+            assert_eq!(input_target_for(CaptureSource::Display(id), None, true),
+                       Some(InputTarget::Display { id }));
+        }
+        assert_ne!(InputTarget::Display { id: 77 }, InputTarget::Desktop);
+        assert_eq!(input_target_for(CaptureSource::Display(77), None, false), None);
     }
 }

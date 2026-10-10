@@ -262,7 +262,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         });
     }
     pub fn switch_source(&mut self, source: CaptureSource) {
-        if source == self.source || self.pending.is_some() {
+        // A previously denied source must be explicitly selectable again after
+        // the user corrects host permission. Keep the ordinary duplicate guard.
+        if (source == self.source && self.supports_input) || self.pending.is_some() {
             return;
         }
         self.release_input();
@@ -371,9 +373,12 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         } else if !self.confirmed || self.pending.is_some() {
             "Waiting for the host to confirm this source"
         } else if !self.supports_input {
-            "This source is view-only on this host; its window input is not available"
+            match self.source {
+                CaptureSource::Window(_) => "This host cannot control the selected window. Check RemotePlay Accessibility on that host or choose an input-enabled source",
+                CaptureSource::MainDisplay | CaptureSource::Display(_) => "Display control unavailable. Read the host reason below; after correcting permission or source availability, reselect this source before enabling control",
+            }
         } else if self.paused || self.background_paused || self.activity_pending.is_some() {
-            "Control is disabled while video is paused or resuming"
+            "Remote control paused. Resume video and wait for a frame from this source"
         } else if self
             .stats
             .video_decoder_needs_keyframe
@@ -527,6 +532,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.source_revision = request_id;
                     self.request.source = source;
                     self.supports_input = supports_input;
+                    self.error.clear();
                     self.pending = None;
                     self.confirmed = true;
                     self.uploaded_at = None;

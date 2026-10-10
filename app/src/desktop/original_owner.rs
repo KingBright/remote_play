@@ -164,6 +164,7 @@ pub(crate) struct ViewSnapshot {
     pub source_epoch: Option<Instant>,
     pub message: String,
     pub input_status: String,
+    pub input_eligible: bool,
 }
 impl OriginalOwner {
     pub fn new(backend: Arc<UnifiedServiceOwner>) -> Arc<Self> {
@@ -287,6 +288,7 @@ impl OriginalOwner {
                 source_epoch: None,
                 message: p.message.clone(),
                 input_status: "Connecting to selected device".into(),
+                input_eligible: false,
             };
         }
         if let Some(e) = p.active() {
@@ -316,6 +318,7 @@ impl OriginalOwner {
                 } else {
                     s.error.clone()
                 },
+                input_eligible: s.can_input(),
             }
         } else {
             let role = self.backend.runtime().lock().unwrap().role_state().clone();
@@ -333,6 +336,7 @@ impl OriginalOwner {
                 source_epoch: None,
                 message: p.message.clone(),
                 input_status: "Choose a device".into(),
+                input_eligible: false,
             }
         }
     }
