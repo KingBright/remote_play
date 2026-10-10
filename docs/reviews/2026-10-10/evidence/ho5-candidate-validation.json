@@ -1,83 +1,59 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "evidence_scope": "redacted summary; raw machine paths, operation IDs, boot IDs, process IDs and logs retained locally",
   "tested_commit": "90fcce0a474abcd29369f216e331d7d240fecc30",
+  "support_source_commit": "c4d7031e29e5aa11d18c92e8954603debd394194",
   "repository": "https://github.com/KingBright/remote_play.git",
   "branch": "codex/gpui-mvvm-migration",
-  "remote_sha_verified": true,
-  "host_repository": "/var/home/liang/workspace/remote_play",
-  "build_target": "/var/home/liang/workspace/remote_play/target",
   "source_delivery": {
-    "operation_id": "3b355787-de92-4b57-9ca6-924c6eebd0ab",
-    "exit_code": 0,
     "manifest_files": 938,
     "changed_mtimes_refreshed": 891,
     "source_digest": "f56f3d4ea2534573719ff24c7e8974ad4c63dec8b09c316fa85d8a67e7071bdf",
-    "old_branch_preserved": "main@969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+    "previous_ref_preserved": "main@969ca10922eb17e705877b7ca4cf5ce3bec836c1",
+    "existing_checkout_and_target_reused": true,
     "git_clean_after_build": true,
     "new_mcp_file_transfer": false
-  },
-  "boot": {
-    "operation_id": "71cc7108-e021-4c8a-837f-9d91f35c7849",
-    "observed_at_utc": "2026-10-10T08:22:43.949238+00:00",
-    "boot_id": "2788a001-2ddf-453b-b616-b58198a9ae3f",
-    "old_boot_id": "7cdb1ab9-985d-4b40-b4ee-fed5d587163a",
-    "uptime_seconds": 1911.35,
-    "booted_deployment": "44.20261006.1",
-    "transaction": null,
-    "agent_pid": 2019,
-    "agent_service": "active/running",
-    "agent_version": "0.10.25",
-    "online": true
   },
   "checks": [
     {
       "command": "cargo check -p host --lib --locked --offline",
-      "operation_id": "f867b30c-8322-4c09-8830-da4c4d6a925e",
       "exit_code": 101,
-      "reason": "PipeWire missing from Cargo cache"
+      "reason": "PipeWire absent from cache"
     },
     {
       "command": "cargo check -p host --lib --locked",
-      "operation_id": "a6836c26-ad55-4a9e-b3ef-e0df26e65af3",
       "exit_code": 0,
-      "registry": "existing rsproxy-sparse configuration; no override"
+      "registry": "existing configuration; no override or lockfile change"
     },
     {
       "command": "cargo check -p remote_play_app --bin remote_play --locked --offline",
-      "operation_id": "ae1705b0-e8fc-468c-9ca1-910a79024b11",
       "exit_code": 0
     },
     {
       "command": "cargo check -p remote_play_app --bin remote_play --features native-linux-video --locked --offline",
-      "operation_id": "f494f84e-3aad-400d-b122-3a1b1c2e8d8e",
-      "exit_code": 0,
-      "ffmpeg_include": "/var/home/liang/workspace/.rp-linux-native-20261003/deps/ffmpeg-8.1.2"
+      "exit_code": 0
     },
     {
       "command": "cargo test -p host --lib linux_pipewire::tests --locked --offline",
-      "operation_id": "2c4d37d0-5cfb-4390-8cee-a052b0bfb8d8",
       "exit_code": 101,
-      "reason": "audiopus_sys generated lib64 archive while emitting lib search directory"
+      "reason": "generated Opus archive in out/lib64 while dependency emitted out/lib"
     },
     {
       "command": "cargo test -p host --lib linux_pipewire::tests --locked --offline",
-      "operation_id": "ed8e5cf9-262c-4a63-a023-264a985785c9",
       "exit_code": 0,
       "passed": 11,
       "failed": 0,
       "ignored": 0,
-      "library_path": "/var/home/liang/workspace/remote_play/target/debug/build/audiopus_sys-0523e3ba5c46edb2/out/lib64"
+      "conditions": "command-local LIBRARY_PATH uses existing generated Opus out/lib64; no source/system symlink edits"
     }
   ],
   "sdk": {
-    "metadata_operation": "eff6d9d6-27b7-4a61-930a-eea65f2c3937",
-    "signature_header_match_operation": "8661338c-42ca-4074-87fc-40e6e0b116e7",
-    "exit_code": 0,
+    "ffmpeg_archive_version": "8.1.2",
     "archive_sha256": "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
     "signer_fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
     "official_signer_source": "https://ffmpeg.org/download.html",
     "source_headers_matched": 905,
-    "generated_avconfig": "exists; not in signed archive",
+    "generated_avconfig": "separate",
     "header_versions": {
       "codec": [
         62,
@@ -102,42 +78,29 @@
         103
       ]
     },
-    "system_packages_config_reboot_modified_by_this_task": false
+    "system_packages_or_drivers_replaced": false
   },
   "running_product": {
-    "operation_id": "803abbe6-ca9c-4b3e-befb-63ce4cd698d0",
-    "service": "remote-play-current.service",
     "state": "active/running",
-    "pid": 3346,
-    "executable_observation": "/proc/3346/exe readlink Permission denied; no alternate route used",
+    "actual_executable_verification": "denied; no alternate route used",
     "actual_version": null,
-    "actual_source_commit": null
+    "actual_source_commit": null,
+    "service_changed": false
   },
   "local_preservation": {
     "unrelated_dirty_paths": 88,
     "status_and_bytes_preserved": true,
-    "index_empty_after_candidate_commit": true
-  },
-  "acceptance": {
-    "new_binary_linked": false,
-    "candidate_gui_started": false,
-    "new_candidate_installed": false,
-    "nas_published": false,
-    "actual_presentation": "pending",
-    "input_audio_files": "pending",
-    "visual_review": "pending",
-    "long_duration": "pending",
-    "full_startup_identity_gate": "not implemented yet; concrete gap recorded",
-    "ui_deployment_hold": true
+    "index_empty_after_commit": true
   },
   "local_regression_followup": {
     "command": "PYTHONDONTWRITEBYTECODE=1 RP_SIGNING_INTEGRATION=0 python3 -m unittest discover -s scripts/tests -v",
     "exit_code": 0,
-    "ran": 197,
+    "total": 197,
+    "passed": 191,
     "skipped": 6,
+    "failed": 0,
     "new_launch_lifecycle_tests": 6,
-    "log_sha256": "f5ef0c8e3522d0b9b1acb1aed9fb0db25d8c8b8d2921f3a18b6dc675d05bfcad",
-    "scope": "local working tree; separate uncommitted Android release tests included",
+    "scope": "local working tree; separate uncommitted Android tests included",
     "native_signing_integration": "not run"
   },
   "gui_lifecycle_helper": {
@@ -146,5 +109,7 @@
     "installed_launcher_integrated": false,
     "background_keepalive_preserved": true,
     "full_product_identity_gate": "pending"
-  }
+  },
+  "actual_binary_and_portal_followup": "ho5-local-portal-acceptance.json",
+  "ui_deployment_hold": true
 }

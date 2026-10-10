@@ -1,0 +1,107 @@
+{
+  "schema": 2,
+  "evidence_scope": "redacted reproducibility summary; raw host paths, operation IDs, process IDs and logs retained locally",
+  "source_commit": "c4d7031e29e5aa11d18c92e8954603debd394194",
+  "observed_at_utc": "2026-10-10T09:16:26Z",
+  "build": {
+    "observed_at_utc": "2026-10-10T08:55:37Z",
+    "commands": [
+      "cargo build -p remote_play_app --bin remote_play --features native-linux-video --locked --offline",
+      "cargo build -p host --example linux_portal_control --locked --offline"
+    ],
+    "exit_code": 0,
+    "existing_target_reused": true,
+    "cargo_build_jobs": 2,
+    "opus_link_fix": "command-local LIBRARY_PATH points to the existing audiopus_sys build's out/lib64; no system symlink or source change",
+    "ffmpeg_include": "RP_VERIFIED_FFMPEG_INCLUDE points to previously verified headers; no system package replacement",
+    "manifest_files": 940,
+    "source_digest": "ebf66ad7c83018eb80de285eb7c964da78b6f73c3423956a44656db6752d28d0",
+    "candidate_sha256": "6d742360ed795a7f09b115bbb1f3d6ce8994ae6dc1139c153d9583761b8b4658",
+    "binary_linked": true,
+    "compiled_commit_embedded": false,
+    "source_provenance": "verified checkout/manifest, changed-input mtime refresh and completed build; metadata alone does not prove compiled commit"
+  },
+  "rollback": {
+    "existing_disk_sha256": "4cd160cef5da7644486e7f46a695ad9753e8994820986c00723334a786adac2c",
+    "matched_retained_linux_package": true,
+    "rollback_copy_verified": true,
+    "service_unchanged": true,
+    "profiles_or_secrets_read_or_copied": false,
+    "loaded_process_executable_verification": "denied; no alternate route used",
+    "actual_process_version": null,
+    "actual_process_compiled_commit": null
+  },
+  "portal_attempts": [
+    {
+      "source_kind": "window",
+      "start_utc": "2026-10-10T08:57:16Z",
+      "elapsed_seconds": 25.004,
+      "child_exit_code": 1,
+      "result": "test-owned SIGINT cancellation; no successful selection",
+      "force_killed": false
+    },
+    {
+      "source_kind": "monitor",
+      "start_utc": "2026-10-10T08:57:41Z",
+      "elapsed_seconds": 25.006,
+      "child_exit_code": 1,
+      "result": "test-owned SIGINT cancellation; no successful selection",
+      "force_killed": false
+    }
+  ],
+  "readonly_followup": {
+    "desktop": "KDE",
+    "session_type": "wayland",
+    "session_active": true,
+    "user_manager_wayland_environment_present": true,
+    "agent_daemon_wayland_display_unset": true,
+    "environment_was_not_modified": true,
+    "portal_version": 5,
+    "kde_portal_backend": "active/running (actual plasma portal unit)",
+    "pipewire": "active/running",
+    "wireplumber": "active/running",
+    "selector_visibility": "not independently observed; a cancelled historical request cannot be proved visible by later service metadata",
+    "normal_interactive_route": "no HO5 desktop screenshot/control tool exposed in current session",
+    "new_portal_request_sent": false,
+    "remaining_portal_control_processes": 0,
+    "gui_identity_gate": {
+      "command": "python3 scripts/verify_desktop_gui.py --binary <verified artifact> --platform linux --version 2.0.0-alpha.8",
+      "candidate": {
+        "exit_code": 0,
+        "gui_identity_verified": true,
+        "network_started": false,
+        "window_started": false
+      },
+      "existing_installed_disk": {
+        "exit_code": 1,
+        "rejection_reason": "metadata still advertises the legacy diagnostic GUI"
+      },
+      "actual_loaded_process_identity": "unknown; disk-file gate does not verify the running process",
+      "full_build_commit_startup_gate": "not implemented: ProductInfo and per-profile owner metadata do not encode compiled commit/build"
+    }
+  },
+  "acceptance": {
+    "captured_frames": 0,
+    "cancelled_session_close_rpc": "not exposed in control output; dialog/session/FD cleanup unknown",
+    "revocation_after_capture": "not tested",
+    "stop_restart_capture": "not tested",
+    "changing_pipewire_frames": "not tested",
+    "multiwindow_isolation": "not tested",
+    "actual_gpui_presentation": "not tested",
+    "input_audio_files": "not tested",
+    "next_required_condition": "local desktop user must make the normal window/monitor choice through the actual selector",
+    "candidate_gui_started": false,
+    "candidate_installed": false,
+    "service_restarted": false,
+    "mac_app_touched": false,
+    "ui_deployment_hold": true
+  },
+  "local_python_regression": {
+    "total": 197,
+    "passed": 191,
+    "skipped": 6,
+    "failed": 0,
+    "native_signing_integration": false,
+    "repeated_for_documentation": false
+  }
+}
