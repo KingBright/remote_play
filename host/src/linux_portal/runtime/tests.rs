@@ -520,7 +520,7 @@ async fn actual_bus_prepared_frames_use_pixel_geometry_and_stop_on_revoke() {
     assert_eq!(info.process_id, None);
     assert_eq!(
         info.source,
-        CaptureSource::Window(capture.generation() as u32)
+        CaptureSource::Window(capture.generation() as u32 | 0x8000_0000)
     );
     let frames = capture.mailbox();
     let mut capturer =
@@ -610,4 +610,106 @@ async fn actual_bus_response_from_another_sender_cannot_authorize_selection() {
     let mut lease = selecting.await.unwrap().unwrap();
     assert!(lease.close().await);
     assert_eq!(fixture.calls.count("select"), 1);
+}
+
+#[tokio::test]
+async fn worker_exit_revokes_private_portal_and_weak_supervisor_does_not_keep_grant_alive() {
+    struct FakeWorker(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for FakeWorker {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let (fixture, capture) = prepared_fixture().await;
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, rx) = oneshot::channel();
+    capture.attach_worker(Box::new(FakeWorker(dropped.clone())), rx);
+    let mut revoked = capture.revocation();
+    done.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), revoked.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(*revoked.borrow());
+    assert!(capture.mailbox().receive().await.is_err());
+    fixture.calls.wait("session_close").await;
+    drop(capture);
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn adopting_worker_mailbox_preserves_newest_pixels_and_dynamic_geometry() {
+    let fixture = Fixture::new(Behavior::EarlyResponse, 2).await;
+    let (_cancel, rx) = watch::channel(false);
+    let mut lease = fixture.select(rx).await.unwrap();
+    let (_, fd) = lease.take_pipewire_remote().unwrap();
+    drop(fd);
+    let generation = lease.selected_source().generation;
+    let mailbox = Arc::new(FrameMailbox::new(generation).unwrap());
+    assert!(mailbox.set_format_revision(3));
+    let mut first = crate::linux_raw_encode::tests::frame(
+        crate::linux_frame::PixelFormat::Nv12,
+        crate::linux_raw_encode::tests::known_color(),
+        1,
+    );
+    first.stamp.generation = generation;
+    first.stamp.format_revision = 3;
+    let mut newest = crate::linux_raw_encode::tests::frame(
+        crate::linux_frame::PixelFormat::Nv12,
+        crate::linux_raw_encode::tests::known_color(),
+        2,
+    );
+    newest.stamp.generation = generation;
+    newest.stamp.format_revision = 3;
+    assert!(mailbox.publish(newest));
+    let capture = lease.prepare_with_mailbox(first, mailbox.clone()).unwrap();
+    assert_eq!(mailbox.receive().await.unwrap().stamp.sequence, Some(2));
+    let mut changed = crate::linux_raw_encode::tests::frame(
+        crate::linux_frame::PixelFormat::Nv12,
+        crate::linux_raw_encode::tests::known_color(),
+        3,
+    );
+    changed.stamp.generation = generation;
+    changed.stamp.format_revision = 3;
+    changed.source_format.crop = Some(crate::linux_frame::Crop {
+        x: 0,
+        y: 0,
+        width: 64,
+        height: 64,
+    });
+    changed.width = 64;
+    changed.planes[0].truncate(64 * 64);
+    changed.planes[1].truncate(64 * 32);
+    changed.validate_owned().unwrap();
+    assert!(mailbox.publish(changed));
+    assert_eq!(
+        (capture.source_info().width, capture.source_info().height),
+        (64, 64)
+    );
+    capture.revoke();
+    fixture.calls.wait("session_close").await;
+}
+
+#[tokio::test]
+async fn local_cancel_rejects_delivery_before_cleanup_actor_runs() {
+    let (fixture, capture) = prepared_fixture().await;
+    assert!(!capture.is_revoked());
+    fixture
+        .cancel_keepalive
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .send_replace(true);
+    // No yield: checking only the background actor's notification would still
+    // admit this frame/commit after the local sharing window was closed.
+    assert!(capture.is_revoked());
+    let mut frame = crate::linux_raw_encode::tests::frame(
+        crate::linux_frame::PixelFormat::Nv12,
+        crate::linux_raw_encode::tests::known_color(),
+        1,
+    );
+    frame.stamp.generation = capture.generation();
+    assert!(capture.publish_owned(frame).is_err());
+    fixture.calls.wait("session_close").await;
 }

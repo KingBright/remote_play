@@ -59,6 +59,7 @@ pub(crate) fn frame(pixel: PixelFormat, color: SourceColor, sequence: u64) -> Ow
         &planes,
         FrameStamp {
             generation: 9,
+            format_revision: 0,
             sequence: Some(sequence),
             pipewire_pts_ns: Some(900_000_000 + sequence as i64),
             arrival_ts_us: remote_core::timing::quanta_now_us(),
@@ -351,6 +352,7 @@ fn reference_au_backpressure_preserves_order_and_multislice_frames() {
         stamps_tx
             .send(FrameStamp {
                 generation: 1,
+                format_revision: 0,
                 sequence: Some(sequence),
                 pipewire_pts_ns: None,
                 arrival_ts_us: sequence + 1,
@@ -426,4 +428,25 @@ async fn cancellation_unblocks_full_compressed_queue_and_reaps_ffmpeg() {
         output.stdout.is_empty(),
         "fixture encoder PID was not reaped"
     );
+}
+
+#[test]
+fn expired_raw_encoder_input_is_not_renewed_on_submit_and_initial_snapshot_is_explicit() {
+    let input = Input::default();
+    let mut expired = frame(PixelFormat::Nv12, known_color(), 1);
+    expired.stamp.format_revision = 1;
+    expired.received_at = std::time::Instant::now() - Duration::from_secs(1);
+    input.submit(expired).unwrap();
+    input.close_after_latest();
+    assert!(input.receive().is_none());
+    let input = Input::default();
+    let mut initial = frame(PixelFormat::Nv12, known_color(), 2);
+    initial.stamp.format_revision = 1;
+    initial.initial_snapshot = true;
+    initial.received_at = std::time::Instant::now() - Duration::from_secs(1);
+    input.submit(initial).unwrap();
+    let retained = input.receive().unwrap();
+    assert!(retained.is_expired(Duration::from_millis(250)));
+    assert_eq!(retained.stamp.sequence, Some(2));
+    input.close();
 }

@@ -10,6 +10,8 @@ pub(crate) mod device_list;
 pub(crate) mod device_drawer;
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod session_recovery;
+#[cfg(all(feature = "gpui-restoration", any(target_os = "linux", test)))]
+pub(crate) mod local_share;
 pub(crate) mod instance;
 mod model;
 #[cfg(all(test, feature = "gpui-restoration"))]

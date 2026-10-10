@@ -58,6 +58,8 @@ pub struct FrameFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameStamp {
     pub generation: u64,
+    /// Local negotiation epoch; never serialized into the network protocol.
+    pub format_revision: u64,
     pub sequence: Option<u64>,
     /// PipeWire's nanosecond PTS. Its epoch is not the host timing epoch.
     pub pipewire_pts_ns: Option<i64>,
@@ -82,6 +84,8 @@ pub struct OwnedFrame {
     pub planes: Vec<Vec<u8>>,
     pub mapping_offsets: Vec<u32>,
     pub stamp: FrameStamp,
+    pub(crate) received_at: std::time::Instant,
+    pub(crate) initial_snapshot: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +185,9 @@ impl FrameFormat {
 }
 
 impl OwnedFrame {
+    pub(crate) fn is_expired(&self, max_age: std::time::Duration) -> bool {
+        self.received_at.elapsed() > max_age
+    }
     /// Recheck the public owned boundary before passing bytes to a subprocess.
     pub fn validate_owned(&self) -> Result<(), FrameError> {
         if self.stamp.generation == 0 {
@@ -270,12 +277,17 @@ impl OwnedFrame {
             planes: owned,
             mapping_offsets: planes.iter().map(|plane| plane.mapping_offset).collect(),
             stamp,
+            received_at: std::time::Instant::now(),
+            initial_snapshot: false,
         })
     }
 }
 
 struct MailboxState {
-    latest: Option<OwnedFrame>,
+    latest: Option<(OwnedFrame, std::time::Instant)>,
+    format_revision: u64,
+    dimensions: Option<(u32, u32)>,
+    delivered: bool,
     paused: bool,
     closed: bool,
 }
@@ -284,19 +296,46 @@ struct MailboxState {
 /// is accepted here. Closing revokes the generation and wakes blocked readers.
 pub struct FrameMailbox {
     generation: u64,
+    max_age: Option<std::time::Duration>,
+    allow_initial_snapshot: bool,
     state: Mutex<MailboxState>,
     changed: Notify,
 }
 
 impl FrameMailbox {
     pub fn new(generation: u64) -> Result<Self, FrameError> {
+        Self::with_max_age(generation, None)
+    }
+
+    pub(crate) fn with_max_age(
+        generation: u64,
+        max_age: Option<std::time::Duration>,
+    ) -> Result<Self, FrameError> {
+        Self::with_policy(generation, max_age, false)
+    }
+    pub(crate) fn native_stream(
+        generation: u64,
+        max_age: std::time::Duration,
+    ) -> Result<Self, FrameError> {
+        Self::with_policy(generation, Some(max_age), true)
+    }
+    fn with_policy(
+        generation: u64,
+        max_age: Option<std::time::Duration>,
+        allow_initial_snapshot: bool,
+    ) -> Result<Self, FrameError> {
         if generation == 0 {
             return Err(FrameError::Generation);
         }
         Ok(Self {
             generation,
+            max_age,
+            allow_initial_snapshot,
             state: Mutex::new(MailboxState {
                 latest: None,
+                format_revision: 0,
+                dimensions: None,
+                delivered: false,
                 paused: false,
                 closed: false,
             }),
@@ -305,14 +344,58 @@ impl FrameMailbox {
     }
 
     pub fn publish(&self, frame: OwnedFrame) -> bool {
+        self.publish_inner(frame, false)
+    }
+    pub(crate) fn publish_initial(&self, frame: OwnedFrame) -> bool {
+        self.publish_inner(frame, true)
+    }
+    fn publish_inner(&self, frame: OwnedFrame, only_if_empty: bool) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed || state.paused || frame.stamp.generation != self.generation {
+        if state.closed
+            || state.paused
+            || frame.stamp.generation != self.generation
+            || frame.stamp.format_revision != state.format_revision
+        {
             return false;
         }
-        state.latest = Some(frame);
+        if !only_if_empty || state.latest.is_none() {
+            state.dimensions = Some((frame.width, frame.height));
+            let received_at = frame.received_at;
+            state.latest = Some((frame, received_at));
+        }
         drop(state);
         self.changed.notify_one();
         true
+    }
+
+    /// Invalidate queued pixels before admitting a newly negotiated format.
+    pub(crate) fn set_format_revision(&self, revision: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed || revision <= state.format_revision {
+            return false;
+        }
+        state.format_revision = revision;
+        state.latest = None;
+        true
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed
+    }
+    pub(crate) fn is_paused(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .paused
+    }
+    pub(crate) fn dimensions(&self) -> Option<(u32, u32)> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .dimensions
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -341,8 +424,18 @@ impl FrameMailbox {
                 if state.closed {
                     return Err(FrameError::Generation);
                 }
-                if let Some(frame) = state.latest.take() {
-                    return Ok(frame);
+                if let Some((mut frame, published)) = state.latest.take() {
+                    // A damage-only source may remain unchanged between picker
+                    // confirmation and the viewer's explicit source switch. Its
+                    // latest valid snapshot is available once to that first
+                    // consumer, retaining the original arrival/copy timestamp.
+                    // Pause, format changes and revocation clear queued pixels.
+                    let initial = self.allow_initial_snapshot && !state.delivered;
+                    if initial || self.max_age.is_none_or(|age| published.elapsed() <= age) {
+                        frame.initial_snapshot = initial;
+                        state.delivered = true;
+                        return Ok(frame);
+                    }
                 }
             }
             notification.await;
@@ -367,6 +460,7 @@ mod tests {
     fn stamp(sequence: u64) -> FrameStamp {
         FrameStamp {
             generation: 1,
+            format_revision: 0,
             sequence: Some(sequence),
             pipewire_pts_ns: None,
             arrival_ts_us: 4321,

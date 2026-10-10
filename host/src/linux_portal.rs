@@ -18,6 +18,9 @@ pub struct PeerOwner {
 }
 
 impl PeerOwner {
+    pub(crate) fn connection_id(self) -> u32 {
+        self.connection_id
+    }
     /// Caller must obtain nonce from the host's verified authentication table.
     /// An address, display name, or a remotely supplied node ID is insufficient.
     pub fn from_authenticated_connection(

@@ -71,6 +71,14 @@ impl Input {
                 return None;
             }
             if let Some(frame) = state.latest.take() {
+                // Drop only pending raw pixels, never compressed/reference AUs.
+                // First handoff and a later publish cannot renew capture age.
+                if frame.stamp.format_revision != 0
+                    && !frame.initial_snapshot
+                    && frame.is_expired(std::time::Duration::from_millis(250))
+                {
+                    continue;
+                }
                 return Some(frame);
             }
             if state.finishing {
@@ -100,6 +108,7 @@ pub struct RawHevcSource {
     width: u32,
     height: u32,
     generation: u64,
+    format_revision: u64,
 }
 impl RawHevcSource {
     pub fn start(first: &OwnedFrame, settings: RawSettings) -> Result<Self> {
@@ -177,10 +186,12 @@ impl RawHevcSource {
             width: first.width,
             height: first.height,
             generation: first.stamp.generation,
+            format_revision: first.stamp.format_revision,
         })
     }
     pub fn matches(&self, frame: &OwnedFrame) -> bool {
         self.generation == frame.stamp.generation
+            && self.format_revision == frame.stamp.format_revision
             && self.format == frame.source_format
             && (self.width, self.height) == (frame.width, frame.height)
     }

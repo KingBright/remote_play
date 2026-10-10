@@ -300,6 +300,10 @@ struct RestoredDashboard {
     drawer_open: bool,
     active_tab: DrawerTab,
     device_list_state: DeviceListState,
+    #[cfg(target_os = "linux")]
+    local_share_state: crate::desktop::local_share::State,
+    #[cfg(target_os = "linux")]
+    local_share_owner: crate::desktop::local_share::linux::Owner,
     session_commands: SessionCommandState,
     source_commands: SessionCommandState,
     discovery_commands: SessionCommandState,
@@ -350,6 +354,8 @@ impl RestoredDashboard {
         };
         let root_focus = cx.focus_handle();
         window.focus(&root_focus);
+        #[cfg(target_os = "linux")]
+        let local_share_owner = crate::desktop::local_share::linux::Owner::new(runtime.owner.local_portal_shares());
         Self {
             runtime,
             owner,
@@ -380,6 +386,10 @@ impl RestoredDashboard {
             drawer_open: true,
             active_tab: DrawerTab::Devices,
             device_list_state: DeviceListState::default(),
+            #[cfg(target_os = "linux")]
+            local_share_state: crate::desktop::local_share::State::default(),
+            #[cfg(target_os = "linux")]
+            local_share_owner,
             session_commands: SessionCommandState::default(),
             source_commands: SessionCommandState::default(),
             discovery_commands: SessionCommandState::default(),
@@ -1711,6 +1721,10 @@ impl Render for RestoredDashboard {
                     self.mesh_pairing_snapshot.clone(),
                     self.active_tab,
                     &self.device_list_state,
+                    #[cfg(target_os = "linux")]
+                    &self.local_share_state,
+                    #[cfg(target_os = "linux")]
+                    self.local_share_owner.active_keys(),
                     self.input_locked,
                     side_services,
                     self.stream_settings.values().resolution(),
@@ -2683,6 +2697,8 @@ fn slide_over_management_drawer(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
+    #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
+    #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     input_locked: bool,
     side_services: SideServiceUiState,
     selected_resolution: (u32, u32),
@@ -2802,6 +2818,8 @@ fn slide_over_management_drawer(
                         devices,
                         role,
                         device_list_state,
+                        #[cfg(target_os = "linux")] local_share_state,
+                        #[cfg(target_os = "linux")] local_share_active,
                         owner.clone(),
                         cx,
                     )
@@ -2860,13 +2878,23 @@ fn drawer_tab_button(
 
 fn drawer_devices_tab(
     devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
+    #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
+    #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let view = cx.weak_entity();
     let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
-    div().flex().flex_col().gap_3()
-    .child(crate::desktop::session_recovery::ConnectionRecoveryControls::new(
+    let content = div().flex().flex_col().gap_3();
+    #[cfg(target_os = "linux")]
+    let content = {
+        let share_view = cx.weak_entity();
+        content.child(crate::desktop::local_share::Controls::new(
+            local_share_state.clone(), local_share_active,
+            move |action, cx| { let _ = share_view.update(cx, |this, cx| this.dispatch_local_share(action, cx)); },
+        ))
+    };
+    content.child(crate::desktop::session_recovery::ConnectionRecoveryControls::new(
         owner.session_tabs(), move |action, cx| {
             let _ = recovery_view.update(cx, |this, cx| this.dispatch_session_action(action, cx));
         },
@@ -2882,6 +2910,39 @@ fn drawer_devices_tab(
 }
 
 impl RestoredDashboard {
+    #[cfg(target_os = "linux")]
+    fn dispatch_local_share(&mut self, action: crate::desktop::local_share::Action, cx: &mut Context<Self>) {
+        use crate::desktop::local_share::Effect;
+        let Some(effect) = self.local_share_state.reduce(action) else { return; };
+        match effect {
+            Effect::Cancel(attempt) => self.local_share_owner.cancel(attempt),
+            Effect::Stop(key) => self.local_share_owner.stop(&key),
+            Effect::Refresh(receipt) => {
+                let future = self.local_share_owner.refresh(receipt);
+                let task = tokio::spawn(future);
+                cx.spawn(async move |view, cx| {
+                    let result = task.await.unwrap_or_else(|_| Err("Viewer refresh stopped".into()));
+                    let _ = view.update(cx, |this, cx| {
+                        match result {
+                            Ok(rows) => { this.local_share_state.refreshed(receipt, rows); }
+                            Err(error) => { this.local_share_state.refresh_failed(receipt, error); }
+                        }
+                        cx.notify();
+                    });
+                }).detach();
+            }
+            Effect::Select { attempt, key, kind } => {
+                let future = self.local_share_owner.select(attempt, key, kind);
+                let task = tokio::spawn(future);
+                cx.spawn(async move |view, cx| {
+                    let result = task.await.unwrap_or_else(|_| Err("Selection stopped".into()));
+                    let _ = view.update(cx, |this, cx| { this.local_share_state.completed(attempt, result); cx.notify(); });
+                }).detach();
+            }
+        }
+        cx.notify();
+    }
+
     fn dispatch_stream_settings_action(
         &mut self,
         action: StreamSettingsAction,

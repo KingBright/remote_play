@@ -1,0 +1,440 @@
+{
+  "schema": 1,
+  "observed_at_utc": "2026-10-10T03:04:45.026980+00:00",
+  "parent": "cc0262390ea1909dd27968f7aa911f06d728054e",
+  "branch": "codex/gpui-mvvm-migration",
+  "scope": "approved Linux portal/PipeWire minimum plus original GPUI local share controls",
+  "source_hashes": {
+    "Cargo.lock": "e816ae3e5c8559fc66c84a23c67d61cefd1f7867785d4f9b4a7735862f7a60a0",
+    "app/src/desktop/local_share.rs": "8c7c33d634160ba4b0c013f357ffd87bd19b79f47904c1fbd0234df1c0a47202",
+    "app/src/desktop/local_share/linux.rs": "2dc848d787e64c9fad85333cfe61f4f968e595b93d6b472066755f0760d9d2ad",
+    "app/src/desktop/local_share/tests.rs": "c0740138d390192cdf360c592858e6f218f3bb38d0c1104ab5fe32cbf0401eae",
+    "app/src/desktop/mod.rs": "953f2de6607f2a6001b9a7c19f1e04bc864039957cb7eeb35a4f23aab153d522",
+    "app/src/lib.rs": "bb486967d297d33f2fea2b509543785084a9a0e0d365602933b6943e580e8340",
+    "app/src/restored_ui.rs": "4321f25d06d3ae316676453f56961003a77c24ba7f4c8dc79eec0efb7e409979",
+    "host/Cargo.toml": "4cf13f6be1356c4b00ddb0028e015095ae67089019a080b5480e7a625371e55a",
+    "host/src/lib.rs": "5a2b3e02eadee200ab9bdfee4f73ae612705cfa554889715a82884e6500cc807",
+    "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+    "host/src/linux_pipewire.rs": "d749efd6955a0d45046bb027d67e355b462e89648e60509ece24b060ca076abe",
+    "host/src/linux_pipewire/native.rs": "eef3c519fac8c8632e0dbc85cce510671d9f2591da984a60e6d3aadd3ad61330",
+    "host/src/linux_pipewire/tests.rs": "52679ece51fe97a5ff6d1e4a7db66d7a291277fc9f9b52f04680acc4deecc6c9",
+    "host/src/linux_portal.rs": "6d66e11f36db93153f99aef8bbe2aa6106e63b3d83933e50f7ed92d51b661752",
+    "host/src/linux_portal/runtime.rs": "c583f54703cbbd22b9c5ece6ee709e2a410791f967dc9a86b7e44dd132dbb4d9",
+    "host/src/linux_portal/runtime/tests.rs": "76832dcc92efb99cb764bbab60463605c5c47e08db69a2256c7a24bafd24236e",
+    "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+    "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+    "host/src/linux_video_encode.rs": "633b524706c23ff693a4ad3e9c36ea1651af9bfbb9be10e14481c86b8943cb32",
+    "host/src/service.rs": "f8c2de159eda853b808a595cc2d035d4f97408bda0522731b1b27289b62028dc"
+  },
+  "source_status": "implemented_source_unvalidated_linux_cfg",
+  "tests": [
+    {
+      "label": "pw-contract-padding-final",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "linux_pipewire::tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=2"
+      ],
+      "passed": 10,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 7.302,
+      "source_coverage_hashes": {
+        "host/src/linux_pipewire.rs": "d749efd6955a0d45046bb027d67e355b462e89648e60509ece24b060ca076abe",
+        "host/src/linux_pipewire/tests.rs": "52679ece51fe97a5ff6d1e4a7db66d7a291277fc9f9b52f04680acc4deecc6c9",
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+        "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "8f7ffcf15850bfe48c2010ad6fb633b96f73e0ba80bc17169d05daa72e13c2a5",
+      "local_log": "/tmp/remoteplay-pw-contract-padding-final.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-portal-cancel-final",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "linux_portal::runtime::tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=2"
+      ],
+      "passed": 12,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 1.216,
+      "source_coverage_hashes": {
+        "host/src/linux_portal.rs": "6d66e11f36db93153f99aef8bbe2aa6106e63b3d83933e50f7ed92d51b661752",
+        "host/src/linux_portal/runtime.rs": "c583f54703cbbd22b9c5ece6ee709e2a410791f967dc9a86b7e44dd132dbb4d9",
+        "host/src/linux_portal/runtime/tests.rs": "76832dcc92efb99cb764bbab60463605c5c47e08db69a2256c7a24bafd24236e",
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+        "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "7e7a58a6ea40b96a2297e44b7811a60159076fb492dd3229858fc101bd56e81d",
+      "local_log": "/tmp/remoteplay-pw-portal-cancel-final.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-service-frozen",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "service::",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=2"
+      ],
+      "passed": 10,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 1.219,
+      "source_coverage_hashes": {
+        "Cargo.lock": "e816ae3e5c8559fc66c84a23c67d61cefd1f7867785d4f9b4a7735862f7a60a0",
+        "app/src/desktop/local_share.rs": "8c7c33d634160ba4b0c013f357ffd87bd19b79f47904c1fbd0234df1c0a47202",
+        "app/src/desktop/local_share/linux.rs": "2dc848d787e64c9fad85333cfe61f4f968e595b93d6b472066755f0760d9d2ad",
+        "app/src/desktop/local_share/tests.rs": "c0740138d390192cdf360c592858e6f218f3bb38d0c1104ab5fe32cbf0401eae",
+        "app/src/desktop/mod.rs": "953f2de6607f2a6001b9a7c19f1e04bc864039957cb7eeb35a4f23aab153d522",
+        "app/src/lib.rs": "bb486967d297d33f2fea2b509543785084a9a0e0d365602933b6943e580e8340",
+        "app/src/restored_ui.rs": "4321f25d06d3ae316676453f56961003a77c24ba7f4c8dc79eec0efb7e409979",
+        "host/Cargo.toml": "4cf13f6be1356c4b00ddb0028e015095ae67089019a080b5480e7a625371e55a",
+        "host/src/lib.rs": "5a2b3e02eadee200ab9bdfee4f73ae612705cfa554889715a82884e6500cc807",
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+        "host/src/linux_pipewire.rs": "d749efd6955a0d45046bb027d67e355b462e89648e60509ece24b060ca076abe",
+        "host/src/linux_pipewire/native.rs": "eef3c519fac8c8632e0dbc85cce510671d9f2591da984a60e6d3aadd3ad61330",
+        "host/src/linux_pipewire/tests.rs": "52679ece51fe97a5ff6d1e4a7db66d7a291277fc9f9b52f04680acc4deecc6c9",
+        "host/src/linux_portal.rs": "6d66e11f36db93153f99aef8bbe2aa6106e63b3d83933e50f7ed92d51b661752",
+        "host/src/linux_portal/runtime.rs": "c583f54703cbbd22b9c5ece6ee709e2a410791f967dc9a86b7e44dd132dbb4d9",
+        "host/src/linux_portal/runtime/tests.rs": "76832dcc92efb99cb764bbab60463605c5c47e08db69a2256c7a24bafd24236e",
+        "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+        "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+        "host/src/linux_video_encode.rs": "633b524706c23ff693a4ad3e9c36ea1651af9bfbb9be10e14481c86b8943cb32",
+        "host/src/service.rs": "f8c2de159eda853b808a595cc2d035d4f97408bda0522731b1b27289b62028dc"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "548870514dadddbf5eaec33bbc45468069c8b164dfee79f541b163c7deeadfcf",
+      "local_log": "/tmp/remoteplay-pw-service-frozen.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-hevc-final",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "linux_video_encode::lifecycle_tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "passed": 3,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 6.996,
+      "source_coverage_hashes": {
+        "host/src/linux_video_encode.rs": "633b524706c23ff693a4ad3e9c36ea1651af9bfbb9be10e14481c86b8943cb32",
+        "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+        "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "02746975dd45d2e83b486bd2db7d75bfb4843e24dafba1fb8432f3baa1b43752",
+      "local_log": "/tmp/remoteplay-pw-hevc-final.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-raw-final",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "linux_raw_encode::tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=2"
+      ],
+      "passed": 7,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.918,
+      "source_coverage_hashes": {
+        "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+        "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "ed9d16ba3792254fc74e57e93db7ce9257f10cefbe3d3c33ce1cb9e6dfa5f7c2",
+      "local_log": "/tmp/remoteplay-pw-raw-final.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-frame-final",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "host",
+        "--lib",
+        "linux_frame::tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=2"
+      ],
+      "passed": 7,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.308,
+      "source_coverage_hashes": {
+        "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "1b2e9b13b321776dece3afa32ec5929e189039a557c47a1770dd31925372ada0",
+      "local_log": "/tmp/remoteplay-pw-frame-final.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    },
+    {
+      "label": "pw-share-ui-fixed",
+      "command": [
+        "/Users/jinliang/.cargo/bin/cargo",
+        "test",
+        "-p",
+        "remote_play_app",
+        "--lib",
+        "desktop::local_share::tests",
+        "--offline",
+        "--locked",
+        "--",
+        "--test-threads=1"
+      ],
+      "passed": 3,
+      "failed": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 11.269,
+      "source_coverage_hashes": {
+        "app/src/desktop/local_share.rs": "8c7c33d634160ba4b0c013f357ffd87bd19b79f47904c1fbd0234df1c0a47202",
+        "app/src/desktop/local_share/tests.rs": "c0740138d390192cdf360c592858e6f218f3bb38d0c1104ab5fe32cbf0401eae",
+        "app/src/desktop/mod.rs": "953f2de6607f2a6001b9a7c19f1e04bc864039957cb7eeb35a4f23aab153d522"
+      },
+      "source_stable_during_run": true,
+      "log_sha256": "b5fa775cac2246f371a739c61054663173142cd0e22aa01818c02fb7847cc309",
+      "local_log": "/tmp/remoteplay-pw-share-ui-fixed.log",
+      "platform": "aarch64-apple-darwin",
+      "linux_native_compiled": false
+    }
+  ],
+  "unique_passed": 52,
+  "new_tests": 20,
+  "adjacent_regressions": 32,
+  "ordinary_mac_check": {
+    "command": [
+      "/Users/jinliang/.cargo/bin/cargo",
+      "check",
+      "-p",
+      "remote_play_app",
+      "--bin",
+      "remote_play",
+      "--offline",
+      "--locked"
+    ],
+    "exit_code": 0,
+    "elapsed_seconds": 1.221,
+    "sources_stable": true,
+    "source_hashes": {
+      "host/Cargo.toml": "4cf13f6be1356c4b00ddb0028e015095ae67089019a080b5480e7a625371e55a",
+      "host/src/lib.rs": "5a2b3e02eadee200ab9bdfee4f73ae612705cfa554889715a82884e6500cc807",
+      "host/src/service.rs": "f8c2de159eda853b808a595cc2d035d4f97408bda0522731b1b27289b62028dc",
+      "host/src/linux_frame.rs": "9dffe3bfc25b9932fbc8671f3f373dc0ac38b5dd5b5e3387a21d1a8ad99f7ce1",
+      "host/src/linux_raw_encode.rs": "6db7bd973f19308c718186d2de14d5d8fc4df61d088dac04249d7bdbee19441d",
+      "host/src/linux_raw_encode/tests.rs": "2418e67c6d0a0258d362bb388081fee262ac7c01d27b15ad0cf48f2372233005",
+      "host/src/linux_pipewire.rs": "d749efd6955a0d45046bb027d67e355b462e89648e60509ece24b060ca076abe",
+      "host/src/linux_pipewire/native.rs": "eef3c519fac8c8632e0dbc85cce510671d9f2591da984a60e6d3aadd3ad61330",
+      "host/src/linux_pipewire/tests.rs": "52679ece51fe97a5ff6d1e4a7db66d7a291277fc9f9b52f04680acc4deecc6c9",
+      "host/src/linux_portal/runtime.rs": "c583f54703cbbd22b9c5ece6ee709e2a410791f967dc9a86b7e44dd132dbb4d9",
+      "host/src/linux_portal/runtime/tests.rs": "76832dcc92efb99cb764bbab60463605c5c47e08db69a2256c7a24bafd24236e",
+      "host/src/linux_video_encode.rs": "633b524706c23ff693a4ad3e9c36ea1651af9bfbb9be10e14481c86b8943cb32",
+      "app/src/lib.rs": "bb486967d297d33f2fea2b509543785084a9a0e0d365602933b6943e580e8340",
+      "app/src/restored_ui.rs": "4321f25d06d3ae316676453f56961003a77c24ba7f4c8dc79eec0efb7e409979",
+      "app/src/desktop/mod.rs": "953f2de6607f2a6001b9a7c19f1e04bc864039957cb7eeb35a4f23aab153d522",
+      "app/src/desktop/local_share.rs": "8c7c33d634160ba4b0c013f357ffd87bd19b79f47904c1fbd0234df1c0a47202",
+      "app/src/desktop/local_share/linux.rs": "2dc848d787e64c9fad85333cfe61f4f968e595b93d6b472066755f0760d9d2ad",
+      "app/src/desktop/local_share/tests.rs": "c0740138d390192cdf360c592858e6f218f3bb38d0c1104ab5fe32cbf0401eae",
+      "host/src/linux_portal.rs": "6d66e11f36db93153f99aef8bbe2aa6106e63b3d83933e50f7ed92d51b661752",
+      "Cargo.lock": "e816ae3e5c8559fc66c84a23c67d61cefd1f7867785d4f9b4a7735862f7a60a0"
+    }
+  },
+  "sdk_observation": {
+    "operation_id": "85adbe57-4b46-4d4b-88a8-1b4047c3dbc2",
+    "exit_code": 0,
+    "observed_unix_seconds": 1791598621,
+    "device_id": "02f29fa0-48c1-4e31-a345-90aa88467323",
+    "workspace_id": "02f29fa0-48c1-4e31-a345-90aa88467323:450c64ca-e15c-491a-ba07-5a49b782f545",
+    "pipewire_header": false,
+    "spa_header": false,
+    "alsa_header": false,
+    "clang_found": false,
+    "flatpak_sdk_or_llvm_runtimes": [],
+    "flatpak_runtime_list_exit": 0,
+    "existing_sdk_roots": [],
+    "new_sdk_or_container_created": false,
+    "privilege_bypass": false
+  },
+  "source_transfer": {
+    "operation_id": "37c1dfde-5dbc-420e-a19d-aeb49e8702d8",
+    "status": "paused",
+    "confirmed_bytes": 0,
+    "new_source_transferred": false,
+    "alternate_transfer": false,
+    "dns_admin_boundary_bypassed": false
+  },
+  "dependencies": {
+    "new_locked_packages": [
+      {
+        "name": "annotate-snippets",
+        "version": "0.11.5",
+        "checksum": "710e8eae58854cdc1790fcb56cca04d712a17be849eeb81da2a724bf4bae2bc4"
+      },
+      {
+        "name": "anstyle",
+        "version": "1.0.14",
+        "checksum": "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
+      },
+      {
+        "name": "bindgen",
+        "version": "0.72.1",
+        "checksum": "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+      },
+      {
+        "name": "cfg-expr",
+        "version": "0.20.10",
+        "checksum": "9ba9e9ec16c447027685b1f897b720e18e9a8afd00bd7332c483537e38086c9f"
+      },
+      {
+        "name": "cookie-factory",
+        "version": "0.3.3",
+        "checksum": "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
+      },
+      {
+        "name": "libspa",
+        "version": "0.10.1",
+        "checksum": "882f7427e7989dcc9d388b7f05c4630390a1d7696f9ffa469cd4a7a48f0b4c40"
+      },
+      {
+        "name": "libspa-sys",
+        "version": "0.10.1",
+        "checksum": "3b6e17bdaf63ed0d5e4144022624032b41fd9733112e8c74ac26fc9bf1291924"
+      },
+      {
+        "name": "pipewire",
+        "version": "0.10.1",
+        "checksum": "bde71084c4e25959d68f1ea54daa75e5ecdb338e5caf0b5510143b79baa32d5c"
+      },
+      {
+        "name": "pipewire-sys",
+        "version": "0.10.1",
+        "checksum": "9ce653f53e63e5b93853218092ee9a8906a5d082c92f3f1db26316955dd63ce0"
+      },
+      {
+        "name": "system-deps",
+        "version": "7.0.8",
+        "checksum": "396a35feb67335377e0251fcbc1092fc85c484bd4e3a7a54319399da127796e7"
+      },
+      {
+        "name": "target-lexicon",
+        "version": "0.13.5",
+        "checksum": "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+      },
+      {
+        "name": "unicode-width",
+        "version": "0.2.2",
+        "checksum": "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+      },
+      {
+        "name": "version-compare",
+        "version": "0.2.1",
+        "checksum": "03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e"
+      }
+    ],
+    "removed_packages": [],
+    "existing_version_upgrades": [],
+    "gui_packages_added": [],
+    "egui_eframe_present": false,
+    "linux_only_direct_dependency": "pipewire = =0.10.1 (v0_3_65)"
+  },
+  "native_api_inspection": {
+    "public_crate_checksums_verified": true,
+    "binding_versions": [
+      "pipewire 0.10.1",
+      "pipewire-sys 0.10.1",
+      "libspa 0.10.1",
+      "libspa-sys 0.10.1"
+    ],
+    "inspection_proves_linux_compilation": false
+  },
+  "uncovered": [
+    "Linux native worker type/link check",
+    "Linux GPUI owner/default-host/drawer cfg type/link check",
+    "real system picker and exported parent identifier",
+    "real mapped buffers, RAII returns, FD/node/session lifetime",
+    "actual capture color bitstream SPS",
+    "static source/pause/resume/revocation/disconnect/multiple-window lifecycle",
+    "transport/decode/actual GPUI presentation",
+    "input/audio/files and other-platform physical regression",
+    "long-duration CPU/GPU/latency/memory and DPI/window/fullscreen screenshot acceptance"
+  ],
+  "intentional_format_limits": [
+    "NV12/I420 only",
+    "MemFd/MemPtr READABLE only",
+    "no DMA-BUF/P010/HDR/RGB conversion",
+    "unknown range rejected",
+    "nonzero unvalidated chroma site rejected",
+    "interlace/multiview/negative stride/non-identity transform rejected"
+  ],
+  "preservation": {
+    "baseline_paths": 105,
+    "all_statuses_and_hashes_unchanged": true,
+    "new_target": false,
+    "target": "/Users/jinliang/rust-target",
+    "prebuild_gate_bytes": 8589934592,
+    "runtime_floor_bytes": 4294967296,
+    "free_bytes": 82431426560
+  },
+  "release": {
+    "pushed": false,
+    "signed": false,
+    "published": false,
+    "installed": false,
+    "installed_or_running_binary_changed": false,
+    "system_permissions_changed": false,
+    "visual_accepted": false,
+    "performance_accepted": false
+  }
+}

@@ -144,8 +144,14 @@ pub struct PortalCaptureLease {
     owner: LeaseOwner,
     remote: Option<RestrictedRemote>,
     selected: SelectedPortalSource,
+    cancellation: watch::Receiver<bool>,
 }
 impl PortalCaptureLease {
+    fn is_revoked(&self) -> bool {
+        *self.cancellation.borrow()
+            || self.cancellation.has_changed().is_err()
+            || *self.owner.control.revoked.borrow()
+    }
     pub fn selected_source(&self) -> SelectedPortalSource {
         self.selected
     }
@@ -156,6 +162,20 @@ impl PortalCaptureLease {
     /// A restricted native worker calls this only after connect_fd and the first
     /// copied format. Logical portal geometry never supplies captured dimensions.
     pub fn prepare_owned_capture(self, first: OwnedFrame) -> Result<PreparedPortalCapture> {
+        let mailbox = Arc::new(
+            FrameMailbox::new(self.selected.generation).map_err(|_| PortalCallError::Generation)?,
+        );
+        self.prepare_with_mailbox(first, mailbox)
+    }
+
+    pub(crate) fn prepare_with_mailbox(
+        self,
+        first: OwnedFrame,
+        mailbox: Arc<FrameMailbox>,
+    ) -> Result<PreparedPortalCapture> {
+        if self.is_revoked() {
+            return Err(PortalCallError::Revoked);
+        }
         crate::linux_raw_encode::validate_native_input(&first)
             .map_err(|_| PortalCallError::InvalidSource)?;
         if first.stamp.generation != self.selected.generation
@@ -168,13 +188,16 @@ impl PortalCaptureLease {
         }
         let id =
             u32::try_from(self.selected.generation).map_err(|_| PortalCallError::Generation)?;
+        if id >= 0x8000_0000 {
+            return Err(PortalCallError::Generation);
+        }
+        // Linux X11 resource IDs occupy the lower range. Process-local portal
+        // IDs never expose node IDs and cannot alias the legacy X11 catalog.
+        let id = id | 0x8000_0000;
         let source = match self.selected.kind {
             SourceKind::Monitor => CaptureSource::Display(id),
             SourceKind::Window => CaptureSource::Window(id),
         };
-        let mailbox = Arc::new(
-            FrameMailbox::new(self.selected.generation).map_err(|_| PortalCallError::Generation)?,
-        );
         let info = CaptureSourceInfo {
             source,
             title: match self.selected.kind {
@@ -204,7 +227,7 @@ impl PortalCaptureLease {
                 .frames
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(mailbox.clone());
-            if !mailbox.publish(first) {
+            if !mailbox.publish_initial(first) {
                 return Err(PortalCallError::Revoked);
             }
         }
@@ -213,6 +236,7 @@ impl PortalCaptureLease {
                 lease: Mutex::new(self),
                 mailbox,
                 info: Mutex::new(info),
+                worker: Mutex::new(None),
             }),
         })
     }
@@ -220,6 +244,9 @@ impl PortalCaptureLease {
     /// Transfers the restricted FD exactly once. No global PipeWire remote is
     /// opened here. The eventual consumer must observe revocation and disconnect.
     pub fn take_pipewire_remote(&mut self) -> Result<(u32, OwnedFd)> {
+        if self.is_revoked() {
+            return Err(PortalCallError::Revoked);
+        }
         let state = self
             .owner
             .control
@@ -253,6 +280,7 @@ struct PreparedInner {
     lease: Mutex<PortalCaptureLease>,
     mailbox: Arc<FrameMailbox>,
     info: Mutex<CaptureSourceInfo>,
+    worker: Mutex<Option<Box<dyn Send + Sync>>>,
 }
 impl Drop for PreparedInner {
     fn drop(&mut self) {
@@ -267,12 +295,44 @@ pub struct PreparedPortalCapture {
     inner: Arc<PreparedInner>,
 }
 impl PreparedPortalCapture {
-    pub fn source_info(&self) -> CaptureSourceInfo {
+    /// Also observe local cancellation synchronously, before the cleanup actor
+    /// has processed its watch notification or delivered Session.Closed.
+    pub fn is_revoked(&self) -> bool {
         self.inner
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_revoked()
+    }
+    pub(crate) fn attach_worker(&self, worker: Box<dyn Send + Sync>, done: oneshot::Receiver<()>) {
+        *self.inner.worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(worker);
+        // Weak ownership prevents a worker/lease cycle. Unexpected worker exit
+        // revokes the grant and schedules the existing bounded portal cleanup.
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let _ = done.await;
+            if let Some(inner) = weak.upgrade() {
+                inner
+                    .lease
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .owner
+                    .signal_close();
+            }
+        });
+    }
+    pub fn source_info(&self) -> CaptureSourceInfo {
+        let mut info = self
+            .inner
             .info
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .clone()
+            .clone();
+        if let Some((width, height)) = self.inner.mailbox.dimensions() {
+            info.width = width;
+            info.height = height;
+        }
+        info
     }
     pub fn generation(&self) -> u64 {
         self.inner
@@ -305,10 +365,12 @@ impl PreparedPortalCapture {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !matches!(
-            state.phase(),
-            super::Phase::Streaming | super::Phase::Paused
-        ) || frame.stamp.generation != lease.selected.generation
+        if lease.is_revoked()
+            || !matches!(
+                state.phase(),
+                super::Phase::Streaming | super::Phase::Paused
+            )
+            || frame.stamp.generation != lease.selected.generation
         {
             return Err(PortalCallError::Revoked);
         }
@@ -822,6 +884,7 @@ async fn select_on_connection(
         owner,
         remote: Some(remote),
         selected,
+        cancellation: cancel,
     })
 }
 

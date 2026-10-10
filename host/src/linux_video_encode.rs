@@ -306,6 +306,35 @@ mod lifecycle_tests {
         capture.stop().await.unwrap();
         assert!(!mailbox.publish(frame(PixelFormat::Nv12, known_color(), 22)));
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_format_new_negotiation_restarts_actual_hevc_with_idr() {
+        let mut encoder = LinuxVideoEncoder::from_owned_frames(9, 64, 64, 30, 2000).unwrap();
+        for revision in [1, 2] {
+            for sequence in 0..3 {
+                let mut input = frame(PixelFormat::Nv12, known_color(), sequence);
+                input.stamp.format_revision = revision;
+                encoder
+                    .submit_frame(crate::linux_capture::LinuxVideoFrame::from_owned(input))
+                    .await
+                    .unwrap();
+                wait_for_writer(encoder.native.as_ref().unwrap()).await;
+            }
+            encoder.native.as_ref().unwrap().finish_input();
+            for sequence in 0..3 {
+                let chunk =
+                    tokio::time::timeout(Duration::from_secs(5), encoder.pull_encoded_chunk())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(chunk.native_stamp.unwrap().format_revision, revision);
+                assert_eq!(chunk.native_stamp.unwrap().sequence, Some(sequence));
+                if sequence == 0 {
+                    assert!(chunk.is_keyframe);
+                }
+            }
+        }
+    }
     #[test]
     fn paused_settings_update_never_starts_ffmpeg() {
         let mut encoder = LinuxVideoEncoder {

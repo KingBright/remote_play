@@ -1431,6 +1431,8 @@ pub struct UnifiedServiceOwner {
     client_active_session_id: Option<Arc<AtomicU32>>,
     client_host_stats: Option<Arc<SharedHostStats>>,
     side_services: UnifiedSideServiceControls,
+    #[cfg(target_os = "linux")]
+    local_portal_shares: Option<mpsc::Sender<host::service::LocalPortalShareCommand>>,
     tasks: Vec<AbortOnDropTask>,
 }
 
@@ -1523,11 +1525,17 @@ impl UnifiedServiceOwner {
             None => (None, None),
         };
 
+        #[cfg(target_os = "linux")]
+        let mut local_portal_shares = None;
         if let Some(host_config) = config.passive_host {
+            #[cfg(target_os = "linux")]
+            let controls = { let (tx, rx) = mpsc::channel(16); local_portal_shares = Some(tx); rx };
             tasks.push(AbortOnDropTask(tokio::spawn(async move {
-                if let Err(err) = run_host_service(host_config).await {
-                    eprintln!("Unified passive host service stopped: {err}");
-                }
+                #[cfg(target_os = "linux")]
+                let result = host::service::run_host_service_with_portal_shares(host_config, controls).await;
+                #[cfg(not(target_os = "linux"))]
+                let result = run_host_service(host_config).await;
+                if let Err(err) = result { eprintln!("Unified passive host service stopped: {err}"); }
             })));
         }
 
@@ -1593,9 +1601,14 @@ impl UnifiedServiceOwner {
             client_active_session_id,
             client_host_stats,
             side_services: config.side_services,
+            #[cfg(target_os = "linux")]
+            local_portal_shares,
             tasks,
         })
     }
+
+    #[cfg(target_os = "linux")]
+    pub fn local_portal_shares(&self) -> Option<mpsc::Sender<host::service::LocalPortalShareCommand>> { self.local_portal_shares.clone() }
 
     pub fn runtime(&self) -> Arc<Mutex<UnifiedAppRuntime>> {
         self.runtime.clone()

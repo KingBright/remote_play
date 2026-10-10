@@ -52,6 +52,10 @@ pub mod linux_input;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_raw_encode;
 #[cfg(any(test, target_os = "linux"))]
+mod linux_pipewire;
+#[cfg(target_os = "linux")]
+pub use linux_pipewire::native::prepare_pipewire_capture;
+#[cfg(any(test, target_os = "linux"))]
 pub mod linux_video_encode;
 #[cfg(target_os = "windows")]
 mod windows_capture;
@@ -1086,7 +1090,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             chunk_res = video_encoder.pull_encoded_chunk() => {
                 let chunk = chunk_res?;
                 #[cfg(target_os = "linux")]
-                if native_capture.as_ref().is_some_and(|capture| *capture.revocation().borrow()) { break; }
+                if native_capture.as_ref().is_some_and(|capture| capture.is_revoked()) { break; }
                 if paused || chunk.nalu.is_empty() {
                     continue;
                 }
