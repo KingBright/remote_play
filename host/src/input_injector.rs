@@ -26,12 +26,7 @@ unsafe impl Sync for MacInputInjector {}
 
 impl MacInputInjector {
     pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let has_post_event_access = request_post_event_access_if_needed();
-        if !has_post_event_access {
-            eprintln!(
-                "[Input] macOS Accessibility permission is required for remote keyboard and pointer control"
-            );
-        }
+        require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| "Failed to create CGEventSource")?;
         Ok(Self {
@@ -45,9 +40,7 @@ impl MacInputInjector {
     }
 
     pub fn for_window(id: u32, pid: i32) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        if !unsafe { CGPreflightPostEventAccess() } {
-            return Err("The signed host lacks input-posting permission; verify Accessibility for the running RemotePlay app".into());
-        }
+        require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
         let window = crate::window_input::WindowTarget::new(id, pid)?;
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| "Cannot create window input source")?;
@@ -364,20 +357,17 @@ impl MacInputInjector {
     }
 }
 
-fn request_post_event_access_if_needed() -> bool {
-    unsafe {
-        if CGPreflightPostEventAccess() {
-            true
-        } else {
-            CGRequestPostEventAccess() || CGPreflightPostEventAccess()
-        }
+fn require_post_event_access(allowed: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if allowed {
+        Ok(())
+    } else {
+        Err("The running signed RemotePlay host lacks input-posting permission. Verify its App identity and enable RemotePlay in System Settings > Privacy & Security > Accessibility".into())
     }
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightPostEventAccess() -> bool;
-    fn CGRequestPostEventAccess() -> bool;
 }
 
 fn current_pointer_location(source: &CGEventSource) -> CGPoint {
@@ -484,6 +474,10 @@ fn pointer_mouse_button(pressed_buttons: u8) -> CGMouseButton {
 
 impl InputInjector for MacInputInjector {
     fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Consent can be revoked after the injector was created. Propagate a
+        // real error through INPUT_UNAVAILABLE before changing held state or
+        // posting events; CGEvent::post itself has no success return value.
+        require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
         self.prepare_window_event(&event)?;
         self.inject(event);
         Ok(())
@@ -497,6 +491,14 @@ impl InputInjector for MacInputInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_or_revoked_post_access_is_an_error_not_injection_success() {
+        assert!(require_post_event_access(true).is_ok());
+        let error = require_post_event_access(false).unwrap_err().to_string();
+        assert!(error.contains("running signed RemotePlay host"));
+        assert!(error.contains("Accessibility"));
+    }
 
     #[test]
     fn protocol_buttons_map_to_core_graphics_buttons_and_event_types() {
