@@ -67,6 +67,7 @@ pub async fn prepare_pipewire_capture(
     mut lease: PortalCaptureLease,
 ) -> Result<PreparedPortalCapture, PortalCallError> {
     let generation = lease.selected_source().generation;
+    let serial = lease.selected_source().pipewire_serial;
     let mut revoked_rx = lease.revocation();
     let (node, fd) = lease.take_pipewire_remote()?;
     let mailbox = Arc::new(
@@ -84,6 +85,7 @@ pub async fn prepare_pipewire_capture(
             let _ = run(
                 fd,
                 node,
+                serial,
                 generation,
                 worker_mailbox.clone(),
                 worker_stop,
@@ -159,6 +161,7 @@ fn format(raw: spa::param::video::VideoInfoRaw) -> Result<FrameFormat, WorkerErr
 fn run(
     fd: OwnedFd,
     node: u32,
+    serial: Option<u64>,
     generation: u64,
     mailbox: Arc<FrameMailbox>,
     stop: Arc<AtomicBool>,
@@ -178,14 +181,14 @@ fn run(
             error_loop.quit();
         })
         .register();
-    let stream = pw::stream::StreamBox::new(
-        &core,
-        "RemotePlay local share",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Video", *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Screen",
-        },
-    )?;
+    let mut properties = properties! {
+        *pw::keys::MEDIA_TYPE => "Video", *pw::keys::MEDIA_CATEGORY => "Capture",
+        *pw::keys::MEDIA_ROLE => "Screen",
+    };
+    if let Some(serial) = serial {
+        properties.insert("target.object", serial.to_string());
+    }
+    let stream = pw::stream::StreamBox::new(&core, "RemotePlay local share", properties)?;
     let _listener = stream
         .add_local_listener_with_user_data(Data {
             contract: CopyContract::new(generation, mailbox.clone()),
@@ -375,7 +378,7 @@ fn run(
     let pod = spa::pod::Pod::from_bytes(&bytes).ok_or("invalid format pod")?;
     stream.connect(
         spa::utils::Direction::Input,
-        Some(node),
+        if serial.is_some() { None } else { Some(node) },
         pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
         &mut [pod],
     )?;

@@ -22,6 +22,9 @@ use zbus::{Connection, Proxy, proxy::SignalStream};
 const DESKTOP: &str = "org.freedesktop.portal.Desktop";
 const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
 const SCREENCAST: &str = "org.freedesktop.portal.ScreenCast";
+const REMOTE_DESKTOP: &str = "org.freedesktop.portal.RemoteDesktop";
+mod input;
+pub use input::PortalInputError;
 const SESSION: &str = "org.freedesktop.portal.Session";
 const REQUEST: &str = "org.freedesktop.portal.Request";
 const DBUS: &str = "org.freedesktop.DBus";
@@ -72,6 +75,8 @@ pub struct SelectedPortalSource {
     pub kind: SourceKind,
     /// Session-local PipeWire node, never a persistent catalog/source ID.
     pub node_id: u32,
+    /// Stable object serial where offered (ScreenCast v6), not a network ID.
+    pub pipewire_serial: Option<u64>,
     /// Compositor logical geometry, never encoder/captured pixel dimensions.
     pub logical_size: Option<(i32, i32)>,
     pub logical_position: Option<(i32, i32)>,
@@ -98,6 +103,7 @@ struct Control {
     state: Mutex<PortalSessionState>,
     revoked: watch::Sender<bool>,
     frames: Mutex<Option<Arc<FrameMailbox>>>,
+    input: Mutex<Option<Arc<input::PortalInput>>>,
 }
 impl Control {
     fn revoke(&self) -> ClosePlan {
@@ -159,6 +165,18 @@ impl PortalCaptureLease {
         self.owner.control.revoked.subscribe()
     }
 
+    fn input_available(&self) -> bool {
+        !self.is_revoked()
+            && self
+                .owner
+                .control
+                .input
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|input| input.available())
+    }
+
     /// A restricted native worker calls this only after connect_fd and the first
     /// copied format. Logical portal geometry never supplies captured dimensions.
     pub fn prepare_owned_capture(self, first: OwnedFrame) -> Result<PreparedPortalCapture> {
@@ -178,6 +196,16 @@ impl PortalCaptureLease {
         }
         crate::linux_raw_encode::validate_native_input(&first)
             .map_err(|_| PortalCallError::InvalidSource)?;
+        if let Some(input) = self
+            .owner
+            .control
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            input.bind_frame(&first);
+        }
         if first.stamp.generation != self.selected.generation
             || self
                 .remote
@@ -209,7 +237,7 @@ impl PortalCaptureLease {
             process_id: None,
             width: first.width,
             height: first.height,
-            supports_input: false,
+            supports_input: self.input_available(),
         };
         {
             let mut state = self
@@ -332,7 +360,47 @@ impl PreparedPortalCapture {
             info.width = width;
             info.height = height;
         }
+        info.supports_input = self.input_available();
         info
+    }
+    /// This process-local route never uses the global desktop/uinput injector.
+    /// The caller must first check authenticated peer, source ID and revision.
+    pub fn input_available(&self) -> bool {
+        self.input_status().is_ok()
+    }
+    pub fn input_status(&self) -> std::result::Result<(), PortalInputError> {
+        if self.is_revoked() {
+            return Err(PortalInputError::SessionClosed);
+        }
+        self.input().ok_or(PortalInputError::ViewOnly)?.status()
+    }
+    fn input(&self) -> Option<Arc<input::PortalInput>> {
+        self.inner
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .owner
+            .control
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub async fn inject_input(
+        &self,
+        event: protocol::InputEvent,
+    ) -> std::result::Result<(), PortalInputError> {
+        self.input_status()?;
+        self.input()
+            .ok_or(PortalInputError::ViewOnly)?
+            .inject(event)
+            .await
+    }
+    pub async fn release_input(&self) -> std::result::Result<(), PortalInputError> {
+        match self.input() {
+            Some(input) => input.release().await,
+            None => Ok(()),
+        }
     }
     pub fn generation(&self) -> u64 {
         self.inner
@@ -375,6 +443,16 @@ impl PreparedPortalCapture {
             return Err(PortalCallError::Revoked);
         }
         let (width, height) = (frame.width, frame.height);
+        if let Some(input) = lease
+            .owner
+            .control
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            input.observe_frame(&frame);
+        }
         let published = self.inner.mailbox.publish(frame);
         if published {
             let mut info = self
@@ -490,6 +568,17 @@ fn start_owner(
             _ = owner_changed.next() => watched.revoke(),
         };
         watched.revoked.send_replace(true);
+        let input = watched
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let input_ok = match input {
+            Some(input) => tokio::time::timeout(Duration::from_millis(750), input.release())
+                .await
+                .is_ok_and(|result| result.is_ok()),
+            None => true,
+        };
         let request_ok = match plan.request {
             Some(path) => {
                 close_object(&connection, &destination, &path, REQUEST, timeouts.cleanup).await
@@ -502,7 +591,7 @@ fn start_owner(
             }
             None => true,
         };
-        let _ = done_tx.send(request_ok && session_ok);
+        let _ = done_tx.send(input_ok && request_ok && session_ok);
         // Proxies/connection are dropped here even if Close is unavailable.
         // A restarted portal cannot inherit the old unique destination or FD.
     });
@@ -518,6 +607,7 @@ async fn request<B: Serialize + Type>(
     destination: &str,
     session_sender: &str,
     method: Method,
+    interface: &'static str,
     request_token: &str,
     body: &B,
     owner: &LeaseOwner,
@@ -542,13 +632,14 @@ async fn request<B: Serialize + Type>(
                 .unwrap_or_else(|error| error.into_inner())
                 .begin_request(method, path.clone())
                 .map_err(|_| PortalCallError::Revoked)?;
-            let screencast = proxy(connection, destination, DESKTOP_PATH, SCREENCAST).await?;
+            let portal = proxy(connection, destination, DESKTOP_PATH, interface).await?;
             let name = match method {
                 Method::Create => "CreateSession",
+                Method::SelectDevices => "SelectDevices",
                 Method::Select => "SelectSources",
                 Method::Start => "Start",
             };
-            let returned: OwnedObjectPath = screencast
+            let returned: OwnedObjectPath = portal
                 .call(name, body)
                 .await
                 .map_err(|_| PortalCallError::Transport)?;
@@ -635,6 +726,16 @@ fn selected(
         generation,
         kind,
         node_id: node,
+        pipewire_serial: properties
+            .remove("pipewire-serial")
+            .map(|value| {
+                let serial = u64::try_from(value).map_err(|_| PortalCallError::InvalidSource)?;
+                if serial == 0 {
+                    return Err(PortalCallError::InvalidSource);
+                }
+                Ok(serial)
+            })
+            .transpose()?,
         logical_size,
         logical_position: geometry(properties.remove("position"))?,
         embedded_cursor: options.embedded_cursor,
@@ -646,7 +747,29 @@ fn selected(
 pub async fn request_local_portal_capture(
     parent_identifier: &str,
     sources: PickerSources,
+    cancel: watch::Receiver<bool>,
+) -> Result<PortalCaptureLease> {
+    request_local_capture(parent_identifier, sources, cancel, false).await
+}
+
+/// Explicit local control request, with normal RemoteDesktop consent. Generic
+/// window captures have no verified focus binding and cannot grant desktop input.
+pub async fn request_local_portal_control_capture(
+    parent_identifier: &str,
+    sources: PickerSources,
+    cancel: watch::Receiver<bool>,
+) -> Result<PortalCaptureLease> {
+    if sources != PickerSources::Monitor {
+        return Err(PortalCallError::Capabilities);
+    }
+    request_local_capture(parent_identifier, sources, cancel, true).await
+}
+
+async fn request_local_capture(
+    parent_identifier: &str,
+    sources: PickerSources,
     mut cancel: watch::Receiver<bool>,
+    control_input: bool,
 ) -> Result<PortalCaptureLease> {
     if *cancel.borrow() {
         return Err(PortalCallError::Cancelled);
@@ -659,16 +782,47 @@ pub async fn request_local_portal_capture(
             .map_err(|_| PortalCallError::Transport)?.method_timeout(timeouts.operation).build()) =>
             result.map_err(|_| PortalCallError::Timeout)?.map_err(|_| PortalCallError::Transport)?,
     };
-    select_on_connection(connection, parent_identifier, sources, cancel, timeouts).await
+    select_with_control(
+        connection,
+        parent_identifier,
+        sources,
+        cancel,
+        timeouts,
+        control_input,
+    )
+    .await
 }
 
+#[cfg(test)]
 async fn select_on_connection(
+    connection: Connection,
+    parent_identifier: &str,
+    sources: PickerSources,
+    cancel: watch::Receiver<bool>,
+    timeouts: Timeouts,
+) -> Result<PortalCaptureLease> {
+    select_with_control(
+        connection,
+        parent_identifier,
+        sources,
+        cancel,
+        timeouts,
+        false,
+    )
+    .await
+}
+
+async fn select_with_control(
     connection: Connection,
     parent_identifier: &str,
     sources: PickerSources,
     mut cancel: watch::Receiver<bool>,
     timeouts: Timeouts,
+    control_input: bool,
 ) -> Result<PortalCaptureLease> {
+    if control_input && sources != PickerSources::Monitor {
+        return Err(PortalCallError::Capabilities);
+    }
     if parent_identifier.len() > 4096
         || !parent_identifier.is_empty()
             && !parent_identifier.starts_with("x11:")
@@ -678,7 +832,7 @@ async fn select_on_connection(
     }
     // Keep the initial channel alive until the real session owner is installed.
     let (initial_tx, mut initial_revoked) = watch::channel(false);
-    let (destination, screencast, options) = bounded(
+    let (destination, screencast, options, screencast_version) = bounded(
         async {
             let initial = proxy(&connection, DESKTOP, DESKTOP_PATH, SCREENCAST).await?;
             let _: u32 = initial
@@ -708,7 +862,21 @@ async fn select_on_connection(
                 .map_err(|_| PortalCallError::Transport)?;
             let options = SelectionOptions::from_capabilities(available & sources.mask(), cursors)
                 .map_err(|_| PortalCallError::Capabilities)?;
-            Ok((destination, screencast, options))
+            if control_input {
+                let remote = proxy(&connection, &destination, DESKTOP_PATH, REMOTE_DESKTOP).await?;
+                let version: u32 = remote
+                    .get_property("version")
+                    .await
+                    .map_err(|_| PortalCallError::Capabilities)?;
+                let devices: u32 = remote
+                    .get_property("AvailableDeviceTypes")
+                    .await
+                    .map_err(|_| PortalCallError::Capabilities)?;
+                if version == 0 || devices & 3 != 3 {
+                    return Err(PortalCallError::Capabilities);
+                }
+            }
+            Ok((destination, screencast, options, version))
         },
         timeouts.operation,
         &mut cancel,
@@ -753,6 +921,7 @@ async fn select_on_connection(
         state: Mutex::new(state),
         revoked,
         frames: Mutex::new(None),
+        input: Mutex::new(None),
     });
     let owner = start_owner(
         connection.clone(),
@@ -773,6 +942,11 @@ async fn select_on_connection(
         &destination,
         &sender,
         Method::Create,
+        if control_input {
+            REMOTE_DESKTOP
+        } else {
+            SCREENCAST
+        },
         &create_token,
         &create_options,
         &owner,
@@ -799,8 +973,35 @@ async fn select_on_connection(
     )?;
     let session =
         OwnedObjectPath::try_from(session_path.as_str()).map_err(|_| PortalCallError::Response)?;
+    if control_input {
+        let device_token = token();
+        let device_options: HashMap<&str, Value<'_>> = HashMap::from([
+            ("handle_token", Value::from(device_token.as_str())),
+            ("types", Value::from(3u32)),
+        ]);
+        request(
+            &connection,
+            &destination,
+            &sender,
+            Method::SelectDevices,
+            REMOTE_DESKTOP,
+            &device_token,
+            &(&session, device_options),
+            &owner,
+            &mut cancel,
+            timeouts.operation,
+        )
+        .await?;
+        complete(
+            &owner,
+            Method::SelectDevices,
+            &format!("{DESKTOP_PATH}/request/{sender}/{device_token}"),
+            None,
+            None,
+        )?;
+    }
     let select_token = token();
-    let select_options: HashMap<&str, Value<'_>> = HashMap::from([
+    let mut select_options: HashMap<&str, Value<'_>> = HashMap::from([
         ("handle_token", Value::from(select_token.as_str())),
         (
             "types",
@@ -813,11 +1014,17 @@ async fn select_on_connection(
             Value::from(if options.embedded_cursor { 2u32 } else { 1u32 }),
         ),
     ]);
+    // Combined sessions must use RemoteDesktop persistence options exclusively;
+    // omitting them there means nonpersistent consent. Never request restoration.
+    if control_input {
+        select_options.remove("persist_mode");
+    }
     request(
         &connection,
         &destination,
         &sender,
         Method::Select,
+        SCREENCAST,
         &select_token,
         &(&session, select_options),
         &owner,
@@ -840,6 +1047,11 @@ async fn select_on_connection(
         &destination,
         &sender,
         Method::Start,
+        if control_input {
+            REMOTE_DESKTOP
+        } else {
+            SCREENCAST
+        },
         &start_token,
         &(&session, parent_identifier, start_options),
         &owner,
@@ -847,7 +1059,20 @@ async fn select_on_connection(
         timeouts.selection,
     )
     .await?;
+    let devices = if control_input {
+        let devices = u32::try_from(response.get("devices").ok_or(PortalCallError::Response)?)
+            .map_err(|_| PortalCallError::Response)?;
+        if devices & !3 != 0 {
+            return Err(PortalCallError::Response);
+        }
+        devices
+    } else {
+        0
+    };
     let selected = selected(response, generation, options)?;
+    if control_input && screencast_version >= 6 && selected.pipewire_serial.is_none() {
+        return Err(PortalCallError::InvalidSource);
+    }
     complete(
         &owner,
         Method::Start,
@@ -855,6 +1080,21 @@ async fn select_on_connection(
         None,
         Some(selected.kind),
     )?;
+    if control_input {
+        *owner
+            .control
+            .input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(input::PortalInput::new(
+            connection.clone(),
+            destination.clone(),
+            session.clone(),
+            selected,
+            devices,
+            owner.control.revoked.subscribe(),
+            cancel.clone(),
+        )));
+    }
     let mut revoked = owner.control.revoked.subscribe();
     let fd: zbus::zvariant::OwnedFd = bounded(
         async {

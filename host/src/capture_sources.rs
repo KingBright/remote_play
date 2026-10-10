@@ -128,8 +128,9 @@ pub fn list() -> Result<Vec<CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
                 process_id: None,
                 width: display.width(),
                 height: display.height(),
-                supports_input: display.display_id()
-                    == core_graphics::display::CGDisplay::main().id,
+                // Capability only: subscription/injection separately check the
+                // actual running host's input-posting permission.
+                supports_input: crate::input_injector::display_input_capable(display.display_id()),
             });
         }
         for window in content.windows() {
@@ -155,9 +156,9 @@ pub fn list() -> Result<Vec<CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
                 process_id: Some(app.process_id()),
                 width: size.0,
                 height: size.1,
-                // Independent window input is routed to its verified process/window,
-                // and still requires the user's existing Accessibility grant.
-                supports_input: crate::window_input::permission_available(),
+                // Geometry/owner capability, not permission. The selected PID
+                // is bound by the host; readiness requires actual OS grants.
+                supports_input: app.process_id() > 0,
             });
         }
         Ok(sources)

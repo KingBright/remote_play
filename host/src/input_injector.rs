@@ -418,6 +418,14 @@ fn display_bounds(id: u32) -> Result<core_graphics::geometry::CGRect, Box<dyn Er
     validate_display_bounds(display.bounds(), display.is_online(), display.is_active())
 }
 
+pub(crate) fn display_input_status(id: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
+    display_bounds(id).map(|_| ())
+}
+
+pub(crate) fn post_event_access_status() -> Result<(), Box<dyn Error + Send + Sync>> {
+    require_post_event_access(unsafe { CGPreflightPostEventAccess() })
+}
+
 /// Geometry capability only. Permission is checked by the constructor and
 /// every injected event so an OS denial uses the existing INPUT_UNAVAILABLE
 /// error path instead of being mistaken for an unimplemented display target.
