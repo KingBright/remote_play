@@ -164,6 +164,16 @@ portrait logical rectangles, invalid/offline display refusal and permission
 denial. The continued application input filter passes 23 tests. These remain
 code regressions; there is still no actual target-effect receipt for two Macs.
 
+The platform cleanup also clears the remembered target pointer when input
+ownership is released, suppresses key/button releases that this injector never
+tracked, and permits tracked releases after an application window disappears.
+A destroyed window still refuses every new press or movement. Seven platform
+input tests pass after this release fix; the release classifier is a code
+regression, not a physical key-up acceptance result. The complete application
+library passes 116 tests with two existing ignored cases, its updated input
+filter passes 23, and the opt-in event recorder passes separately. The merged
+producer's release suite passes 267 tests with seven existing skips.
+
 The user subsequently authorized a routine same-permission MacBook upgrade
 after a new final artifact includes lifecycle, immutable identity and the latest
 input changes. Preparation and artifact verification may proceed independently.
@@ -172,3 +182,13 @@ safe switch point is being confirmed before any stop. An unanswered activity
 question is not permission to interrupt an unknown live media/input session.
 Studio and HO5 installation, OS/TCC changes, public Git push and manual CUA
 remain outside that upgrade step.
+
+The parent subsequently assigned all shared host target/dispatcher integration
+to the main RP task. This task has left `host/src/service.rs` and
+`host/src/capture_sources.rs` unchanged from the verified producer commit.
+MacBook upgrade must wait for a candidate incorporating that final common
+integration, then repeat independent source/build/signature/manifest and native
+rollback verification. The earlier `1081` receipt does not establish the latest
+input changes. The existing pinned signing identity was successfully checked
+in the authorized native environment; no signer or OS-access repair is needed
+based on a default-sandbox identity lookup failure.

@@ -66,6 +66,11 @@ impl MacInputInjector {
     fn post(&self, event: &CGEvent) {
         if let Some(window) = &self.window {
             if !window.alive() {
+                // A destroyed target must still release input that this
+                // injector posted. Never post a new press to another window.
+                if is_release_event(event.get_type()) {
+                    event.post(CGEventTapLocation::HID);
+                }
                 return;
             }
             event.set_integer_value_field(
@@ -316,13 +321,15 @@ impl MacInputInjector {
         for key_code in pressed_keys {
             self.post_key(key_code, false, 0);
         }
-        let pressed_buttons = self.pressed_buttons.swap(0, Ordering::Relaxed);
+        let pressed_buttons = self.pressed_buttons.load(Ordering::Relaxed);
         for button in 0..=2 {
             if pressed_buttons & (1 << button) != 0 {
                 self.post_mouse_button(button, false);
             }
         }
+        self.pressed_buttons.store(0, Ordering::Relaxed);
         self.set_modifiers(0);
+        *self.target_pointer.lock().expect("source pointer lock") = None;
     }
 
     fn current_modifiers(&self) -> u8 {
@@ -337,8 +344,9 @@ impl MacInputInjector {
     }
 
     fn post_tracked_key(&self, key_code: u16, pressed: bool, modifiers: u8) {
-        self.post_key(key_code, pressed, modifiers);
         let mut keys = self.pressed_keys.lock().expect("pressed keys lock");
+        if !pressed && !keys.contains(&key_code) { return; }
+        self.post_key(key_code, pressed, modifiers);
         if pressed {
             keys.insert(key_code);
         } else {
@@ -368,6 +376,9 @@ impl MacInputInjector {
     }
 
     fn post_mouse_button(&self, button: u8, pressed: bool) {
+        if !pressed && (button > 2 || self.pressed_buttons.load(Ordering::Relaxed) & (1 << button) == 0) {
+            return;
+        }
         let (Some(cg_button), Some(event_type)) =
             (mouse_button(button), mouse_event_type(button, pressed))
         else {
@@ -435,6 +446,10 @@ fn pointer_coordinates(point: CGPoint, bounds: core_graphics::geometry::CGRect) 
     let point = clamp_display_pointer(point, bounds);
     ((((point.x - bounds.origin.x) / bounds.size.width) * f64::from(u16::MAX)).round() as u16,
      (((point.y - bounds.origin.y) / bounds.size.height) * f64::from(u16::MAX)).round() as u16)
+}
+
+fn is_release_event(kind: CGEventType) -> bool {
+    matches!(kind, CGEventType::KeyUp | CGEventType::LeftMouseUp | CGEventType::RightMouseUp | CGEventType::OtherMouseUp)
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -639,6 +654,16 @@ mod tests {
         assert!(validate_display_bounds(valid, true, false).is_err());
         for size in [CGSize::new(0., 1080.), CGSize::new(f64::NAN, 900.), CGSize::new(900., f64::INFINITY)] {
             assert!(validate_display_bounds(CGRect::new(&CGPoint::new(0., 0.), &size), true, true).is_err());
+        }
+    }
+
+    #[test]
+    fn destroyed_window_cleanup_permits_releases_but_no_new_press_or_move() {
+        for kind in [CGEventType::KeyUp, CGEventType::LeftMouseUp, CGEventType::RightMouseUp, CGEventType::OtherMouseUp] {
+            assert!(is_release_event(kind));
+        }
+        for kind in [CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::MouseMoved, CGEventType::LeftMouseDragged] {
+            assert!(!is_release_event(kind));
         }
     }
 }
