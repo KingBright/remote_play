@@ -1,3 +1,5 @@
+#[cfg(all(unix, any(test, target_os = "linux")))]
+use crate::linux_portal::{PeerOwner, runtime::PreparedPortalCapture};
 use crate::{
     StreamingRunConfig, SubscriptionAudioConfig, env_flag_enabled, run_streaming,
     start_subscription_audio,
@@ -21,6 +23,32 @@ use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
+
+/// Local process capability; a network address alone cannot authorize a grant.
+#[cfg(all(unix, any(test, target_os = "linux")))]
+pub struct LocalPortalShareTarget {
+    addr: SocketAddr,
+    owner: PeerOwner,
+    source_revision: u32,
+    subscription_id: u32,
+}
+#[cfg(all(unix, any(test, target_os = "linux")))]
+impl LocalPortalShareTarget {
+    pub fn subscription_id(&self) -> u32 {
+        self.subscription_id
+    }
+}
+#[cfg(all(unix, any(test, target_os = "linux")))]
+pub enum LocalPortalShareCommand {
+    Targets {
+        reply: tokio::sync::oneshot::Sender<Vec<LocalPortalShareTarget>>,
+    },
+    Commit {
+        target: LocalPortalShareTarget,
+        capture: PreparedPortalCapture,
+        reply: tokio::sync::oneshot::Sender<Result<protocol::session::CaptureSourceInfo, String>>,
+    },
+}
 
 #[derive(Clone)]
 pub struct HostServiceConfig {
@@ -118,9 +146,15 @@ struct Subscription {
     video_sequence: Arc<std::sync::atomic::AtomicU16>,
     #[cfg(target_os = "windows")]
     _capture_reservation: Arc<WindowsVideoCaptureReservation>,
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    native_capture: Option<PreparedPortalCapture>,
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some(capture) = &self.native_capture {
+            capture.revoke();
+        }
         let _ = self.cancel.send(());
         self.task.abort();
     }
@@ -155,9 +189,15 @@ struct Connection {
     retired: HashSet<u32>,
     audio_groups: HashMap<AudioGroupKey, AudioGroup>,
     _reporter: crate::ScheduledStatsReporterGuard,
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    native_capture: Option<(u32, PreparedPortalCapture)>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some((_, capture)) = self.native_capture.take() {
+            capture.revoke();
+        }
         if let Some(cancel) = self.clipboard_cancel.take() {
             let _ = cancel.send(());
         }
@@ -176,6 +216,49 @@ fn stream_settings(request: &SubscriptionRequest) -> crate::StreamSettings {
 }
 
 impl Connection {
+    fn capture_sources(
+        &self,
+    ) -> Result<Vec<protocol::session::CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
+        let mut sources = crate::capture_sources::list()?;
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some((_, capture)) = &self.native_capture {
+            if !*capture.revocation().borrow() {
+                sources.push(capture.source_info());
+            }
+        }
+        sources.truncate(256);
+        Ok(sources)
+    }
+
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    fn commit_native_capture(
+        &mut self,
+        target: LocalPortalShareTarget,
+        current: PeerOwner,
+        capture: PreparedPortalCapture,
+    ) -> Result<protocol::session::CaptureSourceInfo, String> {
+        if target.owner != current
+            || !self
+                .subscriptions
+                .get(&target.subscription_id)
+                .is_some_and(|subscription| {
+                    subscription.source_revision == target.source_revision
+                        && !subscription.task.is_finished()
+                })
+            || *capture.revocation().borrow()
+        {
+            capture.revoke();
+            return Err(
+                "local share target changed or was revoked; previous source was kept".into(),
+            );
+        }
+        let info = capture.source_info();
+        // Existing streaming tasks retain their own grant until SwitchSource
+        // tears them down. A cancelled picker never reaches this mutation.
+        self.native_capture = Some((target.subscription_id, capture));
+        Ok(info)
+    }
+
     fn new(id: u32, addr: SocketAddr, udp: UdpSender, config: &HostServiceConfig) -> Self {
         let (cancel, cancel_rx) = broadcast::channel(8);
         let (sender, _worker) =
@@ -227,6 +310,8 @@ impl Connection {
             retired: HashSet::new(),
             audio_groups: HashMap::new(),
             _reporter: reporter,
+            #[cfg(all(unix, any(test, target_os = "linux")))]
+            native_capture: None,
         }
     }
 
@@ -351,8 +436,39 @@ impl Connection {
         let sources = if request.source == CaptureSource::MainDisplay {
             Vec::new()
         } else {
-            crate::capture_sources::list().map_err(|e| e.to_string())?
+            #[cfg(all(unix, any(test, target_os = "linux")))]
+            if let Some((_, capture)) = &self.native_capture
+                && capture.source_info().source == request.source
+            {
+                vec![capture.source_info()]
+            } else {
+                self.capture_sources().map_err(|e| e.to_string())?
+            }
+            #[cfg(not(all(unix, any(test, target_os = "linux"))))]
+            self.capture_sources().map_err(|e| e.to_string())?
         };
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        let native_capture = match &self.native_capture {
+            Some((id, capture)) if capture.source_info().source == request.source => {
+                if *id != request.id || *capture.revocation().borrow() {
+                    return Err("native share belongs to another or revoked subscription".into());
+                }
+                Some(capture.clone())
+            }
+            _ => None,
+        };
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some(capture) = &native_capture {
+            let info = capture.source_info();
+            crate::linux_raw_encode::RawSettings {
+                width: request.width,
+                height: request.height,
+                fps: request.fps,
+                bitrate_kbps: request.bitrate_kbps,
+            }
+            .validate_for(info.width, info.height)
+            .map_err(|error| error.to_string())?;
+        }
         let selected = sources.iter().find(|s| s.source == request.source);
         if request.source != CaptureSource::MainDisplay && selected.is_none() {
             return Err("selected capture source is unavailable".into());
@@ -455,6 +571,8 @@ impl Connection {
             stream_settings_rx: Some(rx),
             keyframe_requested: keyframe.clone(),
             video_sequence: video_sequence.clone(),
+            #[cfg(all(unix, any(test, target_os = "linux")))]
+            native_capture: native_capture.clone(),
         };
         let id = request.id;
         let task = tokio::spawn(async move {
@@ -495,6 +613,8 @@ impl Connection {
                 video_sequence,
                 #[cfg(target_os = "windows")]
                 _capture_reservation: capture_reservation,
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                native_capture,
             },
         );
         self.refresh_audio();
@@ -728,6 +848,30 @@ impl InputInjector for LazyInputInjector {
 pub async fn run_host_service(
     config: HostServiceConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    run_host_service_inner(
+        config,
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        None,
+    )
+    .await
+}
+
+/// Optional local GUI/CLI integration. Incoming wire commands cannot construct
+/// this channel or trigger a picker. The native worker supplies a prepared grant.
+#[cfg(target_os = "linux")]
+pub async fn run_host_service_with_portal_shares(
+    config: HostServiceConfig,
+    controls: mpsc::Receiver<LocalPortalShareCommand>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    run_host_service_inner(config, Some(controls)).await
+}
+
+async fn run_host_service_inner(
+    config: HostServiceConfig,
+    #[cfg(all(unix, any(test, target_os = "linux")))] mut local_shares: Option<
+        mpsc::Receiver<LocalPortalShareCommand>,
+    >,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let multiplexer = UdpMultiplexer::bind(&config.bind_addr.to_string()).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
     let injector = LazyInputInjector::default();
@@ -740,6 +884,42 @@ pub async fn run_host_service(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            local = async {
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                if let Some(receiver) = &mut local_shares { return receiver.recv().await; }
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                return std::future::pending::<Option<LocalPortalShareCommand>>().await;
+                #[cfg(not(all(unix, any(test, target_os = "linux"))))]
+                std::future::pending::<Option<()>>().await
+            } => {
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                {
+                    let scope = remote_core::shared_files::current_share_scope();
+                    let key_unchanged = load_session_psk() == psk;
+                    match local {
+                        Some(LocalPortalShareCommand::Targets { reply }) => {
+                            let targets = peers.iter().filter(|_| key_unchanged).flat_map(|(addr,peer)| {
+                                let owner = authenticated.get(addr).and_then(|(nonce,_,_)| PeerOwner::from_authenticated_connection(peer.id, *nonce, scope).ok());
+                                peer.subscriptions.iter().filter(|(_,subscription)| !subscription.task.is_finished()).filter_map(move |(id,subscription)| owner.map(|owner| LocalPortalShareTarget { addr:*addr, owner, source_revision:subscription.source_revision, subscription_id:*id }))
+                            }).collect();
+                            let _ = reply.send(targets);
+                        }
+                        Some(LocalPortalShareCommand::Commit { target, capture, reply }) => {
+                            let owner = if key_unchanged { peers.get(&target.addr).and_then(|peer| authenticated.get(&target.addr).and_then(|(nonce,_,_)| PeerOwner::from_authenticated_connection(peer.id, *nonce, scope).ok())) } else { None };
+                            let result = if let Some(owner) = owner {
+                                peers.get_mut(&target.addr).unwrap().commit_native_capture(target, owner, capture)
+                            } else { capture.revoke(); Err("local share requires the same authenticated connection and scope".into()) };
+                            let _ = reply.send(result);
+                        }
+                        None => {
+                            local_shares = None;
+                            for peer in peers.values_mut() { if let Some((_,capture)) = peer.native_capture.take() { capture.revoke(); } }
+                        }
+                    }
+                }
+                #[cfg(not(all(unix, any(test, target_os = "linux"))))]
+                let _ = local;
+            }
             _ = tick.tick() => {
                 let current_key = load_session_psk();
                 if current_key != psk {
@@ -828,7 +1008,7 @@ pub async fn run_host_service(
                                     send_session(&udp_sender, addr, reply).await;
                                 }
                                 SessionCommand::ListSources { request_id } if peers.contains_key(&addr) => {
-                                    let reply = match crate::capture_sources::list() { Ok(mut sources) => { sources.truncate(256); SessionCommand::Sources { request_id, sources } }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
+                                    let reply = match peers.get(&addr).unwrap().capture_sources() { Ok(sources) => SessionCommand::Sources { request_id, sources }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
                                     send_session(&udp_sender, addr, reply).await;
                                 }
                                 SessionCommand::Subscribe(request) => {
@@ -1029,9 +1209,94 @@ mod failure_admission_tests {
                 video_sequence: Arc::new(std::sync::atomic::AtomicU16::new(37)),
                 #[cfg(target_os = "windows")]
                 _capture_reservation: Arc::new(WindowsVideoCaptureReservation::acquire().unwrap()),
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                native_capture: None,
             },
             stopped,
         )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_portal_grant_commit_rechecks_owner_revision_and_preserves_old_source() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let config = HostServiceConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let addr = "127.0.0.1:40123".parse().unwrap();
+        let mut peer = Connection::new(31, addr, sender, &config);
+        let (subscription, _) = mock_subscription(CaptureSource::MainDisplay);
+        let id = subscription.request.id;
+        peer.subscriptions.insert(id, subscription);
+        tokio::task::yield_now().await;
+        let owner = PeerOwner::from_authenticated_connection(31, [1; 16], Some([2; 32])).unwrap();
+        let other = PeerOwner::from_authenticated_connection(31, [3; 16], Some([2; 32])).unwrap();
+        let target = |owner, revision| LocalPortalShareTarget {
+            addr,
+            owner,
+            source_revision: revision,
+            subscription_id: id,
+        };
+        let (_first_fixture, first) = crate::linux_portal::runtime::tests::prepared_fixture().await;
+        let info = peer
+            .commit_native_capture(target(owner, 10), owner, first.clone())
+            .unwrap();
+        assert!(matches!(info.source, CaptureSource::Window(_)));
+        assert!(!info.supports_input);
+        assert_eq!(
+            peer.subscriptions[&id].request.source,
+            CaptureSource::MainDisplay
+        );
+        let (_second_fixture, second) =
+            crate::linux_portal::runtime::tests::prepared_fixture().await;
+        assert!(
+            peer.commit_native_capture(target(owner, 10), other, second.clone())
+                .is_err()
+        );
+        assert!(*second.revocation().borrow());
+        assert!(!*first.revocation().borrow());
+        assert_eq!(
+            peer.native_capture.as_ref().unwrap().1.source_info().source,
+            info.source
+        );
+        let mut unsupported = peer.subscriptions[&id].request.clone();
+        unsupported.source = info.source;
+        unsupported.width = 1;
+        unsupported.height = 1;
+        let check_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (check_sender, _) = check_mux.split();
+        assert!(
+            peer.subscribe_with_preflight(
+                unsupported,
+                addr,
+                check_sender,
+                config.stats.clone(),
+                false,
+                || Ok(())
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            peer.subscriptions[&id].request.source,
+            CaptureSource::MainDisplay
+        );
+        assert!(!peer.subscriptions[&id].task.is_finished());
+        assert!(!*first.revocation().borrow());
+        let (_third_fixture, third) = crate::linux_portal::runtime::tests::prepared_fixture().await;
+        assert!(
+            peer.commit_native_capture(target(owner, 9), owner, third.clone())
+                .is_err()
+        );
+        assert!(*third.revocation().borrow());
+        assert!(!peer.subscriptions[&id].task.is_finished());
+        drop(peer);
+        assert!(*first.revocation().borrow());
     }
 
     #[tokio::test]

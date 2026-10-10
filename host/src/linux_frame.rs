@@ -181,6 +181,36 @@ impl FrameFormat {
 }
 
 impl OwnedFrame {
+    /// Recheck the public owned boundary before passing bytes to a subprocess.
+    pub fn validate_owned(&self) -> Result<(), FrameError> {
+        if self.stamp.generation == 0 {
+            return Err(FrameError::Generation);
+        }
+        let crop = self.source_format.crop_rect()?;
+        if (self.width, self.height) != (crop.width, crop.height) {
+            return Err(FrameError::Dimensions);
+        }
+        let layouts = self.source_format.plane_layouts(crop);
+        if self.planes.len() != layouts.len() || self.mapping_offsets.len() != layouts.len() {
+            return Err(FrameError::PlaneCount);
+        }
+        let mut total = 0usize;
+        for (plane, layout) in self.planes.iter().zip(layouts) {
+            let expected = layout
+                .copied_row_bytes
+                .checked_mul(layout.copied_rows)
+                .ok_or(FrameError::Budget)?;
+            if plane.len() != expected {
+                return Err(FrameError::Bounds);
+            }
+            total = total.checked_add(expected).ok_or(FrameError::Budget)?;
+        }
+        if total > MAX_FRAME_BYTES {
+            return Err(FrameError::Budget);
+        }
+        Ok(())
+    }
+
     pub fn copy_from(
         format: FrameFormat,
         planes: &[BorrowedPlane<'_>],
@@ -288,7 +318,9 @@ impl FrameMailbox {
     pub fn set_paused(&self, paused: bool) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.paused = paused;
-        state.latest = None;
+        if paused {
+            state.latest = None;
+        }
     }
 
     pub fn close(&self) {

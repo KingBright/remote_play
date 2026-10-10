@@ -1,13 +1,14 @@
 //! Control-plane invariants for one explicit local portal selection.
 //!
-//! This module is the testable ownership boundary, not a D-Bus implementation.
-//! A live adapter must register Response before making each request, enact every
-//! ClosePlan, retain Session.Closed, and transfer only the restricted remote FD.
-//! No wire command, restore token, default PipeWire connection, or UI is added.
+//! Pure ownership rules live here; runtime implements the real D-Bus requests,
+//! cancellation, restricted FD handoff and prepared owned-frame resource.
+//! No wire command, restore token, global PipeWire connection, or second UI is added.
 
 use protocol::session::CaptureSource;
 use remote_core::shared_files::ShareScope;
 use std::os::fd::OwnedFd;
+
+pub mod runtime;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PeerOwner {

@@ -1,3 +1,4 @@
+use crate::linux_frame::{FrameMailbox, OwnedFrame, PixelFormat};
 use async_trait::async_trait;
 use remote_core::{VideoCapturer, VideoFrame, VideoFrameHandleKind, VideoPixelFormat};
 use std::error::Error;
@@ -13,6 +14,21 @@ pub struct LinuxVideoFrame {
     pub capture_time_ms: u32,
     pub is_keyframe: bool,
     pub timing: protocol::FrameTimingCheckpoints,
+    pub(crate) owned: Option<OwnedFrame>,
+}
+
+impl LinuxVideoFrame {
+    pub(crate) fn from_owned(frame: OwnedFrame) -> Self {
+        Self {
+            width: frame.width,
+            height: frame.height,
+            data: Vec::new(),
+            capture_time_ms: (frame.stamp.arrival_ts_us / 1000) as u32,
+            is_keyframe: false,
+            timing: protocol::FrameTimingCheckpoints::new(frame.stamp.arrival_ts_us),
+            owned: Some(frame),
+        }
+    }
 }
 
 impl VideoFrame for LinuxVideoFrame {
@@ -26,7 +42,16 @@ impl VideoFrame for LinuxVideoFrame {
         VideoFrameHandleKind::CpuMemory
     }
     fn pixel_format(&self) -> VideoPixelFormat {
-        VideoPixelFormat::Rgba8
+        match self
+            .owned
+            .as_ref()
+            .map(|frame| frame.source_format.pixel_format)
+        {
+            Some(PixelFormat::Bgra | PixelFormat::Bgrx) => VideoPixelFormat::Bgra8,
+            Some(PixelFormat::Rgba | PixelFormat::Rgbx) => VideoPixelFormat::Rgba8,
+            Some(PixelFormat::Nv12) => VideoPixelFormat::Nv12,
+            _ => VideoPixelFormat::Unknown,
+        }
     }
 }
 
@@ -37,6 +62,7 @@ pub struct LinuxVideoCapturer {
     running: Arc<AtomicBool>,
     frame_rx: Mutex<mpsc::Receiver<LinuxVideoFrame>>,
     frame_tx: mpsc::Sender<LinuxVideoFrame>,
+    native: Option<Arc<FrameMailbox>>,
 }
 
 impl LinuxVideoCapturer {
@@ -49,7 +75,17 @@ impl LinuxVideoCapturer {
             running: Arc::new(AtomicBool::new(false)),
             frame_rx: Mutex::new(frame_rx),
             frame_tx,
+            native: None,
         })
+    }
+
+    pub(crate) fn from_owned_mailbox(
+        mailbox: Arc<FrameMailbox>,
+        fps: u32,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let mut capture = Self::new(0, 0, fps)?;
+        capture.native = Some(mailbox);
+        Ok(capture)
     }
 
     pub fn update_resolution_and_fps(
@@ -69,6 +105,10 @@ impl VideoCapturer for LinuxVideoCapturer {
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.running.store(true, Ordering::SeqCst);
+        if let Some(mailbox) = &self.native {
+            mailbox.set_paused(false);
+            return Ok(());
+        }
         let running = self.running.clone();
         let tx = self.frame_tx.clone();
         let width = self.target_width;
@@ -113,6 +153,7 @@ impl VideoCapturer for LinuxVideoCapturer {
                     capture_time_ms: now_ms,
                     is_keyframe: is_key,
                     timing: protocol::FrameTimingCheckpoints::new(capture_ts_us),
+                    owned: None,
                 };
 
                 let _ = tx.blocking_send(frame);
@@ -125,10 +166,28 @@ impl VideoCapturer for LinuxVideoCapturer {
 
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(mailbox) = &self.native {
+            mailbox.close();
+        }
         Ok(())
     }
 
+    async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(mailbox) = &self.native {
+            mailbox.set_paused(true);
+            Ok(())
+        } else {
+            self.stop().await
+        }
+    }
+    async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.start().await
+    }
+
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
+        if let Some(mailbox) = &self.native {
+            return Ok(LinuxVideoFrame::from_owned(mailbox.receive().await?));
+        }
         let mut rx = self.frame_rx.lock().await;
         rx.recv()
             .await

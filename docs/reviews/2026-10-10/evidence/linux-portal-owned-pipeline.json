@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "date": "2026-10-10",
+  "base_head": "c0718232e5baf76f45acba12f6bbf03d40f5446d",
+  "platform_tested": "aarch64-apple-darwin",
+  "tests": [
+    {
+      "filter": "linux_portal::runtime::tests",
+      "passed": 9,
+      "failed": 0
+    },
+    {
+      "filter": "linux_raw_encode::tests",
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "filter": "linux_video_encode::lifecycle_tests",
+      "passed": 2,
+      "failed": 0
+    },
+    {
+      "filter": "service::",
+      "passed": 8,
+      "failed": 0
+    },
+    {
+      "filter": "linux_frame::tests",
+      "passed": 7,
+      "failed": 0
+    }
+  ],
+  "total_layered_tests": 32,
+  "new_tests": 17,
+  "adjacent_regressions": 15,
+  "source_sha256": {
+    "Cargo.lock": "213010668644af309ef565702cd457c413ce162a464a3b6304a030f0493e1980",
+    "host/Cargo.toml": "a0d8f6695fae220d663cc7a967aa648b1348db6f7b83d8daa13cf8ddaf4d892d",
+    "host/src/lib.rs": "a31a047c4e9b66c240153d6072de92c26632e81253644880585a7dd7d3088a22",
+    "host/src/linux_capture.rs": "255f82d3c6b73d3e4ea10a05ab1e785c11698721dd70ae8bf80b31d5ece55d19",
+    "host/src/linux_frame.rs": "29c506e3782833477207499f713308e5a6882ef56803ef1af29f03251a014d32",
+    "host/src/linux_portal.rs": "c608a431d38f4dfbc08a696281e11fa6197470ba5599f4da38999e98a8bbdb7b",
+    "host/src/linux_portal/runtime.rs": "c1ba0f713204ea25602c6a58df5f27659bb0af4b5718f09cc93e7842fac52fc2",
+    "host/src/linux_portal/runtime/tests.rs": "c207f880d5d88ca26945db686f5641e2aef9a95ef59d53cf04bf3b4ab39f0737",
+    "host/src/linux_raw_encode.rs": "6a7f5ccca0e88100d68d795b47cedc11452d625133190b0225e2bf6d37c12613",
+    "host/src/linux_raw_encode/tests.rs": "c870dd875d103bf5e0d178d46852107811bcd5b3b292a003e8fc6159e08b2f7c",
+    "host/src/linux_video_encode.rs": "c32e48065b990f7bfc266f16ce92b10e3e031d8382a728a127aa37485b8c5c54",
+    "host/src/service.rs": "dea50dfba3ffc9a836e4d8405d70487fcfa9863224ccc0ca1dfa468d780a7a0d",
+    "host/examples/linux_portal_control.rs": "c526584a667629e582fc6ea2fe5d3adc41a4933cf481227c53f5ae49d940bc52"
+  },
+  "linux_compilation": "not_verified",
+  "pipewire_worker": "not_implemented_pending_legitimate_sdk_and_source_transfer",
+  "real_portal_picker": "not_run",
+  "real_pipewire_pixels": "not_verified",
+  "actual_gpui_presentation": "not_verified",
+  "gpui_local_share_button": "not_connected",
+  "production_entry": "unchanged_original_gpui",
+  "deployment": "none",
+  "new_locked_packages": [],
+  "baseline_preservation": {
+    "paths": 105,
+    "mismatches": []
+  },
+  "concurrent_other_paths": [],
+  "free_gib": 79.2,
+  "sdk_readonly": {
+    "ho5_pkg_config_pipewire_spa": "unresolved",
+    "ho5_clang": "not_found_in_path",
+    "ho5_podman": "cannot_reexec_under_current_context",
+    "local_linux_rust_targets": "installed_but_not_a_c_sdk",
+    "local_docker": "only_existing_mysql_container_and_mysql_image_no_developer_sdk_used"
+  },
+  "system_changes": [],
+  "last_results_verified_at": "2026-10-10T02:11:34Z",
+  "mac_typecheck": {
+    "command": "cargo check -p host --lib --example linux_portal_control --offline --locked",
+    "exit_code": 0,
+    "final_duration_seconds": 1.52
+  },
+  "builds_running_for_this_stage": false,
+  "incidental_rustfmt_restored_to_exact_head": [
+    "host/src/capture.rs",
+    "host/src/capture_readiness.rs",
+    "host/src/video_encode.rs"
+  ]
+}

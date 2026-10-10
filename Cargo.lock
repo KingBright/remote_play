@@ -3065,15 +3065,18 @@ dependencies = [
  "core-media-rs",
  "core-media-sys",
  "cpal",
+ "futures-util",
  "opus",
  "protocol",
  "remote_core",
  "remote_platform",
  "screencapturekit 1.5.4",
+ "serde",
  "tokio",
  "video-toolbox-sys",
  "windows-sys 0.59.0",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

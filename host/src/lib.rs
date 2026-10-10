@@ -27,19 +27,31 @@ mod window_input;
 mod capture_backend;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_capture_geometry;
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(all(test, not(target_os = "linux")))]
 mod linux_frame;
+#[cfg(target_os = "linux")]
+pub mod linux_frame;
 #[cfg(all(unix, any(test, target_os = "linux")))]
 mod linux_portal;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub use linux_portal::{
+    SourceKind as PortalSourceKind,
+    runtime::{
+        PickerSources, PortalCallError, PortalCaptureLease, PreparedPortalCapture,
+        SelectedPortalSource, request_local_portal_capture,
+    },
+};
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ffmpeg_hevc;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod linux_audio;
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 pub mod linux_capture;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
+mod linux_raw_encode;
+#[cfg(any(test, target_os = "linux"))]
 pub mod linux_video_encode;
 #[cfg(target_os = "windows")]
 mod windows_capture;
@@ -373,6 +385,8 @@ struct StreamingRunConfig {
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     keyframe_requested: Arc<std::sync::atomic::AtomicBool>,
     video_sequence: Arc<std::sync::atomic::AtomicU16>,
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    native_capture: Option<linux_portal::runtime::PreparedPortalCapture>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -896,7 +910,13 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         mut stream_settings_rx,
         keyframe_requested,
         video_sequence,
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        native_capture,
     } = config;
+    #[cfg(all(unix, test, not(target_os = "linux")))]
+    if native_capture.is_some() {
+        return Err("native Linux streaming requires a Linux runtime".into());
+    }
 
     let Some(initial) = wait_for_capture_start(
         &mut stream_settings_rx,
@@ -944,9 +964,26 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
     let mut video_encoder = MacVideoEncoder::new(width, height, fps, bitrate_kbps)?;
 
     #[cfg(target_os = "linux")]
-    let mut video_capturer = LinuxVideoCapturer::new(width, height, fps)?;
+    let mut video_capturer = match &native_capture {
+        Some(capture) if capture.source_info().source == source => {
+            LinuxVideoCapturer::from_owned_mailbox(capture.mailbox(), fps)?
+        }
+        Some(_) => return Err("native capture source does not match the subscription".into()),
+        None => LinuxVideoCapturer::new(width, height, fps)?,
+    };
     #[cfg(target_os = "linux")]
-    let mut video_encoder = LinuxVideoEncoder::new(width, height, fps, bitrate_kbps)?;
+    let mut video_encoder = match &native_capture {
+        Some(capture) => LinuxVideoEncoder::from_owned_frames(
+            capture.generation(),
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+        )?,
+        None => LinuxVideoEncoder::new(width, height, fps, bitrate_kbps)?,
+    };
+    #[cfg(target_os = "linux")]
+    let mut native_revoked = native_capture.as_ref().map(|capture| capture.revocation());
 
     #[cfg(target_os = "windows")]
     let mut video_capturer = crate::windows_capture::WindowsVideoCapturer::new(width, height, fps)?;
@@ -981,6 +1018,11 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
 
     loop {
         tokio::select! {
+            _ = async {
+                #[cfg(target_os = "linux")]
+                if let Some(revoked) = &mut native_revoked { loop { if *revoked.borrow() || revoked.changed().await.is_err() { return; } } }
+                std::future::pending::<()>().await;
+            } => break,
             _ = cancel_rx.recv() => {
                 break;
             }
@@ -1043,6 +1085,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             }
             chunk_res = video_encoder.pull_encoded_chunk() => {
                 let chunk = chunk_res?;
+                #[cfg(target_os = "linux")]
+                if native_capture.as_ref().is_some_and(|capture| *capture.revocation().borrow()) { break; }
                 if paused || chunk.nalu.is_empty() {
                     continue;
                 }
