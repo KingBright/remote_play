@@ -115,6 +115,8 @@ fn validate_host_video_settings(
 enum InputTarget {
     Desktop,
     Window { id: u32, pid: i32 },
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    Portal,
 }
 fn input_target_for(
     source: CaptureSource,
@@ -151,6 +153,15 @@ struct Subscription {
     _capture_reservation: Arc<WindowsVideoCaptureReservation>,
     #[cfg(all(unix, any(test, target_os = "linux")))]
     native_capture: Option<PreparedPortalCapture>,
+}
+impl Subscription {
+    fn supports_input_now(&self) -> bool {
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some(capture) = &self.native_capture {
+            return self.supports_input && capture.input_available();
+        }
+        self.supports_input && self.input_target.is_some()
+    }
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
@@ -445,7 +456,7 @@ impl Connection {
                 audio_owner: existing
                     .audio_group
                     .and_then(|key| self.audio_groups.get(&key).map(|g| g.owner)),
-                supports_input: existing.supports_input,
+                supports_input: existing.supports_input_now(),
             });
         }
         if self.subscriptions.len() >= MAX_SUBSCRIPTIONS
@@ -507,6 +518,8 @@ impl Connection {
             selected.and_then(|s| s.process_id),
             supports_input,
         );
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        let input_target = if native_capture.is_some() { Some(InputTarget::Portal) } else { input_target };
         let supports_input = supports_input && input_target.is_some();
         let mut initial_settings = stream_settings(&request);
         let mut activity_revision = 0;
@@ -530,6 +543,15 @@ impl Connection {
                 .is_err()
             {
                 return Err("previous capture did not stop; replacement was not started".into());
+            }
+            #[cfg(all(unix, any(test, target_os = "linux")))]
+            if let Some(previous) = &existing.native_capture {
+                previous.release_input().await.map_err(|e| e.to_string())?;
+                if native_capture.as_ref().is_some_and(|next| next.generation() == previous.generation()) {
+                    // A settings/resubscribe update reuses this same consented
+                    // source. Old Subscription::drop must not revoke its lease.
+                    existing.native_capture = None;
+                }
             }
         }
         self.subscriptions.remove(&request.id);
@@ -675,7 +697,7 @@ impl Connection {
                 id,
                 request_id,
                 source,
-                supports_input: current.supports_input,
+                supports_input: current.supports_input_now(),
             });
         }
         let mut request = current.request.clone();
@@ -690,7 +712,7 @@ impl Connection {
             id,
             request_id,
             source,
-            supports_input: current.supports_input,
+            supports_input: current.supports_input_now(),
         })
     }
 
@@ -728,20 +750,43 @@ impl Connection {
                 .is_some_and(|s| s.input_target == Some(InputTarget::Desktop))
     }
     fn can_scoped_input(&self, id: u32, revision: u32) -> bool {
-        self.can_input(id)
-            && self
-                .subscriptions
-                .get(&id)
-                .is_some_and(|s| s.source_revision == revision)
+        self.can_input(id) && self.accepts_input_revision(id, revision)
+    }
+    fn accepts_input_revision(&self, id: u32, revision: u32) -> bool {
+        self.subscriptions.get(&id).is_some_and(|s| s.source_revision == revision
+            && !s.task.is_finished() && !s.settings.borrow().paused)
     }
 
     fn can_input(&self, id: u32) -> bool {
         self.subscriptions.get(&id).is_some_and(|s| {
-            s.supports_input
-                && s.input_target.is_some()
+            s.supports_input_now()
                 && !s.task.is_finished()
                 && !s.settings.borrow().paused
         })
+    }
+}
+
+/// Holds the actual session resource as well as its authenticated subscription.
+/// Removal of a peer cannot lose the resource needed to release pressed input.
+#[derive(Default)]
+struct ActiveInput {
+    owner: Option<(SocketAddr, u32)>,
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    capture: Option<PreparedPortalCapture>,
+}
+impl ActiveInput {
+    async fn release(&mut self, injector: &LazyInputInjector) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.owner = None;
+        injector.release_all_input();
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some(capture) = self.capture.take()
+            && let Err(error) = capture.release_input().await {
+                // Closing the granted session is the bounded recovery if a
+                // compositor cannot confirm key-up; no global input fallback.
+                capture.revoke();
+                return Err(error.into());
+        }
+        Ok(())
     }
 }
 
@@ -765,7 +810,7 @@ async fn send_session(sender: &UdpSender, addr: SocketAddr, command: SessionComm
 }
 async fn inject(
     injector: &LazyInputInjector,
-    owner: &mut Option<(SocketAddr, u32)>,
+    owner: &mut ActiveInput,
     peer: &mut Connection,
     udp: &UdpSender,
     addr: SocketAddr,
@@ -773,19 +818,48 @@ async fn inject(
     event: InputEvent,
 ) {
     if !peer.can_input(id) {
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        if let Some(capture) = peer.subscriptions.get(&id).and_then(|s| s.native_capture.as_ref()) {
+            if let Err(error) = capture.input_status() {
+                input_error(peer, udp, addr, id, &error.to_string()).await;
+            }
+            return;
+        }
+        input_error(peer, udp, addr, id, "Input is not supported for the selected capture source").await;
         return;
     }
     let Some(target) = peer.subscriptions.get(&id).and_then(|s| s.input_target) else {
         return;
     };
-    if *owner != Some((addr, id)) {
-        injector.release_all_input();
-        *owner = Some((addr, id));
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    let capture = peer.subscriptions.get(&id).and_then(|s| s.native_capture.clone());
+    let mut changed = owner.owner != Some((addr, id));
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    { changed |= owner.capture.as_ref().map(PreparedPortalCapture::generation)
+        != capture.as_ref().map(PreparedPortalCapture::generation); }
+    if changed {
+        if let Err(error) = owner.release(injector).await {
+            input_error(peer, udp, addr, id, &error.to_string()).await;
+            return;
+        }
+        owner.owner = Some((addr, id));
+        #[cfg(all(unix, any(test, target_os = "linux")))]
+        { owner.capture = capture.clone(); }
     }
-    if let Err(error) = injector.inject_target(target, event) {
-        injector.release_all_input();
-        *owner = None;
-        if let Some(s) = peer.subscriptions.get_mut(&id)
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    let result = match capture {
+        Some(capture) => capture.inject_input(event).await.map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
+        None => injector.inject_target(target, event),
+    };
+    #[cfg(not(all(unix, any(test, target_os = "linux"))))]
+    let result = injector.inject_target(target, event);
+    if let Err(error) = result {
+        let _ = owner.release(injector).await;
+        input_error(peer, udp, addr, id, &error.to_string()).await;
+    }
+}
+async fn input_error(peer: &mut Connection, udp: &UdpSender, addr: SocketAddr, id: u32, reason: &str) {
+    if let Some(s) = peer.subscriptions.get_mut(&id)
             && s.last_input_error
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
         {
@@ -795,11 +869,10 @@ async fn inject(
                 addr,
                 SessionCommand::Error {
                     request_id: id,
-                    reason: format!("INPUT_UNAVAILABLE: {error}"),
+                    reason: format!("INPUT_UNAVAILABLE: {reason}"),
                 },
             )
             .await;
-        }
     }
 }
 
@@ -848,6 +921,8 @@ impl LazyInputInjector {
                         return Err("This host does not implement window-scoped input; no desktop fallback was used".into());
                     }
                 }
+                #[cfg(all(unix, any(test, target_os = "linux")))]
+                InputTarget::Portal => return Err("Portal input requires the exact consented session resource".into()),
             };
             *current = Some((target, created));
         }
@@ -905,7 +980,7 @@ async fn run_host_service_inner(
     let mut authenticated = HashMap::<SocketAddr, ([u8; 16], [u8; 16], u64)>::new();
     let mut psk = load_session_psk();
     let mut require_auth = require_session_auth() || psk.is_some();
-    let mut input_owner = None;
+    let mut input_owner = ActiveInput::default();
     let mut tick = tokio::time::interval(Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -965,8 +1040,8 @@ async fn run_host_service_inner(
                 #[cfg(not(target_os = "linux"))]
                 let retain_for_local_share = false;
                 for peer in peers.values_mut() { peer.prune_finished_subscriptions(retain_for_local_share); }
-                if input_owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) {
-                    injector.release_all_input(); input_owner = None;
+                if input_owner.owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) {
+                    let _ = input_owner.release(&injector).await;
                 }
             }
             received = udp_receiver.recv() => {
@@ -1001,15 +1076,22 @@ async fn run_host_service_inner(
                                 if peers.len() >= 8 && !peers.contains_key(&addr) { continue; }
                                 let peer = peers.entry(addr).or_insert_with(|| Connection::new(session_id, addr, udp_sender.clone(), &config));
                                 peer.set_clipboard(config.enable_clipboard_sync);
-                                if !peer.subscriptions.contains_key(&session_id) { peer.subscriptions.clear(); peer.refresh_audio(); }
+                                if !peer.subscriptions.contains_key(&session_id) {
+                                    if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
+                                    peer.subscriptions.clear(); peer.refresh_audio();
+                                }
                                 if let Err(reason) = peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true).await {
                                     send_session(&udp_sender, addr, SessionCommand::Error { request_id: session_id, reason }).await;
                                 }
                             }
                             ControlMessage::Session(command) => match *command {
                                 SessionCommand::ReleaseInput { id } => {
-                                    if input_owner == Some((addr, id)) { injector.release_all_input(); input_owner=None; }
-                                    send_session(&udp_sender,addr,SessionCommand::InputReleased {id}).await;
+                                    let result = if input_owner.owner == Some((addr, id)) { input_owner.release(&injector).await } else { Ok(()) };
+                                    let reply = match result {
+                                        Ok(()) => SessionCommand::InputReleased { id },
+                                        Err(error) => SessionCommand::Error { request_id:id, reason:format!("INPUT_UNAVAILABLE: {error}") },
+                                    };
+                                    send_session(&udp_sender,addr,reply).await;
                                 }
                                 SessionCommand::Configure { id, revision, width, height, fps, bitrate_kbps } => {
                                     let reply = if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() || width > 8192 || height > 8192 || u64::from(width) * u64::from(height) > 33_554_432 {
@@ -1047,6 +1129,7 @@ async fn run_host_service_inner(
                                 }
                                 SessionCommand::Subscribe(request) => {
                                     let id = request.id;
+                                    if input_owner.owner == Some((addr,id)) { let _ = input_owner.release(&injector).await; }
                                     let result = match peers.get_mut(&addr) {
                                         Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
                                         None => Err("open a connection first".to_owned()),
@@ -1056,7 +1139,7 @@ async fn run_host_service_inner(
                                 }
                                 SessionCommand::SwitchSource { id, request_id, source } => {
                                     // Never carry a held button/key across capture sources.
-                                    if input_owner == Some((addr, id)) { injector.release_all_input(); input_owner=None; }
+                                    if input_owner.owner == Some((addr, id)) { let _ = input_owner.release(&injector).await; }
                                     let result = match peers.get_mut(&addr) {
                                         Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
                                         None => Err("open a connection first".to_owned()),
@@ -1064,19 +1147,23 @@ async fn run_host_service_inner(
                                     send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason })).await;
                                 }
                                 SessionCommand::Unsubscribe { id } => {
+                                    if input_owner.owner == Some((addr,id)) { let _ = input_owner.release(&injector).await; }
                                     if let Some(peer) = peers.get_mut(&addr) { peer.subscriptions.remove(&id);
                                     #[cfg(all(unix, any(test, target_os = "linux")))]
                                     if let Some(capture) = peer.native_capture.remove(&id) { capture.revoke(); }
                                     peer.retired.insert(id); peer.refresh_audio(); send_session(&udp_sender, addr, SessionCommand::Unsubscribed { id }).await; }
                                 }
-                                SessionCommand::Close { connection_id } if peers.get(&addr).is_some_and(|p| p.id == connection_id) => { peers.remove(&addr); }
+                                SessionCommand::Close { connection_id } if peers.get(&addr).is_some_and(|p| p.id == connection_id) => {
+                                    if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
+                                    peers.remove(&addr);
+                                }
                                 SessionCommand::Input { id, event } => {
                                     if let Some(peer)=peers.get_mut(&addr) && peer.can_legacy_input(id) {
                                         inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await;
                                     }
                                 }
                                 SessionCommand::SourceInput { id, source_revision, event } => {
-                                    if let Some(peer)=peers.get_mut(&addr) && peer.can_scoped_input(id,source_revision) {
+                                    if let Some(peer)=peers.get_mut(&addr) && peer.accepts_input_revision(id,source_revision) {
                                         inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await;
                                     }
                                 }
@@ -1085,7 +1172,10 @@ async fn run_host_service_inner(
                                 }
                                 _ => {}
                             },
-                            ControlMessage::StopStream => { peers.remove(&addr); }
+                            ControlMessage::StopStream => {
+                                if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
+                                peers.remove(&addr);
+                            }
                             ControlMessage::Input(event) => {
                                 if let Some(peer) = peers.get_mut(&addr) && peer.subscriptions.len() == 1
                                     && let Some(&id) = peer.subscriptions.keys().next() && peer.can_legacy_input(id) { inject(&injector, &mut input_owner, peer, &udp_sender, addr, id, event).await; }
@@ -1115,7 +1205,7 @@ async fn run_host_service_inner(
                             }
                             _ => {}
                         }
-                        if input_owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) { injector.release_all_input(); input_owner = None; }
+                        if input_owner.owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) { let _ = input_owner.release(&injector).await; }
                     }
                     MultiplexedPacket::Data(envelope, addr) | MultiplexedPacket::DataWithTiming(envelope, _, addr) => {
                         let Some(peer) = peers.get_mut(&addr) else { continue; };
@@ -1422,6 +1512,70 @@ mod failure_admission_tests {
             .settings
             .send_modify(|s| s.paused = true);
         assert!(!peer.can_scoped_input(100, 11));
+    }
+
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    #[tokio::test]
+    async fn portal_input_uses_exact_session_target_and_releases_without_global_injector() {
+        let (fixture, capture) = crate::linux_portal::runtime::tests::prepared_control_fixture().await;
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let addr = "127.0.0.1:39577".parse().unwrap();
+        let config = HostServiceConfig { bind_addr: addr, stats: Statistics::new(),
+            enable_clipboard_sync: false, enable_file_transfer: false, enable_talkback: false };
+        let mut peer = Connection::new(1, addr, sender.clone(), &config);
+        let (mut sub, _) = mock_subscription(capture.source_info().source);
+        sub.input_target = Some(InputTarget::Portal);
+        sub.native_capture = Some(capture.clone());
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        assert!(peer.can_scoped_input(100, 10));
+        assert!(!peer.accepts_input_revision(100, 9));
+        assert!(!peer.can_legacy_input(100));
+        let injector = LazyInputInjector::default();
+        let mut active = ActiveInput::default();
+        inject(&injector, &mut active, &mut peer, &sender, addr, 100,
+            InputEvent::Key { key_code:0, pressed:true, modifiers:protocol::input_modifiers::SHIFT }).await;
+        assert_eq!(fixture.target_text()[0], "A");
+        assert_eq!(active.owner, Some((addr,100)));
+        assert!(injector.0.lock().unwrap().is_none(), "portal input must never create a global OS injector");
+        active.release(&injector).await.unwrap();
+        assert!(fixture.held_input_empty());
+        capture.revoke();
+        assert!(!peer.can_scoped_input(100,10));
+    }
+
+    #[cfg(all(unix, any(test, target_os = "linux")))]
+    #[tokio::test]
+    async fn native_resubscribe_releases_keys_without_revoking_reused_source() {
+        let (fixture,capture) = crate::linux_portal::runtime::tests::prepared_control_fixture().await;
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender,_receiver) = mux.split();
+        let addr = "127.0.0.1:39579".parse().unwrap();
+        let config = HostServiceConfig { bind_addr:addr,stats:Statistics::new(),
+            enable_clipboard_sync:false,enable_file_transfer:false,enable_talkback:false };
+        let mut peer = Connection::new(1,addr,sender.clone(),&config);
+        let source = capture.source_info().source;
+        let (mut sub,_) = mock_subscription(source);
+        sub.input_target = Some(InputTarget::Portal);
+        sub.native_capture = Some(capture.clone());
+        sub.settings.send_modify(|s|s.paused=false);
+        // A completed stream must be recreated even on the same selected source;
+        // unchanged active rate updates correctly use the earlier fast path.
+        sub.task.abort();
+        tokio::time::timeout(Duration::from_secs(1),async {
+            while !sub.task.is_finished() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        peer.subscriptions.insert(100,sub);
+        peer.native_capture.insert(100,capture.clone());
+        capture.inject_input(InputEvent::KeyDown(0)).await.unwrap();
+        peer.subscribe_with_preflight(SubscriptionRequest { id:100,source,width:1280,height:720,
+            fps:30,bitrate_kbps:4000,audio:false },addr,sender,config.stats.clone(),false,||Ok(())).await.unwrap();
+        assert!(fixture.held_input_empty());
+        assert!(!capture.is_revoked(),"reusing a selected source must preserve its session lease");
+        assert_eq!(peer.subscriptions[&100].source_revision,10);
+        drop(peer);
+        assert!(capture.is_revoked());
     }
 
     #[tokio::test]

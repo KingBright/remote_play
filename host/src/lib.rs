@@ -37,8 +37,8 @@ mod linux_portal;
 pub use linux_portal::{
     SourceKind as PortalSourceKind,
     runtime::{
-        PickerSources, PortalCallError, PortalCaptureLease, PreparedPortalCapture,
-        SelectedPortalSource, request_local_portal_capture,
+        PickerSources, PortalCallError, PortalCaptureLease, PortalInputError, PreparedPortalCapture,
+        SelectedPortalSource, request_local_portal_capture, request_local_portal_control_capture,
     },
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]

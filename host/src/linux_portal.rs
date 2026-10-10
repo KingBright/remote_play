@@ -54,6 +54,8 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     Create,
+    /// Optional RemoteDesktop selection before selecting ScreenCast sources.
+    SelectDevices,
     Select,
     Start,
 }
@@ -123,6 +125,7 @@ pub struct PortalSessionState {
     session: String,
     request: Option<(Method, String)>,
     selection_options: SelectionOptions,
+    devices_selected: bool,
 }
 
 fn valid_handle(path: &str, kind: &str) -> bool {
@@ -159,6 +162,7 @@ impl PortalSessionState {
             session,
             request: None,
             selection_options: options,
+            devices_selected: false,
         })
     }
 
@@ -178,6 +182,7 @@ impl PortalSessionState {
         self.phase = match (self.phase, method) {
             (Phase::Idle, Method::Create) => Phase::Creating,
             (Phase::Selecting, Method::Select) => Phase::Selecting,
+            (Phase::Selecting, Method::SelectDevices) if !self.devices_selected => Phase::Selecting,
             (Phase::Starting, Method::Start) => Phase::Starting,
             _ => return Err(PortalError::State),
         };
@@ -204,6 +209,10 @@ impl PortalSessionState {
         match method {
             Method::Create if returned_session == Some(self.session.as_str()) => {
                 self.phase = Phase::Selecting
+            }
+            Method::SelectDevices => {
+                self.devices_selected = true;
+                self.phase = Phase::Selecting;
             }
             Method::Select => self.phase = Phase::Starting,
             Method::Start
@@ -409,6 +418,30 @@ mod tests {
         PeerOwner::from_authenticated_connection(connection, [nonce; 16], Some([scope; 32]))
             .unwrap()
     }
+    #[test]
+    fn optional_remote_desktop_devices_are_selected_once_before_sources() {
+        let mut state = state();
+        state.begin_request(Method::Create, CREATE.into()).unwrap();
+        state
+            .complete_request(CREATE, 0, Some(SESSION), None)
+            .unwrap();
+        state
+            .begin_request(Method::SelectDevices, SELECT.into())
+            .unwrap();
+        state.complete_request(SELECT, 0, None, None).unwrap();
+        assert_eq!(
+            state.begin_request(Method::SelectDevices, SELECT.into()),
+            Err(PortalError::State)
+        );
+        state.begin_request(Method::Select, SELECT.into()).unwrap();
+        state.complete_request(SELECT, 0, None, None).unwrap();
+        state.begin_request(Method::Start, START.into()).unwrap();
+        state
+            .complete_request(START, 0, None, Some(SourceKind::Monitor))
+            .unwrap();
+        assert_eq!(state.phase(), Phase::Ready);
+    }
+
     #[test]
     fn selection_is_once_and_pause_never_reopens_the_picker() {
         let mut state = ready();

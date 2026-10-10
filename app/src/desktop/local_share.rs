@@ -12,6 +12,7 @@ use std::rc::Rc;
 pub(crate) enum ShareKind {
     Window,
     Display,
+    ControlledDisplay,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TargetRow {
@@ -129,7 +130,7 @@ impl RenderOnce for Controls {
         let mut content=div().flex().flex_col().gap_2().p_3().rounded(px(8.0))
             .bg(cx.theme().surface.sunken).text_size(px(11.0)).text_color(cx.theme().content.primary)
             .child("Share this computer")
-            .child(div().text_color(cx.theme().content.tertiary).child("Choose a connected viewer, then a window or display. The viewer selects the shared source in Sources."))
+            .child(div().text_color(cx.theme().content.tertiary).child("Window and Display share video only. Display + control asks for keyboard and pointer access. The viewer selects the shared source in Sources."))
             .child(Button::new("share_refresh","Refresh viewers").debug_selector(||"share-refresh".into())
                 .control_size(ControlSize::Sm).variant(ButtonVariant::Secondary).rounded_full().h(px(28.0)).disabled(pending)
                 .on_click(move |_,_,cx|refresh(Action::Refresh,cx)));
@@ -150,9 +151,11 @@ impl RenderOnce for Controls {
             let active = self.active.contains(&row.key);
             let window = self.send.clone();
             let display = self.send.clone();
+            let control = self.send.clone();
             let stop = self.send.clone();
             let window_key = row.key.clone();
             let display_key = row.key.clone();
+            let control_key = row.key.clone();
             let stop_key = row.key;
             content = content.child(
                 div()
@@ -194,6 +197,29 @@ impl RenderOnce for Controls {
                                             cx,
                                         )
                                     }),
+                            )
+                            .child(
+                                Button::new(
+                                    format!("share_control_{control_key}"),
+                                    "Display + control",
+                                )
+                                .debug_selector({
+                                    let key = control_key.clone();
+                                    move || format!("share-control-{key}")
+                                })
+                                .control_size(ControlSize::Sm)
+                                .rounded_full()
+                                .h(px(28.0))
+                                .disabled(pending)
+                                .on_click(move |_, _, cx| {
+                                    control(
+                                        Action::Select(
+                                            control_key.clone(),
+                                            ShareKind::ControlledDisplay,
+                                        ),
+                                        cx,
+                                    )
+                                }),
                             )
                             .when(active, |row| {
                                 row.child(

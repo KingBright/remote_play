@@ -128,6 +128,13 @@ fn actual_ely_share_buttons_dispatch_selection_disable_repeat_and_cancel(cx: &mu
         }
     });
     cx.run_until_parked();
+    let center = cx.debug_bounds("share-control-a").unwrap().center();
+    cx.simulate_click(center, Modifiers::none());
+    assert_eq!(
+        *output.borrow(),
+        [Action::Select("a".into(), ShareKind::ControlledDisplay)]
+    );
+    output.borrow_mut().clear();
     let center = cx.debug_bounds("share-window-a").unwrap().center();
     cx.simulate_click(center, Modifiers::none());
     assert_eq!(
@@ -144,6 +151,8 @@ fn actual_ely_share_buttons_dispatch_selection_disable_repeat_and_cancel(cx: &mu
     let center = cx.debug_bounds("share-window-a").unwrap().center();
     cx.simulate_click(center, Modifiers::none());
     let center = cx.debug_bounds("share-refresh").unwrap().center();
+    cx.simulate_click(center, Modifiers::none());
+    let center = cx.debug_bounds("share-control-a").unwrap().center();
     cx.simulate_click(center, Modifiers::none());
     assert!(output.borrow().is_empty());
     let center = cx.debug_bounds("share-cancel").unwrap().center();

@@ -188,15 +188,25 @@ async fn select(
     let picker = match kind {
         ShareKind::Window => host::PickerSources::Window,
         ShareKind::Display => host::PickerSources::Monitor,
+        ShareKind::ControlledDisplay => host::PickerSources::Monitor,
     };
     // Empty parent is explicitly supported by ScreenCast. A Wayland pointer is
     // not an exported xdg-foreign handle; never fabricate one or add GTK.
-    let lease = host::request_local_portal_capture("", picker, cancel)
-        .await
-        .map_err(selection_message)?;
+    let selection = if kind == ShareKind::ControlledDisplay {
+        host::request_local_portal_control_capture("", picker, cancel).await
+    } else {
+        host::request_local_portal_capture("", picker, cancel).await
+    };
+    let lease = selection.map_err(selection_message)?;
     let capture = host::prepare_pipewire_capture(lease)
         .await
         .map_err(selection_message)?;
+    if kind == ShareKind::ControlledDisplay
+        && let Err(error) = capture.input_status()
+    {
+        capture.revoke();
+        return Err(error.to_string());
+    }
     let owned = state.upgrade().ok_or("Sharing window closed")?;
     {
         let mut owned = owned.lock().unwrap_or_else(|e| e.into_inner());

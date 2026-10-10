@@ -22,6 +22,22 @@ struct Calls {
     peers: Mutex<Vec<UnixStream>>,
     sessions: Mutex<Vec<String>>,
     changed: Notify,
+    target: Mutex<ObservableTarget>,
+    version: std::sync::atomic::AtomicU32,
+    serial: AtomicU64,
+    geometry: Mutex<Option<(i32, i32)>>,
+    fail_key_down: std::sync::atomic::AtomicBool,
+}
+/// Deterministic target used only on a private bus. Changes here are observable
+/// effects of injection, not real compositor permission/presentation evidence.
+#[derive(Default)]
+struct ObservableTarget {
+    position: Option<(u32, f64, f64)>,
+    keys: std::collections::BTreeSet<i32>,
+    buttons: std::collections::BTreeSet<i32>,
+    focus: usize,
+    text: [String; 2],
+    scroll: (f64, f64),
 }
 impl Calls {
     fn record(&self, name: &str) {
@@ -66,6 +82,7 @@ struct FakePortal {
     calls: Arc<Calls>,
     behavior: Behavior,
     source_type: u32,
+    devices: Option<u32>,
 }
 fn text(options: &Values, key: &str) -> String {
     <&str>::try_from(options.get(key).unwrap())
@@ -113,7 +130,10 @@ async fn emit_response(connection: &Connection, path: &str, destination: &str, v
 impl FakePortal {
     #[zbus(property, name = "version")]
     fn version(&self) -> u32 {
-        5
+        match self.calls.version.load(Ordering::Relaxed) {
+            0 => 5,
+            version => version,
+        }
     }
     #[zbus(property)]
     fn available_source_types(&self) -> u32 {
@@ -166,10 +186,12 @@ impl FakePortal {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
-        assert_eq!(
-            u32::try_from(options.get("persist_mode").unwrap()).unwrap(),
-            0
-        );
+        if let Some(mode) = options.get("persist_mode") {
+            assert_eq!(u32::try_from(mode).unwrap(), 0);
+            assert_eq!(self.calls.count("rd_create"), 0);
+        } else {
+            assert_eq!(self.calls.count("rd_create"), 1);
+        }
         assert!(!bool::try_from(options.get("multiple").unwrap()).unwrap());
         assert!(!options.contains_key("restore_token"));
         let types = u32::try_from(options.get("types").unwrap()).unwrap();
@@ -197,27 +219,37 @@ impl FakePortal {
         let (request, destination) =
             register_request(connection, header, &options, &self.calls).await;
         if !matches!(self.behavior, Behavior::NoStartResponse) {
-            let properties: Values = HashMap::from([
+            let mut properties: Values = HashMap::from([
                 ("source_type".into(), OwnedValue::from(self.source_type)),
                 (
                     "size".into(),
-                    Value::from((640i32, 360i32)).try_to_owned().unwrap(),
+                    Value::from(
+                        self.calls
+                            .geometry
+                            .lock()
+                            .unwrap()
+                            .unwrap_or((640i32, 360i32)),
+                    )
+                    .try_to_owned()
+                    .unwrap(),
                 ),
                 (
                     "position".into(),
                     Value::from((-640i32, 0i32)).try_to_owned().unwrap(),
                 ),
             ]);
+            let serial = self.calls.serial.load(Ordering::Relaxed);
+            if serial != 0 {
+                properties.insert("pipewire-serial".into(), serial.into());
+            }
             let streams = Value::from(vec![(77u32, properties)])
                 .try_to_owned()
                 .unwrap();
-            emit_response(
-                connection,
-                &request,
-                &destination,
-                HashMap::from([("streams".into(), streams)]),
-            )
-            .await;
+            let mut response = HashMap::from([("streams".into(), streams)]);
+            if let Some(devices) = self.devices {
+                response.insert("devices".into(), devices.into());
+            }
+            emit_response(connection, &request, &destination, response).await;
         }
         self.calls.record("start");
         Ok(OwnedObjectPath::try_from(request).unwrap())
@@ -303,8 +335,23 @@ pub(crate) async fn prepared_fixture() -> (Fixture, PreparedPortalCapture) {
     let capture = lease.prepare_owned_capture(first).unwrap();
     (fixture, capture)
 }
+pub(crate) async fn prepared_control_fixture() -> (Fixture, PreparedPortalCapture) {
+    let fixture = Fixture::new(Behavior::EarlyResponse, 1).await;
+    let capture = input_tests::control(&fixture).await;
+    (fixture, capture)
+}
 impl Fixture {
+    pub(crate) fn target_text(&self) -> [String; 2] {
+        self.calls.target.lock().unwrap().text.clone()
+    }
+    pub(crate) fn held_input_empty(&self) -> bool {
+        let target = self.calls.target.lock().unwrap();
+        target.keys.is_empty() && target.buttons.is_empty()
+    }
     async fn new(behavior: Behavior, source_type: u32) -> Self {
+        Self::with_devices(behavior, source_type, 3).await
+    }
+    async fn with_devices(behavior: Behavior, source_type: u32, devices: u32) -> Self {
         let bus = PrivateBus::start();
         let calls = Arc::new(Calls::default());
         let service = zbus::connection::Builder::address(bus.address.as_str())
@@ -316,6 +363,16 @@ impl Fixture {
                 FakePortal {
                     calls: calls.clone(),
                     behavior,
+                    source_type,
+                    devices: None,
+                },
+            )
+            .unwrap()
+            .serve_at(
+                DESKTOP_PATH,
+                FakeRemoteDesktop {
+                    calls: calls.clone(),
+                    devices,
                     source_type,
                 },
             )
@@ -353,6 +410,143 @@ impl Fixture {
             self.timeouts(),
         )
         .await
+    }
+}
+
+mod input_tests;
+
+struct FakeRemoteDesktop {
+    calls: Arc<Calls>,
+    devices: u32,
+    source_type: u32,
+}
+#[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
+impl FakeRemoteDesktop {
+    #[zbus(property, name = "version")]
+    fn version(&self) -> u32 {
+        2
+    }
+    #[zbus(property)]
+    fn available_device_types(&self) -> u32 {
+        3
+    }
+    async fn create_session(
+        &self,
+        options: Values,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        self.calls.record("rd_create");
+        FakePortal {
+            calls: self.calls.clone(),
+            behavior: Behavior::EarlyResponse,
+            source_type: self.source_type,
+            devices: Some(self.devices),
+        }
+        .create_session(options, header, connection)
+        .await
+    }
+    async fn select_devices(
+        &self,
+        _session: OwnedObjectPath,
+        options: Values,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        assert_eq!(u32::try_from(options.get("types").unwrap()).unwrap(), 3);
+        assert_eq!(options.len(), 2); // No persistence, restore token, touch or clipboard.
+        let (request, destination) =
+            register_request(connection, header, &options, &self.calls).await;
+        emit_response(connection, &request, &destination, Values::new()).await;
+        self.calls.record("devices");
+        Ok(OwnedObjectPath::try_from(request).unwrap())
+    }
+    async fn start(
+        &self,
+        session: OwnedObjectPath,
+        parent: String,
+        options: Values,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        self.calls.record("rd_start");
+        FakePortal {
+            calls: self.calls.clone(),
+            behavior: Behavior::EarlyResponse,
+            source_type: self.source_type,
+            devices: Some(self.devices),
+        }
+        .start(session, parent, options, header, connection)
+        .await
+    }
+    fn notify_pointer_motion_absolute(
+        &self,
+        _session: OwnedObjectPath,
+        _options: Values,
+        stream: u32,
+        x: f64,
+        y: f64,
+    ) {
+        assert_eq!(stream, 77);
+        let (width, height) = self.calls.geometry.lock().unwrap().unwrap_or((640, 360));
+        assert!((0.0..f64::from(width)).contains(&x) && (0.0..f64::from(height)).contains(&y));
+        self.calls.target.lock().unwrap().position = Some((stream, x, y));
+    }
+    fn notify_pointer_button(
+        &self,
+        _session: OwnedObjectPath,
+        _options: Values,
+        button: i32,
+        state: u32,
+    ) {
+        let mut target = self.calls.target.lock().unwrap();
+        if state == 1 {
+            target.buttons.insert(button);
+            if button == 0x110
+                && let Some((_, x, _)) = target.position
+            {
+                target.focus = usize::from(x >= 320.0);
+            }
+        } else {
+            target.buttons.remove(&button);
+        }
+        drop(target);
+        self.calls.record(if state == 1 {
+            "button_down"
+        } else {
+            "button_up"
+        });
+    }
+    fn notify_keyboard_keycode(
+        &self,
+        _session: OwnedObjectPath,
+        _options: Values,
+        key: i32,
+        state: u32,
+    ) -> zbus::fdo::Result<()> {
+        let mut target = self.calls.target.lock().unwrap();
+        if state == 1 {
+            target.keys.insert(key);
+            if key == 30 {
+                let focus = target.focus;
+                let character = if target.keys.contains(&42) { 'A' } else { 'a' };
+                target.text[focus].push(character);
+            }
+        } else {
+            target.keys.remove(&key);
+        }
+        drop(target);
+        self.calls
+            .record(if state == 1 { "key_down" } else { "key_up" });
+        if state == 1 && self.calls.fail_key_down.load(Ordering::Relaxed) {
+            return Err(zbus::fdo::Error::Failed(
+                "private target rejected reply after observing event".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn notify_pointer_axis(&self, _session: OwnedObjectPath, _options: Values, dx: f64, dy: f64) {
+        self.calls.target.lock().unwrap().scroll = (dx, dy);
     }
 }
 
