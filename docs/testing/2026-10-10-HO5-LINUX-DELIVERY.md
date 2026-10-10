@@ -1,7 +1,8 @@
 # HO5 Linux fixed candidate — 2026-10-10
 
-The shared input source has a real Linux release candidate. HO5's current user
-service is still running the previous installation. No upgrade, live Portal
+The shared input source was compiled and installed through a normal maintenance
+switch of HO5's existing current user service. Same-user stop, atomic replacement,
+startup and stable health checks passed with retained rollback. No live Portal
 control request, physical presentation or target input acceptance occurred.
 
 ## Candidate and source binding
@@ -26,6 +27,7 @@ the primary checkpoint.
 | Embedded build identity | `3ba025f11a0deca36cfcf786454c2ee2c6e136bd2061e7a7474ea099d5df6519` |
 | Candidate verification manifest | `d03f676d86050f6c4b0cf77456ed6982caffee803d4c6386f21634157f9e6409` |
 | Original remote candidate handoff | `3969d8c8a6c4b68b00d523293b9a6d92f881e6cc311a9b01de513cb29f56c0ec` |
+| Normal current maintenance receipt | `c6d5d8d6ed121b4d5e744acf5f8861ee06c1de60e3b57cb1ac6f178c1ab56c48` |
 
 `--product-info-json` reports `2.0.0-alpha.8`, Linux x86_64,
 `restored-original-gpui`, original GUI compiled and native video compiled.
@@ -47,40 +49,53 @@ local handoff, outside the repository.
 The correct existing entry is the `remote-play-current.service` user unit at
 `$HOME/.config/systemd/user/remote-play-current.service`, executing
 `$HOME/.local/opt/remoteplay/2.0.0-alpha.8/remote_play`. There is no `current`
-symlink at the guessed installation location. The installed binary reports
-alpha.8/original GPUI/native video but has no embedded build identity. That disk
-query does not prove the image mapped into the running process.
+symlink at the guessed installation location. The previous binary reported
+alpha.8/original GPUI/native video without embedded build identity. It is now
+retained in rollback; the current binary matches the candidate and embedded
+identity above. A disk query remains distinct from direct mapped-image proof.
 
-The latest read-only check found the user service active/running, enabled, with
-zero restarts and exit status zero. Its executable and unit hashes remain
-unchanged. Persistent profile inode, size, ownership, mode and mtimes remain
-unchanged; private identity contents were not read or copied. Network protocol
-version remains 2 and persistent configuration implementation is outside the
-source delta. This is source/metadata compatibility evidence, not a completed
-old/new installation transaction.
+The ordinary-user executor and current process are UID 1000. The independent
+Remote Hosts Agent has a separate service scope and retained its original PID.
+Preflight journal entries showed P2P candidate discovery without definite active
+remote-control or transfer evidence. Live session counters were unavailable;
+this was not treated as proof of inactivity. Continuing maintenance authorization
+covers one rollback-protected same-identity switch and short connection rebuild.
+
+The normal user-service stop succeeded with the existing signal/timeout policy;
+old PID exit and profile-lock release were checked before atomic replacement.
+Normal start succeeded. A distinct new PID retained the expected readable argv,
+UID and service cgroup across six startup samples and the later read-only check.
+The service is active/running, with zero restarts and exit status zero. Original
+GPUI runtime renderer metadata and installed binary/compiled identity match.
+The user unit hash is unchanged. Public profile bytes and private identity inode,
+size, ownership, mode and mtimes are unchanged; private identity contents were
+not read or copied. Protocol version remains 2 and persistent configuration
+implementation is outside the source delta. Build-info now truthfully records
+the installed verified candidate; its previous copy remains in rollback.
 
 Hash-verified rollback copies retain the old executable, sibling build-info,
 user unit and previous compiler output. A rollback transaction has not been
 exercised. No published artifact, legacy system unit, OS permission, launch
 configuration or persistent access was changed.
 
-The existing process exposes no read-only active-session query. Current session
-and transfer activity remains unknown; the user was asked to check the HO5
-window. The normal upgrade is paused at that safety condition. OS access to the
-mapped executable also returns permission denied; that limitation was not
-bypassed. Service status and disk metadata are kept separate from actual
-running-image proof.
+The receipt verifies controlled stop/placement/start and stable startup-path
+binding. Direct mapped-executable access was previously denied by the OS and was
+not retried or bypassed. It remains explicitly unverified; service launch binding
+and installed metadata are not substituted for the native loaded-image gate.
 
 ## Native acceptance still required
 
 Read-only Portal properties report RemoteDesktop version 2, available device
 mask 7 and ScreenCast version 5. These are capabilities, not a session grant.
-Discovery, signaling, media to an identified current receiver, actual
-presentation and observable desktop input remain unverified. The prior native
-Host/App regressions passed (92/114 plus entry 1); they are not repeated here
+Startup logs show two WebSocket tunnel connected events and P2P candidate
+observations for two peers, without connect-failure/disconnect events in the
+checked interval. These establish transport events, not an accepted Session
+handshake, authenticated GUI discovery, media to an identified receiver, actual
+presentation or observable desktop input. Those layers remain unverified. The
+prior native Host/App regressions passed (92/114 plus entry 1); they are not repeated here
 and do not establish compositor input effects.
 
-After a safe identity-matched current upgrade, connect an authenticated viewer.
+Using the upgraded current app, connect an authenticated viewer.
 On HO5, use **Share this computer → Display + control**, choose the monitor in
 the normal KDE selector and allow the requested keyboard/pointer access. On the
 viewer, select that shared source in **Sources**, wait for an actual presented
@@ -89,8 +104,11 @@ focus. Check target text, pointer, buttons and scrolling, then disconnect and
 verify held inputs release. Record the current receiver and direction; ACKs,
 uinput availability, decoded frames and UI submission do not prove effects.
 
-The [four-platform matrix](2026-10-10-INPUT-STAGE-MATRIX.json) keeps all thirteen
-directed physical acceptance rows incomplete. The signed Mac input candidate
+The [four-platform matrix](2026-10-10-INPUT-STAGE-MATRIX.json) has twelve ordered
+cross-platform directions (four platforms, host different from viewer), plus
+one distinct-Mac observation record. Those thirteen records are physically
+incomplete. The Mac record does not fix both device directions; each direction
+needs its own controlled receipt when tested. The signed Mac input candidate
 build 1082 was handed to its separate native upgrade task; the older 24/24 Mac
 fixture result belongs to build 1081. Windows/Android registered-agent state
 does not establish installed versions or physical acceptance. Audio, transfer,

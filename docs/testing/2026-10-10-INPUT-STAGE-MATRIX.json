@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "date": "2026-10-10",
-  "updated_at_utc": "2026-10-10T14:02:22Z",
+  "updated_at_utc": "2026-10-10T14:23:50Z",
   "evidence_boundary": "user observation, private target fixtures, native compilation, isolated installation, actual presentation and physical input are separate",
   "platforms": [
     "macos",
@@ -9,6 +9,14 @@
     "windows",
     "android"
   ],
+  "matrix_definition": {
+    "row_count": 13,
+    "cross_platform_directed_pairs": 12,
+    "cross_platform_rule": "Four platforms, ordered host/viewer pairs excluding self: 4 * 3",
+    "additional_same_platform_observation_rows": 1,
+    "same_platform_scope": "One observation record for two distinct Macs with directed roles still unknown; not two verified Mac-to-Mac directions",
+    "complete_mac_bidirectional_acceptance_requires": "Record both exact device/host/viewer directions separately when physically tested"
+  },
   "status_legend": {
     "user_observed_working": "User observation; no controlled event/display receipt",
     "user_observed_no_response": "User observed failure; cause remains under investigation",
@@ -227,7 +235,7 @@
     }
   ],
   "current_os_facts": {
-    "linux": "HO5 current user service remains active/running with zero restarts; installed executable and unit hashes unchanged. OS denies mapped-executable access. Active session status is unknown; final candidate has not replaced current",
+    "linux": "HO5 current user service was normally stopped and upgraded in its existing launch path; new PID stable, original GPUI runtime metadata, same UID/configuration/identity and unchanged user unit verified. Independent recovery Agent unchanged. Installed compiled identity and controlled launch binding verified; direct mapped-image access remains unavailable",
     "macos": "Daily MacBook alpha.7 and Studio alpha.8 were previously verified with pinned signing. Signed joint input candidate build 20261010.1082 was handed to the Mac task; no resulting daily upgrade receipt is available here",
     "windows": "Registered cube agent was offline at the fresh 2026-10-10 inventory; installed process/version and physical tests remain unknown. Agent state does not prove OS power state",
     "android": "Registered Android agent was offline with no heartbeat in the fresh inventory; USB authorization, installed version and directed roles remain unknown"
@@ -249,25 +257,33 @@
     "dynamic_dependencies_verified": true,
     "rollback_copies_hash_verified": true,
     "rollback_transaction_exercised": false,
-    "normal_current_upgrade_applied": false,
-    "active_session_status": "unknown",
+    "normal_current_upgrade_applied": true,
+    "upgrade_receipt_sha256": "c6d5d8d6ed121b4d5e744acf5f8861ee06c1de60e3b57cb1ac6f178c1ab56c48",
+    "service_health_verified": true,
+    "stable_startup_samples": 6,
+    "same_user_and_configuration_scope": true,
+    "persistent_profile_preserved": true,
+    "independent_recovery_agent_preserved": true,
+    "runtime_renderer_verified": true,
+    "controlled_start_path_binding_verified": true,
+    "active_session_status": "old live counters unavailable; no definite active use observed before authorized maintenance",
     "actual_running_image_verified": false,
     "live_portal_control_grant": false,
     "physical_input_verified": false,
+    "transport_observation": "Two WebSocket tunnel connected events and two P2P candidate peer observations; no disconnect/connect-failure events in the checked startup interval. These are not Session signaling or media/input acceptance",
     "release_receipt_minted": false,
     "release_authorized": false,
     "detail": "2026-10-10-HO5-LINUX-DELIVERY.md"
   },
   "software_evidence": {
     "linux_backend": "Real RemoteDesktop + ScreenCast session adapter; fixed private-bus target effects tested. No live desktop response was fabricated",
-    "linux_binary": "Fixed source rebuilt in existing HO5 release target; actual product artifact fresh=false, embedded original GPUI/native Linux identity and ldd passed. Old binary, wrong source/configuration and runtime-sidecar relabel attempts reject. No GUI, Portal grant or service upgrade started",
+    "linux_binary": "Fixed source rebuilt in existing HO5 release target; actual product artifact fresh=false, embedded original GPUI/native Linux identity and ldd passed. Old binary, wrong source/configuration and runtime-sidecar relabel attempts reject. Normal current user-service upgrade passed with retained rollback; native Portal consent, presentation and input effects still pending",
     "gpui": "Single original GPUI/Ely implementation; explicit local Display + control action",
     "macos": "Selected display IDs route to for_display; geometry capability and actual process permissions remain separate. Source/GUI patches through a770d95419191f99e7c6ebffbea84e066dbf8817 integrated; physical effects pending",
     "isolated_macos_install": "Parent reports 24/24 earlier build-1081 joint lifecycle fixture checks, including SIGSTOP health failure and rollback; these do not validate new build 1082 or cross-platform video/input"
   },
   "physical_checks_remaining": [
-    "confirm HO5 current has no active remote session or transfer before normal authorized upgrade",
-    "verify actual running candidate image and service health after a safe current upgrade",
+    "direct mapped-image proof remains unavailable under OS permissions; controlled start binding and installed compiled identity are separately verified",
     "verify discovery and signaling with an identified current receiver",
     "normal local portal approval on the matching Linux product",
     "actual window/display presentation receipts",

@@ -2,8 +2,9 @@
 
 The Linux source now has a consented RemoteDesktop input path, wired into the
 existing original GPUI/Ely application and the common host subscription service.
-This is a tested source checkpoint. It is not a deployment receipt or a claim
-that physical remote control has passed.
+This is a tested source checkpoint. The normal HO5 current maintenance upgrade
+is recorded separately in the linked delivery evidence; physical remote control
+has not passed acceptance.
 
 ## Behavior and ownership
 
@@ -74,7 +75,8 @@ has changed.
 | HO5 Ely share controls | 3 passed, 0 ignored, 0 failed | Existing target reused; no native visual acceptance |
 | Release scripts | 241 total: 234 passed, 7 skipped, 0 failures/errors | `python3 -m unittest discover -s scripts/tests -v` |
 | Joint Mac input regression | Host 138 passed/1 ignored; App 116 passed/2 ignored; Python 267 total, 260 passed/7 skipped; 5 native signing fixtures passed | Same shared input integrated with separate Mac GUI/background lifecycle; physical input remains pending |
-| HO5 fixed release candidate | Built in 3m 53s; original GPUI/native Linux identity and dynamic dependencies passed | Existing target reused, product actually rebuilt; no current upgrade or physical acceptance |
+| HO5 fixed release candidate | Built in 3m 53s; original GPUI/native Linux identity and dynamic dependencies passed | Existing target reused, product actually rebuilt; physical acceptance pending |
+| HO5 current maintenance upgrade | Normal same-user stop/atomic replacement/start passed; stable new PID across 6 startup samples and later checks | Same profile and user unit preserved; installed identity and launch binding verified, direct mapped-image proof unavailable |
 
 Fixed tests check target pointer position, click-selected focus between two
 test windows, inserted text, scrolling, release of keys/buttons/modifiers,
@@ -92,8 +94,11 @@ are not committed as public runtime or device configuration.
 ## Four-platform physical matrix
 
 See [the directed matrix](2026-10-10-INPUT-STAGE-MATRIX.json): twelve cross-platform
-directions plus the user-observed distinct-Mac case. User observations, native
-OS facts, isolated installation fixtures and controlled physical acceptance
+directions plus one user-observed distinct-Mac record, making thirteen records.
+That Mac observation still has unspecified directed device roles; it is not two
+verified Mac directions. Fix and record both roles separately for bidirectional
+Mac acceptance. User observations, native OS facts, isolated installation
+fixtures and controlled physical acceptance
 are labeled separately.
 
 The user reported Mac-to-Mac video working and mouse/keyboard unresponsive.
@@ -110,17 +115,20 @@ or target-input receipt. Historical FFmpeg/placeholder sidecar startup logs do
 not prove a current frame. The fresh inventory found the registered Windows and
 Android agents offline; installed versions, USB authorization and directed
 physical tests remain unknown. Audio, files, direct/relay paths and long-duration
-physical acceptance remain untested in this stage. The denied legacy system-service stop was not
-retried; production services, OS permissions and launch configuration were not
-changed by this input work.
+physical acceptance remain untested in this stage. The denied legacy system
+service stop was not retried. The existing current user service was normally
+upgraded under continuing maintenance authorization, preserving its profile and
+launch configuration; OS permissions were not changed.
 
 The [fixed HO5 delivery](2026-10-10-HO5-LINUX-DELIVERY.md) records the actual
-compiled candidate, source binding, unchanged current service and verified
-rollback copies. The current upgrade is paused while live session/transfer
-activity remains unknown. Signed Mac input build 1082 has been handed to its
-native upgrade task; the earlier 24/24 fixture result belongs to build 1081.
+compiled candidate, source binding, successful current maintenance upgrade and
+verified rollback copies. Old live counters were unavailable; no definite active
+use was observed in the preflight, and the maintenance authorization covers one
+rollback-protected switch with brief connection reconstruction. Signed Mac input
+build 1082 has been handed to its native upgrade task; the earlier 24/24 fixture
+result belongs to build 1081.
 
-Next physical acceptance must use an identity-matched staged executable, normal
+Next physical acceptance must use the upgraded current executable, normal
 local control consent, the viewer's control role and focus, and an observable
 target. Record presentation separately from input effects, then repeat source
 switch/resize/disconnect release and window isolation checks. Mass deployment
