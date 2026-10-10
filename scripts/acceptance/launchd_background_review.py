@@ -19,10 +19,13 @@ import sys
 import tempfile
 import time
 import uuid
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import installer_scope
 import install_macos_unified as installer
+import installer_build_identity as identity_adapter
+import build_identity_gate as identity_gate
 from macos_release_guard import load_policy, verified_archive, verify_app, ReleaseRejected
 
 
@@ -33,7 +36,11 @@ def main():
     parser.add_argument('--failed-upgrade-archive', type=Path, required=True)
     parser.add_argument('--evidence-dir', type=Path, required=True)
     parser.add_argument('--execute', action='store_true')
+    parser.add_argument('--native-observer', type=Path)
+    parser.add_argument('--native-observer-sha256')
     args = parser.parse_args()
+    if bool(args.native_observer) != bool(args.native_observer_sha256):
+        parser.error('Native observer and independently reviewed digest must be specified together')
     if not args.execute:
         print(json.dumps({'applied': False, 'scope': 'fresh private fixture + independent launchd label',
                           'manual_click_login_reboot': 'not_tested', 'production_modified': False}))
@@ -66,6 +73,7 @@ def main():
     receipt = {'scope_root': str(root), 'test_label': label, 'checks': {}, 'production_modified': False,
                'manual_click_verified': False, 'login_reboot_verified': False, 'pid_observations': [],
                'state': 'preparing'}
+    receipt['product_build_identity_chain_verified'] = False
     gui = None
     def save():
         path=evidence/'launchd-receipt.json'; path.write_text(json.dumps(receipt,indent=2)+'\n'); path.chmod(0o600)
@@ -102,6 +110,50 @@ def main():
         return False
     def identity_hashes():
         return {name:hashlib.sha256((profile/name).read_bytes()).hexdigest() for name in ('mesh.conf','mesh.secret')}
+    def native_image(observed):
+        result = identity_gate.verify_running_macos(observed['pid'], executable,
+                    verify_app(target, load_policy())['executable_sha256'],
+                    args.native_observer, args.native_observer_sha256)
+        return result.get('actual_loaded_image_verified') is True
+    def reject_manifest_only_claims():
+        # A deliberately synthetic external record tests that a correctly signed
+        # old product cannot acquire compiled identity from a new sidecar. This
+        # is a negative fixture, never an observed-build or release attestation.
+        negative=evidence/'manifest-only-negative.zip'
+        with verified_archive(args.new_archive.resolve(),load_policy()) as (app,signed):
+            app=app.resolve()
+            metadata=subprocess.run([str(app/'Contents/MacOS/remote_play'),'--product-info-json'],
+                                    capture_output=True,check=True,timeout=15)
+            info=json.loads(metadata.stdout)
+            config=identity_gate.configuration('macos',info['architecture'],signed['version'],
+                    info['architecture']+'-apple-darwin','dev','a'*64,'b'*64)
+            synthetic=identity_gate.identity(dict(commit='c'*40,git_tree='d'*40,state='clean',
+                    patch_sha256=None,snapshot_sha256='e'*64,file_count=1),config)
+            info['build_identity']=synthetic
+            manifest=dict(schema=1,kind='remoteplay-release',build_identity=synthetic,
+                    artifact_root='RemotePlay.app',executable='Contents/MacOS/remote_play',
+                    product_info=info,files=identity_gate.files_in(app),
+                    binary_sha256=signed['executable_sha256'],compiler_binary_sha256=signed['executable_sha256'],
+                    signing={k:signed[k] for k in ('bundle_id','certificate_sha1','designated_requirement','version','signature_verified')})
+            raw=json.dumps(manifest,sort_keys=True).encode()
+            # The old ditto archive carries AppleDouble metadata. Build the
+            # negative view from the verified App inventory so archive-layout
+            # rejection cannot mask the missing compiled identity assertion.
+            with zipfile.ZipFile(negative,'x') as output:
+                for path in app.rglob('*'):
+                    if path.is_file():output.write(path,'RemotePlay.app/'+path.relative_to(app).as_posix())
+                output.writestr(identity_gate.MANIFEST,raw)
+        expected=identity_adapter.Expectations('c'*40,synthetic['identity_sha256'],identity_gate.digest(raw),
+                                              str(args.native_observer),args.native_observer_sha256)
+        old_pid=state()['pid']; old_app=verify_app(target,load_policy());old_plist=plist.read_bytes()
+        try:installer.install(negative.resolve(),True,separate_background=True,expected_release=expected)
+        except identity_gate.IdentityRejected as error:
+            rejected='expected compiled source/build identity' in str(error)
+            receipt['negative_rejection_reason']=str(error)
+        else:rejected=False
+        receipt['checks']['manifest_only_cannot_retrofit_missing_compiled_identity']=rejected
+        receipt['checks']['identity_preflight_rejection_preserves_running_app_and_plist']=(
+                state()['pid']==old_pid and verify_app(target,load_policy())==old_app and plist.read_bytes()==old_plist)
     save()
     with installer_scope.isolated(root,label):
         try:
@@ -110,6 +162,8 @@ def main():
             launchctl('bootstrap');initial=wait_running()
             receipt['checks']['legacy_background_connects']=wait_connection()
             identities=identity_hashes()
+            if args.native_observer is not None:
+                reject_manifest_only_claims()
             original_metadata=(plist.stat().st_uid,plist.stat().st_gid,plist.stat().st_mode&0o777)
             # The exact guarded production transaction runs under explicit fixture scope.
             receipt['plan']=installer.install(args.new_archive.resolve(),False,separate_background=True)
@@ -119,6 +173,8 @@ def main():
             receipt['checks']['migration_preserves_identity']=identity_hashes()==identities
             receipt['checks']['migration_preserves_launch_agent_permissions']=(plist.stat().st_uid,plist.stat().st_gid,plist.stat().st_mode&0o777)==original_metadata
             receipt['checks']['migration_loopback_connects']=wait_connection()
+            if args.native_observer is not None:
+                receipt['checks']['native_backend_mapped_image_after_migration']=native_image(upgraded)
             duplicate=run('--background-service')
             receipt['checks']['second_host_rejected']=duplicate.returncode!=0
             # Existing integration hook exits the real GPUI loop normally. It is
@@ -144,6 +200,8 @@ def main():
             recovered=wait_running(upgraded['pid'])
             installer.background_health(executable,profile,recovered['pid'],receipt['upgrade']['candidate']['executable_sha256'],installer.Deadline(30))
             receipt['checks']['launchd_recovers_only_background_after_crash']=wait_connection()
+            if args.native_observer is not None:
+                receipt['checks']['native_backend_mapped_image_after_launchd_recovery']=native_image(recovered)
             # Controlled unloaded gap tests attachment refusal, not a user reboot.
             launchctl('bootout')
             with installer.idle_profile(profile,installer.Deadline(10)):pass
@@ -169,7 +227,9 @@ def main():
             receipt['checks']['failure_preserves_launch_agent_permissions']=(plist.stat().st_uid,plist.stat().st_gid,plist.stat().st_mode&0o777)==before_metadata
             receipt['checks']['failure_preserves_identity']=identity_hashes()==identities
             receipt['checks']['rollback_background_connects']=wait_connection()
-            receipt['state']='complete';save()
+            if args.native_observer is not None:
+                receipt['checks']['native_backend_mapped_image_after_rollback']=native_image(state())
+            receipt['state']='complete' if all(receipt['checks'].values()) else 'failed_checks';save()
         except Exception as error:
             receipt.update(state='failed',error_type=type(error).__name__,error_summary=str(error)[:300]);save()
         finally:

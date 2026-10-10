@@ -36,6 +36,11 @@ class MigrationFixture(InstallerFixture):
         for name, value in [('product_capabilities', lambda *a: self.info),
                             ('background_health', lambda *a: {'background_role_verified': True})]:
             p = patch.object(installer, name, value); p.start(); self.addCleanup(p.stop)
+        # These existing transaction fixtures have synthetic signatures/metadata.
+        # Real expectation rejection and identity-bound transactions have their
+        # own tests; this does not introduce a production bypass.
+        p = patch.object(installer.release_identity, 'require_context', lambda *a, **k: None)
+        p.start(); self.addCleanup(p.stop)
 
     def migrate(self): return installer.install(self.archive, True, separate_background=True)
 

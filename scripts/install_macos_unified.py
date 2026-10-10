@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 import installer_scope
+import installer_build_identity as release_identity
 from background_lifecycle_plan import plan as background_plan, LifecyclePlanRejected
 from macos_release_guard import ReleaseRejected, check_upgrade, load_policy, run, sha256, verified_archive, verify_app
 
@@ -43,9 +44,11 @@ def service_state(domain: str, *, deadline=None) -> dict:
         raise ReleaseRejected('Cannot determine existing service state: ' + result.stderr[-1200:])
     pid = re.search(r'^\s*pid = (\d+)\s*$', result.stdout, re.M)
     program = re.search(r'^\s*program = (.+)$', result.stdout, re.M)
+    arguments = re.search(r'\n\s*arguments = \{\n(.*?)\n\s*\}', result.stdout, re.S)
     running = bool(re.search(r'^\s*state = running\s*$', result.stdout, re.M))
     return {'loaded': True, 'running': running, 'pid': int(pid[1]) if pid else None,
-            'program': program[1].strip() if program else None}
+            'program': program[1].strip() if program else None,
+            'arguments': [line.strip() for line in arguments[1].strip().splitlines()] if arguments else None}
 
 
 
@@ -201,6 +204,7 @@ PHASES = TERMINAL_PHASES | {
     'rollback_old_restore_requested', 'rollback_start_requested',
     'recovery_required', 'lifecycle_write_requested', 'lifecycle_written',
     'rollback_lifecycle_requested',
+    'identity_write_requested', 'identity_written', 'rollback_identity_requested',
 }
 UNCERTAIN_PHASES = {'stop_requested', 'start_requested',
                     'rollback_stop_requested', 'rollback_start_requested'}
@@ -359,6 +363,7 @@ def journal_paths(document: dict, target: Path) -> tuple[Path, Path]:
             raise ValueError('service path')
         if document.get('service_label', LABEL) != service_label(): raise ValueError('service label')
         if 'lifecycle' in document: validate_lifecycle_journal(document, plist_path=canonical_paths()[2])
+        if 'release_identity' in document: validate_release_journal(document, target)
         return candidate, backup
     except (KeyError, TypeError, ValueError) as error:
         raise ReleaseRejected('Invalid installer journal paths or preconditions') from error
@@ -560,6 +565,78 @@ def background_health(executable: Path, profile: Path, expected_pid: int, expect
     raise ReleaseRejected('Updated process did not expose the expected background service identity')
 
 
+def release_state_path(target: Path) -> Path:
+    return target.parent / release_identity.STATE_NAME
+
+
+@contextmanager
+def installation_archive(archive, policy, expectations, deadline):
+    if expectations is None:
+        with verified_archive(archive, policy, runner=deadline.run, check=deadline.check) as (app, report):
+            yield app, report, None
+    else:
+        with release_identity.verified_identity_archive(archive, policy, expectations,
+                runner=deadline.run, check=deadline.check) as result: yield result
+
+
+def prepare_release_backup(value: dict, target: Path, backup_root: Path) -> dict:
+    path = release_state_path(target)
+    before = release_identity.private_bytes(path) if path.exists() or path.is_symlink() else None
+    after = release_identity.state_bytes(value)
+    if before is not None: release_identity.write_new(backup_root / 'release-identity.before.json', before)
+    release_identity.write_new(backup_root / 'release-identity.after.json', after)
+    fsync_directory(backup_root)
+    return {'state_path': str(path), 'before_sha256': release_identity.gate.digest(before) if before is not None else None,
+            'after_sha256': release_identity.gate.digest(after)}
+
+
+def validate_release_journal(document: dict, target: Path) -> None:
+    value = document['release_identity']; root = Path(document['backup']).parent
+    if (not isinstance(value, dict) or set(value) != {'state_path', 'before_sha256', 'after_sha256'}
+            or value['state_path'] != str(release_state_path(target))):
+        raise ReleaseRejected('Invalid release-identity journal')
+    release_identity.gate.sha(value['after_sha256'])
+    for name, expected in [('before', value['before_sha256']), ('after', value['after_sha256'])]:
+        path = root / ('release-identity.' + name + '.json')
+        if expected is None:
+            if path.exists() or path.is_symlink(): raise ReleaseRejected('Unexpected prior release-identity backup')
+            continue
+        release_identity.gate.sha(expected)
+        raw = release_identity.private_bytes(path)
+        if release_identity.gate.digest(raw) != expected: raise ReleaseRejected('Release-identity backup changed')
+        release_identity.parse_state(raw)
+    path = release_state_path(target)
+    current = release_identity.gate.digest(release_identity.private_bytes(path)) if path.exists() or path.is_symlink() else None
+    if current not in (value['before_sha256'], value['after_sha256']):
+        raise ReleaseRejected('Release identity was concurrently edited; retain the whole rollback tuple')
+    if (document['phase'] == 'completed' and current != value['after_sha256']) or (
+            document['phase'] == 'rolled_back' and current != value['before_sha256']):
+        raise ReleaseRejected('Terminal journal does not match canonical release-identity state')
+
+
+def restore_release_identity(document: dict, target: Path) -> None:
+    if 'release_identity' not in document: return
+    validate_release_journal(document, target)
+    value = document['release_identity']; path = release_state_path(target)
+    current = release_identity.gate.digest(release_identity.private_bytes(path)) if path.exists() else None
+    if current == value['before_sha256']: return
+    before = (Path(document['backup']).parent / 'release-identity.before.json')
+    raw = release_identity.private_bytes(before) if value['before_sha256'] is not None else None
+    release_identity.replace_state(path, raw, current)
+
+
+def verified_backend_identity(target: Path, value: dict, state: dict, plist: Path, profile: Path, deadline):
+    installed = release_identity.verify_app_contract(target, value, verify_with_budget(target, load_policy(), deadline))
+    authenticated = background_health(target / 'Contents/MacOS/remote_play', profile, state['pid'],
+                                       value['manifest']['binary_sha256'], deadline)
+    observed = release_identity.verify_backend(target, value, state, plistlib.loads(plist.read_bytes()),
+                                               service_label(), authenticated)
+    after = service_state(f'gui/{os.getuid()}', deadline=deadline)
+    if any(after.get(key) != state.get(key) for key in ('pid', 'program', 'arguments', 'running', 'loaded')):
+        raise ReleaseRejected('Backend generation changed during native image verification')
+    return dict(installed, **observed)
+
+
 def clean_staging(candidate: Path) -> None:
     # Paths and signed contents were checked under the installation lock.
     if candidate.parent.exists():
@@ -598,7 +675,7 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
         current = service_state(domain, deadline=deadline)
         validate_service(plist, target / 'Contents/MacOS/remote_play', current)
         validate_processes(target / 'Contents/MacOS/remote_play', current, deadline)
-        if current['loaded'] and (observed['target'] != old or 'lifecycle' in document):
+        if current['loaded'] and (observed['target'] != old or 'lifecycle' in document or 'release_identity' in document):
             checkpoint(journal, document, 'rollback_stop_requested')
             deadline.run(['/bin/launchctl', 'bootout', domain + '/' + service_label()])
             checkpoint(journal, document, 'service_stopped')
@@ -607,6 +684,9 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
         if 'lifecycle' in document and phase != 'prepared':
             checkpoint(journal, document, 'rollback_lifecycle_requested')
             restore_lifecycle(document, plist, deadline)
+        if 'release_identity' in document and phase != 'prepared':
+            checkpoint(journal, document, 'rollback_identity_requested')
+            restore_release_identity(document, target)
         if observed['target'] == new:
             checkpoint(journal, document, 'rollback_candidate_move_requested')
             deadline.check(); durable_rename(target, candidate)
@@ -617,6 +697,9 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
             checkpoint(journal, document, 'service_stopped')
         if identity(verify_with_budget(target, policy, deadline)) != old:
             raise ReleaseRejected('Restored app does not match pinned previous app')
+        previous_release = release_identity.read_state(release_state_path(target)) if 'release_identity' in document else None
+        if previous_release is not None:
+            release_identity.verify_app_contract(target, previous_release, verify_with_budget(target, policy, deadline))
     if phase != 'prepared' and document['service_before']['loaded']:
         current = service_state(domain, deadline=deadline)
         validate_service(plist, target / 'Contents/MacOS/remote_play', current)
@@ -624,11 +707,16 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
             checkpoint(journal, document, 'rollback_start_requested')
             deadline.run(['/bin/launchctl', 'bootstrap', domain, str(plist)])
             checkpoint(journal, document, 'started')
-        wait_running(domain, target / 'Contents/MacOS/remote_play', None, deadline=deadline)
+        restored = wait_running(domain, target / 'Contents/MacOS/remote_play', None, deadline=deadline)
+        if previous_release is not None:
+            verified_backend_identity(target, previous_release, restored, plist, profile_directory(plist.parents[2]), deadline)
     receipt = {'action': 'recovered_previous', 'target': str(target), 'applied': False,
                'configuration_unchanged': None, 'permissions_modified': False,
                'operation_id': document['operation_id'], 'backup': str(backup),
                'capture_health': 'not_tested_by_installer'}
+    if 'release_identity' in document:
+        receipt.update(previous_release_state_restored=True,
+                       previous_build_identity_verified=previous_release is not None)
     clean_staging(candidate)
     atomic_json(backup.parent / 'receipt.json', receipt)
     checkpoint(journal, document, 'rolled_back')
@@ -665,27 +753,38 @@ def recover_interrupted(*, deadline_seconds: float = 120) -> dict:
 
 
 def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300,
-            separate_background: bool = False) -> dict:
+            separate_background: bool = False, expected_release=None) -> dict:
     deadline = Deadline(deadline_seconds); policy = load_policy()
     home, target, plist, domain = canonical_paths()
     applications = target.parent; executable = target / 'Contents/MacOS/remote_play'
     journal = applications / '.remoteplay-install-journal.json'
-    with verified_archive(archive, policy, runner=deadline.run, check=deadline.check) as (source, candidate_info):
+    state_path = release_state_path(target)
+    release_identity.require_context(expected_release, state_path, separate_background=separate_background,
+                                      isolated_fixture=installer_scope.current() is not None, apply=apply)
+    before_release_bytes = release_identity.private_bytes(state_path) if state_path.exists() or state_path.is_symlink() else None
+    previous_release = release_identity.parse_state(before_release_bytes) if before_release_bytes is not None else None
+    with installation_archive(archive, policy, expected_release, deadline) as (source, candidate_info, candidate_release):
         pending = read_journal(journal)
         if pending is not None: journal_paths(pending, target)
         if pending is not None and pending['phase'] not in TERMINAL_PHASES:
             raise ReleaseRejected('Installer journal requires explicit --recover; do not replay --apply')
         previous = verify_with_budget(target, policy, deadline)
+        if previous_release is not None: release_identity.verify_app_contract(target, previous_release, previous)
         action = check_upgrade(previous, candidate_info)
         state = service_state(domain, deadline=deadline)
         validate_service(plist, executable, state)
         migration = lifecycle_migration(plist, executable, source, candidate_info, home, deadline) if separate_background else None
         service_document = plistlib.loads(plist.read_bytes()) if plist.is_file() else {}
         background_mode = service_document.get('ProgramArguments') == [str(executable), '--background-service']
+        if candidate_release is not None and not (migration is not None or background_mode):
+            raise ReleaseRejected('Identity-bound installation requires an explicit backend migration or the existing backend role')
         if background_mode and migration is None:
             product_capabilities(source / 'Contents/MacOS/remote_play', candidate_info['version'], deadline)
         if action == 'already_installed' and migration is not None and migration['before_bytes'] != migration['after_bytes']:
             action = 'migrate_background_lifecycle'
+        if candidate_release is not None and previous['build'] == candidate_info['build']:
+            if action != 'already_installed' or before_release_bytes != release_identity.state_bytes(candidate_release):
+                raise ReleaseRejected('Assign a new signed build for a release-identity or launch-role migration')
         system = system_mesh_state(deadline=deadline)
         blocker = system_mesh_blocker(system) if action != 'already_installed' else None
         plan = {'action': action, 'target': str(target), 'previous': previous, 'candidate': candidate_info,
@@ -695,7 +794,15 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 'lifecycle_migration_requested': separate_background,
                 'service_role_after': 'background-service' if migration or background_mode else 'preserved',
                 'isolated_fixture': installer_scope.current() is not None}
+        plan.update(build_identity_preflight_verified=candidate_release is not None,
+                    backend_running_image_verified=False,
+                    legacy_signature_only=candidate_release is None,
+                    release_authorized=False)
+        if candidate_release is not None and not state['loaded']:
+            plan['apply_blockers'].append('Existing user service is unloaded; actual backend identity cannot be verified without an explicit service start')
         if not apply: return plan
+        if candidate_release is not None and not state['loaded']:
+            raise ReleaseRejected('Identity-bound apply requires the existing loaded backend service; no implicit service start')
         if action != 'already_installed': require_system_mesh_absent(deadline, system)
         with installation_lock(applications):
             pending = read_journal(journal)
@@ -704,6 +811,8 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 raise ReleaseRejected('Installer journal requires explicit --recover; do not replay --apply')
             if verify_with_budget(target, policy, deadline) != previous:
                 raise ReleaseRejected('Installed app changed during preflight')
+            now_release_bytes = release_identity.private_bytes(state_path) if state_path.exists() or state_path.is_symlink() else None
+            if now_release_bytes != before_release_bytes: raise ReleaseRejected('Installed release state changed during preflight')
             current = service_state(domain, deadline=deadline)
             validate_service(plist, executable, current)
             if current != state: raise ReleaseRejected('Service changed during preflight')
@@ -711,7 +820,11 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 import hashlib
                 if sha256(plist) != hashlib.sha256(migration['before_bytes']).hexdigest():
                     raise ReleaseRejected('Launch agent changed during migration preflight')
-            if action == 'already_installed': return plan
+            if action == 'already_installed':
+                if candidate_release is not None and current['loaded']:
+                    plan.update(verified_backend_identity(target, candidate_release, current, plist, profile_directory(home), deadline))
+                    plan['backend_running_image_verified'] = True
+                return plan
             require_system_mesh_absent(deadline)
             validate_processes(executable, current, deadline)
             validate_user_profile(home, os.getuid())
@@ -722,6 +835,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             backup_root.mkdir(parents=True, mode=0o700)
             backup = backup_root / 'RemotePlay.app'
             lifecycle = prepare_lifecycle_backup(migration, backup_root, plist) if migration is not None else None
+            release_backup = prepare_release_backup(candidate_release, target, backup_root) if candidate_release is not None else None
             staging_root = Path(tempfile.mkdtemp(prefix='.remoteplay-update-', dir=applications))
             candidate = staging_root / 'RemotePlay.app'
             def copy_file(source_path, destination_path):
@@ -730,6 +844,8 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 shutil.copytree(source, candidate, copy_function=copy_file)
                 if identity(verify_with_budget(candidate, policy, deadline)) != identity(candidate_info):
                     raise ReleaseRejected('Staged candidate changed')
+                if candidate_release is not None:
+                    release_identity.verify_app_contract(candidate.resolve(), candidate_release, candidate_info)
                 require_system_mesh_absent(deadline)
             except Exception:
                 shutil.rmtree(staging_root)
@@ -740,6 +856,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                         'service_before': state, 'service_label': service_label(), 'deadline_seconds': deadline_seconds,
                         'recovery_budget_seconds': 120}
             if lifecycle is not None: document['lifecycle'] = lifecycle
+            if release_backup is not None: document['release_identity'] = release_backup
             checkpoint(journal, document, 'prepared')
             try:
                 checkpoint(journal, document, 'stop_requested')
@@ -755,12 +872,18 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                     checkpoint(journal, document, 'verify_new_requested')
                     if identity(verify_with_budget(target, policy, deadline)) != identity(candidate_info):
                         raise ReleaseRejected('Installed candidate changed')
+                    if candidate_release is not None: release_identity.verify_app_contract(target, candidate_release, candidate_info)
                     checkpoint(journal, document, 'new_verified')
                     if migration is not None:
                         checkpoint(journal, document, 'lifecycle_write_requested')
                         atomic_plist(plist, migration['after_bytes'], lifecycle['before_sha256'], lifecycle['mode'], lifecycle['gid'])
                         ensure_role_marker(migration['profile'])
                         checkpoint(journal, document, 'lifecycle_written')
+                    if release_backup is not None:
+                        checkpoint(journal, document, 'identity_write_requested')
+                        release_identity.replace_state(state_path, release_identity.private_bytes(backup_root / 'release-identity.after.json'),
+                                                        release_backup['before_sha256'])
+                        checkpoint(journal, document, 'identity_written')
                 if state['loaded']:
                     checkpoint(journal, document, 'start_requested')
                     deadline.run(['/bin/launchctl', 'bootstrap', domain, str(plist)])
@@ -769,12 +892,16 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
                 final = wait_running(domain, executable, state['pid'], deadline=deadline) if state['loaded'] else {'running': False}
                 if state['loaded'] and (migration is not None or background_mode):
                     final.update(background_health(executable, profile_directory(home), final['pid'], candidate_info['executable_sha256'], deadline))
+                if candidate_release is not None and state['loaded']:
+                    final.update(verified_backend_identity(target, candidate_release, final, plist, profile_directory(home), deadline))
+                    plan['backend_running_image_verified'] = True
                 if preserve_hashes(home, plist, deadline=deadline, lifecycle_change=migration is not None) != preserved:
                     raise ReleaseRejected('Network or launch configuration changed during upgrade')
                 plan.update(applied=True, service=final, configuration_unchanged=True,
                             backup=str(backup), operation_id=document['operation_id'],
                             launch_policy_changed=migration is not None,
                             rollback_includes_original_launch_agent=migration is not None)
+                if candidate_release is not None: plan['rollback_includes_release_identity'] = True
                 atomic_json(backup_root / 'receipt.json', plan)
                 checkpoint(journal, document, 'completed')
             except Exception as error:
@@ -803,6 +930,11 @@ if __name__ == '__main__':
     parser.add_argument('--separate-background', action='store_true', help='Journal an explicit background-only launch-agent migration and app+plist rollback')
     parser.add_argument('--isolated-fixture-root', type=Path, help='Explicit private disposable fixture scope; never changes production paths')
     parser.add_argument('--test-service-label', help='Independent com.remoteplay.lifecycle-test.<uuid> label; requires the fixture root')
+    parser.add_argument('--expected-commit')
+    parser.add_argument('--expected-identity-sha256')
+    parser.add_argument('--expected-manifest-sha256')
+    parser.add_argument('--native-observer', type=Path)
+    parser.add_argument('--native-observer-sha256')
     parser.add_argument('--deadline-seconds', type=float, default=None, help='Cooperative budget; defaults to 300 for apply/plan, 120 for recovery')
     args = parser.parse_args()
     if args.recover and (args.apply or args.archive): parser.error('--recover cannot be combined with an archive or --apply')
@@ -810,13 +942,16 @@ if __name__ == '__main__':
     if bool(args.isolated_fixture_root) != bool(args.test_service_label): parser.error('Fixture root and independent test label must be specified together')
     if not args.recover and args.archive is None: parser.error('archive is required unless --recover is selected')
     try:
+        expectations = release_identity.requested(args.expected_commit, args.expected_identity_sha256,
+                            args.expected_manifest_sha256, args.native_observer, args.native_observer_sha256)
+        if args.recover and expectations is not None: parser.error('Recovery restores the journaled previous release expectations; no new expectation overrides')
         scope = installer_scope.isolated(args.isolated_fixture_root, args.test_service_label) if args.isolated_fixture_root else nullcontext()
         with scope:
             if args.recover:
                 result = recover_interrupted(deadline_seconds=120 if args.deadline_seconds is None else args.deadline_seconds)
             else:
                 result = install(args.archive, args.apply, deadline_seconds=300 if args.deadline_seconds is None else args.deadline_seconds,
-                                 separate_background=args.separate_background)
+                                 separate_background=args.separate_background, expected_release=expectations)
         print('MACOS_INSTALL_RECEIPT ' + json.dumps(result), flush=True)
     except Exception as error:
         import sys

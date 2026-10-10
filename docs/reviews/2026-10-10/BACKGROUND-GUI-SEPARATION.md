@@ -46,8 +46,8 @@ The final review executable SHA-256 is
 It is an unsigned development fixture, not an installed or signed release.
 
 Application library tests: 115 passed, 2 existing ignored cases. Release Python
-checks after installer integration: 206 total, 200 passed and 6 existing
-signing/platform skips. Four launch-policy migration/rollback tests reject env-only separation, preserve the
+checks after build-identity dependency and installer integration: 263 total,
+256 passed and 7 existing signing/platform skips. Four launch-policy migration/rollback tests reject env-only separation, preserve the
 existing profile/display identity, and refuse concurrent rollback edits. Private
 socket/frame/mismatched-executable tests and actual frontend ownership tests pass;
 frontend attach/drop leaves identity file inode, size and mtime unchanged.
@@ -137,28 +137,30 @@ owned files or the shared worktree. The lifecycle branch's local original
 commit `ffe96bcd5f6ebe47b6a55cb5a3329f726cc42348`; the original reference remains
 local and is not published through this branch.
 
-The current product does not embed that gate's generated immutable build
-identity. The current signed lifecycle fixtures have no independently pinned
-release manifest. Lifecycle acceptance therefore does not establish the gate's
-source/build/package/loaded-image chain, and this installer does not yet enforce
-that chain in production.
+The producer subsequently implemented immutable embedding in
+`0f858a51773a5b5309291a78f6ef48f683255682`. This task read that interface without
+editing its producer files. The retained lifecycle binaries remain unstamped;
+their acceptance does not establish a combined observed-build release chain.
 
-The smallest coordinated integration must first embed the generated module in
-ProductInfo and have the authoritative packager preserve the observed build
+The coordinated release integration must combine the generated module in
+ProductInfo with these lifecycle fields and have the authoritative packager preserve the observed build
 receipt and seal an external `remoteplay-release-manifest.json`. The existing
-archive signing guard rejects that additional archive-root file, so it needs a
-narrow reviewed allowance plus independent manifest validation before extraction.
-The installer can then verify the archive against the independently supplied
-commit, build-identity digest and manifest digest before any stop, journal and
-back up the canonical manifest/expectations with the App/plist, install them
-under the same profile lock, and restore all components on a known failure.
+publication signing guard still rejects that archive-root file and needs coordinated
+manifest handling. The installer first verifies the complete independently pinned
+archive, then uses a bounded App-only view with the unchanged signing guard.
+The installer now verifies the archive against the independently supplied
+commit, build-identity digest and manifest digest before any stop. It journals and
+backs up the canonical manifest/expectations with the App/plist, installs them
+under the same profile lock, and restores all components on a known failure.
 
-The current `verify_install` API deliberately requires the configured frontend
+The core `verify_install` API deliberately requires the configured frontend
 arguments `--gui`. The launch agent here correctly runs `--background-service`.
 Calling that API with invented frontend arguments would give false launcher
-evidence. A separate background-role adapter must use the actual observed
+evidence. The installer-owned background adapter now uses the actual observed
 launch-agent arguments and authenticated service PID, then the independently
-hashed native observer must verify the loaded background image. Frontend launch
-and running-image acceptance remain a separate observation. These coordinated
-product, packaging and role-adapter steps are still pending; none was bypassed
-or represented as completed by the fixture tests.
+hashed native observer verifies the loaded background image. Frontend launch
+and running-image acceptance remain a separate observation. See
+[INSTALLER-BUILD-IDENTITY.md](../../testing/INSTALLER-BUILD-IDENTITY.md) for the
+five input fields, exact release-state rollback contract, 24 native fixture checks
+and the still-pending positive native signed-product release-state transaction.
+No missing source/compiled evidence is defaulted to passed.
