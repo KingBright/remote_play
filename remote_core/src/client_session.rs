@@ -586,6 +586,25 @@ impl MediaPacketHandler {
         }
     }
 
+    /// A matched source-switch acknowledgement starts a new local video epoch.
+    /// Keep audio configuration and route ownership; discard only old video
+    /// reorder state. V2 has no wire source revision, so this cannot identify a
+    /// delayed old datagram arriving after the acknowledgement.
+    pub(crate) fn reset_video_source(&mut self) {
+        self.video_jitter_buffer = JitterBuffer::new(0);
+        self.video_expected_seq_init = false;
+        self.last_seq = None;
+        self.packets_expected = 0;
+        self.packets_lost = 0;
+        self.loss_rate_pct = 0.0;
+        self.smooth_e2e_ms = 0.0;
+        self.needs_keyframe = true;
+        self.last_keyframe_request = None;
+        self.stats_net
+            .video_decoder_needs_keyframe
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     fn recovery_wait(&self) -> Option<Duration> {
         (self.needs_keyframe && self.video_source.is_some()).then(|| {
             Duration::from_millis(250).saturating_sub(

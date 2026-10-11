@@ -280,6 +280,13 @@ impl Actor {
             .await;
     }
     async fn request(&mut self, command: SessionCommand) {
+        if let SessionCommand::SwitchSource { id, .. } = &command {
+            // Only the latest intent for this subscription may reopen video.
+            // Late acknowledgements of superseded requests are ignored.
+            self.pending.retain(|_, pending| {
+                !matches!(&pending.command, SessionCommand::SwitchSource { id: previous, .. } if previous == id)
+            });
+        }
         if let Some(key) = request_key(&command) {
             let now = Instant::now();
             self.pending.insert(
@@ -292,6 +299,53 @@ impl Actor {
             );
         }
         self.send(&command).await;
+    }
+    fn source_switch_pending(&self, id: u32) -> bool {
+        self.pending.values().any(|pending|
+            matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == id))
+    }
+    fn prepare_control(&mut self, command: &SessionCommand) {
+        match command {
+            SessionCommand::Unsubscribe { id } => {
+                self.subscriptions.remove(id);
+                self.pending.remove(&(2, *id));
+                self.pending.remove(&(4, *id));
+                self.pending.retain(|_, pending|
+                    !matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == *id));
+            }
+            SessionCommand::SetActivity { id, video, .. } => {
+                if let Some(view) = self.subscriptions.get_mut(id) { view.active = *video; }
+            }
+            _ => {}
+        }
+    }
+    fn accept_control(&mut self, command: &SessionCommand) -> bool {
+        if let Some(key) = request_key(command) {
+            let pending = self.pending.get(&key);
+            let current = match command {
+                SessionCommand::SourceSwitched { .. } => pending.is_some_and(|pending| {
+                    matches!((&pending.command, command),
+                        (SessionCommand::SwitchSource { id, request_id, source },
+                         SessionCommand::SourceSwitched { id: accepted_id, request_id: accepted_request, source: accepted_source, .. })
+                        if id == accepted_id && request_id == accepted_request && source == accepted_source)
+                }),
+                _ => pending.is_none_or(|pending| match (&pending.command, command) {
+                    (SessionCommand::Configure { revision, .. }, SessionCommand::Configured { revision: accepted, .. }) => accepted >= revision,
+                    (SessionCommand::SetActivity { revision, .. }, SessionCommand::Activity { revision: accepted, .. }) => accepted >= revision,
+                    _ => true,
+                }),
+            };
+            if !current { return false; }
+            if let SessionCommand::SourceSwitched { id, .. } = command {
+                let Some(view) = self.subscriptions.get_mut(id) else { return false; };
+                view.handler.reset_video_source();
+            }
+            self.pending.remove(&key);
+        }
+        if let SessionCommand::Error { request_id, .. } = command {
+            self.pending.retain(|key, _| key.1 != *request_id);
+        }
+        true
     }
     async fn run(&mut self, mut cancel: broadcast::Receiver<()>) {
         let mut last_pong = Instant::now();
@@ -325,7 +379,9 @@ impl Actor {
                     for key in expired { self.pending.remove(&key); let _ = self.control_tx.send(SessionCommand::Error { request_id: key.1, reason: "host confirmation timed out".into() }); }
                 }
                 _ = media.tick(), if self.subscriptions.values().any(|s| s.active) => {
-                    for view in self.subscriptions.values_mut().filter(|s| s.active) {
+                    for (id, view) in &mut self.subscriptions {
+                        if !view.active || self.pending.values().any(|pending|
+                            matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == *id)) { continue; }
                         view.handler.drain_video();
                         if let Some((target, session_id)) = view.handler.take_keyframe_request() {
                             let _ = self.sender.send_control(&ControlMessage::RequestKeyframe { session_id }, target).await;
@@ -344,11 +400,7 @@ impl Actor {
                     }
                     Some(Command::Clipboard(ingress)) => self.clipboard = ingress,
                     Some(Command::Control(command)) => {
-                        match &command {
-                            SessionCommand::Unsubscribe { id } => { self.subscriptions.remove(id); self.pending.remove(&(2, *id)); self.pending.remove(&(4, *id)); }
-                            SessionCommand::SetActivity { id, video, .. } => { if let Some(view) = self.subscriptions.get_mut(id) { view.active = *video; } }
-                            _ => {}
-                        }
+                        self.prepare_control(&command);
                         self.request(command).await;
                     }
                 },
@@ -356,17 +408,7 @@ impl Actor {
                     match packet {
                         Ok(MultiplexedPacket::Control(ControlMessage::Session(command), addr)) if addr == self.target => {
                             let command = *command;
-                            if let Some(key) = request_key(&command) {
-                                let current = self.pending.get(&key).is_none_or(|pending| match (&pending.command, &command) {
-                                    (SessionCommand::SwitchSource { id, request_id, source }, SessionCommand::SourceSwitched { id: accepted_id, request_id: accepted_request, source: accepted_source, .. }) => id == accepted_id && request_id == accepted_request && source == accepted_source,
-                                    (SessionCommand::Configure { revision, .. }, SessionCommand::Configured { revision:accepted, .. }) => accepted >= revision,
-                                    (SessionCommand::SetActivity { revision, .. }, SessionCommand::Activity { revision: accepted, .. }) => accepted >= revision,
-                                    _ => true,
-                                });
-                                if !current { continue; }
-                                self.pending.remove(&key);
-                            }
-                            if let SessionCommand::Error { request_id, .. } = &command { self.pending.retain(|key, _| key.1 != *request_id); }
+                            if !self.accept_control(&command) { continue; }
                             let _ = self.control_tx.send(command);
                         }
                         Ok(MultiplexedPacket::Control(ControlMessage::Pong { .. }, addr)) if addr == self.target => { last_pong = Instant::now(); self.last_response_tx.send_replace(last_pong); },
@@ -422,7 +464,8 @@ impl Actor {
     async fn packet(&mut self, packet: RtpPacket, timing: FrameTimingCheckpoints) {
         if packet.header.payload_type == protocol::PayloadType::AudioOpus as u8 {
             let _ = self.audio_tx.try_send(AudioIngressEvent::Packet(packet));
-        } else if let Some(view) = self.subscriptions.get_mut(&packet.header.ssrc)
+        } else if !self.source_switch_pending(packet.header.ssrc)
+            && let Some(view) = self.subscriptions.get_mut(&packet.header.ssrc)
             && view.active
         {
             view.handler.remember_video_source(&packet, self.target);
@@ -554,6 +597,100 @@ async fn initial_open(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::session::CaptureSource;
+
+    async fn source_switch_actor() -> (Actor, mpsc::Receiver<AudioIngressEvent>) {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = mux.local_addr().unwrap();
+        let (sender, receiver) = mux.split();
+        let (last_response_tx, _) = tokio::sync::watch::channel(Instant::now());
+        let (_, commands) = mpsc::channel(1);
+        let (control_tx, _) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::channel(8);
+        let (files_tx, _) = mpsc::channel(1);
+        (Actor {last_response_tx,id:90108,target,sender,receiver,commands,
+            control_tx,audio_tx,files_tx,subscriptions:HashMap::new(),pending:HashMap::new(),clipboard:None},audio_rx)
+    }
+    fn source_switch_view(actor: &mut Actor, id: u32) -> mpsc::Receiver<(RtpPacket,FrameTimingCheckpoints)> {
+        let (decode_tx, decode_rx) = mpsc::channel(8);
+        let handler = MediaPacketHandler::new(Statistics::new(), Arc::new(AtomicU32::new(id)),
+            Arc::new(SharedHostStats::default()),actor.audio_tx.clone(),decode_tx,None);
+        actor.subscriptions.insert(id, View {handler,active:true});
+        decode_rx
+    }
+    fn source_video(id:u32, seq:u16) -> RtpPacket {
+        RtpPacket {header:protocol::RtpHeader {version:2,payload_type:protocol::PayloadType::VideoH265 as u8,
+            sequence_number:seq,timestamp:1,ssrc:id},payload:vec![0,0,1,0x26,1,seq as u8]}
+    }
+
+    #[tokio::test]
+    async fn source_switch_gates_own_video_discards_old_reorder_and_preserves_other_media() {
+        let (mut actor,mut audio)=source_switch_actor().await;
+        let mut ours=source_switch_view(&mut actor,7);
+        let mut other=source_switch_view(&mut actor,8);
+        actor.packet(source_video(7,10),FrameTimingCheckpoints::default()).await;
+        assert_eq!(ours.try_recv().unwrap().0.header.sequence_number,10);
+        actor.packet(source_video(7,12),FrameTimingCheckpoints::default()).await;
+        assert!(ours.try_recv().is_err()); // Missing 11 leaves old video in reorder.
+        actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
+        actor.packet(source_video(7,13),FrameTimingCheckpoints::default()).await;
+        actor.packet(source_video(8,1),FrameTimingCheckpoints::default()).await;
+        assert_eq!(other.try_recv().unwrap().0.header.ssrc,8);
+        assert!(ours.try_recv().is_err());
+        let mut sound=source_video(7,1);
+        sound.header.payload_type=protocol::PayloadType::AudioOpus as u8;
+        actor.packet(sound.clone(),FrameTimingCheckpoints::default()).await;
+        assert_eq!(audio.try_recv().unwrap(),AudioIngressEvent::Packet(sound));
+        for (id,request_id,source) in [(8,100,88),(7,99,88),(7,100,77)] {
+            assert!(!actor.accept_control(&SessionCommand::SourceSwitched{id,request_id,
+                source:CaptureSource::Display(source),supports_input:true}));
+            assert!(actor.source_switch_pending(7));
+        }
+        let accepted=SessionCommand::SourceSwitched{id:7,request_id:100,source:CaptureSource::Display(88),supports_input:true};
+        assert!(actor.accept_control(&accepted));
+        assert!(!actor.source_switch_pending(7));
+        assert!(!actor.accept_control(&accepted)); // Duplicate cannot reset the new epoch.
+        actor.packet(source_video(7,20),FrameTimingCheckpoints::default()).await;
+        assert_eq!(ours.try_recv().unwrap().0.header.sequence_number,20);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        actor.subscriptions.get_mut(&7).unwrap().handler.drain_video();
+        assert!(ours.try_recv().is_err(),"old queued 12/13 reached the decoder after switch");
+    }
+
+    #[tokio::test]
+    async fn source_switch_latest_intent_and_unsubscribe_reject_stale_acknowledgements() {
+        let (mut actor,_)=source_switch_actor().await;
+        let _ours=source_switch_view(&mut actor,7);
+        let _other=source_switch_view(&mut actor,8);
+        for (request_id,display) in [(100,88),(101,99)] {
+            actor.request(SessionCommand::SwitchSource{id:7,request_id,source:CaptureSource::Display(display)}).await;
+        }
+        assert_eq!(actor.pending.len(),1);
+        assert!(!actor.accept_control(&SessionCommand::SourceSwitched{id:7,request_id:100,source:CaptureSource::Display(88),supports_input:true}));
+        assert!(actor.source_switch_pending(7));
+        actor.prepare_control(&SessionCommand::Unsubscribe{id:7});
+        assert!(!actor.source_switch_pending(7));
+        assert!(!actor.accept_control(&SessionCommand::SourceSwitched{id:7,request_id:101,source:CaptureSource::Display(99),supports_input:true}));
+        assert!(!actor.subscriptions.contains_key(&7));
+        assert!(actor.subscriptions.contains_key(&8));
+    }
+
+    #[tokio::test]
+    async fn source_switch_rejection_resumes_old_source_and_success_keeps_activity_paused() {
+        let (mut actor,_)=source_switch_actor().await;
+        let mut video=source_switch_view(&mut actor,7);
+        actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
+        assert!(actor.accept_control(&SessionCommand::Error{request_id:100,reason:"source unavailable".into()}));
+        assert!(!actor.source_switch_pending(7));
+        actor.packet(source_video(7,10),FrameTimingCheckpoints::default()).await;
+        assert!(video.try_recv().is_ok(),"a rejected selection must preserve the existing stream");
+        actor.prepare_control(&SessionCommand::SetActivity{id:7,revision:2,video:false,audio:false});
+        actor.request(SessionCommand::SwitchSource{id:7,request_id:101,source:CaptureSource::Display(99)}).await;
+        assert!(actor.accept_control(&SessionCommand::SourceSwitched{id:7,request_id:101,source:CaptureSource::Display(99),supports_input:true}));
+        assert!(!actor.subscriptions[&7].active);
+        actor.packet(source_video(7,11),FrameTimingCheckpoints::default()).await;
+        assert!(video.try_recv().is_err(),"source acknowledgement must not unpause video");
+    }
 
     /// Protocol-only regression. No capture, decoder, account profile or system
     /// input is used: synthetic encrypted datagrams exercise the real actor.
