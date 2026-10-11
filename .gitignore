@@ -10,3 +10,10 @@
 /android/local.properties
 
 /.remote-play-provision/
+
+/.rust-artifacts/
+/.rust-storage/bootstrap-before-workspace/
+/.rust-storage/retained-native-aliases/
+/.rust-storage/last-build.json
+/.rust-storage/last-cleanup.json
+/.rust-storage/lock

@@ -15,3 +15,16 @@ exclude = ["third_party/ely-gpui-component"]
 gpui-ce = { path = "third_party/gpui-ce" }
 blade-graphics = { path = "third_party/blade-graphics" }
 screencapturekit = { path = "third_party/screencapturekit" }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.verify]
+inherits = "dev"
+debug = "line-tables-only"
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false

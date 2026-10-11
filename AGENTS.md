@@ -57,3 +57,6 @@ The product default is the original GPUI, not desktop::run/egui. gpui-preview re
 The per-profile lock includes runtime renderer identity. A new original GUI must not report success by waking an alpha.7 unidentified/diagnostic owner; report the mismatch without spawning a second network runtime. This new metadata file is process state, not network identity; preserve all persistent configuration protections.
 
 Use --product-info-json to inspect the actual compiled default without starting a window/profile. The release GUI gate verifies identity only; native screenshot and interaction acceptance are separate. Do not claim an installed program changed because a test/preview/staging main was compiled or launched. Versioned production packages and launchers still require explicit successful deployment receipts.
+
+## Isolated task build ownership
+Compile this task-owned workspace through `python3 -B .rust-storage/rust_storage.py run --project . -- cargo ...` from this directory. Preserve the policy/registry; run its check and cleanup dry-run. Never use a shared target, path overrides or cargo clean.
