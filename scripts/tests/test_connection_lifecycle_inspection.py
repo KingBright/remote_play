@@ -13,7 +13,7 @@ SPEC.loader.exec_module(inspection)
 class LifecycleInspectionTests(unittest.TestCase):
     def setUp(self):
         self.record = dict(connection_id=123, state='closed', observed_at_ms=42,
-                           active_capture_workers=0, native_streams=0,
+                           active_capture_workers=0, native_streams=0, native_stops_pending=0,
                            native_stops_completed=1, native_stop_errors=0,
                            captured_frames=53, encoded_frames=53)
 
@@ -23,7 +23,7 @@ class LifecycleInspectionTests(unittest.TestCase):
                 inspection.validate(records, 123)
 
     def test_stop_failure_active_resource_or_changing_counter_fails_closed(self):
-        for change in ({'state': 'closing'}, {'active_capture_workers': 1},
+        for change in ({'state': 'closing'}, {'state': 'teardown_unknown'}, {'native_stops_pending': 1}, {'active_capture_workers': 1},
                        {'native_streams': 1}, {'native_stop_errors': 1},
                        {'native_stops_completed': 0}, {'encoded_frames': 0},
                        {'captured_frames': 54}):

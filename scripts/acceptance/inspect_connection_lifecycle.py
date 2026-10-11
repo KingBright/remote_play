@@ -11,7 +11,7 @@ import struct
 import time
 
 LIMIT = 262144
-COUNTERS = ('active_capture_workers', 'native_streams', 'native_stops_completed',
+COUNTERS = ('active_capture_workers', 'native_streams', 'native_stops_pending', 'native_stops_completed',
             'native_stop_errors', 'captured_frames', 'encoded_frames')
 
 
@@ -52,7 +52,7 @@ def validate(records, connection_id):
             'known connection absent or ID collision; no inferred teardown')
     record = records[0]
     require(record.get('connection_id') == connection_id, 'connection ID mismatch')
-    require(record.get('state') in ('open', 'closing', 'closed', 'drop_requested', 'teardown_failed'),
+    require(record.get('state') in ('open', 'closing', 'closed', 'drop_requested', 'teardown_failed', 'teardown_unknown'),
             'unknown lifecycle state')
     require(all(type(record.get(key)) is int and record[key] >= 0 for key in COUNTERS),
             'missing or invalid native counters')
@@ -64,7 +64,7 @@ def confirmed_closed(first, second):
     # Require a native start/stop and encoder evidence for this video fixture.
     for record in (first, second):
         require(record['state'] == 'closed' and record['active_capture_workers'] == 0
-                and record['native_streams'] == 0 and record['native_stop_errors'] == 0
+                and record['native_streams'] == 0 and record['native_stops_pending'] == 0 and record['native_stop_errors'] == 0
                 and record['native_stops_completed'] > 0 and record['encoded_frames'] > 0,
                 'native video teardown was not confirmed')
     require(all(first[key] == second[key] for key in COUNTERS),

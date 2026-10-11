@@ -62,6 +62,7 @@ pub struct MacVideoCapturer {
     slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
     stream: Option<SCStream>,
     stream_running: bool,
+    pending_stop: Option<crate::lifecycle::NativeStopReceipt>,
     resources: Option<Arc<crate::lifecycle::Resources>>,
     target_width: u32,
     source: protocol::session::CaptureSource,
@@ -78,6 +79,7 @@ impl MacVideoCapturer {
             slot: Arc::new(remote_core::LatestFrameSlot::new()),
             stream: None,
             stream_running: false,
+            pending_stop: None,
             resources: None,
             target_width,
             source: protocol::session::CaptureSource::MainDisplay,
@@ -97,25 +99,21 @@ impl MacVideoCapturer {
         self.resources = Some(resources);
         self
     }
-    fn stop_owned_stream(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn stop_owned_stream(&mut self) {
         if let Some(stream) = self.stream.take() {
-            let result = if self.stream_running {
-                stream.stop_capture()
-            } else {
-                Ok(())
-            };
-            self.stream_running = false; // completion is synchronous
-            if let Some(x) = &self.resources {
-                use std::sync::atomic::Ordering::SeqCst;
-                if result.is_ok() {
-                    x.native_stops_completed.fetch_add(1, SeqCst);
-                } else {
-                    x.native_stop_errors.fetch_add(1, SeqCst);
-                }
-                drop(stream);
-                x.native_streams.fetch_sub(1, SeqCst);
-            }
-            result?;
+            let (receipt, completion) =
+                crate::lifecycle::NativeStopCompletion::new(self.resources.clone());
+            self.pending_stop = Some(receipt);
+            self.stream_running = false;
+            stream.stop_capture_owned(move |result| {
+                completion.complete(result.map_err(|error| error.to_string()))
+            });
+        }
+    }
+    async fn await_owned_stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(receipt) = &self.pending_stop {
+            receipt.wait().await?;
+            self.pending_stop = None;
         }
         Ok(())
     }
@@ -182,6 +180,7 @@ impl VideoCapturer for MacVideoCapturer {
     type Frame = MacVideoFrame;
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.await_owned_stop().await?;
         let (filter, size) = crate::capture_sources::filter(self.source)?;
         self.source_size = size;
         let config = self.configuration(size);
@@ -203,29 +202,23 @@ impl VideoCapturer for MacVideoCapturer {
     }
 
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.stop_owned_stream()
+        self.stop_owned_stream();
+        self.await_owned_stop().await
     }
 
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if self.stream_running {
-            if let Some(stream) = &self.stream {
-                stream.stop_capture()?;
-            }
-            self.stream_running = false;
-        }
+        // Recreate only after confirmed stop; a withheld native callback cannot
+        // block the runtime or permit a replacement owner.
+        self.stop_owned_stream();
         drop(self.slot.take());
-        Ok(())
+        self.await_owned_stop().await
     }
 
     async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.await_owned_stop().await?;
         drop(self.slot.take());
         self.pacer.reset(self.target_fps);
-        if let Some(stream) = &self.stream {
-            if !self.stream_running {
-                stream.start_capture()?;
-                self.stream_running = true;
-            }
-        } else {
+        if self.stream.is_none() {
             self.start().await?;
         }
         Ok(())
@@ -255,7 +248,7 @@ impl VideoCapturer for MacVideoCapturer {
 
 impl Drop for MacVideoCapturer {
     fn drop(&mut self) {
-        let _ = self.stop_owned_stream();
+        self.stop_owned_stream();
     }
 }
 

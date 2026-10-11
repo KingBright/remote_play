@@ -15,7 +15,7 @@ use remote_core::session_crypto::{
     random_bytes_16, require_session_auth, verify_session_mac,
 };
 use remote_core::{InputInjector, stats::Statistics};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -188,6 +188,7 @@ struct Subscription {
     keyframe: Arc<AtomicBool>,
     cancel: broadcast::Sender<()>,
     task: tokio::task::JoinHandle<()>,
+    task_joined: bool,
     audio_group: Option<AudioGroupKey>,
     audio_active: bool,
     supports_input: bool,
@@ -259,7 +260,9 @@ struct Connection {
     #[cfg(target_os = "macos")]
     talkback_settings: Option<watch::Sender<crate::talkback_player::TalkbackPlaybackSettings>>,
     subscriptions: HashMap<u32, Subscription>,
-    retired: HashSet<u32>,
+    // First terminal result is immutable, including unknown/failed cleanup.
+    retired: HashMap<u32, Result<(), String>>,
+    worker_failure: bool,
     audio_groups: HashMap<AudioGroupKey, AudioGroup>,
     _reporter: crate::ScheduledStatsReporterGuard,
     resources: Arc<crate::lifecycle::Resources>,
@@ -296,6 +299,7 @@ impl Drop for Connection {
 }
 
 struct ClosingTask {
+    resources: Arc<crate::lifecycle::Resources>,
     id: u32,
     notify: bool,
     task: tokio::task::JoinHandle<Result<(), String>>,
@@ -306,10 +310,24 @@ impl Drop for ClosingTask {
     }
 }
 struct ClosedReceipt {
+    resources: Arc<crate::lifecycle::Resources>,
     id: u32,
     result: Result<(), String>,
     at: Instant,
 }
+impl ClosedReceipt {
+    fn resources_live(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.resources.workers.load(SeqCst) != 0 || self.resources.native_streams.load(SeqCst) != 0
+    }
+}
+fn pending_closed_count(closed: &HashMap<SocketAddr, ClosedReceipt>) -> usize {
+    closed
+        .values()
+        .filter(|receipt| receipt.resources_live())
+        .count()
+}
+
 fn joined(result: Result<(), tokio::task::JoinError>) -> Result<(), String> {
     match result {
         Ok(()) => Ok(()),
@@ -329,6 +347,7 @@ fn begin_close(
         closing.insert(
             addr,
             ClosingTask {
+                resources: peer.resources.clone(),
                 id,
                 notify,
                 task: tokio::spawn(peer.shutdown()),
@@ -386,26 +405,44 @@ fn stream_settings(request: &SubscriptionRequest) -> crate::StreamSettings {
 
 impl Connection {
     async fn unsubscribe(&mut self, id: u32) -> Result<(), String> {
-        if !self.subscriptions.contains_key(&id) {
-            return if self.retired.contains(&id) {
-                Ok(())
-            } else {
-                Err("subscription is unavailable".into())
-            };
+        if let Some(receipt) = self.retired.get(&id) {
+            return receipt.clone();
         }
-        self.retired.insert(id);
+        if !self.subscriptions.contains_key(&id) {
+            return Err("subscription is unavailable".into());
+        }
+        self.retired
+            .insert(id, Err("unsubscribe cleanup outcome is unknown".into()));
+        let result = self.unsubscribe_owned(id).await;
+        self.retired.insert(id, result.clone());
+        result
+    }
+    async fn unsubscribe_owned(&mut self, id: u32) -> Result<(), String> {
         let subscription = self.subscriptions.get_mut(&id).unwrap();
         subscription.supports_input = false;
         subscription.input_target = None;
         let _ = subscription.cancel.send(());
         subscription.task.abort();
-        let capture_result = tokio::time::timeout(Duration::from_secs(2), &mut subscription.task)
-            .await
-            .map_err(|_| {
-                "capture teardown still pending; no unsubscribe acknowledgement".to_string()
-            })?;
+        let capture_result = if subscription.task_joined {
+            Ok(())
+        } else {
+            let result =
+                tokio::time::timeout(crate::lifecycle::CLEANUP_WAIT, &mut subscription.task)
+                    .await
+                    .map_err(|_| {
+                        "capture teardown still pending; no unsubscribe acknowledgement".to_string()
+                    })?;
+            subscription.task_joined = true;
+            joined(result)
+        };
         self.subscriptions.remove(&id);
-        joined(capture_result)?;
+        if let Err(error) = capture_result {
+            self.worker_failure = true;
+            return Err(error);
+        }
+        if self.worker_failure {
+            return Err("prior connection worker failed; teardown is not confirmed".into());
+        }
         #[cfg(all(unix, any(test, target_os = "linux")))]
         if let Some(capture) = self.native_capture.remove(&id) {
             capture.revoke();
@@ -416,8 +453,17 @@ impl Connection {
                 .await
                 .map_err(|_| "audio/clipboard teardown still pending".to_string())?;
             self.retiring_tasks.pop();
-            joined(result)?;
+            if let Err(error) = joined(result) {
+                self.worker_failure = true;
+                return Err(error);
+            }
         }
+        tokio::time::timeout(
+            crate::lifecycle::CLEANUP_WAIT,
+            crate::lifecycle::wait_native_stops(&self.resources),
+        )
+        .await
+        .map_err(|_| "native teardown still pending; unsubscribe outcome is unknown".to_string())?;
         if self
             .resources
             .native_stop_errors
@@ -430,7 +476,17 @@ impl Connection {
     }
     async fn shutdown(mut self) -> Result<(), String> {
         crate::lifecycle::publish(self.id, &self.resources, "closing");
-        let mut worker_failure = false;
+        match tokio::time::timeout(crate::lifecycle::CLEANUP_WAIT, self.shutdown_owned()).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.terminal_reported = true;
+                crate::lifecycle::publish(self.id, &self.resources, "teardown_unknown");
+                Err("teardown deadline expired; native owners remain retained until actual completion".into())
+            }
+        }
+    }
+    async fn shutdown_owned(&mut self) -> Result<(), String> {
+        let mut worker_failure = self.worker_failure;
         let _ = self.cancel.send(());
         if let Some(cancel) = self.clipboard_cancel.take() {
             let _ = cancel.send(());
@@ -444,7 +500,10 @@ impl Connection {
             subscription.task.abort();
         }
         for subscription in self.subscriptions.values_mut() {
-            worker_failure |= joined((&mut subscription.task).await).is_err();
+            if !subscription.task_joined {
+                worker_failure |= joined((&mut subscription.task).await).is_err();
+                subscription.task_joined = true;
+            }
         }
         self.subscriptions.clear();
         #[cfg(all(unix, any(test, target_os = "linux")))]
@@ -474,10 +533,12 @@ impl Connection {
             Err(error) if error.is_cancelled() => false,
             _ => true,
         };
+        crate::lifecycle::wait_native_stops(&self.resources).await;
         use std::sync::atomic::Ordering::SeqCst;
         let confirmed = !worker_failure
             && self.resources.workers.load(SeqCst) == 0
             && self.resources.native_streams.load(SeqCst) == 0
+            && self.resources.native_stops_pending.load(SeqCst) == 0
             && self.resources.native_stop_errors.load(SeqCst) == 0;
         self.terminal_reported = true;
         crate::lifecycle::publish(
@@ -510,6 +571,17 @@ impl Connection {
                 subscription.input_target = None;
                 subscription.audio_group = None;
                 return true;
+            }
+            use std::future::Future;
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            if !subscription.task_joined
+                && let std::task::Poll::Ready(result) =
+                    std::pin::Pin::new(&mut subscription.task).poll(&mut cx)
+            {
+                if let Err(error) = joined(result) {
+                    self.worker_failure = true;
+                    self.retired.insert(subscription.request.id, Err(error));
+                }
             }
             false
         });
@@ -631,7 +703,8 @@ impl Connection {
             #[cfg(target_os = "macos")]
             talkback_settings,
             subscriptions: HashMap::new(),
-            retired: HashSet::new(),
+            retired: HashMap::new(),
+            worker_failure: false,
             audio_groups: HashMap::new(),
             _reporter: reporter,
             resources,
@@ -722,8 +795,24 @@ impl Connection {
             request.bitrate_kbps,
         )
         .map_err(str::to_owned)?;
-        if self.retired.contains(&request.id) || self.retired.len() >= 4096 {
+        if self.retired.contains_key(&request.id) || self.retired.len() >= 4096 {
             return Err("subscription was closed; use a new ID".into());
+        }
+        if self
+            .resources
+            .native_stops_pending
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0
+            || self
+                .resources
+                .native_stop_errors
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+            || self.retiring_tasks.iter().any(|task| !task.is_finished())
+        {
+            return Err(
+                "previous native/audio teardown is unconfirmed; no replacement started".into(),
+            );
         }
         if request.width > 8192
             || request.height > 8192
@@ -852,11 +941,34 @@ impl Connection {
             // before a replacement can touch capture/encoder resources.
             let _ = existing.cancel.send(());
             existing.task.abort();
-            if tokio::time::timeout(Duration::from_secs(2), &mut existing.task)
-                .await
-                .is_err()
+            if !existing.task_joined {
+                let result =
+                    tokio::time::timeout(crate::lifecycle::CLEANUP_WAIT, &mut existing.task)
+                        .await
+                        .map_err(|_| {
+                            "previous capture did not stop; replacement was not started".to_string()
+                        })?;
+                existing.task_joined = true;
+                if let Err(error) = joined(result) {
+                    self.worker_failure = true;
+                    return Err(error);
+                }
+            }
+            tokio::time::timeout(
+                crate::lifecycle::CLEANUP_WAIT,
+                crate::lifecycle::wait_native_stops(&self.resources),
+            )
+            .await
+            .map_err(|_| {
+                "previous native stop is unknown; replacement was not started".to_string()
+            })?;
+            if self
+                .resources
+                .native_stop_errors
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
             {
-                return Err("previous capture did not stop; replacement was not started".into());
+                return Err("previous native stop failed; replacement was not started".into());
             }
             #[cfg(all(unix, any(test, target_os = "linux")))]
             if let Some(previous) = &existing.native_capture {
@@ -971,6 +1083,7 @@ impl Connection {
                 keyframe,
                 cancel,
                 task,
+                task_joined: false,
                 audio_group: audio_key,
                 audio_active,
                 supports_input,
@@ -1388,7 +1501,7 @@ async fn run_host_service_inner(
                 if current_key != psk {
                     for addr in authenticated.keys() { udp_sender.remove_peer_crypto(*addr); }
                     for addr in peers.keys().copied().collect::<Vec<_>>(){begin_close(&mut peers,&mut closing,addr,false);}
-                    closed.clear();authenticated.clear(); psk = current_key;
+                    closed.retain(|_,receipt|receipt.resources_live());authenticated.clear(); psk = current_key;
                     require_auth = require_session_auth() || psk.is_some();
                 }
                 let expired: Vec<_> = peers.iter().filter(|(_, peer)| peer.last_seen.elapsed() > Duration::from_secs(15)).map(|(addr, _)| *addr).collect();
@@ -1398,9 +1511,9 @@ async fn run_host_service_inner(
                     let mut ending=closing.remove(&addr).unwrap();
                     let result=(&mut ending.task).await.unwrap_or_else(|_|Err("connection teardown task failed".into()));
                     if ending.notify&&authenticated.contains_key(&addr){send_session(&udp_sender,addr,terminal_reply(ending.id,&result)).await;}
-                    closed.insert(addr,ClosedReceipt{id:ending.id,result,at:Instant::now()});
+                    closed.insert(addr,ClosedReceipt{resources:ending.resources.clone(),id:ending.id,result,at:Instant::now()});
                 }
-                closed.retain(|_,receipt|receipt.at.elapsed()<Duration::from_secs(30));
+                closed.retain(|_,receipt|receipt.resources_live() || receipt.at.elapsed()<Duration::from_secs(30));
                 authenticated.retain(|addr, (_, _, ts)| {
                     let keep = peers.contains_key(addr)||closing.contains_key(addr)||closed.contains_key(addr)|| now_unix_ms().saturating_sub(*ts) < 30_000;
                     if !keep { udp_sender.remove_peer_crypto(*addr); }
@@ -1425,7 +1538,7 @@ async fn run_host_service_inner(
                             verify_session_mac(&mac_session_hello(key, &nonce, timestamp_ms), &mac, timestamp_ms, now_unix_ms()).map_err(|e| e.to_string())?;
                             if let Some((previous, salt, ts)) = authenticated.get(&addr) {
                                 if *previous == nonce { return Ok((*salt, *ts)); }
-                                if peers.contains_key(&addr)||closing.contains_key(&addr) { return Err("close the existing connection before rekeying".into()); }
+                                if peers.contains_key(&addr)||closing.contains_key(&addr)||closed.get(&addr).is_some_and(ClosedReceipt::resources_live) { return Err("close the existing connection before rekeying".into()); }
                             }
                             if authenticated.len() >= 16 && !authenticated.contains_key(&addr) { return Err("authentication capacity reached".into()); }
                             let salt = random_bytes_16(); let ts = now_unix_ms();
@@ -1456,7 +1569,7 @@ async fn run_host_service_inner(
                         match message {
                             ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
                                 if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() { continue; }
-                                if peers.len()+closing.len() >= 8 && !peers.contains_key(&addr) { continue; }
+                                if closed.get(&addr).is_some_and(ClosedReceipt::resources_live) || (peers.len()+closing.len()+pending_closed_count(&closed) >= 8 && !peers.contains_key(&addr)) { continue; }
                                 let peer = peers.entry(addr).or_insert_with(|| Connection::new(session_id, addr, udp_sender.clone(), &config));
                                 peer.set_clipboard(config.enable_clipboard_sync);
                                 if !peer.subscriptions.contains_key(&session_id) {
@@ -1501,8 +1614,9 @@ async fn run_host_service_inner(
                                     #[cfg(not(target_os = "linux"))]
                                     let window_capture = cfg!(target_os = "macos");
                                     let reply = if version != SESSION_VERSION || connection_id == 0 { SessionCommand::Error { request_id: connection_id, reason: "unsupported connection version or ID".into() } }
+                                    else if closed.get(&addr).is_some_and(ClosedReceipt::resources_live) { SessionCommand::Error { request_id: connection_id, reason: "previous native teardown remains unknown".into() } }
                                     else if peers.get(&addr).is_some_and(|p| p.id != connection_id) { SessionCommand::Error { request_id: connection_id, reason: "close the existing connection first".into() } }
-                                    else if peers.len()+closing.len() >= 8 && !peers.contains_key(&addr) { SessionCommand::Error { request_id: connection_id, reason: "connection limit reached".into() } }
+                                    else if peers.len()+closing.len()+pending_closed_count(&closed) >= 8 && !peers.contains_key(&addr) { SessionCommand::Error { request_id: connection_id, reason: "connection limit reached".into() } }
                                     else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
                                     send_session(&udp_sender, addr, reply).await;
                                 }
@@ -1656,6 +1770,238 @@ mod failure_admission_tests {
         ready.await.unwrap();
         peer.subscriptions.insert(100, sub);
     }
+    struct WithheldStopFixture {
+        resources: Arc<crate::lifecycle::Resources>,
+        release: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+        owner_dropped: Arc<AtomicBool>,
+    }
+    struct NativeOwnerFixture(Arc<AtomicBool>);
+    impl Drop for NativeOwnerFixture {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl Drop for WithheldStopFixture {
+        fn drop(&mut self) {
+            let (_, completion) =
+                crate::lifecycle::NativeStopCompletion::new(Some(self.resources.clone()));
+            let release = self.release.take().unwrap();
+            let owner = NativeOwnerFixture(self.owner_dropped.clone());
+            // Model the native callback context, with no real capture or consent.
+            tokio::spawn(async move {
+                let result = match release.await {
+                    Ok(result) => result,
+                    Err(_) => std::future::pending().await,
+                };
+                if result.is_ok() {
+                    drop(owner);
+                } else {
+                    std::mem::forget(owner);
+                }
+                completion.complete(result);
+            });
+        }
+    }
+    async fn install_withheld_stop_fixture(
+        peer: &mut Connection,
+    ) -> (
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+        Arc<AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.task.abort();
+        let _ = (&mut sub.task).await;
+        let resources = peer.resources.clone();
+        let owner_dropped = Arc::new(AtomicBool::new(false));
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let fixture = WithheldStopFixture {
+            resources: resources.clone(),
+            release: Some(released),
+            owner_dropped: owner_dropped.clone(),
+        };
+        sub.task = tokio::spawn(async move {
+            let _worker = crate::lifecycle::WorkerGuard::new(resources.clone());
+            resources.native_streams.fetch_add(1, SeqCst);
+            let _native = fixture;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        peer.subscriptions.insert(100, sub);
+        (release, owner_dropped)
+    }
+    #[tokio::test]
+    async fn duplicate_unsubscribe_replays_native_stop_failure() {
+        let (mut peer, _) = fixture_peer(90010).await;
+        let (release, dropped) = install_withheld_stop_fixture(&mut peer).await;
+        release
+            .send(Err("withheld fixture native stop failed".into()))
+            .unwrap();
+        let first = peer.unsubscribe(100).await;
+        assert!(first.is_err());
+        assert_eq!(peer.unsubscribe(100).await, first);
+        assert!(!dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            peer.resources
+                .native_stop_errors
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(peer.shutdown().await.is_err());
+    }
+    #[tokio::test]
+    async fn duplicate_unsubscribe_keeps_unknown_audio_cleanup_result_after_completion() {
+        let (mut peer, _) = fixture_peer(90011).await;
+        install_capture_fixture(&mut peer).await;
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        peer.retiring_tasks.push(tokio::spawn(async move {
+            let _ = started.send(());
+            let _ = released.await;
+        }));
+        ready.await.unwrap();
+        let first = peer.unsubscribe(100).await;
+        assert!(matches!(&first, Err(error) if error.contains("still pending")));
+        assert!(!peer.retiring_tasks[0].is_finished());
+        assert_eq!(peer.unsubscribe(100).await, first);
+        release.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(peer.unsubscribe(100).await, first);
+        peer.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn withheld_native_completion_cannot_deadlock_runtime_or_acknowledge_cleanup() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut peer, _) = fixture_peer(90012).await;
+        let (release, dropped) = install_withheld_stop_fixture(&mut peer).await;
+        let resources = peer.resources.clone();
+        let first = peer.unsubscribe(100).await;
+        assert!(matches!(&first, Err(error) if error.contains("unknown")));
+        assert!(!dropped.load(SeqCst));
+        assert_eq!(resources.native_streams.load(SeqCst), 1);
+        assert_eq!(resources.native_stops_pending.load(SeqCst), 1);
+        assert_eq!(resources.native_stops_completed.load(SeqCst), 0);
+        let (other, _) = fixture_peer(90013).await;
+        tokio::time::timeout(Duration::from_millis(500), other.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let result = peer.shutdown().await;
+        assert!(result.is_err());
+        assert_eq!(
+            crate::lifecycle::inspect_connection(90012)[0].state,
+            "teardown_unknown"
+        );
+        assert!(!matches!(
+            terminal_reply(90012, &result),
+            SessionCommand::Closed { .. }
+        ));
+        assert!(!dropped.load(SeqCst));
+        let receipt = ClosedReceipt {
+            id: 90012,
+            resources: resources.clone(),
+            result: result.clone(),
+            at: Instant::now(),
+        };
+        assert!(receipt.resources_live());
+        assert_eq!(
+            pending_closed_count(&HashMap::from([(
+                "127.0.0.1:39981".parse().unwrap(),
+                receipt
+            )])),
+            1
+        );
+        release.send(Ok(())).unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::lifecycle::wait_native_stops(&resources),
+        )
+        .await
+        .unwrap();
+        assert!(dropped.load(SeqCst));
+        assert_eq!(resources.native_streams.load(SeqCst), 0);
+        assert_eq!(resources.native_stops_completed.load(SeqCst), 1);
+        assert_eq!(
+            crate::lifecycle::inspect_connection(90012)[0].state,
+            "teardown_unknown"
+        );
+        // A previously returned unknown connection result never becomes Closed.
+        assert!(matches!(
+            terminal_reply(90012, &result),
+            SessionCommand::Error { .. }
+        ));
+    }
+    #[tokio::test]
+    async fn disconnect_with_withheld_stop_returns_bounded_error_and_keeps_native_owner() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut peer, addr) = fixture_peer(90014).await;
+        let (release, dropped) = install_withheld_stop_fixture(&mut peer).await;
+        let resources = peer.resources.clone();
+        let mut peers = HashMap::from([(addr, peer)]);
+        let mut closing = HashMap::new();
+        begin_close(&mut peers, &mut closing, addr, false);
+        let mut ending = closing.remove(&addr).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut ending.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert!(!ending.notify);
+        assert_eq!(resources.native_stops_pending.load(SeqCst), 1);
+        assert!(!dropped.load(SeqCst));
+        // Simulated IPC on this same single runtime thread remains responsive.
+        assert_eq!(
+            crate::lifecycle::inspect_connection(90014)[0].native_streams,
+            1
+        );
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tokio::time::sleep(Duration::from_millis(5)),
+        )
+        .await
+        .unwrap();
+        release.send(Ok(())).unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::lifecycle::wait_native_stops(&resources),
+        )
+        .await
+        .unwrap();
+        assert!(dropped.load(SeqCst));
+    }
+    #[tokio::test]
+    async fn duplicate_unsubscribe_keeps_capture_join_panic() {
+        let (mut peer, _) = fixture_peer(90015).await;
+        let (mut sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.task.abort();
+        let _ = (&mut sub.task).await;
+        sub.task = tokio::spawn(async { panic!("capture fixture failure") });
+        tokio::task::yield_now().await;
+        peer.subscriptions.insert(100, sub);
+        let first = peer.unsubscribe(100).await;
+        assert!(first.is_err());
+        assert_eq!(peer.unsubscribe(100).await, first);
+        assert!(peer.shutdown().await.is_err());
+    }
+    #[tokio::test]
+    async fn pruning_finished_capture_keeps_join_failure_for_close() {
+        let (mut peer, _) = fixture_peer(90016).await;
+        let (mut sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.task.abort();
+        let _ = (&mut sub.task).await;
+        sub.task = tokio::spawn(async { panic!("pruned capture fixture failure") });
+        tokio::task::yield_now().await;
+        peer.subscriptions.insert(100, sub);
+        peer.prune_finished_subscriptions(false);
+        assert!(peer.unsubscribe(100).await.is_err());
+        let result = peer.shutdown().await;
+        assert!(matches!(
+            terminal_reply(90016, &result),
+            SessionCommand::Error { .. }
+        ));
+    }
     #[tokio::test]
     async fn close_receipt_waits_for_native_drop_and_deduplicates_owned_id() {
         let (mut peer, addr) = fixture_peer(90001).await;
@@ -1694,6 +2040,7 @@ mod failure_admission_tests {
         closed.insert(
             addr,
             ClosedReceipt {
+                resources: resources.clone(),
                 id: 90001,
                 result,
                 at: Instant::now(),
@@ -1789,7 +2136,7 @@ mod failure_admission_tests {
             0
         );
         assert!(peer.audio_groups.is_empty());
-        assert!(!peer.retired.contains(&100));
+        assert!(!peer.retired.contains_key(&100));
         peer.shutdown().await.unwrap();
     }
 
@@ -1937,6 +2284,7 @@ mod failure_admission_tests {
                 keyframe: Arc::new(AtomicBool::new(false)),
                 cancel,
                 task,
+                task_joined: false,
                 audio_group: None,
                 audio_active: false,
                 supports_input: true,
