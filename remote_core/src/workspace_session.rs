@@ -319,6 +319,18 @@ impl Actor {
             _ => {}
         }
     }
+    fn reject_request(&mut self, request_id: u32) {
+        let video: Vec<_> = self.pending.values().filter_map(|pending| match pending.command {
+            SessionCommand::SwitchSource { id, request_id: requested, .. } if requested == request_id => Some(id),
+            _ => None,
+        }).collect();
+        self.pending.retain(|key, _| key.1 != request_id);
+        // Video was gated while waiting, so even a rejected switch has skipped
+        // compressed references. Recover the retained source from a keyframe.
+        for id in video {
+            if let Some(view) = self.subscriptions.get_mut(&id) { view.handler.reset_video_source(); }
+        }
+    }
     fn accept_control(&mut self, command: &SessionCommand) -> bool {
         if let Some(key) = request_key(command) {
             let pending = self.pending.get(&key);
@@ -343,7 +355,7 @@ impl Actor {
             self.pending.remove(&key);
         }
         if let SessionCommand::Error { request_id, .. } = command {
-            self.pending.retain(|key, _| key.1 != *request_id);
+            self.reject_request(*request_id);
         }
         true
     }
@@ -376,7 +388,7 @@ impl Actor {
                             pending.last_sent = Instant::now();
                         }
                     }
-                    for key in expired { self.pending.remove(&key); let _ = self.control_tx.send(SessionCommand::Error { request_id: key.1, reason: "host confirmation timed out".into() }); }
+                    for key in expired { self.reject_request(key.1); let _ = self.control_tx.send(SessionCommand::Error { request_id: key.1, reason: "host confirmation timed out".into() }); }
                 }
                 _ = media.tick(), if self.subscriptions.values().any(|s| s.active) => {
                     for (id, view) in &mut self.subscriptions {
@@ -679,10 +691,15 @@ mod tests {
     async fn source_switch_rejection_resumes_old_source_and_success_keeps_activity_paused() {
         let (mut actor,_)=source_switch_actor().await;
         let mut video=source_switch_view(&mut actor,7);
+        actor.packet(source_video(7,10),FrameTimingCheckpoints::default()).await;
+        video.try_recv().unwrap();
         actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
+        actor.packet(source_video(7,11),FrameTimingCheckpoints::default()).await;
+        assert!(video.try_recv().is_err());
         assert!(actor.accept_control(&SessionCommand::Error{request_id:100,reason:"source unavailable".into()}));
         assert!(!actor.source_switch_pending(7));
-        actor.packet(source_video(7,10),FrameTimingCheckpoints::default()).await;
+        assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(),Some((actor.target,7)));
+        actor.packet(source_video(7,12),FrameTimingCheckpoints::default()).await;
         assert!(video.try_recv().is_ok(),"a rejected selection must preserve the existing stream");
         actor.prepare_control(&SessionCommand::SetActivity{id:7,revision:2,video:false,audio:false});
         actor.request(SessionCommand::SwitchSource{id:7,request_id:101,source:CaptureSource::Display(99)}).await;
@@ -690,6 +707,22 @@ mod tests {
         assert!(!actor.subscriptions[&7].active);
         actor.packet(source_video(7,11),FrameTimingCheckpoints::default()).await;
         assert!(video.try_recv().is_err(),"source acknowledgement must not unpause video");
+    }
+
+    #[tokio::test]
+    async fn source_switch_timeout_recovers_only_the_affected_subscription() {
+        let (mut actor,_)=source_switch_actor().await;
+        let mut ours=source_switch_view(&mut actor,7);
+        let mut other=source_switch_view(&mut actor,8);
+        actor.packet(source_video(7,10),FrameTimingCheckpoints::default()).await;
+        actor.packet(source_video(8,10),FrameTimingCheckpoints::default()).await;
+        ours.try_recv().unwrap();other.try_recv().unwrap();
+        actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
+        actor.reject_request(100); // Same transition used by the bounded retry timer.
+        assert!(!actor.source_switch_pending(7));
+        assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(),Some((actor.target,7)));
+        assert_eq!(actor.subscriptions.get_mut(&8).unwrap().handler.take_keyframe_request(),None);
+        assert!(!actor.accept_control(&SessionCommand::SourceSwitched{id:7,request_id:100,source:CaptureSource::Display(88),supports_input:true}));
     }
 
     /// Protocol-only regression. No capture, decoder, account profile or system
