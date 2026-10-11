@@ -524,6 +524,22 @@ impl SCStream {
         completion.wait().map_err(SCError::CaptureStopFailed)
     }
 
+    /// Stop without blocking a caller thread. The callback owns the stream and
+    /// its handlers until native completion, even if completion never arrives.
+    /// The stream is released before success; failed stops retain their owner.
+    /// No cancellation/deadline can free an unconfirmed native owner.
+    pub fn stop_capture_owned(self, completed: impl FnOnce(Result<(), SCError>) + Send + 'static) {
+        use crate::utils::completion::OwnedUnitCompletion;
+        extern "C" fn callback(context: *mut c_void, success: bool, message: *const i8) {
+            unsafe { OwnedUnitCompletion::<SCStream>::complete_context(context, success, message) };
+        }
+        let ptr = self.ptr;
+        let context = OwnedUnitCompletion::new(self, move |result| {
+            completed(result.map_err(SCError::CaptureStopFailed))
+        });
+        unsafe { ffi::sc_stream_stop_capture(ptr, context, callback) };
+    }
+
     /// Update the stream configuration
     ///
     /// This method blocks until the configuration update completes or fails.

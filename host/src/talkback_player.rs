@@ -14,7 +14,8 @@ use tokio::sync::{mpsc as tokio_mpsc, watch};
 const TALKBACK_SAMPLE_QUEUE: usize = 96_000;
 
 pub struct TalkbackPlayer {
-    _stream: cpal::Stream,
+    stream: Option<cpal::Stream>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +43,22 @@ impl TalkbackPlaybackSettings {
     }
 }
 
+impl Drop for TalkbackPlayer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl TalkbackPlayer {
+    pub async fn shutdown(&mut self) -> Result<(), String> {
+        self.stream.take();
+        self.task.abort();
+        match (&mut self.task).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(_) => Err("talkback worker failed during teardown".into()),
+        }
+    }
     pub fn new(
         session_id: u32,
         mut rx: tokio_mpsc::Receiver<DataEnvelope>,
@@ -58,7 +74,48 @@ impl TalkbackPlayer {
         let output_channels = usize::from(output_config.channels.max(1));
         let (sample_tx, sample_rx) = mpsc::sync_channel::<f32>(TALKBACK_SAMPLE_QUEUE);
 
-        tokio::spawn(async move {
+        let err_fn = |err| eprintln!("talkback output stream error: {}", err);
+
+        let stream = match default_config.sample_format() {
+            cpal::SampleFormat::F32 => device.build_output_stream(
+                &output_config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = sample_rx.try_recv().unwrap_or(0.0);
+                    }
+                },
+                err_fn,
+                None,
+            )?,
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                &output_config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = f32_to_i16(sample_rx.try_recv().unwrap_or(0.0));
+                    }
+                },
+                err_fn,
+                None,
+            )?,
+            cpal::SampleFormat::U16 => device.build_output_stream(
+                &output_config,
+                move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
+                    for sample in data.iter_mut() {
+                        *sample = f32_to_u16(sample_rx.try_recv().unwrap_or(0.0));
+                    }
+                },
+                err_fn,
+                None,
+            )?,
+            sample_format => {
+                return Err(
+                    format!("unsupported talkback output sample format {sample_format:?}").into(),
+                );
+            }
+        };
+
+        stream.play()?;
+        let task = tokio::spawn(async move {
             let mut streams = HashMap::<u32, AudioDecodeStream>::new();
             let mut settings = *settings_rx.borrow();
 
@@ -120,49 +177,10 @@ impl TalkbackPlayer {
                 }
             }
         });
-
-        let err_fn = |err| eprintln!("talkback output stream error: {}", err);
-
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::F32 => device.build_output_stream(
-                &output_config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        *sample = sample_rx.try_recv().unwrap_or(0.0);
-                    }
-                },
-                err_fn,
-                None,
-            )?,
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &output_config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        *sample = f32_to_i16(sample_rx.try_recv().unwrap_or(0.0));
-                    }
-                },
-                err_fn,
-                None,
-            )?,
-            cpal::SampleFormat::U16 => device.build_output_stream(
-                &output_config,
-                move |data: &mut [u16], _: &cpal::OutputCallbackInfo| {
-                    for sample in data.iter_mut() {
-                        *sample = f32_to_u16(sample_rx.try_recv().unwrap_or(0.0));
-                    }
-                },
-                err_fn,
-                None,
-            )?,
-            sample_format => {
-                return Err(
-                    format!("unsupported talkback output sample format {sample_format:?}").into(),
-                );
-            }
-        };
-
-        stream.play()?;
-        Ok(Self { _stream: stream })
+        Ok(Self {
+            stream: Some(stream),
+            task,
+        })
     }
 }
 

@@ -416,7 +416,13 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             )
     }
     pub fn input_command(&self, event: InputEvent) -> SessionCommand {
-        if matches!(self.source, CaptureSource::Window(_)) {
+        // Selected displays, like windows, are bound to an exact host target.
+        // Their host rejects legacy desktop Input; retain the source revision
+        // so late events cannot follow a switch to another selected source.
+        if matches!(
+            self.source,
+            CaptureSource::Window(_) | CaptureSource::Display(_)
+        ) {
             SessionCommand::SourceInput {
                 id: self.video_id,
                 source_revision: self.source_revision,
@@ -777,6 +783,137 @@ fn current_input_frame(frame: Option<Instant>, source_started: Instant, responsi
 #[cfg(test)]
 mod static_input_tests {
     use super::*;
+    use protocol::ControlMessage;
+    use remote_core::net::{MultiplexedPacket, UdpMultiplexer};
+
+    // Real session commands and wire encoding, with only a loopback recorder.
+    // No GUI, capture, permission request, clipboard start or OS input injection.
+    #[tokio::test]
+    async fn selected_display_input_reaches_the_wire_with_current_source_revision() {
+        assert!(remote_core::session_crypto::load_session_psk().is_none());
+        remote_core::init_crypto_provider();
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let addr = mux.local_addr().unwrap();
+        let (sender, receiver) = mux.split();
+        let (recorded_tx, mut recorded_rx) = tokio::sync::mpsc::unbounded_channel();
+        let recorder = tokio::spawn(async move {
+            while let Ok(packet) = receiver.recv().await {
+                match packet {
+                    MultiplexedPacket::Control(ControlMessage::Session(command), from) => {
+                        if let SessionCommand::Open { connection_id, .. } = *command {
+                            sender
+                                .send_control(
+                                    &ControlMessage::Session(Box::new(SessionCommand::Opened {
+                                        connection_id,
+                                        version: protocol::session::SESSION_VERSION,
+                                        max_subscriptions: 8,
+                                        files: false,
+                                        clipboard: false,
+                                        window_capture: true,
+                                    })),
+                                    from,
+                                )
+                                .await
+                                .unwrap();
+                        } else {
+                            recorded_tx.send(*command).unwrap();
+                        }
+                    }
+                    MultiplexedPacket::Control(ControlMessage::Ping { client_send_ts }, from) => {
+                        sender
+                            .send_control(
+                                &ControlMessage::Pong {
+                                    client_send_ts,
+                                    host_recv_ts: client_send_ts,
+                                    host_send_ts: client_send_ts,
+                                },
+                                from,
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let (conn, events) = WorkspaceConnection::connect(addr, temp.path().join("receive"))
+            .await
+            .unwrap();
+        let mut session = SessionState::<(), ()>::new(
+            "loopback".into(),
+            "Input recorder".into(),
+            "Loopback".into(),
+            conn,
+            events,
+        );
+        // Synthetic presentation eligibility only; no native frame is decoded.
+        session.confirmed = true;
+        session.supports_input = true;
+        session.locked = false;
+        session.first_frame_after = Instant::now() - Duration::from_secs(1);
+        session.uploaded_at = Some(Instant::now());
+        let inputs = [
+            InputEvent::MouseMoveAbsolute { x: 32768, y: 32768 },
+            InputEvent::MouseDown(0),
+            InputEvent::MouseUp(0),
+            InputEvent::MouseScroll {
+                delta_x: 0,
+                delta_y: -2,
+            },
+            InputEvent::Key {
+                key_code: 0,
+                pressed: true,
+                modifiers: 0,
+            },
+            InputEvent::Key {
+                key_code: 0,
+                pressed: false,
+                modifiers: 0,
+            },
+            InputEvent::ModifiersChanged(protocol::input_modifiers::SHIFT),
+        ];
+        for source in [
+            CaptureSource::Display(1),
+            CaptureSource::Display(77),
+            CaptureSource::Window(3),
+        ] {
+            session.source = source;
+            for revision in [0, 12] {
+                session.source_revision = revision;
+                for event in &inputs {
+                    assert!(session.can_input());
+                    session.input(event.clone());
+                    let received = tokio::time::timeout(Duration::from_secs(2), recorded_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(received).unwrap(),
+                        serde_json::to_value(SessionCommand::SourceInput {
+                            id: session.video_id,
+                            source_revision: revision,
+                            event: event.clone(),
+                        })
+                        .unwrap(),
+                        "selected source {source:?} must not use unscoped desktop input"
+                    );
+                }
+            }
+        }
+        session.source = CaptureSource::MainDisplay;
+        assert_eq!(
+            serde_json::to_value(session.input_command(inputs[0].clone())).unwrap(),
+            serde_json::to_value(SessionCommand::Input {
+                id: session.video_id,
+                event: inputs[0].clone(),
+            })
+            .unwrap(),
+            "retain compatibility for the default desktop subscription"
+        );
+        recorder.abort();
+    }
+
     #[test]
     fn unchanged_screen_does_not_disable_input() {
         let now = Instant::now();

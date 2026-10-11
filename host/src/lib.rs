@@ -11,6 +11,7 @@ mod connection_services;
 mod display_power;
 #[cfg(target_os = "macos")]
 mod input_injector;
+pub mod lifecycle;
 #[allow(dead_code)]
 mod sender;
 pub mod service;
@@ -37,8 +38,9 @@ mod linux_portal;
 pub use linux_portal::{
     SourceKind as PortalSourceKind,
     runtime::{
-        PickerSources, PortalCallError, PortalCaptureLease, PortalInputError, PreparedPortalCapture,
-        SelectedPortalSource, request_local_portal_capture, request_local_portal_control_capture,
+        PickerSources, PortalCallError, PortalCaptureLease, PortalInputError,
+        PreparedPortalCapture, SelectedPortalSource, request_local_portal_capture,
+        request_local_portal_control_capture,
     },
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -50,9 +52,9 @@ pub mod linux_capture;
 #[cfg(target_os = "linux")]
 pub mod linux_input;
 #[cfg(any(test, target_os = "linux"))]
-mod linux_raw_encode;
-#[cfg(any(test, target_os = "linux"))]
 mod linux_pipewire;
+#[cfg(any(test, target_os = "linux"))]
+mod linux_raw_encode;
 #[cfg(target_os = "linux")]
 pub use linux_pipewire::native::prepare_pipewire_capture;
 #[cfg(any(test, target_os = "linux"))]
@@ -383,6 +385,7 @@ struct StreamingRunConfig {
     bitrate_kbps: u32,
     udp_sender: UdpSender,
     stats: Arc<Statistics>,
+    resources: Arc<lifecycle::Resources>,
     cancel_rx: broadcast::Receiver<()>,
     scheduled_sender: ScheduledDataSender,
     source: protocol::session::CaptureSource,
@@ -487,11 +490,12 @@ struct AudioCaptureTaskRuntime {
     use_data_plane_media: bool,
     scheduled_sender: Option<ScheduledDataSender>,
     media_settings_rx: Option<watch::Receiver<StreamSettings>>,
+    resources: Arc<crate::lifecycle::Resources>,
 }
 
 fn spawn_audio_capture_task<C>(
     label: &'static str,
-    mut audio_capturer: C,
+    audio_capturer: C,
     runtime: AudioCaptureTaskRuntime,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -511,7 +515,10 @@ where
             use_data_plane_media,
             scheduled_sender,
             mut media_settings_rx,
+            resources,
         } = runtime;
+        let _worker = crate::lifecycle::WorkerGuard::new(resources);
+        let mut audio_capturer = audio_capturer;
 
         if let Err(err) = audio_capturer.start().await {
             eprintln!("{label} audio capture failed to start: {}", err);
@@ -762,6 +769,7 @@ struct SubscriptionAudioConfig {
     stream_settings_rx: Option<watch::Receiver<StreamSettings>>,
     include_audio: bool,
     include_microphone: bool,
+    resources: Arc<crate::lifecycle::Resources>,
 }
 
 fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task::JoinHandle<()>> {
@@ -776,6 +784,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
         stream_settings_rx,
         include_audio,
         include_microphone,
+        resources,
     } = config;
     let scheduled_media_sender = Some(scheduled_sender);
     let use_data_plane_media = true;
@@ -795,6 +804,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
                 use_data_plane_media,
                 scheduled_sender: scheduled_media_sender.clone(),
                 media_settings_rx: stream_settings_rx.clone(),
+                resources: resources.clone(),
             },
         ))
     } else {
@@ -815,6 +825,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
                 use_data_plane_media,
                 scheduled_sender: scheduled_media_sender.clone(),
                 media_settings_rx: stream_settings_rx.clone(),
+                resources: resources.clone(),
             },
         ))
     } else {
@@ -826,7 +837,9 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
         if use_data_plane_media {
             Some(spawn_audio_capture_task(
                 "Remote system",
-                crate::audio_capture::MacSystemAudioCapturer::new().for_source(source),
+                crate::audio_capture::MacSystemAudioCapturer::new()
+                    .for_source(source)
+                    .with_resources(resources.clone()),
                 AudioCaptureTaskRuntime {
                     stream_id: remote_system_audio_stream_id(session_id),
                     udp_sender: udp_sender.clone(),
@@ -836,6 +849,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
                     use_data_plane_media,
                     scheduled_sender: scheduled_media_sender.clone(),
                     media_settings_rx: stream_settings_rx.clone(),
+                    resources: resources.clone(),
                 },
             ))
         } else {
@@ -908,6 +922,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         bitrate_kbps,
         udp_sender,
         stats,
+        resources,
         mut cancel_rx,
         scheduled_sender,
         source,
@@ -917,6 +932,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
         #[cfg(all(unix, any(test, target_os = "linux")))]
         native_capture,
     } = config;
+    // Native resources drop before this guard, including cancellation paths.
+    let _worker = lifecycle::WorkerGuard::new(resources.clone());
     #[cfg(all(unix, test, not(target_os = "linux")))]
     if native_capture.is_some() {
         return Err("native Linux streaming requires a Linux runtime".into());
@@ -963,7 +980,9 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
 
     // 2. Setup A/V Pipeline
     #[cfg(target_os = "macos")]
-    let mut video_capturer = MacVideoCapturer::new(width, height, fps).with_source(source);
+    let mut video_capturer = MacVideoCapturer::new(width, height, fps)
+        .with_source(source)
+        .with_resources(resources.clone());
     #[cfg(target_os = "macos")]
     let mut video_encoder = MacVideoEncoder::new(width, height, fps, bitrate_kbps)?;
 
@@ -1082,6 +1101,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
             frame_res = video_capturer.capture_frame(), if !paused => {
                 let frame = frame_res?;
                 stats_video.video_frames_captured.fetch_add(1, Relaxed);
+                resources.captured_frames.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if keyframe_requested.swap(false, Relaxed) {
                     video_encoder.request_keyframe();
                 }
@@ -1095,6 +1115,7 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                     continue;
                 }
                 stats_video.video_frames_encoded.fetch_add(1, Relaxed);
+                resources.encoded_frames.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 stats_video.video_bytes_encoded.fetch_add(chunk.nalu.len() as u64, Relaxed);
                 bytes_since_update += chunk.nalu.len() as u64;
 

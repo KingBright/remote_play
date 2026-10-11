@@ -164,6 +164,9 @@ impl Default for MacAudioCapturer {
 pub struct MacSystemAudioCapturer {
     rx: mpsc::Receiver<MacAudioFrame>,
     stream: Option<SCStream>,
+    stream_running: bool,
+    pending_stop: Option<crate::lifecycle::NativeStopReceipt>,
+    resources: Option<std::sync::Arc<crate::lifecycle::Resources>>,
     source: protocol::session::CaptureSource,
     tx_output: Option<mpsc::Sender<MacAudioFrame>>,
 }
@@ -174,9 +177,37 @@ impl MacSystemAudioCapturer {
         Self {
             rx,
             stream: None,
+            stream_running: false,
+            pending_stop: None,
+            resources: None,
             source: protocol::session::CaptureSource::MainDisplay,
             tx_output: Some(tx),
         }
+    }
+    pub(crate) fn with_resources(
+        mut self,
+        resources: std::sync::Arc<crate::lifecycle::Resources>,
+    ) -> Self {
+        self.resources = Some(resources);
+        self
+    }
+    fn stop_owned_stream(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            let (receipt, completion) =
+                crate::lifecycle::NativeStopCompletion::new(self.resources.clone());
+            self.pending_stop = Some(receipt);
+            self.stream_running = false;
+            stream.stop_capture_owned(move |result| {
+                completion.complete(result.map_err(|error| error.to_string()))
+            });
+        }
+    }
+    async fn await_owned_stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(receipt) = &self.pending_stop {
+            receipt.wait().await?;
+            self.pending_stop = None;
+        }
+        Ok(())
     }
     pub fn for_source(mut self, source: protocol::session::CaptureSource) -> Self {
         self.source = source;
@@ -215,6 +246,7 @@ impl AudioCapturer for MacSystemAudioCapturer {
     type Frame = MacAudioFrame;
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.await_owned_stop().await?;
         let content = SCShareableContent::get()?;
         let display = content
             .displays()
@@ -246,6 +278,11 @@ impl AudioCapturer for MacSystemAudioCapturer {
         config.set_sample_rate(48_000);
         config.set_channel_count(2);
 
+        if self.tx_output.is_none() {
+            let (tx, rx) = mpsc::channel(100);
+            self.rx = rx;
+            self.tx_output = Some(tx);
+        }
         let output = SystemAudioOutput {
             tx: self.tx_output.take().unwrap(),
         };
@@ -253,29 +290,29 @@ impl AudioCapturer for MacSystemAudioCapturer {
         stream.add_output_handler(output, SCStreamOutputType::Audio);
         stream.start_capture()?;
         self.stream = Some(stream);
+        self.stream_running = true;
+        if let Some(resources) = &self.resources {
+            resources
+                .native_streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = self.stream.take() {
-            stream.stop_capture()?;
-        }
-        Ok(())
+        self.stop_owned_stream();
+        self.await_owned_stop().await
     }
 
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = &self.stream {
-            stream.stop_capture()?;
-        }
+        self.stop_owned_stream();
         while self.rx.try_recv().is_ok() {}
-        Ok(())
+        self.await_owned_stop().await
     }
-
     async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.await_owned_stop().await?;
         while self.rx.try_recv().is_ok() {}
-        if let Some(stream) = &self.stream {
-            stream.start_capture()?;
-        } else {
+        if self.stream.is_none() {
             self.start().await?;
         }
         Ok(())
@@ -292,9 +329,7 @@ impl AudioCapturer for MacSystemAudioCapturer {
 
 impl Drop for MacSystemAudioCapturer {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.stop_capture();
-        }
+        self.stop_owned_stream();
     }
 }
 

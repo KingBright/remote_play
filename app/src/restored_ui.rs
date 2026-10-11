@@ -66,6 +66,19 @@ pub async fn run_restored_gui(
     run_original_dashboard(runtime, Some(instance), activation)
 }
 
+/// A manually launched window attaches to the existing background owner.
+/// Session media/native presentation remains entirely in this GUI process.
+#[cfg(unix)]
+pub async fn run_attached_gui(config: UnifiedRuntimeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let service = crate::background_service::Client::connect(&config.mesh_dir)?;
+    let Some(mut instance) = Instance::acquire_frontend(&config.mesh_dir)? else { return Ok(()); };
+    let activation = Arc::new(AtomicBool::new(false));
+    let signal = activation.clone();
+    instance.attach_callback(move || { signal.store(true, Ordering::Release); })?;
+    let runtime = Arc::new(service.frontend_runtime().await?);
+    run_original_dashboard(runtime, Some(instance), activation)
+}
+
 /// Bounded integration entry for the same production dashboard and renderer.
 /// Callers supply one service owner and an isolated profile, never another UI.
 pub fn run_restored_workspace_runtime(
@@ -114,6 +127,7 @@ fn open_restored_window(
     cx: &mut App,
 ) {
     let primary = instance.is_some();
+    let attached = instance.as_ref().is_some_and(|i| i.is_frontend());
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds(
             point(px(80.), px(60.)),
@@ -137,7 +151,11 @@ fn open_restored_window(
         let view = cx.new(|cx| RestoredDashboard::new(runtime, instance, activation, window, cx));
         let weak = view.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
-            if primary {
+            if primary && attached {
+                let _ = weak.update(cx, |this, _| { this.owner.release_input(); this.owner.close_all(); });
+                cx.quit();
+                true
+            } else if primary {
                 let _ = weak.update(cx, |this, _| {
                     this.owner.release_input();
                     this.window_active = false;

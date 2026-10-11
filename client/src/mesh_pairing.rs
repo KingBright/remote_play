@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MeshPairingMessageKind {
     Neutral,
     Success,
@@ -11,7 +11,7 @@ pub enum MeshPairingMessageKind {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MeshPairingSnapshot {
     pub network_name: String,
     pub device_id: String,
@@ -23,8 +23,18 @@ pub struct MeshPairingSnapshot {
     pub restart_required: bool,
 }
 
+/// A frontend delegates all profile mutations to the single background owner.
+/// Implementations must not log invitation codes or change credentials locally.
+pub trait MeshPairingBackend: Send + Sync {
+    fn snapshot(&self) -> MeshPairingSnapshot;
+    fn create_new_group(&self) -> MeshPairingSnapshot;
+    fn join_from_invite_code(&self, code: &str) -> MeshPairingSnapshot;
+    fn request_runtime_reload(&self, message: String) -> MeshPairingSnapshot;
+}
+
 #[derive(Clone)]
 pub struct MeshPairingControl {
+    delegate: Option<Arc<dyn MeshPairingBackend>>,
     display_name: String,
     config_dir: PathBuf,
     mesh_reload_tx: Option<mpsc::UnboundedSender<()>>,
@@ -32,6 +42,12 @@ pub struct MeshPairingControl {
 }
 
 impl MeshPairingControl {
+    pub fn from_backend(backend: Arc<dyn MeshPairingBackend>) -> Self {
+        let snapshot = backend.snapshot();
+        Self { display_name: snapshot.display_name.clone(), config_dir: snapshot.config_dir.clone(),
+            mesh_reload_tx: None, snapshot: Arc::new(Mutex::new(snapshot)), delegate: Some(backend) }
+    }
+
     pub fn load_or_create(
         config_dir: impl Into<PathBuf>,
         display_name: impl Into<String>,
@@ -51,6 +67,7 @@ impl MeshPairingControl {
         );
 
         Ok(Self {
+            delegate: None,
             display_name,
             config_dir,
             mesh_reload_tx: None,
@@ -64,10 +81,12 @@ impl MeshPairingControl {
     }
 
     pub fn snapshot(&self) -> MeshPairingSnapshot {
+        if let Some(backend) = &self.delegate { return backend.snapshot(); }
         self.snapshot.lock().unwrap().clone()
     }
 
     pub fn create_new_group(&self) -> MeshPairingSnapshot {
+        if let Some(backend) = &self.delegate { return backend.create_new_group(); }
         let config = MeshConfig::generate(&self.display_name);
         self.save_and_update(
             config,
@@ -78,6 +97,7 @@ impl MeshPairingControl {
     }
 
     pub fn join_from_invite_code(&self, invite_code: &str) -> MeshPairingSnapshot {
+        if let Some(backend) = &self.delegate { return backend.join_from_invite_code(invite_code); }
         let invite_code = invite_code.trim();
         if invite_code.is_empty() {
             return self.update_message(
@@ -110,6 +130,7 @@ impl MeshPairingControl {
 
     pub fn request_runtime_reload(&self, message: impl Into<String>) -> MeshPairingSnapshot {
         let message = message.into();
+        if let Some(backend) = &self.delegate { return backend.request_runtime_reload(message); }
         let Some(tx) = &self.mesh_reload_tx else {
             return self.update_message(
                 format!("{message} Restart RemotePlay to use it."),

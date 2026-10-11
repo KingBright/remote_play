@@ -269,6 +269,47 @@ pub unsafe fn error_from_cstr(msg: *const i8) -> String {
 /// Unit completion - for operations that return success/error without a value
 pub type UnitCompletion = SyncCompletion<()>;
 
+/// Native owner transferred to one stop callback. A missing callback keeps the
+/// owner alive without a waiter thread. A failed stop also retains the owner:
+/// releasing handlers while capture may still be running is not safe cleanup.
+pub struct OwnedUnitCompletion<T> {
+    owner: T,
+    completed: Option<Box<dyn FnOnce(Result<(), String>) + Send>>,
+}
+impl<T: Send + 'static> OwnedUnitCompletion<T> {
+    pub fn new(
+        owner: T,
+        completed: impl FnOnce(Result<(), String>) + Send + 'static,
+    ) -> SyncCompletionPtr {
+        Box::into_raw(Box::new(Self {
+            owner,
+            completed: Some(Box::new(completed)),
+        }))
+        .cast()
+    }
+    /// Complete exactly one native stop.
+    ///
+    /// # Safety
+    /// The context must be issued by new for this owner type and invoked once;
+    /// message must be null or valid until this function returns.
+    pub unsafe fn complete_context(context: SyncCompletionPtr, success: bool, message: *const i8) {
+        let mut owned = unsafe { Box::from_raw(context.cast::<Self>()) };
+        let completed = owned.completed.take().expect("one native completion");
+        if success {
+            let Self { owner, .. } = *owned;
+            drop(owner); // release the actual owner before success/counter update
+            completed(Ok(()));
+        } else {
+            let error = unsafe { error_from_cstr(message) };
+            // Retain the owner until process exit rather than falsely claiming
+            // native recovery. The host retains its live resource/failed slot,
+            // bounding admission and reporting this permanent failure.
+            let _retained_owner = Box::into_raw(owned);
+            completed(Err(error));
+        }
+    }
+}
+
 impl UnitCompletion {
     /// C callback for operations that return (context, success, `error_msg`)
     ///
