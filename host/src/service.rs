@@ -328,6 +328,71 @@ fn pending_closed_count(closed: &HashMap<SocketAddr, ClosedReceipt>) -> usize {
         .count()
 }
 
+// Keep Hello admission in the same production path used by the state regression.
+fn accept_session_hello(
+    psk: Option<&[u8]>,
+    hello: ([u8; 16], u64, [u8; 32]),
+    addr: SocketAddr,
+    udp_sender: &UdpSender,
+    peers: &HashMap<SocketAddr, Connection>,
+    closing: &HashMap<SocketAddr, ClosingTask>,
+    closed: &mut HashMap<SocketAddr, ClosedReceipt>,
+    authenticated: &mut HashMap<SocketAddr, ([u8; 16], [u8; 16], u64)>,
+) -> Result<([u8; 16], u64), String> {
+    let (nonce, timestamp_ms, mac) = hello;
+    let key = psk.ok_or("host has no session PSK configured")?;
+    verify_session_mac(
+        &mac_session_hello(key, &nonce, timestamp_ms),
+        &mac,
+        timestamp_ms,
+        now_unix_ms(),
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some((previous, salt, ts)) = authenticated.get(&addr) {
+        if *previous == nonce {
+            return Ok((*salt, *ts));
+        }
+    }
+    // Authentication can be cleared on key rotation while native owners survive.
+    // The retained resource slot must be checked before any identity/receipt replacement.
+    if peers.contains_key(&addr)
+        || closing.contains_key(&addr)
+        || closed.get(&addr).is_some_and(ClosedReceipt::resources_live)
+    {
+        return Err("close the existing connection before rekeying".into());
+    }
+    if authenticated.len() >= 16 && !authenticated.contains_key(&addr) {
+        return Err("authentication capacity reached".into());
+    }
+    let salt = random_bytes_16();
+    let ts = now_unix_ms();
+    udp_sender.install_peer_crypto(
+        addr,
+        SessionCrypto::from_psk(key, &salt).map_err(|e| e.to_string())?,
+    );
+    authenticated.insert(addr, (nonce, salt, ts));
+    closed.remove(&addr);
+    Ok((salt, ts))
+}
+
+// Both Open and legacy StartStream must account for retained native ownership.
+fn connection_admission_error(
+    addr: SocketAddr,
+    peers: &HashMap<SocketAddr, Connection>,
+    closing: &HashMap<SocketAddr, ClosingTask>,
+    closed: &HashMap<SocketAddr, ClosedReceipt>,
+) -> Option<&'static str> {
+    if closed.get(&addr).is_some_and(ClosedReceipt::resources_live) {
+        Some("previous native teardown remains unknown")
+    } else if peers.len() + closing.len() + pending_closed_count(closed) >= 8
+        && !peers.contains_key(&addr)
+    {
+        Some("connection limit reached")
+    } else {
+        None
+    }
+}
+
 fn joined(result: Result<(), tokio::task::JoinError>) -> Result<(), String> {
     match result {
         Ok(()) => Ok(()),
@@ -1533,20 +1598,10 @@ async fn run_host_service_inner(
                 match packet {
                     MultiplexedPacket::Control(ControlMessage::SessionHello { nonce, timestamp_ms, mac }, addr) => {
                         eprintln!("RP_SESSION_AUTH t_ms={} stage=hello_received local_peer_port={}",now_unix_ms(),addr.port());
-                        let result = (|| -> Result<_, String> {
-                            let key = psk.as_ref().ok_or("host has no session PSK configured")?;
-                            verify_session_mac(&mac_session_hello(key, &nonce, timestamp_ms), &mac, timestamp_ms, now_unix_ms()).map_err(|e| e.to_string())?;
-                            if let Some((previous, salt, ts)) = authenticated.get(&addr) {
-                                if *previous == nonce { return Ok((*salt, *ts)); }
-                                if peers.contains_key(&addr)||closing.contains_key(&addr)||closed.get(&addr).is_some_and(ClosedReceipt::resources_live) { return Err("close the existing connection before rekeying".into()); }
-                            }
-                            if authenticated.len() >= 16 && !authenticated.contains_key(&addr) { return Err("authentication capacity reached".into()); }
-                            let salt = random_bytes_16(); let ts = now_unix_ms();
-                            udp_sender.install_peer_crypto(addr, SessionCrypto::from_psk(key, &salt).map_err(|e| e.to_string())?);
-                            authenticated.insert(addr, (nonce, salt, ts));
-                            closed.remove(&addr);
-                            Ok((salt, ts))
-                        })();
+                        let result = accept_session_hello(
+                            psk.as_deref(), (nonce, timestamp_ms, mac), addr, &udp_sender,
+                            &peers, &closing, &mut closed, &mut authenticated,
+                        );
                         eprintln!("RP_SESSION_AUTH t_ms={} stage={} local_peer_port={}",now_unix_ms(),if result.is_ok(){"accepted"}else{"rejected"},addr.port());
                         let reply = match result { Ok((salt, timestamp_ms)) => ControlMessage::SessionAccept { salt, timestamp_ms, mac: mac_session_accept(psk.as_ref().unwrap(), &salt, timestamp_ms) }, Err(reason) => ControlMessage::SessionReject { reason } };
                         let _ = udp_sender.send_control(&reply, addr).await;
@@ -1569,7 +1624,7 @@ async fn run_host_service_inner(
                         match message {
                             ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
                                 if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() { continue; }
-                                if closed.get(&addr).is_some_and(ClosedReceipt::resources_live) || (peers.len()+closing.len()+pending_closed_count(&closed) >= 8 && !peers.contains_key(&addr)) { continue; }
+                                if connection_admission_error(addr, &peers, &closing, &closed).is_some() { continue; }
                                 let peer = peers.entry(addr).or_insert_with(|| Connection::new(session_id, addr, udp_sender.clone(), &config));
                                 peer.set_clipboard(config.enable_clipboard_sync);
                                 if !peer.subscriptions.contains_key(&session_id) {
@@ -1614,9 +1669,8 @@ async fn run_host_service_inner(
                                     #[cfg(not(target_os = "linux"))]
                                     let window_capture = cfg!(target_os = "macos");
                                     let reply = if version != SESSION_VERSION || connection_id == 0 { SessionCommand::Error { request_id: connection_id, reason: "unsupported connection version or ID".into() } }
-                                    else if closed.get(&addr).is_some_and(ClosedReceipt::resources_live) { SessionCommand::Error { request_id: connection_id, reason: "previous native teardown remains unknown".into() } }
+                                    else if let Some(reason) = connection_admission_error(addr, &peers, &closing, &closed) { SessionCommand::Error { request_id: connection_id, reason: reason.into() } }
                                     else if peers.get(&addr).is_some_and(|p| p.id != connection_id) { SessionCommand::Error { request_id: connection_id, reason: "close the existing connection first".into() } }
-                                    else if peers.len()+closing.len()+pending_closed_count(&closed) >= 8 && !peers.contains_key(&addr) { SessionCommand::Error { request_id: connection_id, reason: "connection limit reached".into() } }
                                     else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
                                     send_session(&udp_sender, addr, reply).await;
                                 }
@@ -1832,6 +1886,337 @@ mod failure_admission_tests {
         peer.subscriptions.insert(100, sub);
         (release, owner_dropped)
     }
+    #[tokio::test]
+    async fn key_rotation_same_address_hello_keeps_pending_native_budget_until_release() {
+        use std::sync::atomic::Ordering::SeqCst;
+        // All secrets/owners are synthetic; no profile, capture or device key changes.
+        let old_key = [0x41; 32];
+        let new_key = [0x42; 32];
+        let nonce = [0x51; 16];
+        let (mut peer, addr) = fixture_peer(90020).await;
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let (release, dropped) = install_withheld_stop_fixture(&mut peer).await;
+        let resources = peer.resources.clone();
+        let result = peer.shutdown().await;
+        assert!(result.is_err());
+        assert_eq!(resources.workers.load(SeqCst), 0);
+        assert_eq!(resources.native_stops_pending.load(SeqCst), 1);
+        assert!(!dropped.load(SeqCst));
+        let mut closed = HashMap::from([(
+            addr,
+            ClosedReceipt {
+                resources: resources.clone(),
+                id: 90020,
+                result,
+                at: Instant::now(),
+            },
+        )]);
+        let mut peers = HashMap::new();
+        for index in 0..7 {
+            let (other, _) = fixture_peer(90021 + index).await;
+            peers.insert(
+                SocketAddr::from(([127, 0, 0, 1], 40000 + index as u16)),
+                other,
+            );
+        }
+        let closing = HashMap::new();
+        let mut authenticated = HashMap::from([(addr, (nonce, [0x61; 16], now_unix_ms()))]);
+        let timestamp = now_unix_ms();
+        let replay = accept_session_hello(
+            Some(&old_key),
+            (
+                nonce,
+                timestamp,
+                mac_session_hello(&old_key, &nonce, timestamp),
+            ),
+            addr,
+            &sender,
+            &peers,
+            &closing,
+            &mut closed,
+            &mut authenticated,
+        );
+        assert_eq!(
+            replay.unwrap(),
+            (authenticated[&addr].1, authenticated[&addr].2)
+        );
+        let changed_nonce = [0x52; 16];
+        assert!(
+            accept_session_hello(
+                Some(&old_key),
+                (
+                    changed_nonce,
+                    timestamp,
+                    mac_session_hello(&old_key, &changed_nonce, timestamp)
+                ),
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_err()
+        );
+        // Mirror the key-rotation tick: remove old crypto/auth, retain live receipts.
+        sender.remove_peer_crypto(addr);
+        authenticated.clear();
+        closed.retain(|_, receipt| receipt.resources_live());
+        assert_eq!(pending_closed_count(&closed), 1);
+        // A valid MAC under the revoked key cannot authenticate with the new key.
+        assert!(
+            accept_session_hello(
+                Some(&new_key),
+                (
+                    nonce,
+                    timestamp,
+                    mac_session_hello(&old_key, &nonce, timestamp)
+                ),
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_err()
+        );
+        assert!(authenticated.is_empty());
+        let stale = timestamp.saturating_sub(61_000);
+        assert!(
+            accept_session_hello(
+                Some(&new_key),
+                (nonce, stale, mac_session_hello(&new_key, &nonce, stale)),
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_err()
+        );
+        let hello = (
+            nonce,
+            timestamp,
+            mac_session_hello(&new_key, &nonce, timestamp),
+        );
+        let admission = accept_session_hello(
+            Some(&new_key),
+            hello,
+            addr,
+            &sender,
+            &peers,
+            &closing,
+            &mut closed,
+            &mut authenticated,
+        );
+        assert!(
+            admission.is_err(),
+            "valid same-address Hello after key rotation must not erase live native ownership: {admission:?}"
+        );
+        assert!(authenticated.is_empty());
+        assert!(Arc::ptr_eq(&closed[&addr].resources, &resources));
+        assert_eq!(pending_closed_count(&closed), 1);
+        assert_eq!(
+            connection_admission_error(addr, &peers, &closing, &closed),
+            Some("previous native teardown remains unknown")
+        );
+        let other_addr = SocketAddr::from(([127, 0, 0, 1], 41000));
+        assert_eq!(
+            connection_admission_error(other_addr, &peers, &closing, &closed),
+            Some("connection limit reached")
+        );
+        // Only the delayed successful completion destroys the owner and frees the slot.
+        release.send(Ok(())).unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::lifecycle::wait_native_stops(&resources),
+        )
+        .await
+        .unwrap();
+        assert!(dropped.load(SeqCst));
+        assert_eq!(resources.native_streams.load(SeqCst), 0);
+        assert_eq!(pending_closed_count(&closed), 0);
+        assert!(
+            accept_session_hello(
+                Some(&new_key),
+                hello,
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_ok()
+        );
+        assert!(!closed.contains_key(&addr));
+        assert_eq!(
+            connection_admission_error(addr, &peers, &closing, &closed),
+            None
+        );
+        assert_eq!(
+            connection_admission_error(other_addr, &peers, &closing, &closed),
+            None
+        );
+        let (replacement, _) = fixture_peer(90028).await;
+        peers.insert(addr, replacement);
+        assert_eq!(peers.len(), 8);
+        assert_eq!(
+            connection_admission_error(other_addr, &peers, &closing, &closed),
+            Some("connection limit reached")
+        );
+        for (_, peer) in peers {
+            peer.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cleared_auth_cannot_replace_closing_or_failed_native_owner() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut peer, addr) = fixture_peer(90029).await;
+        let (release, dropped) = install_withheld_stop_fixture(&mut peer).await;
+        let resources = peer.resources.clone();
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let key = [0x71; 32];
+        let nonce = [0x72; 16];
+        let ts = now_unix_ms();
+        let hello = (nonce, ts, mac_session_hello(&key, &nonce, ts));
+        let mut peers = HashMap::from([(addr, peer)]);
+        let mut closing = HashMap::new();
+        let mut closed = HashMap::new();
+        // Key rotation removes authentication before the close worker finishes.
+        let mut authenticated = HashMap::new();
+        begin_close(&mut peers, &mut closing, addr, false);
+        assert!(
+            accept_session_hello(
+                Some(&key),
+                hello,
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_err()
+        );
+        assert!(authenticated.is_empty());
+        assert!(Arc::ptr_eq(&closing[&addr].resources, &resources));
+        let mut ending = closing.remove(&addr).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut ending.task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert_eq!(resources.native_stops_pending.load(SeqCst), 1);
+        closed.insert(
+            addr,
+            ClosedReceipt {
+                resources: resources.clone(),
+                id: ending.id,
+                result,
+                at: Instant::now(),
+            },
+        );
+        release
+            .send(Err("native owner release failed".into()))
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            crate::lifecycle::wait_native_stops(&resources),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resources.native_stops_pending.load(SeqCst), 0);
+        assert_eq!(resources.native_stop_errors.load(SeqCst), 1);
+        assert_eq!(resources.native_streams.load(SeqCst), 1);
+        assert!(!dropped.load(SeqCst));
+        // Pending reaching zero after failure does not mean the native owner is gone.
+        for _ in 0..2 {
+            authenticated.clear();
+            closed.retain(|_, receipt| receipt.resources_live());
+            assert!(
+                accept_session_hello(
+                    Some(&key),
+                    hello,
+                    addr,
+                    &sender,
+                    &peers,
+                    &closing,
+                    &mut closed,
+                    &mut authenticated
+                )
+                .is_err()
+            );
+            assert!(authenticated.is_empty());
+            assert_eq!(pending_closed_count(&closed), 1);
+            assert_eq!(
+                connection_admission_error(addr, &peers, &closing, &closed),
+                Some("previous native teardown remains unknown")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cleared_auth_keeps_worker_occupancy_until_worker_releases() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 42000));
+        let resources = Arc::new(crate::lifecycle::Resources::default());
+        let worker = crate::lifecycle::WorkerGuard::new(resources.clone());
+        let mut closed = HashMap::from([(
+            addr,
+            ClosedReceipt {
+                resources,
+                id: 90030,
+                result: Err("cleanup worker remains unknown".into()),
+                at: Instant::now(),
+            },
+        )]);
+        let peers = HashMap::new();
+        let closing = HashMap::new();
+        let mut authenticated = HashMap::new();
+        let key = [0x73; 32];
+        let nonce = [0x74; 16];
+        let ts = now_unix_ms();
+        let hello = (nonce, ts, mac_session_hello(&key, &nonce, ts));
+        assert!(
+            accept_session_hello(
+                Some(&key),
+                hello,
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_err()
+        );
+        assert!(authenticated.is_empty());
+        assert_eq!(pending_closed_count(&closed), 1);
+        drop(worker);
+        assert_eq!(pending_closed_count(&closed), 0);
+        assert!(
+            accept_session_hello(
+                Some(&key),
+                hello,
+                addr,
+                &sender,
+                &peers,
+                &closing,
+                &mut closed,
+                &mut authenticated
+            )
+            .is_ok()
+        );
+        assert!(!closed.contains_key(&addr));
+    }
+
     #[tokio::test]
     async fn duplicate_unsubscribe_replays_native_stop_failure() {
         let (mut peer, _) = fixture_peer(90010).await;
