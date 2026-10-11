@@ -1585,6 +1585,55 @@ mod failure_admission_tests {
         assert!(!peer.can_scoped_input(100, 11));
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn selected_display_requires_scoped_input_and_rejects_previous_source() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _receiver) = mux.split();
+        let addr = "127.0.0.1:39577".parse().unwrap();
+        let config = HostServiceConfig {
+            bind_addr: addr,
+            stats: Statistics::new(),
+            enable_clipboard_sync: false,
+            enable_file_transfer: false,
+            enable_talkback: false,
+        };
+        let mut peer = Connection::new(1, addr, sender, &config);
+        let (mut sub, _) = mock_subscription(CaptureSource::Display(77));
+        sub.input_target = input_target_for(sub.request.source, None, true);
+        sub.source_revision = 0;
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        assert!(
+            peer.can_input(100),
+            "mocked permission is available; no TCC access"
+        );
+        assert!(
+            !peer.can_legacy_input(100),
+            "the old viewer message is silently rejected"
+        );
+        assert!(peer.can_scoped_input(100, 0), "initial subscription also uses scoped input");
+        peer.subscriptions.get_mut(&100).unwrap().source_revision = 10;
+        assert!(peer.can_scoped_input(100, 10));
+        assert!(!peer.can_scoped_input(100, 9));
+        assert!(!peer.can_scoped_input(999, 10));
+        let current = peer.subscriptions.get_mut(&100).unwrap();
+        current.request.source = CaptureSource::Display(1);
+        current.input_target = input_target_for(current.request.source, None, true);
+        current.source_revision = 11;
+        assert!(
+            !peer.can_scoped_input(100, 10),
+            "late input must not hit another display"
+        );
+        assert!(peer.can_scoped_input(100, 11));
+        peer.subscriptions
+            .get_mut(&100)
+            .unwrap()
+            .settings
+            .send_modify(|s| s.paused = true);
+        assert!(!peer.can_scoped_input(100, 11));
+    }
+
     #[cfg(all(unix, any(test, target_os = "linux")))]
     #[tokio::test]
     async fn portal_input_uses_exact_session_target_and_releases_without_global_injector() {
