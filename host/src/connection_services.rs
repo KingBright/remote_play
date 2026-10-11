@@ -15,7 +15,8 @@ pub(super) struct ConnectionServicesConfig {
     pub(super) host_send_file: Option<PathBuf>,
 }
 
-pub(super) async fn run(config: ConnectionServicesConfig) {
+pub(super) async fn run(config: ConnectionServicesConfig) -> Result<(), String> {
+    let mut tasks = tokio::task::JoinSet::new();
     let ConnectionServicesConfig {
         clipboard_enabled,
         session_id,
@@ -41,19 +42,22 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
             let file_clipboard_provider = WindowsClipboardProvider::new();
             #[cfg(target_os = "linux")]
             let file_clipboard_provider = LinuxClipboardProvider::new();
-            tokio::spawn(
-                remote_core::clipboard_file_runtime::run_clipboard_file_sync(
+            let clipboard_commands = command_tx.clone();
+            let clipboard_cancel = cancel_rx.resubscribe();
+            tasks.spawn(async move {
+                let _ = remote_core::clipboard_file_runtime::run_clipboard_file_sync(
                     file_clipboard_provider,
-                    command_tx.clone(),
+                    clipboard_commands,
                     event_rx,
                     Some(forward_tx),
-                    cancel_rx.resubscribe(),
+                    clipboard_cancel,
                     remote_core::clipboard_file_runtime::ClipboardFileSyncConfig {
                         enabled: Some(clipboard_enabled),
                         ..Default::default()
                     },
-                ),
-            );
+                )
+                .await;
+            });
             event_rx = forward_rx;
             let _file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
             let receive_dir = env_path_or_temp(
@@ -61,7 +65,7 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
                 "remote-play-host-received-files",
             );
             let runtime_cancel_rx = cancel_rx.resubscribe();
-            let runtime_task = tokio::spawn(async move {
+            let runtime_task = tasks.spawn(async move {
                 if let Err(err) = run_file_transfer_runtime(
                     sender,
                     command_rx,
@@ -79,7 +83,7 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
                 }
             });
             let logger_cancel_rx = cancel_rx.resubscribe();
-            let event_logger = tokio::spawn(async move {
+            let event_logger = tasks.spawn(async move {
                 let mut cancel_rx = logger_cancel_rx;
                 loop {
                     tokio::select! {
@@ -93,7 +97,7 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
             });
             if let Some(send_file) = host_send_file {
                 let auto_send_tx = command_tx.clone();
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     println!(
                         "Host auto-enqueueing send file on session startup: {}",
@@ -117,7 +121,7 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
         };
 
     #[cfg(target_os = "macos")]
-    let _talkback_player = if let (Some(inbound_rx), Some(settings_rx)) =
+    let mut talkback_player = if let (Some(inbound_rx), Some(settings_rx)) =
         (talkback_inbound_rx, talkback_settings_rx)
     {
         match crate::talkback_player::TalkbackPlayer::new(session_id, inbound_rx, settings_rx) {
@@ -132,14 +136,32 @@ pub(super) async fn run(config: ConnectionServicesConfig) {
     };
 
     let _ = cancel_rx.recv().await;
+    tasks.abort_all();
+    let mut failed = false;
+    while let Some(result) = tasks.join_next().await {
+        failed |= matches!(result,Err(error) if !error.is_cancelled());
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(player) = talkback_player.as_mut() {
+        failed |= player.shutdown().await.is_err();
+    }
+    if failed {
+        Err("connection service child failed during teardown".into())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn start_clipboard(
     sender: ScheduledDataSender,
-) -> (mpsc::Sender<DataEnvelope>, broadcast::Sender<()>) {
+) -> (
+    mpsc::Sender<DataEnvelope>,
+    broadcast::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let (inbound_tx, inbound_rx) = mpsc::channel(256);
     let (cancel, cancel_rx) = broadcast::channel(2);
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         #[cfg(target_os = "macos")]
         let provider = MacClipboardProvider::new();
         #[cfg(target_os = "linux")]
@@ -158,5 +180,5 @@ pub(super) fn start_clipboard(
             eprintln!("Clipboard: {error}");
         }
     });
-    (inbound_tx, cancel)
+    (inbound_tx, cancel, task)
 }

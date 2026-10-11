@@ -164,6 +164,8 @@ impl Default for MacAudioCapturer {
 pub struct MacSystemAudioCapturer {
     rx: mpsc::Receiver<MacAudioFrame>,
     stream: Option<SCStream>,
+    stream_running: bool,
+    resources: Option<std::sync::Arc<crate::lifecycle::Resources>>,
     source: protocol::session::CaptureSource,
     tx_output: Option<mpsc::Sender<MacAudioFrame>>,
 }
@@ -174,9 +176,40 @@ impl MacSystemAudioCapturer {
         Self {
             rx,
             stream: None,
+            stream_running: false,
+            resources: None,
             source: protocol::session::CaptureSource::MainDisplay,
             tx_output: Some(tx),
         }
+    }
+    pub(crate) fn with_resources(
+        mut self,
+        resources: std::sync::Arc<crate::lifecycle::Resources>,
+    ) -> Self {
+        self.resources = Some(resources);
+        self
+    }
+    fn stop_owned_stream(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = self.stream.take() {
+            let result = if self.stream_running {
+                stream.stop_capture()
+            } else {
+                Ok(())
+            };
+            self.stream_running = false;
+            if let Some(resources) = &self.resources {
+                use std::sync::atomic::Ordering::SeqCst;
+                if result.is_ok() {
+                    resources.native_stops_completed.fetch_add(1, SeqCst);
+                } else {
+                    resources.native_stop_errors.fetch_add(1, SeqCst);
+                }
+                drop(stream);
+                resources.native_streams.fetch_sub(1, SeqCst);
+            }
+            result?;
+        }
+        Ok(())
     }
     pub fn for_source(mut self, source: protocol::session::CaptureSource) -> Self {
         self.source = source;
@@ -253,19 +286,25 @@ impl AudioCapturer for MacSystemAudioCapturer {
         stream.add_output_handler(output, SCStreamOutputType::Audio);
         stream.start_capture()?;
         self.stream = Some(stream);
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = self.stream.take() {
-            stream.stop_capture()?;
+        self.stream_running = true;
+        if let Some(resources) = &self.resources {
+            resources
+                .native_streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
 
+    async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.stop_owned_stream()
+    }
+
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = &self.stream {
-            stream.stop_capture()?;
+        if self.stream_running {
+            if let Some(stream) = &self.stream {
+                stream.stop_capture()?;
+            }
+            self.stream_running = false;
         }
         while self.rx.try_recv().is_ok() {}
         Ok(())
@@ -274,7 +313,10 @@ impl AudioCapturer for MacSystemAudioCapturer {
     async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         while self.rx.try_recv().is_ok() {}
         if let Some(stream) = &self.stream {
-            stream.start_capture()?;
+            if !self.stream_running {
+                stream.start_capture()?;
+                self.stream_running = true;
+            }
         } else {
             self.start().await?;
         }
@@ -292,9 +334,7 @@ impl AudioCapturer for MacSystemAudioCapturer {
 
 impl Drop for MacSystemAudioCapturer {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.stop_capture();
-        }
+        let _ = self.stop_owned_stream();
     }
 }
 

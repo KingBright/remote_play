@@ -721,6 +721,7 @@ pub struct UnifiedP2pRuntimeConfig {
     pub rendezvous: String,
     pub group_id: String,
     pub peer_id: String,
+    pub routing_key: remote_core::routed_relay::RoutingKey,
     pub bind_addr: SocketAddr,
     pub announcement: Vec<u8>,
     pub host_control_target_addr: Option<SocketAddr>,
@@ -1235,6 +1236,7 @@ fn build_unified_p2p_config(
         rendezvous: config.p2p_rendezvous.clone(),
         group_id,
         peer_id: identity.node_id,
+        routing_key: remote_core::routed_relay::derive_routing_key(identity.network_secret.expose_secret().as_bytes()),
         bind_addr: config.p2p_bind_addr,
         announcement,
         host_control_target_addr: config
@@ -2166,6 +2168,7 @@ async fn start_unified_p2p_runtime(
     )?
     .with_rendezvous_addrs(rendezvous_addrs)
     .with_event_logging(config.log_events);
+    tunnel_config = tunnel_config.with_routing_key(config.routing_key);
     if let Some(target) = config.host_control_target_addr {
         tunnel_config = tunnel_config.with_local_target_addr(target);
     }

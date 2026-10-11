@@ -260,6 +260,9 @@ fn request_key(command: &SessionCommand) -> Option<(u8, u32)> {
         SessionCommand::Subscribe(request) => Some((2, request.id)),
         SessionCommand::Subscribed { id, .. } => Some((2, *id)),
         SessionCommand::Unsubscribe { id } | SessionCommand::Unsubscribed { id } => Some((3, *id)),
+        SessionCommand::Close { connection_id } | SessionCommand::Closed { connection_id, .. } => {
+            Some((9, *connection_id))
+        }
         SessionCommand::SetActivity { id, .. } | SessionCommand::Activity { id, .. } => {
             Some((4, *id))
         }
@@ -691,6 +694,92 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn close_retries_until_authenticated_closed_then_removes_pending() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let (server_tx, server_rx) = server.split();
+        let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let local = client.local_addr().unwrap();
+        let (sender, receiver) = client.split();
+        let key = b"isolated-close-retry-fixture";
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        let (last_response_tx, _) = tokio::sync::watch::channel(Instant::now());
+        let (commands, command_rx) = mpsc::channel(8);
+        let (control_tx, mut controls) = mpsc::unbounded_channel();
+        let (audio_tx, _) = mpsc::channel(1);
+        let (files_tx, _) = mpsc::channel(1);
+        let mut actor = Actor {
+            last_response_tx,
+            id: 90100,
+            target,
+            sender,
+            receiver,
+            commands: command_rx,
+            control_tx,
+            audio_tx,
+            files_tx,
+            subscriptions: HashMap::new(),
+            pending: HashMap::new(),
+            clipboard: None,
+        };
+        let (cancel, cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move {
+            actor.run(cancel_rx).await;
+            actor.pending
+        });
+        commands
+            .send(Command::Control(SessionCommand::Close {
+                connection_id: 90100,
+            }))
+            .await
+            .unwrap();
+        async fn next_close(receiver: &UdpReceiver) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let MultiplexedPacket::Control(ControlMessage::Session(command), _) =
+                        receiver.recv().await.unwrap()
+                    {
+                        if matches!(
+                            *command,
+                            SessionCommand::Close {
+                                connection_id: 90100
+                            }
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        next_close(&server_rx).await;
+        next_close(&server_rx).await;
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Closed {
+                    connection_id: 90100,
+                    reason: "fixture native stop completed".into(),
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), controls.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionCommand::Closed {
+                connection_id: 90100,
+                ..
+            }
+        ));
+        let _ = cancel.send(());
+        assert!(task.await.unwrap().is_empty());
+    }
     #[tokio::test]
     async fn handshake_retries_loss_and_ignores_unrelated_control_without_spending_retries() {
         let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();

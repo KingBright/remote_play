@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::{
     net::UdpSocket,
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 
@@ -27,6 +27,48 @@ const MAGIC: &[u8; 4] = b"RPMX";
 const MAX_PAYLOAD: usize = 64000;
 type Token = [u8; 16];
 type HmacSha256 = Hmac<Sha256>;
+
+enum RouteTransport {
+    Relay(SocketAddr),
+    P2p(watch::Receiver<crate::p2p::P2pTunnelSnapshot>),
+}
+impl RouteTransport {
+    fn endpoint(&self, peer: &str) -> Option<SocketAddr> {
+        match self {
+            Self::Relay(addr) => Some(*addr),
+            Self::P2p(snapshot) => snapshot
+                .borrow()
+                .route_for_peer(peer)
+                .filter(|addr| addr.ip().is_loopback()),
+        }
+    }
+    fn accepts(&self, source: SocketAddr, peer: &str) -> bool {
+        self.endpoint(peer) == Some(source)
+    }
+}
+
+fn handshake_stage(payload: &[u8]) -> Option<&'static str> {
+    if payload.first() != Some(&0x02) || payload.len() > 4096 {
+        return None;
+    }
+    match protocol::ControlMessage::decode(&payload[1..]).ok()? {
+        protocol::ControlMessage::SessionHello { .. } => Some("hello"),
+        protocol::ControlMessage::SessionAccept { .. } => Some("accept"),
+        protocol::ControlMessage::SessionReject { .. } => Some("reject"),
+        _ => None,
+    }
+}
+fn trace_handshake(stage: &str, peer: &str, payload: &[u8]) {
+    if let Some(message) = handshake_stage(payload) {
+        eprintln!(
+            "RP_SESSION_ROUTE t_ms={} stage={} peer={} message={}",
+            crate::session_crypto::now_unix_ms(),
+            stage,
+            peer,
+            message
+        );
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RoutingKey([u8; 32]);
@@ -476,19 +518,34 @@ impl RoutedRelay {
             let _ = incoming.listener.ensure_reader(&self.tx);
         }
     }
-    pub async fn run(
-        mut self,
-        relay: SocketAddr,
-        mut cancel: broadcast::Receiver<()>,
-    ) -> io::Result<()> {
+    pub async fn run(self, relay: SocketAddr, cancel: broadcast::Receiver<()>) -> io::Result<()> {
         if !relay.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "relay adapter must be loopback",
             ));
         }
+        self.run_transport(RouteTransport::Relay(relay), cancel)
+            .await
+    }
+    /// The same authenticated device/connection envelope over direct P2P.
+    /// Never switch transports or broadcast an unaddressed legacy session.
+    pub async fn run_p2p(
+        self,
+        snapshot: watch::Receiver<crate::p2p::P2pTunnelSnapshot>,
+        cancel: broadcast::Receiver<()>,
+    ) -> io::Result<()> {
+        self.run_transport(RouteTransport::P2p(snapshot), cancel)
+            .await
+    }
+    async fn run_transport(
+        mut self,
+        transport: RouteTransport,
+        mut cancel: broadcast::Receiver<()>,
+    ) -> io::Result<()> {
         let mut buf = vec![0; 65536];
         let mut cleanup = tokio::time::interval(Duration::from_secs(5));
+        let mut rejection_log_at: Option<Instant> = None;
         loop {
             tokio::select! {
                 _=cancel.recv()=>break,
@@ -508,10 +565,11 @@ impl RoutedRelay {
                             let mut token=rand::random::<Token>();while self.outgoing.contains_key(&token){token=rand::random();}
                             self.clients.insert(client,token);self.outgoing.insert(token,Outgoing{peer:peer.clone(),local,seen:Instant::now()});token
                         };
-                        self.outgoing.get_mut(&token).unwrap().seen=Instant::now();self.send(relay,peer,token,false,payload).await;
+                        self.outgoing.get_mut(&token).unwrap().seen=Instant::now();
+                        if let Some(endpoint)=transport.endpoint(&peer){if matches!(&transport,RouteTransport::P2p(_)){trace_handshake("p2p_client_send",&peer,&payload);}self.send(endpoint,peer,token,false,payload).await;}
                     },
                     Some(Event::Host{peer,token,payload})=>{
-                        if let Some(route)=self.incoming.get_mut(&(peer.clone(),token)){route.seen=Instant::now();self.send(relay,peer,token,true,payload).await;}
+                        if let Some(route)=self.incoming.get_mut(&(peer.clone(),token)){route.seen=Instant::now();if let Some(endpoint)=transport.endpoint(&peer){if matches!(&transport,RouteTransport::P2p(_)){trace_handshake("p2p_host_send",&peer,&payload);}self.send(endpoint,peer,token,true,payload).await;}}
                     },
                 },
                 received=self.hub.recv_from(&mut buf)=>{
@@ -519,11 +577,25 @@ impl RoutedRelay {
                         Ok(value)=>value,
                         Err(error) if recoverable_datagram_error(&error)=>{tokio::time::sleep(RECEIVE_ERROR_BACKOFF).await;continue;},
                         Err(error)=>return Err(error),
-                    };if from!=relay{continue;}
-                    if let Some(envelope)=Envelope::decode(&buf[..n],&self.key.0){self.receive(envelope).await;}
+                    };
+                    if let Some(envelope)=Envelope::decode(&buf[..n],&self.key.0)
+                        && transport.accepts(from,&envelope.source) {
+                        if matches!(&transport,RouteTransport::P2p(_)){trace_handshake("p2p_verified_receive",&envelope.source,&envelope.payload);}
+                        self.receive(envelope).await;
+                    }else if matches!(&transport,RouteTransport::P2p(_))&&rejection_log_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
+                        eprintln!("RP_SESSION_ROUTE t_ms={} stage=p2p_rejected_datagram loopback_port={}",crate::session_crypto::now_unix_ms(),from.port());rejection_log_at=Some(Instant::now());
+                    }
                     // Legacy broadcast datagrams are deliberately rejected, never guessed/routed.
                 },
             }
+        }
+        for listener in self.peers.values_mut() {
+            listener.task.abort();
+            let _ = (&mut listener.task).await;
+        }
+        for incoming in self.incoming.values_mut() {
+            incoming.listener.task.abort();
+            let _ = (&mut incoming.listener.task).await;
         }
         Ok(())
     }

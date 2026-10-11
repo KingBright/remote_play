@@ -61,6 +61,8 @@ impl SCStreamOutputTrait for StreamOutput {
 pub struct MacVideoCapturer {
     slot: Arc<remote_core::LatestFrameSlot<MacVideoFrame>>,
     stream: Option<SCStream>,
+    stream_running: bool,
+    resources: Option<Arc<crate::lifecycle::Resources>>,
     target_width: u32,
     source: protocol::session::CaptureSource,
     source_size: (u32, u32),
@@ -75,6 +77,8 @@ impl MacVideoCapturer {
         Self {
             slot: Arc::new(remote_core::LatestFrameSlot::new()),
             stream: None,
+            stream_running: false,
+            resources: None,
             target_width,
             source: protocol::session::CaptureSource::MainDisplay,
             source_size: (0, 0),
@@ -88,6 +92,32 @@ impl MacVideoCapturer {
     pub fn with_source(mut self, source: protocol::session::CaptureSource) -> Self {
         self.source = source;
         self
+    }
+    pub(crate) fn with_resources(mut self, resources: Arc<crate::lifecycle::Resources>) -> Self {
+        self.resources = Some(resources);
+        self
+    }
+    fn stop_owned_stream(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if let Some(stream) = self.stream.take() {
+            let result = if self.stream_running {
+                stream.stop_capture()
+            } else {
+                Ok(())
+            };
+            self.stream_running = false; // completion is synchronous
+            if let Some(x) = &self.resources {
+                use std::sync::atomic::Ordering::SeqCst;
+                if result.is_ok() {
+                    x.native_stops_completed.fetch_add(1, SeqCst);
+                } else {
+                    x.native_stop_errors.fetch_add(1, SeqCst);
+                }
+                drop(stream);
+                x.native_streams.fetch_sub(1, SeqCst);
+            }
+            result?;
+        }
+        Ok(())
     }
 
     fn configuration(&self, size: (u32, u32)) -> SCStreamConfiguration {
@@ -164,19 +194,24 @@ impl VideoCapturer for MacVideoCapturer {
         stream.start_capture()?;
 
         self.stream = Some(stream);
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = self.stream.take() {
-            stream.stop_capture()?;
+        self.stream_running = true;
+        if let Some(x) = &self.resources {
+            x.native_streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(())
     }
 
+    async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.stop_owned_stream()
+    }
+
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(stream) = &self.stream {
-            stream.stop_capture()?;
+        if self.stream_running {
+            if let Some(stream) = &self.stream {
+                stream.stop_capture()?;
+            }
+            self.stream_running = false;
         }
         drop(self.slot.take());
         Ok(())
@@ -186,7 +221,10 @@ impl VideoCapturer for MacVideoCapturer {
         drop(self.slot.take());
         self.pacer.reset(self.target_fps);
         if let Some(stream) = &self.stream {
-            stream.start_capture()?;
+            if !self.stream_running {
+                stream.start_capture()?;
+                self.stream_running = true;
+            }
         } else {
             self.start().await?;
         }
@@ -217,28 +255,30 @@ impl VideoCapturer for MacVideoCapturer {
 
 impl Drop for MacVideoCapturer {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.stop_capture();
-        }
+        let _ = self.stop_owned_stream();
     }
 }
 
 #[cfg(test)]
 mod capture_matrix_tests {
     use super::*;
-    #[test] fn nv12_configuration_explicitly_requests_a_known_conversion_matrix() {
-        let mut config=SCStreamConfiguration::new();
+    #[test]
+    fn nv12_configuration_explicitly_requests_a_known_conversion_matrix() {
+        let mut config = SCStreamConfiguration::new();
         config.set_pixel_format(screencapturekit::stream::configuration::PixelFormat::YCbCr_420v);
-        let value=crate::video_color::capture_yuv_matrix();
+        let value = crate::video_color::capture_yuv_matrix();
         assert!(!value.is_empty());
         config.set_color_matrix(&value);
-        assert_eq!(config.color_matrix().as_deref(),Some(value.as_str()));
+        assert_eq!(config.color_matrix().as_deref(), Some(value.as_str()));
         // Reconfigure through all documented matrices and exercise allocation
         // churn after the temporary Rust CString/Swift String have been dropped.
-        for value in ["ITU_R_601_4","ITU_R_709_2","SMPTE_240M_1995"] {
+        for value in ["ITU_R_601_4", "ITU_R_709_2", "SMPTE_240M_1995"] {
             config.set_color_matrix(&value.to_owned());
-            for index in 0..2048 {let _=core_foundation::string::CFString::new(&format!("color-lifetime-test-{index}"));}
-            assert_eq!(config.clone().color_matrix().as_deref(),Some(value));
+            for index in 0..2048 {
+                let _ =
+                    core_foundation::string::CFString::new(&format!("color-lifetime-test-{index}"));
+            }
+            assert_eq!(config.clone().color_matrix().as_deref(), Some(value));
         }
     }
 }

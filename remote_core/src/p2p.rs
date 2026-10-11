@@ -416,6 +416,7 @@ pub struct P2pTunnelConfig {
     pub peer_id: String,
     pub announcement: Vec<u8>,
     pub local_target_addr: Option<SocketAddr>,
+    pub routing_key: Option<crate::routed_relay::RoutingKey>,
     pub discovery_target_addr: Option<SocketAddr>,
     pub register_interval: Duration,
     pub punch_interval: Duration,
@@ -447,6 +448,7 @@ impl P2pTunnelConfig {
             peer_id,
             announcement,
             local_target_addr: None,
+            routing_key: None,
             discovery_target_addr: None,
             register_interval: Duration::from_secs(2),
             punch_interval: Duration::from_millis(500),
@@ -474,6 +476,13 @@ impl P2pTunnelConfig {
 
     pub fn with_local_target_addr(mut self, addr: SocketAddr) -> Self {
         self.local_target_addr = Some(addr);
+        self
+    }
+
+    /// Production control/media needs per-connection routing, not last-sender
+    /// raw forwarding. The existing network secret derives this routing key.
+    pub fn with_routing_key(mut self, key: crate::routed_relay::RoutingKey) -> Self {
+        self.routing_key = Some(key);
         self
     }
 
@@ -556,7 +565,7 @@ impl BoundP2pTunnel {
     }
 
     pub async fn run(
-        self,
+        mut self,
         mut cancel_rx: broadcast::Receiver<()>,
         snapshot_tx: watch::Sender<P2pTunnelSnapshot>,
     ) -> io::Result<()> {
@@ -583,6 +592,23 @@ impl BoundP2pTunnel {
         let mut prune_interval = tokio::time::interval(Duration::from_secs(1));
         prune_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (route_cancel_tx, _) = broadcast::channel(1);
+        let mut router_tasks = tokio::task::JoinSet::new();
+        let application_routes = if let Some(key) = self.config.routing_key.clone() {
+            let router = crate::routed_relay::RoutedRelay::bind(
+                self.config.peer_id.clone(),
+                key,
+                self.config.local_target_addr,
+            )
+            .await?;
+            self.config.local_target_addr = Some(router.local_addr()?);
+            let routes = router.routes();
+            let cancel = route_cancel_tx.subscribe();
+            let snapshot = snapshot_tx.subscribe();
+            router_tasks.spawn(router.run_p2p(snapshot, cancel));
+            Some(routes)
+        } else {
+            None
+        };
         let mut peers: HashMap<String, PeerRoute> = HashMap::new();
         let mut observations: HashMap<SocketAddr, SocketAddr> = HashMap::new();
         let mut probe_token = 1u64;
@@ -596,9 +622,11 @@ impl BoundP2pTunnel {
             tokio::select! {
                 _ = cancel_rx.recv() => {
                     let _ = route_cancel_tx.send(());
-                    for (_, route) in peers.drain() {
+                    for (_, mut route) in peers.drain() {
                         route.task.abort();
+                        let _=(&mut route.task).await;
                     }
+                    while let Some(result)=router_tasks.join_next().await { result.map_err(io::Error::other)??; }
                     return Ok(());
                 }
                 _ = register_interval.tick() => {
@@ -712,7 +740,7 @@ impl BoundP2pTunnel {
                                     add_candidate_set(route, endpoint, CandidateKind::Observed, &self.config);
                                 }
                                 if peers.get(&peer_id).is_some_and(|route| route.direct_ready) {
-                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                                 }
                                 let punch = P2pPacket::Punch {
                                     group_id: self.config.group_id.clone(),
@@ -758,7 +786,7 @@ impl BoundP2pTunnel {
                                 }.encode().map_err(p2p_io_error)?;
                                 let _ = public_socket.send_to(&ack, addr).await;
                                 if became_ready {
-                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                                 }
                                 publish_snapshot(&snapshot_tx, &peers, &observations);
                                 continue;
@@ -780,7 +808,7 @@ impl BoundP2pTunnel {
                                     confirm_candidate(route, addr, None, &self.config)
                                 } else { false };
                                 if became_ready {
-                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                                 }
                                 publish_snapshot(&snapshot_tx, &peers, &observations);
                                 continue;
@@ -808,7 +836,7 @@ impl BoundP2pTunnel {
                                 }.encode().map_err(p2p_io_error)?;
                                 let _ = public_socket.send_to(&ack, addr).await;
                                 if became_ready {
-                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                    publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                                 }
                                 publish_snapshot(&snapshot_tx, &peers, &observations);
                                 continue;
@@ -822,7 +850,7 @@ impl BoundP2pTunnel {
                                         .find_map(|candidate| candidate.last_probe.filter(|(sent_token, _)| *sent_token == token).map(|(_, sent)| sent.elapsed()));
                                     let became_ready = confirm_candidate(route, addr, rtt, &self.config);
                                     if became_ready {
-                                        publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                                        publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                                     }
                                     publish_snapshot(&snapshot_tx, &peers, &observations);
                                 }
@@ -846,7 +874,7 @@ impl BoundP2pTunnel {
                             became_ready
                         } else { false };
                         if became_ready {
-                            publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr).await?;
+                            publish_peer_discovery(&peers, &peer_id, self.config.discovery_target_addr, application_routes.as_ref()).await?;
                         }
                         publish_snapshot(&snapshot_tx, &peers, &observations);
                     }
@@ -891,6 +919,11 @@ struct PeerRoute {
     direct_ready: bool,
     last_seen: Instant,
     task: JoinHandle<()>,
+}
+impl Drop for PeerRoute {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 async fn ensure_peer_route(
@@ -1149,10 +1182,14 @@ async fn publish_peer_discovery(
     peers: &HashMap<String, PeerRoute>,
     peer_id: &str,
     discovery_target: Option<SocketAddr>,
+    application_routes: Option<&crate::routed_relay::PeerRelayRoutes>,
 ) -> io::Result<()> {
     if let Some(route) = peers.get(peer_id) {
-        inject_discovery_announcement(route.local_endpoint, &route.announcement, discovery_target)
-            .await?;
+        let endpoint = match application_routes {
+            Some(routes) => routes.endpoint(peer_id).await?,
+            None => route.local_endpoint,
+        };
+        inject_discovery_announcement(endpoint, &route.announcement, discovery_target).await?;
     }
     Ok(())
 }
@@ -1437,7 +1474,7 @@ mod tests {
         }
     }
 
-    fn announcement(peer: &str, port: u16) -> Vec<u8> {
+    pub(super) fn announcement(peer: &str, port: u16) -> Vec<u8> {
         DiscoveryAnnouncement {
             network_name: "network".into(),
             device_id: peer.into(),
@@ -2023,5 +2060,185 @@ mod tests {
         let _ = server_cancel_tx.send(());
         local_task.await.unwrap().unwrap();
         server_task.await.unwrap().unwrap();
+    }
+}
+#[cfg(test)]
+mod routed_p2p_tests {
+    use super::*;
+    #[tokio::test]
+    async fn routed_p2p_authenticates_two_clients_and_reverse_connection_independently() {
+        use crate::net::{MultiplexedPacket, UdpMultiplexer};
+        use crate::p2p::tests::announcement;
+        use crate::session_crypto::{mac_session_accept, mac_session_hello, now_unix_ms};
+        use protocol::ControlMessage;
+        let server = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
+            "127.0.0.1:0".parse().unwrap(),
+        ))
+        .await
+        .unwrap();
+        let rendezvous = server.local_addr().unwrap();
+        let (cancel, _) = broadcast::channel(1);
+        let mut tasks = vec![tokio::spawn(server.run(cancel.subscribe()))];
+        let host_a = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let host_b = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let discovery_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let discovery_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (mut view_a, mut view_b) = (
+            watch::channel(P2pTunnelSnapshot::default()),
+            watch::channel(P2pTunnelSnapshot::default()),
+        );
+        let key = crate::routed_relay::derive_routing_key(b"isolated-test-membership-only");
+        for (id, host, sink, tx) in [
+            ("a", &host_a, &discovery_a, view_a.0.clone()),
+            ("b", &host_b, &discovery_b, view_b.0.clone()),
+        ] {
+            let config = P2pTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                rendezvous,
+                "fixture-group",
+                id,
+                announcement(id, host.local_addr().unwrap().port()),
+            )
+            .unwrap()
+            .with_local_target_addr(host.local_addr().unwrap())
+            .with_discovery_target_addr(sink.local_addr().unwrap())
+            .with_routing_key(key.clone());
+            tasks.push(tokio::spawn(
+                BoundP2pTunnel::bind(config)
+                    .await
+                    .unwrap()
+                    .run(cancel.subscribe(), tx),
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if view_a.1.borrow().direct_peer_count() == 1
+                    && view_b.1.borrow().direct_peer_count() == 1
+                {
+                    break;
+                }
+                tokio::select! {_=view_a.1.changed()=>{},_=view_b.1.changed()=>{}}
+            }
+        })
+        .await
+        .unwrap();
+        async fn application_endpoint(sink: &UdpSocket) -> SocketAddr {
+            let mut buf = [0; 1500];
+            let (n, _) = tokio::time::timeout(Duration::from_secs(2), sink.recv_from(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            let peer = crate::discovery::DiscoveryAnnouncement::decode(&buf[..n]).unwrap();
+            assert_eq!(peer.scope, crate::discovery::DiscoveryScope::P2p);
+            SocketAddr::from(([127, 0, 0, 1], peer.control_port))
+        }
+        let endpoint_a = application_endpoint(&discovery_a).await;
+        let endpoint_b = application_endpoint(&discovery_b).await;
+        let client_a = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let client_a2 = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let client_b = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let ca = client_a.split();
+        let ca2 = client_a2.split();
+        let cb = client_b.split();
+        let ha = host_a.split();
+        let hb = host_b.split();
+        async fn handshake(
+            client: &(crate::net::UdpSender, crate::net::UdpReceiver),
+            host: &(crate::net::UdpSender, crate::net::UdpReceiver),
+            endpoint: SocketAddr,
+            nonce: [u8; 16],
+        ) -> SocketAddr {
+            let psk = b"isolated-test-session-secret";
+            let ts = now_unix_ms();
+            client
+                .0
+                .send_control(
+                    &ControlMessage::SessionHello {
+                        nonce,
+                        timestamp_ms: ts,
+                        mac: mac_session_hello(psk, &nonce, ts),
+                    },
+                    endpoint,
+                )
+                .await
+                .unwrap();
+            let packet = tokio::time::timeout(Duration::from_secs(1), host.1.recv())
+                .await
+                .expect("hello must reach host, not the previous viewer")
+                .unwrap();
+            let addr = match packet {
+                MultiplexedPacket::Control(
+                    ControlMessage::SessionHello { nonce: got, .. },
+                    addr,
+                ) => {
+                    assert_eq!(got, nonce);
+                    addr
+                }
+                other => panic!("wrong handshake: {other:?}"),
+            };
+            let salt = nonce;
+            let ts = now_unix_ms();
+            host.0
+                .send_control(
+                    &ControlMessage::SessionAccept {
+                        salt,
+                        timestamp_ms: ts,
+                        mac: mac_session_accept(psk, &salt, ts),
+                    },
+                    addr,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(tokio::time::timeout(Duration::from_secs(1),client.1.recv()).await.unwrap().unwrap(),MultiplexedPacket::Control(ControlMessage::SessionAccept{salt:got,..},from) if got==salt && from==endpoint)
+            );
+            client.0.install_peer_crypto(
+                endpoint,
+                crate::session_crypto::SessionCrypto::from_psk(psk, &salt).unwrap(),
+            );
+            host.0.install_peer_crypto(
+                addr,
+                crate::session_crypto::SessionCrypto::from_psk(psk, &salt).unwrap(),
+            );
+            addr
+        }
+        let a1 = handshake(&ca, &hb, endpoint_a, [1; 16]).await;
+        let reverse = handshake(&cb, &ha, endpoint_b, [2; 16]).await;
+        let a2 = handshake(&ca2, &hb, endpoint_a, [3; 16]).await;
+        assert_ne!(
+            a1, a2,
+            "host crypto/session owners need distinct UDP addresses"
+        );
+        for (client, endpoint, host, addr, id) in [
+            (&ca, endpoint_a, &hb, a1, 11),
+            (&ca2, endpoint_a, &hb, a2, 22),
+            (&cb, endpoint_b, &ha, reverse, 33),
+        ] {
+            client
+                .0
+                .send_control(
+                    &ControlMessage::Session(Box::new(protocol::session::SessionCommand::Open {
+                        connection_id: id,
+                        version: 2,
+                    })),
+                    endpoint,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(tokio::time::timeout(Duration::from_secs(1),host.1.recv()).await.unwrap().unwrap(),MultiplexedPacket::Control(ControlMessage::Session(command),from) if from==addr && matches!(*command,protocol::session::SessionCommand::Open{connection_id,..} if connection_id==id))
+            );
+        }
+        let _ = cancel.send(());
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        // Completion includes all router/listener sockets, not only the parent.
+        let _released_a = UdpSocket::bind(endpoint_a)
+            .await
+            .expect("P2P application listener released on cancellation");
+        let _released_b = UdpSocket::bind(endpoint_b)
+            .await
+            .expect("reverse P2P application listener released on cancellation");
     }
 }

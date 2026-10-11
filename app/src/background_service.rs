@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Snapshot, CreateGroup, JoinGroup(String), Reload(String) }
+enum Request { Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -32,7 +32,7 @@ struct Snapshot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Response { Snapshot(Snapshot), Rejected(String) }
+enum Response { Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
 
 fn uid() -> u32 { unsafe { libc::geteuid() } }
 fn private_directory(path: &Path) -> io::Result<()> {
@@ -114,6 +114,9 @@ impl Drop for Service {
     fn drop(&mut self) { self.task.abort(); let _ = fs::remove_file(&self.path); }
 }
 fn answer(request: Request, runtime: &UnifiedRuntimeHandle, generation: String, executable_sha256: String) -> Response {
+    if let Request::InspectConnection{connection_id}=request {
+        return Response::ConnectionDiagnostics(host::lifecycle::inspect_connection(connection_id));
+    }
     let Some(pairing) = &runtime.mesh_pairing else { return Response::Rejected("Background pairing is unavailable".into()); };
     let changing = !matches!(request, Request::Snapshot);
     if changing && !matches!(runtime.owner.runtime().lock().unwrap().role_state(), remote_core::role::RoleState::Idle) {
@@ -124,6 +127,7 @@ fn answer(request: Request, runtime: &UnifiedRuntimeHandle, generation: String, 
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
         Request::Reload(message) => pairing.request_runtime_reload(message),
+        Request::InspectConnection{..}=>unreachable!(),
     };
     let peers = runtime.owner.discovery_snapshot_rx().map(|rx| rx.borrow().clone()).unwrap_or_default();
     Response::Snapshot(Snapshot { schema: SCHEMA, version: env!("CARGO_PKG_VERSION").into(), generation, executable_sha256, pid: std::process::id(), peers, pairing })
@@ -209,6 +213,7 @@ fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result
     let snapshot = match serde_json::from_slice::<Response>(&bytes)? {
         Response::Snapshot(snapshot) => snapshot,
         Response::Rejected(_) => return Err("Background service rejected the operation".into()),
+        Response::ConnectionDiagnostics(_)=>return Err("Expected background Snapshot".into()),
     };
     if snapshot.executable_sha256 != executable_sha256 || snapshot.schema != SCHEMA || snapshot.version != env!("CARGO_PKG_VERSION") || snapshot.pairing.config_dir != profile {
         return Err("Background service executable/protocol/version/profile mismatch; upgrade the service and GUI together".into());
@@ -261,6 +266,15 @@ pub async fn run(mut config: UnifiedRuntimeConfig) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connection_diagnostic_is_readonly_known_id_and_round_trips(){
+        let request:Request=serde_json::from_str(r#"{"InspectConnection":{"connection_id":4294967295}}"#).unwrap();
+        assert!(matches!(request,Request::InspectConnection{connection_id:u32::MAX}));
+        let records=host::lifecycle::inspect_connection(u32::MAX);assert!(records.is_empty());
+        let bytes=serde_json::to_vec(&Response::ConnectionDiagnostics(records)).unwrap();
+        assert!(matches!(serde_json::from_slice::<Response>(&bytes).unwrap(),Response::ConnectionDiagnostics(records) if records.is_empty()));
+        assert!(serde_json::from_str::<Request>(r#"{"InspectConnection":{"connection_id":1,"all":true}}"#).is_err());
+    }
     #[test]
     fn bounded_frames_and_private_endpoints_fail_closed() {
         assert!(valid_length(0u32.to_be_bytes()).is_err());
