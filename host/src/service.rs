@@ -243,6 +243,9 @@ impl Drop for AudioGroup {
         }
     }
 }
+#[cfg(test)]
+thread_local! {static TEST_CAPTURE_CATALOG: std::cell::RefCell<Option<Vec<protocol::session::CaptureSourceInfo>>> = const {std::cell::RefCell::new(None)};}
+
 struct Connection {
     id: u32,
     last_seen: Instant,
@@ -527,6 +530,10 @@ impl Connection {
     fn capture_sources(
         &self,
     ) -> Result<Vec<protocol::session::CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
+        #[cfg(test)]
+        if let Some(catalog) = TEST_CAPTURE_CATALOG.with(|value| value.borrow().clone()) {
+            return Ok(catalog);
+        }
         let legacy = crate::capture_sources::list();
         #[cfg(not(all(unix, any(test, target_os = "linux"))))]
         let mut sources = legacy?;
@@ -1730,6 +1737,62 @@ mod failure_admission_tests {
         );
         peer.shutdown().await.unwrap();
     }
+    #[tokio::test]
+    async fn unknown_capture_source_preserves_live_subscription_without_native_acquisition() {
+        struct CatalogGuard;
+        impl Drop for CatalogGuard {
+            fn drop(&mut self) {
+                TEST_CAPTURE_CATALOG.with(|value| *value.borrow_mut() = None);
+            }
+        }
+        TEST_CAPTURE_CATALOG.with(|value| *value.borrow_mut() = Some(Vec::new()));
+        let _catalog = CatalogGuard;
+        let (mut peer, addr) = fixture_peer(90006).await;
+        install_capture_fixture(&mut peer).await;
+        let request = SubscriptionRequest {
+            id: 100,
+            source: CaptureSource::Window(u32::MAX),
+            width: 640,
+            height: 360,
+            fps: 15,
+            bitrate_kbps: 1000,
+            audio: true,
+        };
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let result = peer
+            .subscribe_with_preflight(request, addr, sender, Statistics::new(), false, || Ok(()))
+            .await;
+        assert!(
+            matches!(result,Err(ref reason) if reason=="selected capture source is unavailable")
+        );
+        assert_eq!(
+            peer.subscriptions[&100].request.source,
+            CaptureSource::MainDisplay
+        );
+        assert_eq!(
+            peer.resources
+                .workers
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            peer.resources
+                .native_streams
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            peer.resources
+                .native_stops_completed
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(peer.audio_groups.is_empty());
+        assert!(!peer.retired.contains(&100));
+        peer.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn native_stop_error_never_produces_closed() {
         let (peer, _) = fixture_peer(90004).await;

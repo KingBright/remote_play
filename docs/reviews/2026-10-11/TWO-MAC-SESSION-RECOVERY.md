@@ -28,4 +28,6 @@ Use the existing packaging/signing/identity/installer scripts and canonical app 
 
 Windows cube, HO5 and Pixel are outside this candidate/test scope. No device authorization, membership, TCC or production security state is changed by these source fixes or fixture tests.
 
-Fixture verification: host 144 passed / 1 ignored; remote_core 292 passed; background-service IPC 3 passed; release Python suite 271 tests / 7 skipped. These are fixture/compile checks, not evidence that installed 1085 released native resources or that the real P2P timeout is fixed. No GUI presentation or input acceptance was performed. Native Linux portal RPC completion and Windows physical device behavior were not exercised by this Mac-only candidate.
+Fixture verification: host 145 passed / 1 ignored; remote_core 292 passed; background-service IPC 3 passed; release Python suite 271 tests / 7 skipped. These are fixture/compile checks, not evidence that installed 1085 released native resources or that the real P2P timeout is fixed. No GUI presentation or input acceptance was performed. Native Linux portal RPC completion and Windows physical device behavior were not exercised by this Mac-only candidate.
+
+The unknown-source regression injects an empty catalog only under cfg(test), requests a nonexistent window while a capture fixture is active, and verifies the old source/subscription and worker/stream counts remain intact, with no new audio group or retirement. It exercises subscription admission without querying the OS catalog or requesting capture permissions.
