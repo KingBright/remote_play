@@ -14,6 +14,13 @@ The relay namespace is derived locally with HMAC-SHA256 from the paired device g
 
 ## Build
 
+NAS is an artifact receiver and runtime host, never a build machine. Compile on
+the explicitly checked developer machine and transfer only SHA-256-pinned
+runtime binaries/packages plus service/publication metadata. Do not transfer a
+source checkout, Rust/Gradle caches or compilers to NAS, and do not run Cargo,
+Zig, Gradle or Docker builds there.
+
+
 From an Apple Silicon development Mac with Zig installed:
 
 ```bash
