@@ -10,14 +10,21 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 struct Selection {
     key: String,
+    target: Option<LocalPortalShareTarget>,
     cancel: watch::Sender<bool>,
     revoked: Option<watch::Receiver<bool>>,
+}
+struct SavedRestoration {
+    target: LocalPortalShareTarget,
+    kind: ShareKind,
+    token: host::PortalSessionRestore,
 }
 #[derive(Default)]
 struct OwnedState {
     targets: HashMap<String, LocalPortalShareTarget>,
     selections: HashMap<u64, Selection>,
     refresh: Option<u64>,
+    restorations: HashMap<String, SavedRestoration>,
 }
 impl Drop for OwnedState {
     fn drop(&mut self) {
@@ -86,10 +93,23 @@ impl Owner {
                 return Err("Viewer refresh superseded".into());
             }
             state.refresh = None;
-            state.targets = targets
+            let next_targets: HashMap<_, _> = targets
                 .into_iter()
                 .map(|target| (target.local_key(), target))
                 .collect();
+            state.restorations.retain(|key, saved| {
+                saved.token.is_usable() && next_targets.get(key)
+                    .is_some_and(|target| saved.target.same_authenticated_target(target))
+            });
+            state.selections.retain(|_, selection| {
+                let current = next_targets.get(&selection.key).is_some_and(|target| {
+                    selection.target.as_ref()
+                        .is_some_and(|previous| previous.same_authenticated_target(target))
+                });
+                if !current { selection.cancel.send_replace(true); }
+                current
+            });
+            state.targets = next_targets;
             Ok(rows)
         }
     }
@@ -98,6 +118,7 @@ impl Owner {
         state
             .selections
             .retain(|_, selection| selection.revoked.as_ref().is_none_or(|rx| !*rx.borrow()));
+        state.restorations.retain(|_, saved| saved.token.is_usable());
         state
             .selections
             .values()
@@ -106,22 +127,16 @@ impl Owner {
             .collect()
     }
     pub fn cancel(&self, attempt: u64) {
-        if let Some(selection) = self
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .selections
-            .remove(&attempt)
-        {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(selection) = state.selections.remove(&attempt) {
+            state.restorations.remove(&selection.key);
             selection.cancel.send_replace(true);
         }
     }
     pub fn stop(&self, key: &str) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .selections
-            .retain(|_, selection| {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.restorations.remove(key);
+        state.selections.retain(|_, selection| {
                 if selection.key == key {
                     selection.cancel.send_replace(true);
                     false
@@ -136,6 +151,11 @@ impl Owner {
         key: String,
         kind: ShareKind,
     ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+        self.select_source(attempt, key, kind, true)
+    }
+    pub fn select_source(
+        &self, attempt: u64, key: String, kind: ShareKind, reuse: bool,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).refresh = None;
         let control = self.control.clone();
         let state = Arc::downgrade(&self.state);
@@ -146,6 +166,13 @@ impl Owner {
             .targets
             .get(&key)
             .cloned();
+        // Remove before any await: a single-use Portal token cannot be replayed
+        // by concurrent attempts, and an address/name never supplies authority.
+        let restoration = self.state.lock().unwrap_or_else(|e| e.into_inner())
+            .restorations.remove(&key).filter(|saved| reuse && saved.kind == kind
+                && saved.token.is_usable() && target.as_ref()
+                    .is_some_and(|target| saved.target.same_authenticated_target(target)))
+            .map(|saved| saved.token);
         let (cancel, rx) = watch::channel(false);
         self.state
             .lock()
@@ -155,12 +182,13 @@ impl Owner {
                 attempt,
                 Selection {
                     key,
+                    target: target.clone(),
                     cancel,
                     revoked: None,
                 },
             );
         async move {
-            let result = select(control, target, kind, rx, state.clone(), attempt).await;
+            let result = select(control, target, kind, rx, state.clone(), attempt, restoration).await;
             if result.is_err()
                 && let Some(state) = state.upgrade()
                 && let Some(selection) = state
@@ -182,9 +210,19 @@ async fn select(
     cancel: watch::Receiver<bool>,
     state: Weak<Mutex<OwnedState>>,
     attempt: u64,
+    restoration: Option<host::PortalSessionRestore>,
 ) -> Result<(), String> {
     let control = control.ok_or("Sharing service is unavailable")?;
-    let target = target.ok_or("Viewer changed; refresh the viewer list")?;
+    let previous = target.ok_or("Viewer changed; refresh the viewer list")?;
+    // Revalidate live server-derived authority before asking the system portal,
+    // rather than relying on a row retained from an earlier refresh.
+    let (reply, current) = oneshot::channel();
+    tokio::time::timeout(Duration::from_secs(5), control.send(LocalPortalShareCommand::Targets { reply }))
+        .await.map_err(|_| "Viewer check timed out")?.map_err(|_| "Sharing service stopped")?;
+    let current = tokio::time::timeout(Duration::from_secs(5), current).await
+        .map_err(|_| "Viewer check timed out")?.map_err(|_| "Sharing service stopped")?;
+    let target = current.into_iter().find(|target| previous.same_authenticated_target(target))
+        .ok_or("Authenticated viewer changed; refresh the viewer list")?;
     let picker = match kind {
         ShareKind::Window => host::PickerSources::Window,
         ShareKind::Display => host::PickerSources::Monitor,
@@ -192,12 +230,10 @@ async fn select(
     };
     // Empty parent is explicitly supported by ScreenCast. A Wayland pointer is
     // not an exported xdg-foreign handle; never fabricate one or add GTK.
-    let selection = if kind == ShareKind::ControlledDisplay {
-        host::request_local_portal_control_capture("", picker, cancel).await
-    } else {
-        host::request_local_portal_capture("", picker, cancel).await
-    };
-    let lease = selection.map_err(selection_message)?;
+    let mut lease = host::request_local_portal_capture_restorable(
+        "", picker, cancel, kind == ShareKind::ControlledDisplay, restoration,
+    ).await.map_err(selection_message)?;
+    let restoration = lease.take_restoration();
     let capture = host::prepare_pipewire_capture(lease)
         .await
         .map_err(selection_message)?;
@@ -225,7 +261,7 @@ async fn select(
     tokio::time::timeout(
         Duration::from_secs(5),
         control.send(LocalPortalShareCommand::Commit {
-            target,
+            target: target.clone(),
             capture,
             reply,
         }),
@@ -237,6 +273,17 @@ async fn select(
         .await
         .map_err(|_| "Share commit timed out")?
         .map_err(|_| "Sharing service stopped")??;
+    if let Some(token) = restoration {
+        let state = state.upgrade().ok_or("Sharing window closed")?;
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let key = target.local_key();
+        if token.is_usable() && state.selections.get(&attempt)
+            .is_some_and(|selection| !*selection.cancel.borrow())
+            && state.targets.get(&key)
+                .is_some_and(|current| target.same_authenticated_target(current)) {
+            state.restorations.insert(key, SavedRestoration { target, kind, token });
+        }
+    }
     Ok(())
 }
 

@@ -2965,8 +2965,8 @@ impl RestoredDashboard {
                     });
                 }).detach();
             }
-            Effect::Select { attempt, key, kind } => {
-                let future = self.local_share_owner.select(attempt, key, kind);
+            Effect::Select { attempt, key, kind, reuse } => {
+                let future = self.local_share_owner.select_source(attempt, key, kind, reuse);
                 let task = tokio::spawn(future);
                 cx.spawn(async move |view, cx| {
                     let result = task.await.unwrap_or_else(|_| Err("Selection stopped".into()));

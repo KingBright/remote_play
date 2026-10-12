@@ -151,8 +151,37 @@ pub struct PortalCaptureLease {
     remote: Option<RestrictedRemote>,
     selected: SelectedPortalSource,
     cancellation: watch::Receiver<bool>,
+    restoration: Option<PortalSessionRestore>,
+}
+
+/// Opaque, single-use system token. It never leaves this process or grants RP
+/// peer authority. Keep the bus alive for mode-1 application lifetime and stop
+/// reuse when the original grant is revoked. No Clone, Serialize or raw getter.
+pub struct PortalSessionRestore {
+    connection: Connection,
+    destination: String,
+    sources: PickerSources,
+    control_input: bool,
+    token: String,
+    revoked: watch::Receiver<bool>,
+    cancellation: watch::Receiver<bool>,
+}
+impl std::fmt::Debug for PortalSessionRestore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PortalSessionRestore(<redacted>)")
+    }
+}
+impl PortalSessionRestore {
+    pub fn is_usable(&self) -> bool {
+        !*self.revoked.borrow() && self.revoked.has_changed().is_ok()
+            && !*self.cancellation.borrow() && self.cancellation.has_changed().is_ok()
+    }
 }
 impl PortalCaptureLease {
+    pub fn take_restoration(&mut self) -> Option<PortalSessionRestore> {
+        if self.is_revoked() { self.restoration = None; }
+        self.restoration.take()
+    }
     fn is_revoked(&self) -> bool {
         *self.cancellation.borrow()
             || self.cancellation.has_changed().is_err()
@@ -765,32 +794,38 @@ pub async fn request_local_portal_control_capture(
     request_local_capture(parent_identifier, sources, cancel, true).await
 }
 
-async fn request_local_capture(
-    parent_identifier: &str,
-    sources: PickerSources,
-    mut cancel: watch::Receiver<bool>,
-    control_input: bool,
+/// Application-lifetime restoration for an already verified local share target.
+/// The caller binds this opaque token to that target and forgets it on Stop.
+pub async fn request_local_portal_capture_restorable(
+    parent_identifier: &str, sources: PickerSources, cancel: watch::Receiver<bool>,
+    control_input: bool, restoration: Option<PortalSessionRestore>,
 ) -> Result<PortalCaptureLease> {
-    if *cancel.borrow() {
-        return Err(PortalCallError::Cancelled);
-    }
+    request_local_capture_mode(parent_identifier, sources, cancel, control_input, true, restoration).await
+}
+async fn request_local_capture(
+    parent_identifier: &str, sources: PickerSources, cancel: watch::Receiver<bool>, control_input: bool,
+) -> Result<PortalCaptureLease> {
+    request_local_capture_mode(parent_identifier, sources, cancel, control_input, false, None).await
+}
+async fn request_local_capture_mode(
+    parent_identifier: &str, sources: PickerSources, mut cancel: watch::Receiver<bool>,
+    control_input: bool, remember: bool, restoration: Option<PortalSessionRestore>,
+) -> Result<PortalCaptureLease> {
+    if *cancel.borrow() { return Err(PortalCallError::Cancelled); }
     let timeouts = Timeouts::default();
-    let connection = tokio::select! {
-        biased;
-        _ = cancelled(&mut cancel) => return Err(PortalCallError::Cancelled),
-        result = tokio::time::timeout(timeouts.operation, zbus::connection::Builder::session()
-            .map_err(|_| PortalCallError::Transport)?.method_timeout(timeouts.operation).build()) =>
-            result.map_err(|_| PortalCallError::Timeout)?.map_err(|_| PortalCallError::Transport)?,
+    let connection = if let Some(saved) = &restoration {
+        saved.connection.clone()
+    } else {
+        tokio::select! {
+            biased;
+            _ = cancelled(&mut cancel) => return Err(PortalCallError::Cancelled),
+            result = tokio::time::timeout(timeouts.operation, zbus::connection::Builder::session()
+                .map_err(|_| PortalCallError::Transport)?.method_timeout(timeouts.operation).build()) =>
+                result.map_err(|_| PortalCallError::Timeout)?.map_err(|_| PortalCallError::Transport)?,
+        }
     };
-    select_with_control(
-        connection,
-        parent_identifier,
-        sources,
-        cancel,
-        timeouts,
-        control_input,
-    )
-    .await
+    select_with_restoration(connection, parent_identifier, sources, cancel, timeouts,
+                            control_input, (remember, restoration)).await
 }
 
 #[cfg(test)]
@@ -812,14 +847,27 @@ async fn select_on_connection(
     .await
 }
 
+#[cfg(test)]
 async fn select_with_control(
-    connection: Connection,
-    parent_identifier: &str,
-    sources: PickerSources,
-    mut cancel: watch::Receiver<bool>,
-    timeouts: Timeouts,
-    control_input: bool,
+    connection: Connection, parent_identifier: &str, sources: PickerSources,
+    cancel: watch::Receiver<bool>, timeouts: Timeouts, control_input: bool,
 ) -> Result<PortalCaptureLease> {
+    select_with_restoration(connection, parent_identifier, sources, cancel, timeouts,
+                            control_input, (false, None)).await
+}
+async fn select_with_restoration(
+    connection: Connection, parent_identifier: &str, sources: PickerSources,
+    mut cancel: watch::Receiver<bool>, timeouts: Timeouts, control_input: bool,
+    (remember, restoration): (bool, Option<PortalSessionRestore>),
+) -> Result<PortalCaptureLease> {
+    if let Some(saved) = &restoration {
+        if !remember || saved.sources != sources || saved.control_input != control_input {
+            return Err(PortalCallError::Capabilities);
+        }
+        if !saved.is_usable() || saved.connection.unique_name() != connection.unique_name() {
+            return Err(PortalCallError::Revoked);
+        }
+    }
     if control_input && sources != PickerSources::Monitor {
         return Err(PortalCallError::Capabilities);
     }
@@ -832,7 +880,7 @@ async fn select_with_control(
     }
     // Keep the initial channel alive until the real session owner is installed.
     let (initial_tx, mut initial_revoked) = watch::channel(false);
-    let (destination, screencast, options, screencast_version) = bounded(
+    let (destination, screencast, mut options, screencast_version, restore_supported) = bounded(
         async {
             let initial = proxy(&connection, DESKTOP, DESKTOP_PATH, SCREENCAST).await?;
             let _: u32 = initial
@@ -862,6 +910,7 @@ async fn select_with_control(
                 .map_err(|_| PortalCallError::Transport)?;
             let options = SelectionOptions::from_capabilities(available & sources.mask(), cursors)
                 .map_err(|_| PortalCallError::Capabilities)?;
+            let mut restore_supported = true;
             if control_input {
                 let remote = proxy(&connection, &destination, DESKTOP_PATH, REMOTE_DESKTOP).await?;
                 let version: u32 = remote
@@ -875,8 +924,9 @@ async fn select_with_control(
                 if version == 0 || devices & 3 != 3 {
                     return Err(PortalCallError::Capabilities);
                 }
+                restore_supported = version >= 2;
             }
-            Ok((destination, screencast, options, version))
+            Ok((destination, screencast, options, version, restore_supported))
         },
         timeouts.operation,
         &mut cancel,
@@ -884,6 +934,10 @@ async fn select_with_control(
     )
     .await?;
     drop(initial_tx);
+    if restoration.as_ref().is_some_and(|saved| saved.destination != destination) {
+        return Err(PortalCallError::Revoked);
+    }
+    options.persist_mode = u32::from(remember && restore_supported);
     let sender = connection
         .unique_name()
         .ok_or(PortalCallError::Transport)?
@@ -975,10 +1029,16 @@ async fn select_with_control(
         OwnedObjectPath::try_from(session_path.as_str()).map_err(|_| PortalCallError::Response)?;
     if control_input {
         let device_token = token();
-        let device_options: HashMap<&str, Value<'_>> = HashMap::from([
+        let mut device_options: HashMap<&str, Value<'_>> = HashMap::from([
             ("handle_token", Value::from(device_token.as_str())),
             ("types", Value::from(3u32)),
         ]);
+        if options.persist_mode == 1 {
+            device_options.insert("persist_mode", Value::from(1u32));
+            if let Some(saved) = &restoration {
+                device_options.insert("restore_token", Value::from(saved.token.as_str()));
+            }
+        }
         request(
             &connection,
             &destination,
@@ -1008,16 +1068,17 @@ async fn select_with_control(
             Value::from((u32::from(options.monitor)) | (u32::from(options.window) << 1)),
         ),
         ("multiple", Value::from(false)),
-        ("persist_mode", Value::from(0u32)),
+        ("persist_mode", Value::from(options.persist_mode)),
         (
             "cursor_mode",
             Value::from(if options.embedded_cursor { 2u32 } else { 1u32 }),
         ),
     ]);
-    // Combined sessions must use RemoteDesktop persistence options exclusively;
-    // omitting them there means nonpersistent consent. Never request restoration.
+    // Combined-session persistence belongs exclusively to RemoteDesktop.
     if control_input {
         select_options.remove("persist_mode");
+    } else if let Some(saved) = &restoration {
+        select_options.insert("restore_token", Value::from(saved.token.as_str()));
     }
     request(
         &connection,
@@ -1042,7 +1103,7 @@ async fn select_with_control(
     let start_token = token();
     let start_options: HashMap<&str, Value<'_>> =
         HashMap::from([("handle_token", Value::from(start_token.as_str()))]);
-    let response = request(
+    let mut response = request(
         &connection,
         &destination,
         &sender,
@@ -1069,6 +1130,18 @@ async fn select_with_control(
     } else {
         0
     };
+    if restoration.as_ref().is_some_and(|saved| !saved.is_usable()) {
+        return Err(PortalCallError::Revoked);
+    }
+    let restore_value = if options.persist_mode == 1 && (!control_input || devices == 3) {
+        response.remove("restore_token").map(|v| {
+            let token = String::try_from(v).map_err(|_| PortalCallError::Response)?;
+            if token.is_empty() || token.len() > 4096 || token.contains('\0') {
+                return Err(PortalCallError::Response);
+            }
+            Ok(token)
+        }).transpose()?
+    } else { None };
     let selected = selected(response, generation, options)?;
     if control_input && screencast_version >= 6 && selected.pipewire_serial.is_none() {
         return Err(PortalCallError::InvalidSource);
@@ -1120,11 +1193,17 @@ async fn select_with_control(
         RestrictedRemote::new(&state, selected.node_id, fd.into())
             .map_err(|_| PortalCallError::Revoked)?
     };
+    let restoration = restore_value.map(|token| PortalSessionRestore {
+        connection: connection.clone(), destination, sources, control_input, token,
+        revoked: owner.control.revoked.subscribe(),
+        cancellation: cancel.clone(),
+    });
     Ok(PortalCaptureLease {
         owner,
         remote: Some(remote),
         selected,
         cancellation: cancel,
+        restoration,
     })
 }
 

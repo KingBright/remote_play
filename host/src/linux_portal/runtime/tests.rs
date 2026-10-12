@@ -27,6 +27,10 @@ struct Calls {
     serial: AtomicU64,
     geometry: Mutex<Option<(i32, i32)>>,
     fail_key_down: std::sync::atomic::AtomicBool,
+    issue_restores: std::sync::atomic::AtomicBool,
+    issued_restores: AtomicU64,
+    restore_requests: Mutex<Vec<(bool, u32, Option<String>)>>,
+    remote_version: std::sync::atomic::AtomicU32,
 }
 /// Deterministic target used only on a private bus. Changes here are observable
 /// effects of injection, not real compositor permission/presentation evidence.
@@ -187,13 +191,16 @@ impl FakePortal {
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         if let Some(mode) = options.get("persist_mode") {
-            assert_eq!(u32::try_from(mode).unwrap(), 0);
+            assert!(u32::try_from(mode).unwrap() <= 1);
             assert_eq!(self.calls.count("rd_create"), 0);
         } else {
-            assert_eq!(self.calls.count("rd_create"), 1);
+            assert!(self.calls.count("rd_create") >= 1);
         }
         assert!(!bool::try_from(options.get("multiple").unwrap()).unwrap());
-        assert!(!options.contains_key("restore_token"));
+        let mode = options.get("persist_mode").map(|v|u32::try_from(v).unwrap()).unwrap_or(0);
+        let restored = options.get("restore_token").map(|v|<&str>::try_from(v).unwrap().to_owned());
+        if restored.is_some() { assert_eq!(mode, 1); }
+        self.calls.restore_requests.lock().unwrap().push((false, mode, restored));
         let types = u32::try_from(options.get("types").unwrap()).unwrap();
         assert_eq!(types & 4, 0);
         assert!(matches!(
@@ -214,7 +221,7 @@ impl FakePortal {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
-        assert_eq!(parent, "x11:2a");
+        assert!(parent == "x11:2a" || parent.is_empty());
         assert_eq!(options.len(), 1);
         let (request, destination) =
             register_request(connection, header, &options, &self.calls).await;
@@ -248,6 +255,11 @@ impl FakePortal {
             let mut response = HashMap::from([("streams".into(), streams)]);
             if let Some(devices) = self.devices {
                 response.insert("devices".into(), devices.into());
+            }
+            if self.calls.issue_restores.load(Ordering::Relaxed) {
+                let serial = self.calls.issued_restores.fetch_add(1, Ordering::Relaxed) + 1;
+                let token = format!("private-bus-unit-token-{serial}");
+                response.insert("restore_token".into(), Value::from(token.as_str()).try_to_owned().unwrap());
             }
             emit_response(connection, &request, &destination, response).await;
         }
@@ -424,7 +436,7 @@ struct FakeRemoteDesktop {
 impl FakeRemoteDesktop {
     #[zbus(property, name = "version")]
     fn version(&self) -> u32 {
-        2
+        match self.calls.remote_version.load(Ordering::Relaxed) { 0 => 2, value => value }
     }
     #[zbus(property)]
     fn available_device_types(&self) -> u32 {
@@ -454,7 +466,12 @@ impl FakeRemoteDesktop {
         #[zbus(connection)] connection: &Connection,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         assert_eq!(u32::try_from(options.get("types").unwrap()).unwrap(), 3);
-        assert_eq!(options.len(), 2); // No persistence, restore token, touch or clipboard.
+        assert!(options.len() >= 2 && options.len() <= 4);
+        let mode = options.get("persist_mode").map(|v|u32::try_from(v).unwrap()).unwrap_or(0);
+        let restored = options.get("restore_token").map(|v|<&str>::try_from(v).unwrap().to_owned());
+        assert!(mode <= 1);
+        if restored.is_some() { assert_eq!(mode, 1); }
+        self.calls.restore_requests.lock().unwrap().push((true, mode, restored));
         let (request, destination) =
             register_request(connection, header, &options, &self.calls).await;
         emit_response(connection, &request, &destination, Values::new()).await;
@@ -907,3 +924,8 @@ async fn local_cancel_rejects_delivery_before_cleanup_actor_runs() {
     assert!(capture.publish_owned(frame).is_err());
     fixture.calls.wait("session_close").await;
 }
+
+mod restore_tests;
+
+#[cfg(not(target_os="linux"))]
+mod share_owner_tests;

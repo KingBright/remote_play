@@ -49,6 +49,18 @@ impl LocalPortalShareTarget {
     pub fn subscription_id(&self) -> u32 {
         self.subscription_id
     }
+    /// Local restoration cannot follow an address/name to another authenticated
+    /// connection. Source revision is rechecked separately at commit.
+    pub fn same_authenticated_target(&self, other: &Self) -> bool {
+        self.addr == other.addr && self.owner == other.owner
+            && self.subscription_id == other.subscription_id
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_target(nonce: [u8;16]) -> Self {
+        Self { addr: "127.0.0.1:39577".parse().unwrap(),
+            owner: PeerOwner::from_authenticated_connection(31, nonce, Some([2;32])).unwrap(),
+            source_revision: 10, subscription_id: 100 }
+    }
 }
 #[cfg(all(unix, any(test, target_os = "linux")))]
 pub enum LocalPortalShareCommand {
@@ -2918,6 +2930,27 @@ mod failure_admission_tests {
             .settings
             .send_modify(|s| s.paused = true);
         assert!(!peer.can_scoped_input(100, 11));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portal_restoration_authority_is_not_an_address_or_claimed_connection_id() {
+        let make = |connection, nonce, scope, subscription| LocalPortalShareTarget {
+            addr: "127.0.0.1:39577".parse().unwrap(),
+            owner: PeerOwner::from_authenticated_connection(connection, nonce, Some(scope)).unwrap(),
+            source_revision: 10,
+            subscription_id: subscription,
+        };
+        let approved = make(31, [1;16], [2;32], 100);
+        let mut current = approved.clone();
+        current.source_revision = 11;
+        assert!(approved.same_authenticated_target(&current), "commit checks the new source revision separately");
+        for changed in [make(32,[1;16],[2;32],100), make(31,[3;16],[2;32],100),
+                        make(31,[1;16],[4;32],100), make(31,[1;16],[2;32],101)] {
+            assert!(!approved.same_authenticated_target(&changed));
+        }
+        current.addr = "127.0.0.1:39578".parse().unwrap();
+        assert!(!approved.same_authenticated_target(&current));
     }
 
     #[cfg(target_os = "macos")]

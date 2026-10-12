@@ -23,6 +23,7 @@ pub(crate) struct TargetRow {
 pub(crate) enum Action {
     Refresh,
     Select(String, ShareKind),
+    SelectFresh(String, ShareKind),
     Cancel,
     Stop(String),
 }
@@ -33,6 +34,7 @@ pub(crate) enum Effect {
         attempt: u64,
         key: String,
         kind: ShareKind,
+        reuse: bool,
     },
     Cancel(u64),
     Stop(String),
@@ -42,35 +44,41 @@ pub(crate) struct State {
     serial: u64,
     refresh: Option<u64>,
     pub rows: Vec<TargetRow>,
-    pending: Option<(u64, String)>,
+    pending: Option<(u64, String, ShareKind)>,
+    previous_kind: std::collections::HashMap<String, ShareKind>,
     message: Option<String>,
 }
 impl State {
     pub fn reduce(&mut self, action: Action) -> Option<Effect> {
+        let reuse = !matches!(&action, Action::SelectFresh(..));
         match action {
             Action::Refresh if self.pending.is_none() => {
                 self.serial += 1;
                 self.refresh = Some(self.serial);
                 Some(Effect::Refresh(self.serial))
             }
-            Action::Select(key, kind)
+            Action::Select(key, kind) | Action::SelectFresh(key, kind)
                 if self.pending.is_none() && self.rows.iter().any(|row| row.key == key) =>
             {
                 self.serial += 1;
                 self.refresh = None;
-                self.pending = Some((self.serial, key.clone()));
+                self.pending = Some((self.serial, key.clone(), kind));
                 self.message = None;
                 Some(Effect::Select {
                     attempt: self.serial,
                     key,
                     kind,
+                    reuse,
                 })
             }
             Action::Cancel => self
                 .pending
                 .take()
-                .map(|(attempt, _)| Effect::Cancel(attempt)),
-            Action::Stop(key) => Some(Effect::Stop(key)),
+                .map(|(attempt, _, _)| Effect::Cancel(attempt)),
+            Action::Stop(key) => {
+                self.previous_kind.remove(&key);
+                Some(Effect::Stop(key))
+            },
             _ => None,
         }
     }
@@ -91,10 +99,11 @@ impl State {
         true
     }
     pub fn completed(&mut self, receipt: u64, result: Result<(), String>) -> bool {
-        if self.pending.as_ref().map(|(id, _)| *id) != Some(receipt) {
+        if self.pending.as_ref().map(|(id, _, _)| *id) != Some(receipt) {
             return false;
         }
-        self.pending = None;
+        let (_, key, kind) = self.pending.take().unwrap();
+        if result.is_ok() { self.previous_kind.insert(key, kind); }
         self.message = result.err();
         true
     }
@@ -130,7 +139,7 @@ impl RenderOnce for Controls {
         let mut content=div().flex().flex_col().gap_2().p_3().rounded(px(8.0))
             .bg(cx.theme().surface.sunken).text_size(px(11.0)).text_color(cx.theme().content.primary)
             .child("Share this computer")
-            .child(div().text_color(cx.theme().content.tertiary).child("Window and Display share video only. Display + control asks for keyboard and pointer access. The viewer selects the shared source in Sources."))
+            .child(div().text_color(cx.theme().content.tertiary).child("Window and Display share video only. Display + control asks for keyboard and pointer access. Previously allowed selections can be reused while RP runs. Choose another source to select again. The viewer selects the shared source in Sources."))
             .child(Button::new("share_refresh","Refresh viewers").debug_selector(||"share-refresh".into())
                 .control_size(ControlSize::Sm).variant(ButtonVariant::Secondary).rounded_full().h(px(28.0)).disabled(pending)
                 .on_click(move |_,_,cx|refresh(Action::Refresh,cx)));
@@ -156,6 +165,9 @@ impl RenderOnce for Controls {
             let window_key = row.key.clone();
             let display_key = row.key.clone();
             let control_key = row.key.clone();
+            let fresh = self.send.clone();
+            let fresh_key = row.key.clone();
+            let previous_kind = self.state.previous_kind.get(&row.key).copied();
             let stop_key = row.key;
             content = content.child(
                 div()
@@ -164,6 +176,13 @@ impl RenderOnce for Controls {
                     .gap_1()
                     .child(row.label)
                     .when(active, |row| row.child("Shared source available"))
+                    .when(active && previous_kind.is_some(), |row| row.child(
+                        Button::new(format!("share_fresh_{fresh_key}"), "Choose another source")
+                            .debug_selector({ let key = fresh_key.clone(); move || format!("share-fresh-{key}") })
+                            .control_size(ControlSize::Sm).variant(ButtonVariant::Secondary)
+                            .rounded_full().h(px(28.0)).disabled(pending)
+                            .on_click(move |_,_,cx| fresh(Action::SelectFresh(fresh_key.clone(), previous_kind.unwrap()), cx))
+                    ))
                     .child(
                         div()
                             .flex()

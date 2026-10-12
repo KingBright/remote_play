@@ -87,6 +87,7 @@ struct Fixture {
     root: FocusHandle,
     state: State,
     output: Rc<RefCell<Vec<Action>>>,
+    active: Vec<String>,
 }
 impl Render for Fixture {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -95,7 +96,7 @@ impl Render for Fixture {
             .root()
             .child(div().w(px(390.0)).child(Controls::new(
                 self.state.clone(),
-                vec![],
+                self.active.clone(),
                 move |action, _| output.borrow_mut().push(action),
             )))
     }
@@ -125,6 +126,7 @@ fn actual_ely_share_buttons_dispatch_selection_disable_repeat_and_cancel(cx: &mu
             root: cx.focus_handle(),
             state,
             output,
+            active: vec![],
         }
     });
     cx.run_until_parked();
@@ -158,4 +160,23 @@ fn actual_ely_share_buttons_dispatch_selection_disable_repeat_and_cancel(cx: &mu
     let center = cx.debug_bounds("share-cancel").unwrap().center();
     cx.simulate_click(center, Modifiers::none());
     assert_eq!(*output.borrow(), [Action::Cancel]);
+    view.update(cx, |view,cx| {
+        view.state.reduce(Action::Cancel);
+        let Some(Effect::Select {attempt,..}) = view.state.reduce(Action::Select("a".into(),ShareKind::Window)) else {panic!()};
+        view.state.completed(attempt,Ok(()));view.active=vec!["a".into()];cx.notify();
+    });
+    cx.run_until_parked();output.borrow_mut().clear();
+    let center=cx.debug_bounds("share-fresh-a").unwrap().center();
+    cx.simulate_click(center,Modifiers::none());
+    assert_eq!(*output.borrow(),[Action::SelectFresh("a".into(),ShareKind::Window)]);
+}
+
+#[test]
+fn choosing_another_source_is_distinct_from_reusing_an_approved_selection() {
+    let mut state=State { rows: vec![TargetRow {key:"a".into(),label:"a".into()}],..State::default() };
+    let Some(Effect::Select {attempt,reuse:true,..})=state.reduce(Action::Select("a".into(),ShareKind::Window)) else {panic!()};
+    state.completed(attempt,Ok(()));assert_eq!(state.previous_kind["a"],ShareKind::Window);
+    let Some(Effect::Select {attempt,reuse:false,..})=state.reduce(Action::SelectFresh("a".into(),ShareKind::Window)) else {panic!()};
+    state.completed(attempt,Err("picker cancelled".into()));assert_eq!(state.previous_kind["a"],ShareKind::Window);
+    state.reduce(Action::Stop("a".into()));assert!(!state.previous_kind.contains_key("a"));
 }

@@ -2,7 +2,7 @@
 //!
 //! Pure ownership rules live here; runtime implements the real D-Bus requests,
 //! cancellation, restricted FD handoff and prepared owned-frame resource.
-//! No wire command, restore token, global PipeWire connection, or second UI is added.
+//! No wire command, disk restore token, global PipeWire connection, or second UI is added.
 
 use protocol::session::CaptureSource;
 use remote_core::shared_files::ShareScope;
@@ -153,7 +153,9 @@ impl PortalSessionState {
         if !valid_handle(&session, "session") {
             return Err(PortalError::Handle);
         }
-        if options.multiple || options.persist_mode != 0 || !options.monitor && !options.window {
+        // 1 is application-lifetime restoration. Never request the permanent
+        // permission mode (2) through this boundary.
+        if options.multiple || options.persist_mode > 1 || !options.monitor && !options.window {
             return Err(PortalError::Capabilities);
         }
         Ok(Self {
@@ -515,7 +517,7 @@ mod tests {
         }
     }
     #[test]
-    fn no_virtual_persistent_or_metadata_cursor_permission() {
+    fn no_virtual_permanent_or_metadata_cursor_permission() {
         assert_eq!(
             SelectionOptions::from_capabilities(4, 3),
             Err(PortalError::Capabilities)
@@ -528,12 +530,15 @@ mod tests {
         assert!(!options.multiple);
         assert_eq!(options.persist_mode, 0);
         assert!(options.embedded_cursor);
+        assert!(PortalSessionState::new(7, SESSION.into(), SelectionOptions {
+            persist_mode: 1, ..options
+        }).is_ok());
         assert!(
             PortalSessionState::new(
                 7,
                 SESSION.into(),
                 SelectionOptions {
-                    persist_mode: 1,
+                    persist_mode: 2,
                     ..options
                 }
             )

@@ -34,13 +34,14 @@ mod linux_frame;
 pub mod linux_frame;
 #[cfg(all(unix, any(test, target_os = "linux")))]
 mod linux_portal;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub use linux_portal::{
     SourceKind as PortalSourceKind,
     runtime::{
         PickerSources, PortalCallError, PortalCaptureLease, PortalInputError,
         PreparedPortalCapture, SelectedPortalSource, request_local_portal_capture,
-        request_local_portal_control_capture,
+        request_local_portal_control_capture, request_local_portal_capture_restorable,
+        PortalSessionRestore,
     },
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -1244,4 +1245,18 @@ mod capture_start_lifecycle_tests {
             None
         );
     }
+}
+
+// Compile the actual Linux share owner against this crate's private-bus harness
+// on Unix tests. The native PipeWire worker is the one mocked boundary.
+#[cfg(all(test, unix))]
+extern crate self as host;
+#[cfg(all(test, unix, not(target_os = "linux")))]
+pub async fn prepare_pipewire_capture(mut lease: PortalCaptureLease) -> Result<PreparedPortalCapture, PortalCallError> {
+    let (_, fd) = lease.take_pipewire_remote()?;
+    drop(fd);
+    let mut frame = linux_raw_encode::tests::frame(linux_frame::PixelFormat::Nv12,
+        linux_raw_encode::tests::known_color(), 1);
+    frame.stamp.generation = lease.selected_source().generation;
+    lease.prepare_owned_capture(frame)
 }
