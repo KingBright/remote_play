@@ -123,7 +123,55 @@ preflight with target 0.10.35). This is not a product-upgrade success receipt. T
 previous b83 candidate remains immutable; safe idle cannot be established from
 its current product because it lacks authoritative live-session counters.
 
-GitHub main push was rejected before process creation by automatic approval
-review: the current trusted approval did not name the exact private repository
-and full 66-commit source scope. No alternate push route was used. The repository
-and scope clarification is pending; local branches and backups remain retained.
+At the earlier checkpoint, GitHub main push was rejected before process creation
+by automatic approval review because its exact repository/source scope was not
+yet approved. The later explicit approval covered the batch ending at
+`b98a37f31619fe70001b4d86d7283a80822e1266`, which was pushed successfully.
+Neither the subsequent input fixes nor the original104 reconciliation commits
+have been pushed.
+
+## Native ownership and lease lifetime follow-up (2026-10-13)
+
+A further production-dispatch regression reproduced an ownership-lifetime gap:
+A held Ctrl/Shift, B took control and released A's native state, but A's still-live
+protocol lease accepted a new key carrying the old modifier mask. It released B
+and could recreate A's old chord. `event_loop_retired_owner_cannot_resurrect_an_old_chord`
+failed against 286d699's implementation before the repair.
+
+The protocol lease and native owner now share one irreversible revocation token.
+`ActiveInput::release` revokes it before any native cleanup or await, covering
+ownership takeover, disconnect, source/pause retirement, watchdog expiry and
+native error cleanup. `InputLease::expired` includes revocation; the existing
+binding request path creates a fresh epoch with empty held state. A displaced
+viewer must obtain that grant and issue new input. Its old snapshot, release,
+modifier intent or changed-payload duplicate cannot revive the retired epoch.
+Fresh ownership takeover remains supported. The token is host-local lifecycle
+state; it adds no wire field, permission service or device authorization.
+
+The shared input mechanism has four boundaries:
+
+| Boundary | Owner | Invariant |
+| --- | --- | --- |
+| Sender intent | `WorkspaceInputState` | Bind events before queueing; new epoch clears held intent; no replay across source/reconnect. |
+| Protocol admission | `InputLease` / `HeldState` | Exact binding, consumed sequence, age and explicit modifier intent; held snapshots only retain matching presses or release missing ones. |
+| Native ownership | `ActiveInput` + lease revocation | One current native owner; every loss of that owner irreversibly retires its protocol lifetime before cleanup. |
+| Native effect | macOS, Windows, uinput and Portal adapters | One shared event deadline; ownership-aware cleanup; final-post checks after blocking work; unknown outcomes are not replayed. |
+
+Matching held snapshots renew every100ms;300ms without renewal expires, checked
+every50ms. The nominal350ms software bound depends on timely scheduling and
+cannot retract an OS-queued event. Global macOS/Windows and compositor input
+still cannot promise strict isolation from simultaneous local physical keys.
+
+The same-path review also confirmed that raw legacy `ControlMessage::Input` and
+unsequenced Session input are rejected by the protected host. Android's workspace
+path uses `WorkspaceConnection` sealing. Its older single-viewport/manual-address
+bridge still emits legacy raw input and therefore cannot claim control against
+the new protected host. This remains a compatibility gap; it is not made safe by
+re-enabling unbound input, and the Android source commit is not a device-release
+acceptance. Native Windows/Linux ABI, real Android instrumentation, physical
+input and all current cross-device installed-version checks remain separate.
+
+Final follow-up verification: host198 passed/2ignored; protocol45 passed.
+These overlap the earlier focused checks and must not be added as independent
+coverage. Both new lifetime tests pass; the stale-chord regression failed before
+the change. Logs are in task-4/original104-audit-20261013/input-lifetime-tests.log.

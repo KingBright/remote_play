@@ -4,7 +4,7 @@ use crate::{
     StreamingRunConfig, SubscriptionAudioConfig, env_flag_enabled, run_streaming,
     start_subscription_audio,
 };
-use protocol::realtime_input::{InputBinding, InputLease, InputPayload, RealtimeInput};
+use protocol::realtime_input::{InputBinding, InputLease, InputLeaseRevocation, InputPayload, RealtimeInput};
 use protocol::session::{
     CaptureSource, MAX_SUBSCRIPTIONS, SESSION_VERSION, SessionCommand, SubscriptionRequest,
 };
@@ -1364,6 +1364,7 @@ impl Connection {
 struct ActiveInput {
     owner: Option<(SocketAddr, u32)>,
     binding: Option<InputBinding>,
+    lease_revocation: Option<InputLeaseRevocation>,
     #[cfg(all(unix, any(test, target_os = "linux")))]
     capture: Option<PreparedPortalCapture>,
 }
@@ -1372,6 +1373,9 @@ impl ActiveInput {
         &mut self,
         injector: &LazyInputInjector,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Revoke before any native cleanup/await, even if its outcome is unknown.
+        // The displaced sender must obtain a fresh empty lease before resuming.
+        if let Some(lease) = self.lease_revocation.take() { lease.revoke(); }
         self.owner = None;
         self.binding = None;
         injector.release_all_input();
@@ -1455,6 +1459,7 @@ async fn dispatch_realtime_input(
                 return;
             }
             owner.binding = Some(packet.binding);
+            owner.lease_revocation = peer.input_leases.get(&id).map(|slot| slot.lease.revocation());
         }
     }
     if matches!(packet.payload, InputPayload::Release) {
@@ -2360,6 +2365,12 @@ mod failure_admission_tests {
                 payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
         assert!(held.load(SeqCst));
         assert_eq!(releases.load(SeqCst), 1);
+        let binding_a = if takes_over {
+            let SessionCommand::InputBinding { binding, .. } =
+                a.input_binding(31, 100, 10, 2).unwrap() else { panic!() };
+            assert_ne!(binding, binding_a);
+            binding
+        } else { binding_a };
         let description = format!("{payload:?}");
         let packet = RealtimeInput { binding: binding_a, sequence: 4,
             created_host_ms: host_input_time_ms(), payload };
@@ -2374,8 +2385,8 @@ mod failure_admission_tests {
             assert_eq!(releases.load(SeqCst), 1, "{description}");
             assert_eq!(owner.owner, Some((addr_b, 100)), "{description}");
             assert_eq!(owner.binding, Some(binding_b), "{description}");
-            // Suppressed cleanup still consumes its sequence. A changed-payload
-            // duplicate cannot turn that sequence into a new takeover.
+            // Revocation is irreversible. A changed-payload duplicate cannot
+            // turn the retired epoch into a new takeover.
             dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
                 RealtimeInput { payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
                     ..packet }).await;
@@ -2405,9 +2416,16 @@ mod failure_admission_tests {
     }
 
     #[tokio::test]
+    async fn event_loop_retired_owner_cannot_resurrect_an_old_chord() {
+        check_takeover_packet(InputPayload::Event(InputEvent::Key {
+            key_code: 1, pressed: true, modifiers: 3,
+        }), false).await;
+    }
+
+    #[tokio::test]
     async fn event_loop_new_active_input_still_takes_over() {
         for event in [InputEvent::MouseDown(1), InputEvent::KeyDown(1),
-            InputEvent::Key { key_code: 1, pressed: true, modifiers: 3 },
+            InputEvent::Key { key_code: 1, pressed: true, modifiers: 0 },
             InputEvent::MouseMove { dx: 1, dy: 0 },
             InputEvent::MouseMoveAbsolute { x: 10, y: 20 },
             InputEvent::MouseScroll { delta_x: 0, delta_y: 1 },

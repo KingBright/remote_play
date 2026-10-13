@@ -187,9 +187,23 @@ impl HeldState {
     }
 }
 
+/// Native ownership and protocol admission share one irreversible lifetime.
+/// Dropping control never allows an old held snapshot to recreate that lifetime.
+#[derive(Clone, Debug, Default)]
+pub struct InputLeaseRevocation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl InputLeaseRevocation {
+    pub fn revoke(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    fn is_revoked(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[derive(Debug)]
 pub struct InputLease {
     pub binding: InputBinding,
+    revocation: InputLeaseRevocation,
     high_water: u64,
     last_valid_ms: u64,
     held: HeldState,
@@ -201,6 +215,7 @@ impl InputLease {
     pub fn new(binding: InputBinding, now_ms: u64) -> Self {
         Self {
             binding,
+            revocation: InputLeaseRevocation::default(),
             high_water: 0,
             last_valid_ms: now_ms,
             held: HeldState::default(),
@@ -209,11 +224,15 @@ impl InputLease {
             last_held: std::time::Instant::now(),
         }
     }
+    pub fn revocation(&self) -> InputLeaseRevocation {
+        self.revocation.clone()
+    }
     pub fn held_modifiers(&self) -> u8 {
         self.held.modifiers()
     }
     pub fn expired(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_valid_ms) >= HOLD_TIMEOUT_MS
+        self.revocation.is_revoked()
+            || now_ms.saturating_sub(self.last_valid_ms) >= HOLD_TIMEOUT_MS
             || self.last_valid.elapsed().as_millis() >= HOLD_TIMEOUT_MS as u128
             || (!self.held.0.is_empty()
                 && (now_ms.saturating_sub(self.last_held_ms) >= HOLD_TIMEOUT_MS
@@ -361,6 +380,33 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn revoked_native_owner_requires_a_new_empty_protocol_lease() {
+        let mut old = InputLease::new(binding(1), 1000);
+        old.accept(&packet(1, InputPayload::Event(InputEvent::ModifiersChanged(2))), 1000).unwrap();
+        let native_owner = old.revocation();
+        native_owner.revoke();
+        native_owner.revoke();
+        assert!(old.expired(1000));
+        for (sequence, payload) in [
+            (2, InputPayload::Held(vec![(Press::Modifier(2), 1)])),
+            (3, InputPayload::Event(InputEvent::Key { key_code: 8, pressed: true, modifiers: 2 })),
+            (4, InputPayload::Release),
+        ] {
+            assert!(old.accept(&packet(sequence, payload), 1000).is_none());
+        }
+        let mut fresh = InputLease::new(binding(2), 1000);
+        let mut old_snapshot = packet(1, InputPayload::Held(vec![(Press::Modifier(2), 1)]));
+        old_snapshot.binding = binding(2);
+        assert!(fresh.accept(&old_snapshot, 1000).unwrap().is_empty());
+        assert_eq!(fresh.held_modifiers(), 0);
+        native_owner.revoke(); // Late old cleanup cannot revoke the replacement.
+        assert!(!fresh.expired(1000));
+        let mut press = packet(2, InputPayload::Event(InputEvent::Key { key_code: 8, pressed: true, modifiers: 0 }));
+        press.binding = binding(2);
+        assert_eq!(fresh.accept(&press, 1000).unwrap().len(), 1);
+    }
+
     #[test]
     fn reconnect_source_switch_and_old_release_cannot_touch_new_epoch() {
         let mut lease = InputLease::new(binding(2), 1000);
