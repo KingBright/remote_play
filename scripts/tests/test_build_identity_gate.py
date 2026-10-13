@@ -312,6 +312,71 @@ class BuildIdentityGateTests(unittest.TestCase):
                 process.terminate(); process.wait(timeout=5)
 
 
+    def observed_fixture(self, changed=False):
+        self.run_git('branch', '-M', 'main')
+        target = self.root / 'rust-target'; target.mkdir()
+        binary = target / self.config['target'] / 'debug/remote_play'
+        binary.parent.mkdir(parents=True); binary.write_bytes(b'compiled fixture bytes')
+        after = deepcopy(self.source)
+        if changed: after['snapshot_sha256'] = 'f' * 64
+        from contextlib import ExitStack
+        stack = ExitStack(); self.addCleanup(stack.close)
+        stack.enter_context(patch.object(gate, 'shared_target', return_value=target))
+        stack.enter_context(patch.object(gate, 'source_snapshot', side_effect=[self.source, after]))
+        stack.enter_context(patch.object(gate, 'toolchain_digest', return_value='a' * 64))
+        stack.enter_context(patch.object(gate, 'environment_digest', return_value='b' * 64))
+        stack.enter_context(patch.object(gate, 'build_environment', return_value={'PATH': '/usr/bin'}))
+        stack.enter_context(patch.object(gate.shutil, 'disk_usage', return_value=type('Disk', (), {'free': 8 * 1024 ** 3})()))
+        execute = stack.enter_context(patch.object(gate.BuildInputs, 'run', return_value=0))
+        metadata = stack.enter_context(patch.object(gate, 'product_info', return_value=self.info))
+        return target, execute, metadata
+
+    def test_shared_cache_build_has_truthful_receipt_and_cleans_fixed_inputs(self):
+        target, execute, _ = self.observed_fixture()
+        result = gate.observed_build(self.repo, self.identity, target)
+        self.assertEqual(result['schema'], 2); self.assertIs(result['fresh_target'], False)
+        self.assertEqual(result['build_storage']['mode'], 'shared-incremental')
+        env = execute.call_args.kwargs['env']
+        self.assertNotIn('CARGO_INCREMENTAL', env); self.assertNotIn('CARGO_TARGET_DIR', env)
+        self.assertEqual(Path(env['REMOTEPLAY_BUILD_IDENTITY_FILE']).parent, target)
+        self.assertFalse((target / '.remoteplay-build-identity.json').exists())
+        self.assertFalse((target / '.remoteplay-build-identity.rs').exists())
+        self.receipt = result
+        self.seal()  # The ordinary signing/product gate accepts the truthful new receipt.
+
+    def test_source_change_after_build_never_mints_receipt(self):
+        target, execute, metadata = self.observed_fixture(changed=True)
+        with self.assertRaises(gate.IdentityRejected): gate.observed_build(self.repo, self.identity, target)
+        metadata.assert_not_called()
+        self.assertEqual(execute.call_args.args[0][0:2], ['cargo', 'build'])
+        self.assertFalse((target / '.remoteplay-build-identity.json').exists())
+
+    def test_fixed_input_recovery_preserves_unknown_and_active_files(self):
+        target = self.root / 'rust-target'; target.mkdir()
+        inputs = gate.BuildInputs(self.repo, target, self.identity)
+        inputs.document.write_bytes(b'unknown')
+        with self.assertRaises(gate.IdentityRejected):
+            with inputs: pass
+        self.assertEqual(inputs.document.read_bytes(), b'unknown')
+        inputs.document.unlink()  # Disposable fixture, never a project artifact.
+        with gate.BuildInputs(self.repo, target, self.identity) as owned:
+            owned.state.update(phase='running', pgid=12345); owned.save(); owned.settled = False
+        with patch.object(gate, 'group_alive', return_value=True):
+            with self.assertRaises(gate.IdentityRejected):
+                with gate.BuildInputs(self.repo, target, self.identity): pass
+        self.assertTrue(inputs.document.exists())
+        with patch.object(gate, 'group_alive', return_value=False):
+            with gate.BuildInputs(self.repo, target, self.identity):
+                self.assertEqual(gate.read_json(inputs.document), self.identity)
+        self.assertFalse(inputs.document.exists())
+
+    def test_shared_receipt_cannot_relabel_itself_fresh(self):
+        self.receipt.update(schema=2, build_storage={'mode': 'shared-incremental',
+                           'target_directory': str(self.root / 'rust-target'), 'source_directory': str(self.repo)})
+        with self.assertRaises(gate.IdentityRejected): self.seal()
+        self.receipt.update(schema=1, fresh_target=False)
+        with self.assertRaises(gate.IdentityRejected): self.seal()
+
 
 class IndependentNativeIdentityTests(unittest.TestCase):
     def setUp(self):
@@ -385,23 +450,6 @@ class IndependentNativeIdentityTests(unittest.TestCase):
         self.assertEqual(raw, json.dumps(self.identity, sort_keys=True, indent=2).encode() + b'\n')
         self.assertIn('unsafe(link_section = ".rpbuild")', text)
         self.assertIn('unsafe(link_section = "__TEXT,__rpbuild")', text)
-
-    def test_source_change_after_build_never_mints_receipt(self):
-        changed = deepcopy(self.source); changed['snapshot_sha256'] = 'f' * 64
-        repo = self.root / 'source'; repo.mkdir()
-        target = self.root / 'new-target'
-        with patch.object(gate, 'source_snapshot', side_effect=[self.source, changed]), \
-             patch.object(gate, 'toolchain_digest', return_value='a' * 64), \
-             patch.object(gate, 'environment_digest', return_value='b' * 64), \
-             patch.object(gate, 'build_environment', return_value={}), \
-             patch.object(gate.shutil, 'disk_usage', return_value=type('Disk', (), {'free': 8 * 1024 ** 3})()), \
-             patch.object(gate.subprocess, 'run', return_value=type('Exit', (), {'returncode': 0})()) as execute, \
-             patch.object(gate, 'product_info') as metadata:
-            with self.assertRaises(gate.IdentityRejected):
-                gate.observed_build(repo, self.identity, target)
-        metadata.assert_not_called()
-        self.assertEqual(execute.call_args.args[0][0:2], ['cargo', 'build'])
-        self.assertIn('REMOTEPLAY_BUILD_IDENTITY_RS', execute.call_args.kwargs['env'])
 
     def test_macos_lifecycle_metadata_and_launch_role_are_required(self):
         config = gate.configuration('macos', 'aarch64', '2.0.0-alpha.8',
