@@ -1,0 +1,9 @@
+[package]
+name = "remoteplay-native-drm-validation"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+ash = "=0.38.0"
+libc = "0.2"
