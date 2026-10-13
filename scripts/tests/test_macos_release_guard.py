@@ -98,6 +98,31 @@ class ReleaseGateTests(unittest.TestCase):
     def test_zip_backslash_rejected(self): self.reject_archive([('RemotePlay.app\\..\\bad',b'x')])
     def test_zip_collision_rejected(self): self.reject_archive([('RemotePlay.app/A',b'x'),('remoteplay.app/a',b'y')])
     def test_zip_extra_app_rejected(self): self.reject_archive([('Other.app/Contents/Info.plist',b'x')])
+    def test_external_manifest_requires_independent_expectations(self):
+        self.reject_archive([('RemotePlay.app/payload', b'x'),
+                             ('remoteplay-release-manifest.json', b'{}')])
+
+    def test_external_manifest_cannot_supply_its_own_identity(self):
+        archive = self.archive([('RemotePlay.app/payload', b'x'),
+                                ('remoteplay-release-manifest.json', b'{}')])
+        pins = {'commit': 'a' * 40, 'identity_sha256': 'b' * 64, 'manifest_sha256': 'c' * 64}
+        with patch.object(guard, 'verify_app') as verify:
+            with self.assertRaises(guard.identity_gate.IdentityRejected):
+                with guard.verified_archive(archive, self.policy, identity_expectations=pins): pass
+        verify.assert_not_called()
+
+    def test_identity_archive_change_during_signature_check_is_rejected(self):
+        archive = self.archive([('RemotePlay.app/payload', b'x'),
+                                ('remoteplay-release-manifest.json', b'{}')])
+        before = guard.sha256(archive)
+        pins = {'commit': 'a' * 40, 'identity_sha256': 'b' * 64, 'manifest_sha256': 'c' * 64}
+        def mutate(*args, **kwargs):
+            with archive.open('ab') as out: out.write(b'changed')
+            return {}
+        with patch.object(guard.identity_gate, 'verify_package', return_value={'archive_sha256': before}), \
+             patch.object(guard, 'verify_app', side_effect=mutate):
+            with self.assertRaisesRegex(guard.ReleaseRejected, 'changed during signature'):
+                with guard.verified_archive(archive, self.policy, identity_expectations=pins): pass
     def test_zip_symlink_rejected(self):
         entry=zipfile.ZipInfo('RemotePlay.app/link');entry.create_system=3;entry.external_attr=(stat.S_IFLNK|0o777)<<16
         self.reject_archive([(entry,b'/Applications')])
@@ -119,7 +144,8 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_package_guard_precedes_build(self):
         s=(guard.ROOT/'scripts/package_macos_unified.sh').read_text()
-        self.assertLess(s.index('macos_release_guard.py'),s.index('cargo build'))
+        self.assertLess(s.index('macos_release_guard.py'),s.index('verify_prebuilt_binary.py'))
+        self.assertNotIn('cargo build --release', s)
         self.assertNotIn('Signing ad-hoc',s)
 
 
