@@ -59,6 +59,10 @@ impl WorkspaceTouch {
         }
         release
     }
+    /// An old surface's heartbeat cannot attest the replacement gesture.
+    pub fn healthy_binding(&self,token:u64)->Option<InputBinding>{
+        (token==self.surface&&self.attached&&self.frame_ready&&self.visible&&self.supported&&self.tracker.has_active_pointers()).then_some(self.binding).flatten()
+    }
     pub fn invalidate(&mut self) -> Option<InputBinding> {
         self.attached = false;
         self.frame_ready = false;
@@ -369,4 +373,12 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn only_current_live_surface_can_refresh_a_held_binding(){
+        let mut touch=ready();let now=Instant::now();let grant=Some(binding(1));
+        touch.touch(1,event(TouchAction::Down,7,0.1),grant,now);touch.touch(1,event(TouchAction::Move,7,0.8),grant,now);
+        touch.alive(1,now+std::time::Duration::from_millis(100));assert_eq!(touch.healthy_binding(1),grant);assert_eq!(touch.healthy_binding(2),None);
+        touch.alive(1,now+std::time::Duration::from_millis(500));assert_eq!(touch.healthy_binding(1),None);
+    }
+
 }

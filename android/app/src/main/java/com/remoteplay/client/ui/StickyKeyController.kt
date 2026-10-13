@@ -15,6 +15,7 @@ internal class StickyKeyController(private val send: (String, Boolean) -> Unit) 
             send(name, false)
         }
     }
+    fun forgetAll() { held.clear() }
     fun releaseAll() {
         val releases = held.toList().asReversed()
         held.clear()

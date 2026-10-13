@@ -19,6 +19,7 @@ pub struct Instance {
     info: PathBuf,
     renderer_info: PathBuf,
     task: Option<tokio::task::JoinHandle<()>>,
+    frontend: bool,
 }
 impl Instance {
     pub fn acquire(directory: &Path) -> Result<Option<Self>, String> {
@@ -51,7 +52,11 @@ impl Instance {
             }
         }
         #[cfg(windows)] {std::fs::create_dir_all(&directory).map_err(|e|e.to_string())?;crate::private_ipc::private_directory(&directory).map_err(|e|e.to_string())?;}
-        Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)
+        Ok(Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)?
+            .map(|mut instance| {
+                instance.frontend = true;
+                instance
+            }))
     }
     pub fn acquire_headless(directory: &Path) -> Result<Option<Self>, String> {
         Self::acquire_mode(directory, None)
@@ -150,6 +155,7 @@ impl Instance {
             info,
             renderer_info,
             task: None,
+            frontend: false,
         }))
     }
     /// A verified standalone service may only activate its existing window.
@@ -173,7 +179,7 @@ impl Instance {
     }
     pub(crate) fn state_directory(&self) -> &Path { self.info.parent().expect("instance state directory") }
 
-    pub(crate) fn is_frontend(&self) -> bool { self.info.parent().is_some_and(|p| p.ends_with("gui-state")) }
+    pub(crate) fn is_frontend(&self) -> bool { self.frontend }
 
     /// Same lock/activation protocol for every renderer. The callback only signals
     /// its own GUI; it must not start another network or capture runtime.
@@ -207,6 +213,34 @@ impl Drop for Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_named_gui_state_still_owns_runtime_and_its_actual_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("gui-state");
+        std::fs::create_dir(&profile).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let owner = Instance::acquire(&profile).unwrap().unwrap();
+        assert!(!owner.is_frontend());
+        let service_lock = owner.service_lock().unwrap();
+        assert!(Instance::acquire(&profile).unwrap().is_none());
+        let frontend = Instance::acquire_frontend(&profile).unwrap().unwrap();
+        assert!(frontend.is_frontend());
+        assert_eq!(frontend.state_directory(), profile.join("gui-state"));
+        assert!(frontend.service_lock().is_err());
+        assert!(Instance::acquire_frontend(&profile).unwrap().is_none());
+
+        // Service ownership keeps the original lock alive after its window
+        // instance drops; the separate frontend lock cannot replace it.
+        let contender = OpenOptions::new().read(true).write(true)
+            .open(profile.join("desktop-instance.lock")).unwrap();
+        drop(owner);
+        assert!(contender.try_lock().is_err());
+        drop(service_lock);
+        assert!(contender.try_lock().is_ok());
+    }
     #[test]
     fn headless_runtime_also_owns_the_profile_and_rejects_a_second_gui() {
         let dir = tempfile::tempdir().unwrap();

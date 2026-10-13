@@ -3,8 +3,55 @@
 use crate::desktop::directed_receive::{Request, exchange};
 use host::directed_delivery::{Incoming, LEASE};
 use protocol::session::{DeliveryClaimProof, DeliveryState};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 type Error = Box<dyn std::error::Error + Send + Sync>;
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const FIRST_FRAME_TIMEOUT_REASON: &str =
+    "Receiver did not report its first submitted video frame within 30 seconds";
+
+/// A renewable sending intent must not keep a failed startup alive forever.
+/// Once this exact receive has submitted a decoded frame, an unchanged desktop
+/// is allowed to remain quiet for the rest of its renewable lease.
+struct FirstFrameDeadline {
+    deadline: Option<Instant>,
+}
+impl FirstFrameDeadline {
+    fn new(now: Instant) -> Self {
+        Self {
+            deadline: Some(now + FIRST_FRAME_TIMEOUT),
+        }
+    }
+    async fn wait<F: Future>(&self, work: F) -> Result<F::Output, &'static str> {
+        match self.deadline {
+            Some(deadline) => tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+                .await
+                .map_err(|_| FIRST_FRAME_TIMEOUT_REASON),
+            None => Ok(work.await),
+        }
+    }
+    fn observe(
+        &mut self,
+        status: &serde_json::Value,
+        generation: &str,
+        request: &str,
+        source: &str,
+        now: Instant,
+    ) -> Result<bool, &'static str> {
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            return Err(FIRST_FRAME_TIMEOUT_REASON);
+        }
+        let receiving = receiving_status(status, generation, request, source);
+        if receiving {
+            self.deadline = None;
+        }
+        Ok(receiving)
+    }
+}
 async fn ipc(directory: PathBuf, request: Request) -> Result<serde_json::Value, Error> {
     tokio::task::spawn_blocking(move || exchange(&directory, &request)).await?
 }
@@ -130,20 +177,21 @@ async fn receive(
             return Err("Sending intent ended during GUI activation".into());
         }
         offer.finish(DeliveryState::Accepted, "");
+        let mut first_frame = FirstFrameDeadline::new(Instant::now());
         let mut applied = 1;
         while offer.alive() {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            first_frame.wait(tokio::time::sleep(Duration::from_millis(300))).await?;
             let (revision, expires, _) = offer.snapshot();
             if !offer.alive() {
                 break;
             }
-            let status = ipc(directory.clone(), Request::Status).await?;
+            let status = first_frame.wait(ipc(directory.clone(), Request::Status)).await??;
             if status["generation"].as_str() != Some(&generation)
                 || status["lease"]["request_id"].as_str() != Some(&request_id)
             {
                 return Err("Receiver stopped or changed generation".into());
             }
-            if receiving_status(&status, &generation, &request_id, &offer.source) {
+            if first_frame.observe(&status, &generation, &request_id, &offer.source, Instant::now())? {
                 offer.finish(DeliveryState::Receiving, "");
             }
             if receiving_failed(&status, &generation, &request_id, &offer.source) {
@@ -157,7 +205,7 @@ async fn receive(
                 if lease_ms < 1_000 {
                     break;
                 }
-                let response = ipc(
+                let response = first_frame.wait(ipc(
                     directory.clone(),
                     Request::Renew {
                         generation: generation.clone(),
@@ -166,8 +214,8 @@ async fn receive(
                         revision,
                         lease_ms,
                     },
-                )
-                .await?;
+                ))
+                .await??;
                 if response["ok"] != true {
                     return Err("Receiver lease ended".into());
                 }
@@ -221,6 +269,55 @@ fn has_submitted_video(status: &serde_json::Value, source: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn confirmed_receiver() -> serde_json::Value {
+        serde_json::json!({"generation":"gui","lease":{"request_id":"request","remaining_ms":15_000},
+            "sessions":{"directed_receive_failed":false,"sessions":[{"device_id":"source","connected":true,
+                "peer_responsive":true,"confirmed":true,"error":"","video_error":null,
+                "decoded_frames":0,"scene_submitted_frame":false}]}})
+    }
+    #[test]
+    fn confirmed_healthy_receiver_without_video_expires_despite_renewals() {
+        let start = Instant::now();
+        let mut deadline = FirstFrameDeadline::new(start);
+        let mut status = confirmed_receiver();
+        for second in 0..30 {
+            // Both the authenticated connection and renewable intent remain
+            // healthy; neither demonstrates that the first picture arrived.
+            status["lease"]["remaining_ms"] = 15_000.into();
+            assert!(!receiving_failed(&status, "gui", "request", "source"));
+            assert!(!deadline.observe(&status, "gui", "request", "source", start + Duration::from_secs(second)).unwrap());
+        }
+        assert_eq!(deadline.observe(&status, "gui", "request", "source", start + FIRST_FRAME_TIMEOUT), Err(FIRST_FRAME_TIMEOUT_REASON));
+        status["sessions"]["sessions"][0]["decoded_frames"] = 1.into();
+        status["sessions"]["sessions"][0]["scene_submitted_frame"] = true.into();
+        assert_eq!(deadline.observe(&status, "gui", "request", "source", start + FIRST_FRAME_TIMEOUT), Err(FIRST_FRAME_TIMEOUT_REASON));
+    }
+    #[test]
+    fn only_exact_receive_first_frame_disarms_deadline_and_static_picture_stays_valid() {
+        let start = Instant::now();
+        let mut deadline = FirstFrameDeadline::new(start);
+        let mut status = confirmed_receiver();
+        status["sessions"]["sessions"][0]["decoded_frames"] = 1.into();
+        assert!(!deadline.observe(&status, "gui", "request", "source", start).unwrap());
+        status["sessions"]["sessions"][0]["scene_submitted_frame"] = true.into();
+        for (generation, request, source) in [
+            ("old-gui", "request", "source"),
+            ("gui", "old-request", "source"),
+            ("gui", "request", "other-source"),
+        ] {
+            let mut unrelated = FirstFrameDeadline::new(start);
+            assert!(!unrelated.observe(&status, generation, request, source, start).unwrap());
+            assert_eq!(unrelated.observe(&status, generation, request, source, start + FIRST_FRAME_TIMEOUT), Err(FIRST_FRAME_TIMEOUT_REASON));
+        }
+        assert!(deadline.observe(&status, "gui", "request", "source", start + Duration::from_secs(1)).unwrap());
+        // No additional frame is required after the first submitted picture.
+        assert!(deadline.observe(&status, "gui", "request", "source", start + Duration::from_secs(86_400)).unwrap());
+    }
+    #[tokio::test]
+    async fn first_frame_budget_also_bounds_a_stalled_status_exchange() {
+        let deadline = FirstFrameDeadline { deadline: Some(Instant::now() + Duration::from_millis(10)) };
+        assert_eq!(deadline.wait(std::future::pending::<()>()).await, Err(FIRST_FRAME_TIMEOUT_REASON));
+    }
     #[test]
     fn receiving_requires_same_source_decoded_and_submitted_frame() {
         let mut status = serde_json::json!({"sessions":{"sessions":[{"device_id":"source","connected":true,"decoded_frames":0,"scene_submitted_frame":false}]}});

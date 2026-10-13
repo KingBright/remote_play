@@ -202,6 +202,11 @@ impl WorkspaceConnection {
     pub fn input_binding(&self, id: u32, source_revision: u32) -> Option<protocol::realtime_input::InputBinding> {
         self.input.lock().unwrap().binding(id, source_revision)
     }
+    /// Local frontend liveness for this exact grant. Call only from a healthy,
+    /// visible input UI (or its validated surface heartbeat), never an actor timer.
+    pub fn refresh_bound_input(&self,binding:protocol::realtime_input::InputBinding)->bool {
+        self.input.lock().unwrap().refresh_bound(binding)
+    }
     /// Bind a gesture to the exact grant observed before translation, including its epoch.
     /// None releases that grant's held state; a newer grant is never substituted.
     pub fn try_bound_input(&self, binding: protocol::realtime_input::InputBinding, event: Option<protocol::InputEvent>) -> bool {

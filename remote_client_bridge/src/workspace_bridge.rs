@@ -376,6 +376,11 @@ impl MobileWorkspace {
             if let Some(binding) = release {
                 self.connection.try_bound_input(binding, None);
             }
+            if event.phase=="alive" {
+                if let Some(binding)=touch.healthy_binding(event.token){
+                    if !self.connection.refresh_bound_input(binding){touch.cancel();self.connection.try_bound_input(binding,None);}
+                }
+            }
         }
         Ok(())
     }

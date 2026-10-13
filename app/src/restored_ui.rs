@@ -1755,14 +1755,15 @@ impl Render for RestoredDashboard {
             .font_family(crate::design_system::product_ui_font())
             .overflow_hidden()
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "f11" {
+                let Some(keystroke) = fresh_key_down(event) else { return; };
+                if keystroke.key == "f11" {
                     window.toggle_fullscreen();
                     cx.stop_propagation();
                     cx.notify();
                     return;
                 }
-                if event.keystroke.key == "escape"
-                    && !event.keystroke.modifiers.control
+                if keystroke.key == "escape"
+                    && !keystroke.modifiers.control
                     && (this.drawer_open || this.show_apps_menu)
                 {
                     this.owner.release_input();
@@ -1772,9 +1773,9 @@ impl Render for RestoredDashboard {
                     cx.notify();
                     return;
                 }
-                if event.keystroke.key == "escape"
-                    && event.keystroke.modifiers.control
-                    && event.keystroke.modifiers.alt
+                if keystroke.key == "escape"
+                    && keystroke.modifiers.control
+                    && keystroke.modifiers.alt
                 {
                     this.set_input_locked(true);
                     this.toolbar_revealed = true;
@@ -1783,7 +1784,7 @@ impl Render for RestoredDashboard {
                     return;
                 }
                 if this.input_session_id.is_some() && this.input_focus.is_focused(window) {
-                    this.queue_key(&event.keystroke, true);
+                    this.queue_key(keystroke, true);
                     cx.stop_propagation();
                 }
             }))
@@ -4819,6 +4820,12 @@ pub(crate) fn protocol_modifiers(modifiers: Modifiers) -> u8 {
     flags
 }
 
+// Native held input is renewed by the healthy frontend. OS autorepeat is not
+// a fresh press and must never resurrect an expired chord before the next poll.
+pub(crate) fn fresh_key_down(event: &KeyDownEvent) -> Option<&Keystroke> {
+    (!event.is_held).then_some(&event.keystroke)
+}
+
 pub(crate) fn protocol_key_event(
     keystroke: &Keystroke,
     pressed: bool,
@@ -5328,6 +5335,20 @@ mod input_tests {
             protocol_mouse_button(MouseButton::Navigate(NavigationDirection::Back)),
             None
         );
+    }
+
+    #[test]
+    fn gpui_autorepeat_cannot_become_a_fresh_remote_press() {
+        let mut event = gpui::KeyDownEvent {
+            keystroke: Keystroke { key: "a".into(), ..Default::default() },
+            is_held: true,
+            prefer_character_input: false,
+        };
+        assert!(super::fresh_key_down(&event).is_none());
+        event.is_held = false;
+        assert!(super::fresh_key_down(&event).and_then(|key| protocol_key_event(key, true)).is_some());
+        event.is_held = true;
+        assert!(super::fresh_key_down(&event).is_none());
     }
 
     #[test]

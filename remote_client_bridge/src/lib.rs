@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -224,6 +224,11 @@ pub struct RemoteBridgeClient {
     audio_queue: Arc<Mutex<VecDeque<EncodedAudioPacket>>>,
     live: Mutex<Option<LiveSession>>,
     virtual_keys: Mutex<touch_mapper::VirtualKeyboard>,
+    manual_input_intent: Mutex<Option<(protocol::realtime_input::InputBinding, Instant, u64)>>,
+    manual_token_binding: Mutex<Option<(protocol::realtime_input::InputBinding, u64)>>,
+    manual_token_sequence: AtomicU64,
+    manual_input_owner: AtomicU64,
+    manual_input_revoked: AtomicU64,
     lifecycle: Mutex<()>,
     last_connect: Mutex<Option<(String, String)>>,
     connected_at: Mutex<Option<Instant>>,
@@ -271,6 +276,11 @@ impl RemoteBridgeClient {
             audio_queue: Arc::new(Mutex::new(VecDeque::with_capacity(16))),
             live: Mutex::new(None),
             virtual_keys: Mutex::new(touch_mapper::VirtualKeyboard::default()),
+            manual_input_intent: Mutex::new(None),
+            manual_token_binding: Mutex::new(None),
+            manual_token_sequence: AtomicU64::new(0),
+            manual_input_owner: AtomicU64::new(0),
+            manual_input_revoked: AtomicU64::new(0),
             lifecycle: Mutex::new(()),
             last_connect: Mutex::new(None),
             connected_at: Mutex::new(None),
@@ -316,46 +326,114 @@ impl RemoteBridgeClient {
         }
     }
 
-    pub fn handle_touch_input(
-        &self,
-        action: TouchAction,
-        pointer_id: u32,
-        norm_x: f32,
-        norm_y: f32,
-        pressure: f32,
-    ) {
-        let _lifecycle = self.lifecycle.lock().unwrap();
-        let live = self.live.lock().unwrap();
-        let Some(live) = live
-            .as_ref()
-            .filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready())
-        else {
+    /// A viewport captures this local session token once. It cannot refresh a
+    /// replacement connection; telemetry/background keepalives never call this.
+    // Local opaque tokens include the complete grant, including its epoch.
+    // Called under lifecycle; issuing a token neither renews nor revokes input.
+    fn manual_token(&self, binding: protocol::realtime_input::InputBinding) -> u64 {
+        let mut current = self.manual_token_binding.lock().unwrap();
+        if let Some((old, token)) = *current && old == binding { return token; }
+        let token = self.manual_token_sequence.fetch_update(Relaxed, Relaxed, |v| v.checked_add(1))
+            .expect("manual input token exhausted") + 1;
+        *current = Some((binding, token));
+        token
+    }
+    fn revoke_manual_token(&self, token: u64) {
+        if token != 0 && self.manual_input_owner.load(Relaxed) == token {
+            self.manual_input_revoked.fetch_max(token, Relaxed);
+        }
+    }
+    pub fn input_intent_token(&self) -> u64 {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { return 0; };
+        let Ok(live) = self.live.try_lock() else { return 0; };
+        live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready())
+            .and_then(|live| live.connection.input_binding(live.session_id, 0))
+            .map_or(0, |binding| self.manual_token(binding))
+    }
+    // Called under lifecycle + live locks, before any gesture tail or health
+    // renewal. DirectTouch Down has no core held button yet, so its local
+    // tracker needs the same deadline and exact epoch independently.
+    fn expire_manual_input(&self, live: &LiveSession, binding: protocol::realtime_input::InputBinding, now: Instant) -> bool {
+        let mut intent = self.manual_input_intent.lock().unwrap();
+        // A failed nonblocking UI call may have dropped a gesture's Cancel.
+        // Consume that invalidation before another heartbeat can renew it.
+        let revoked = intent.is_some_and(|(_, _, token)| self.manual_input_revoked.compare_exchange(token, 0, Relaxed, Relaxed).is_ok());
+        if revoked || intent.is_some_and(|(old, last, _)| old != binding || now.saturating_duration_since(last).as_millis() >= protocol::realtime_input::HOLD_TIMEOUT_MS as u128) {
             self.touch_tracker.lock().unwrap().cancel_all();
+            *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            if let Some((old, _, _)) = intent.take() { live.connection.try_bound_input(old, None); }
+            self.manual_input_owner.store(0, Relaxed);
+            return true;
+        }
+        false
+    }
+    pub fn refresh_input_intent(&self, token: u64) -> bool {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(token); return false; };
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(token); return false; };
+        let Some(live) = live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready()) else { self.revoke_manual_token(token); return false; };
+        let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return false; };
+        if token == 0 || token != self.manual_token(binding) { return false; }
+        let now = Instant::now();
+        if self.expire_manual_input(live, binding, now) { return false; }
+        if !live.connection.refresh_bound_input(binding) {
+            self.touch_tracker.lock().unwrap().cancel_all();
+            *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
+            live.connection.try_bound_input(binding, None);
+            return false;
+        }
+        if let Some((_, last, _)) = self.manual_input_intent.lock().unwrap().as_mut() { *last = now; }
+        true
+    }
+
+    pub fn handle_touch_input(
+        &self, action: TouchAction, pointer_id: u32, norm_x: f32, norm_y: f32, pressure: f32,
+    ) {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        let Some(live) = live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready()) else {
+            self.touch_tracker.lock().unwrap().cancel_all();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
             return;
         };
-        let events = if let Ok(mut tracker) = self.touch_tracker.lock() {
-            tracker.process_touch(action, pointer_id, norm_x, norm_y, pressure, Instant::now())
-        } else {
-            Vec::new()
-        };
-
-        for ev in events {
-            live.input(ev);
+        let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return; };
+        let now = Instant::now();
+        self.expire_manual_input(live, binding, now);
+        {
+            let mut intent = self.manual_input_intent.lock().unwrap();
+            if !matches!(action, TouchAction::Down) && intent.is_none() { return; }
+            let token = self.manual_token(binding);
+            *intent = Some((binding, now, token));
+            self.manual_input_owner.store(token, Relaxed);
         }
+        let events = self.touch_tracker.lock().unwrap().process_touch(action, pointer_id, norm_x, norm_y, pressure, now);
+        for event in events { live.connection.try_bound_input(binding, Some(event)); }
     }
 
     pub fn send_virtual_key(&self, key_name: &str, pressed: bool) {
-        let _lifecycle = self.lifecycle.lock().unwrap();
-        if pressed && self.desired_media_paused.load(Relaxed) {
-            return;
-        }
-        let live = self.live.lock().unwrap();
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        if pressed && self.desired_media_paused.load(Relaxed) { return; }
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
         if let Some(live) = live.as_ref().filter(|live| live.input_ready()) {
+            let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return; };
+            let now = Instant::now();
+            self.expire_manual_input(live, binding, now);
+            {
+                let mut intent = self.manual_input_intent.lock().unwrap();
+                if !pressed && intent.is_none() { return; }
+                let token = self.manual_token(binding);
+            *intent = Some((binding, now, token));
+            self.manual_input_owner.store(token, Relaxed);
+            }
             for event in self.virtual_keys.lock().unwrap().event(key_name, pressed) {
-                live.input(event);
+                live.connection.try_bound_input(binding, Some(event));
             }
         } else {
             *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
         }
     }
 
@@ -522,6 +600,9 @@ impl RemoteBridgeClient {
     }
 
     fn stop_live(&self) {
+        *self.manual_token_binding.lock().unwrap() = None;
+        *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
         self.host_stats.media_pause.end_session();
         if let Some(live) = self.live.lock().unwrap().take() {
             self.runtime().block_on(live.stop());
@@ -561,6 +642,8 @@ impl RemoteBridgeClient {
         }
         self.touch_tracker.lock().unwrap().cancel_all();
         *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+        *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
         if let Some(live) = self.live.lock().unwrap().as_ref() {
             let revision = live.activity_revision.fetch_add(1, Relaxed) + 1;
             let _ = self
@@ -1773,6 +1856,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            // An existing epoch can remain ready while this reply is still
+            // in flight. Do not deliver the next gesture until the exact
+            // replacement binding has been committed by the actor.
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
                     if client
@@ -1782,11 +1868,25 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .connection
-                        .input_ready(binding.subscription_id, 0)
+                        .input_binding(binding.subscription_id, binding.source_revision)
+                        == Some(binding)
                     {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    // The first queued request may have been superseded by
+                    // the actor's periodic request. Serve subsequent requests
+                    // within the same deadline, keeping the exact epoch check.
+                    if let Ok(Some((ControlMessage::Session(command), target))) =
+                        tokio::time::timeout(Duration::from_millis(1), rx.recv()).await
+                        && let SessionCommand::RequestInputBinding { connection_id, id, source_revision, request } = *command
+                        && connection_id == binding.connection_id
+                        && id == binding.subscription_id
+                        && source_revision == binding.source_revision
+                    {
+                        sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                            binding, request, host_time_ms: remote_core::session_crypto::now_unix_ms(),
+                        })), target).await.unwrap();
+                    }
                 }
             })
             .await
@@ -2025,6 +2125,111 @@ mod tests {
     }
 
     #[test]
+    fn manual_ui_input_never_waits_for_connection_lifecycle_or_live_lock() {
+        for hold_lifecycle in [true, false] {
+            let client = Arc::new(RemoteBridgeClient::new());
+            let lifecycle = hold_lifecycle.then(|| client.lifecycle.lock().unwrap());
+            let live = (!hold_lifecycle).then(|| client.live.lock().unwrap());
+            let worker_client = client.clone();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let token = worker_client.input_intent_token();
+                let refreshed = worker_client.refresh_input_intent(1);
+                worker_client.handle_touch_input(TouchAction::Cancel, 1, 0.0, 0.0, 0.0);
+                worker_client.send_virtual_key("ctrl", false);
+                done_tx.send((token, refreshed)).unwrap();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let result = done_rx.recv_timeout(Duration::from_millis(200));
+            // Always unblock and join even on failure, so a regression cannot
+            // strand the test worker holding a client runtime.
+            drop(live);
+            drop(lifecycle);
+            worker.join().unwrap();
+            assert_eq!(result.unwrap(), (0, false));
+            assert_eq!(client.manual_input_owner.load(Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn stale_busy_heartbeat_cannot_revoke_a_new_session_or_epoch() {
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("scope".into(), address.to_string());
+        grant_manual(&client, &sender, &mut rx, 1);
+        *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+        let mut old = client.input_intent_token();
+        assert_eq!(client.manual_input_owner.load(Relaxed), 0);
+        {
+            let _busy = client.lifecycle.lock().unwrap();
+            assert!(!client.refresh_input_intent(old));
+        }
+        assert_eq!(client.manual_input_revoked.load(Relaxed), 0, "idle failure must not poison a future gesture");
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        assert!(client.refresh_input_intent(old), "a fresh Down after idle contention stays healthy");
+        for reconnect in [false, true] {
+            if reconnect { client.connect("scope".into(), address.to_string()); }
+            grant_manual(&client, &sender, &mut rx, 2);
+            *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+            client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+            let current = client.input_intent_token();
+            assert_ne!(current, old);
+            {
+                let _busy = client.lifecycle.lock().unwrap();
+                assert_eq!(client.input_intent_token(), 0); // query is read-only
+                assert!(!client.refresh_input_intent(old));
+            }
+            assert!(client.refresh_input_intent(current));
+            assert!(client.touch_tracker.lock().unwrap().has_active_pointers());
+            assert_eq!(client.manual_input_intent.lock().unwrap().as_ref().unwrap().2, current);
+            old = current;
+        }
+        client.disconnect();
+    }
+
+    #[test]
+    fn manual_direct_touch_expiry_and_epoch_change_discard_unheld_tail() {
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("touch-expiry".into(), address.to_string());
+        grant_manual(&client, &sender, &mut rx, 1);
+        *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+        for heartbeat_first in [false, true] {
+            client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+            assert!(client.touch_tracker.lock().unwrap().has_active_pointers());
+            // Simulate a stalled frontend without delaying unrelated actor IO.
+            client.manual_input_intent.lock().unwrap().as_mut().unwrap().1 = Instant::now() - Duration::from_millis(400);
+            if heartbeat_first { assert!(!client.refresh_input_intent(client.input_intent_token())); }
+            client.handle_touch_input(TouchAction::Up, 1, 0.1, 0.1, 0.0);
+            assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+            assert!(client.manual_input_intent.lock().unwrap().is_none());
+        }
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        let token = client.input_intent_token();
+        {
+            let _busy = client.lifecycle.lock().unwrap();
+            client.handle_touch_input(TouchAction::Cancel, 1, 0.0, 0.0, 0.0);
+        }
+        assert!(!client.refresh_input_intent(token), "a dropped Cancel must invalidate the old gesture");
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        grant_manual(&client, &sender, &mut rx, 2);
+        client.handle_touch_input(TouchAction::Up, 1, 0.1, 0.1, 0.0);
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+        assert!(client.manual_input_intent.lock().unwrap().is_none());
+        // Inspect the real outbound input stream: no delayed left/right click.
+        client.runtime().block_on(async {
+            let until = tokio::time::Instant::now() + Duration::from_millis(120);
+            while let Ok(packet) = tokio::time::timeout_at(until, next_input(&mut rx, true)).await {
+                assert!(!matches!(packet.payload, protocol::realtime_input::InputPayload::Event(protocol::InputEvent::MouseDown(_) | protocol::InputEvent::MouseUp(_))));
+            }
+        });
+        client.disconnect();
+    }
+
+    #[test]
     fn manual_touch_binds_drag_and_pause_discards_cancelled_tail() {
         use protocol::realtime_input::InputPayload;
         let client = RemoteBridgeClient::new();
@@ -2052,6 +2257,17 @@ mod tests {
             }
         };
         assert_eq!(drag.binding, binding);
+        let intent=client.input_intent_token();assert_ne!(intent,0);
+        assert!(!client.refresh_input_intent(intent^1),"wrong session cannot renew a gesture");
+        for index in 0..5 {
+            std::thread::sleep(Duration::from_millis(90));
+            assert!(client.refresh_input_intent(intent),"a healthy manual viewport must preserve long drag");
+            if index==2 {grant_manual(&client,&sender,&mut rx,1);}
+        }
+        std::thread::sleep(Duration::from_millis(330));
+        grant_manual(&client,&sender,&mut rx,1);
+        assert!(!client.refresh_input_intent(intent),"late UI wake must clear its old drag");
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
         client.set_media_paused(true);
         assert!(
             !client

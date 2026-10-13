@@ -433,6 +433,17 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeUpdateS
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInputIntentToken(_env:JNIEnv,_class:JClass)->jni::sys::jlong {
+    client().input_intent_token() as jni::sys::jlong
+}
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeRefreshInputIntent(_env:JNIEnv,_class:JClass,token:jni::sys::jlong)->jboolean {
+    client().refresh_input_intent(token as u64) as jboolean
+}
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSendTouch(
     _env: JNIEnv,
     _class: JClass,

@@ -237,6 +237,16 @@ object RemotePlayClient {
         return error
     }
 
+    data class InputIntentToken(val generation: Long, val session: Long)
+    @Synchronized fun inputIntentToken(): InputIntentToken? {
+        if (!isNativeLoaded || backgrounded || _mediaPaused.value || _mediaPausePending.value) return null
+        val session = nativeInputIntentToken()
+        return if (session == 0L) null else InputIntentToken(connectionGeneration, session)
+    }
+    @Synchronized fun refreshInputIntent(token: InputIntentToken): Boolean =
+        isNativeLoaded && !backgrounded && !_mediaPaused.value && !_mediaPausePending.value &&
+            token.generation == connectionGeneration && nativeRefreshInputIntent(token.session)
+
     fun sendTouchEvent(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float) {
         if (isNativeLoaded) {
             nativeSendTouch(actionCode, pointerId, normX, normY, pressure)
@@ -363,6 +373,8 @@ object RemotePlayClient {
     private external fun nativeSetMediaPaused(paused: Boolean)
     private external fun nativeMediaPausePending(): Boolean
     private external fun nativeUpdateStreamRates(fps: Int, bitrateKbps: Int): String?
+    private external fun nativeInputIntentToken(): Long
+    private external fun nativeRefreshInputIntent(token: Long): Boolean
     private external fun nativeSendTouch(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float)
     private external fun nativeSendVirtualKey(keyName: String, pressed: Boolean)
     private external fun nativeSetTouchMode(modeCode: Int)

@@ -230,6 +230,13 @@ impl InputLease {
     pub fn held_modifiers(&self) -> u8 {
         self.held.modifiers()
     }
+    /// Local monotonic limit used while the host awaits another peer's capture
+    /// teardown. The wire clock cannot extend this deadline.
+    pub fn deadline(&self)->std::time::Instant {
+        if self.revocation.is_revoked(){return std::time::Instant::now();}
+        let valid=self.last_valid+std::time::Duration::from_millis(HOLD_TIMEOUT_MS);
+        if self.held.0.is_empty(){valid}else{valid.min(self.last_held+std::time::Duration::from_millis(HOLD_TIMEOUT_MS))}
+    }
     pub fn expired(&self, now_ms: u64) -> bool {
         self.revocation.is_revoked()
             || now_ms.saturating_sub(self.last_valid_ms) >= HOLD_TIMEOUT_MS

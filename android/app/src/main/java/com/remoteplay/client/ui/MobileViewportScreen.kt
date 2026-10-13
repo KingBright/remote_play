@@ -33,6 +33,7 @@ import com.remoteplay.client.VideoDimensions
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
@@ -77,6 +78,7 @@ fun MobileViewportScreen(
     var settingsError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
+    var inputSessionToken by remember { mutableStateOf<RemotePlayClient.InputIntentToken?>(null) }
     val inputEnabled = sessionState == SessionState.STREAMING && !mediaPaused && !pausePending && !showStreamSettings
     DisposableEffect(virtualKeys) { onDispose { virtualKeys.releaseAll() } }
     LaunchedEffect(inputEnabled, isModifierBarVisible) {
@@ -85,6 +87,38 @@ fun MobileViewportScreen(
             heldModifiers = emptySet()
         }
         if (!inputEnabled) showKeyboard = false
+    }
+
+    // Observe native identity even if a quick reconnect remains STREAMING
+    // between telemetry polls. Changing identity resets the gesture owner.
+    LaunchedEffect(inputEnabled) {
+        while (true) {
+            val current = if (inputEnabled) RemotePlayClient.inputIntentToken() else null
+            // A busy native query is unknown, not a replacement owner. Keep
+            // the token-bound health effect so failure revokes that exact grant.
+            if ((!inputEnabled || current != null) && current != inputSessionToken) {
+                virtualKeys.forgetAll()
+                heldModifiers = emptySet()
+                keyboardInput = TextFieldValue("  ", selection = TextRange(2))
+                inputSessionToken = current
+            }
+            if (!inputEnabled) break
+            delay(100)
+        }
+    }
+    // This main-dispatcher effect belongs to one observed viewport identity.
+    // A failed renewal never adopts another session or replays old held keys.
+    LaunchedEffect(inputEnabled, inputSessionToken) {
+        val token = inputSessionToken
+        if (inputEnabled && token != null) {
+            while (true) {
+                delay(100)
+                if (!RemotePlayClient.refreshInputIntent(token)) {
+                    virtualKeys.forgetAll()
+                    heldModifiers = emptySet()
+                }
+            }
+        }
     }
 
     LaunchedEffect(showKeyboard) {
@@ -156,7 +190,7 @@ fun MobileViewportScreen(
                     transformState = viewportTransform,
                     touchMode = touchMode,
                     viewportSize = viewportSize,
-                    contentKey = videoDimensions,
+                    contentKey = videoDimensions to inputSessionToken,
                     enabled = inputEnabled,
                     sendTouch = RemotePlayClient::sendTouchEvent
                 )

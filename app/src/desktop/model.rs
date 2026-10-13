@@ -481,6 +481,10 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         );
     }
     pub fn poll(&mut self) {
+        if self.can_input() && (!self.keys.is_empty()||!self.mouse.is_empty()||self.modifiers!=0) {
+            let healthy=self.conn.input_binding(self.video_id,self.source_revision).is_some_and(|binding|self.conn.refresh_bound_input(binding));
+            if !healthy {self.release_input();self.locked=true;self.status="Input paused after the window stopped responding; enable control to continue".into();}
+        }
         let decoder_waiting = self
             .stats
             .video_decoder_needs_keyframe
