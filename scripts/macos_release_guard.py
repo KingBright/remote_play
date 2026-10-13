@@ -159,10 +159,36 @@ def check_upgrade(previous: dict, candidate: dict) -> str:
 
 
 @contextmanager
-def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None):
+def archive_workspace(owned: Path | None):
+    if owned is None:
+        # Standalone read-only verification keeps its existing temporary lifetime.
+        with tempfile.TemporaryDirectory(prefix='rp-release-check-') as directory:
+            yield Path(directory)
+        return
+    owned = Path(owned)
+    if (not owned.is_dir() or any(path.is_symlink() for path in [owned, *owned.parents]) or
+            owned.stat().st_uid != os.getuid()):
+        raise ReleaseRejected('Archive verification requires the public-owned packaging workspace')
+    root = owned / '.archive-check'
+    try:
+        root.mkdir(mode=0o700)  # Existing work is recovered by the original public aux transaction.
+    except FileExistsError as error:
+        raise ReleaseRejected('Archive verification workspace already exists; recover the current transaction first') from error
+    identity = root.stat()
+    try:
+        yield root
+    finally:
+        current = root.lstat()
+        if (not stat.S_ISDIR(current.st_mode) or
+                (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino)):
+            raise ReleaseRejected('Archive verification workspace changed; preserve it for recovery')
+        shutil.rmtree(root)
+
+
+@contextmanager
+def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None, owned_workspace=None):
     # Preflight the whole archive before extracting; no path traversal, links, or zip bombs.
-    with zipfile.ZipFile(archive) as source, tempfile.TemporaryDirectory(prefix='rp-release-check-') as directory:
-        root = Path(directory)
+    with zipfile.ZipFile(archive) as source, archive_workspace(owned_workspace) as root:
         entries = source.infolist()
         if len(entries) > 20000 or sum(entry.file_size for entry in entries) > 1024 ** 3:
             raise ReleaseRejected('Archive exceeds release size limits')
@@ -279,7 +305,7 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
         report = verify_app(app, policy)
         candidate = stage / 'candidate.zip'
         run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(candidate)], 120)
-        with verified_archive(candidate, policy) as (_, extracted):
+        with verified_archive(candidate, policy, owned_workspace=stage) as (_, extracted):
             check_upgrade(report, extracted)
         # This is the transaction's private stage; shared publish atomically updates current.
         os.replace(candidate, archive)
