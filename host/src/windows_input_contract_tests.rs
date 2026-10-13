@@ -7,6 +7,11 @@ use std::sync::Mutex;
 mod actual {
     use super::recording_api as windows_sys;
     include!("windows_input.rs");
+    pub(super) fn held_lock(
+        input: &WindowsInputInjector,
+    ) -> std::sync::MutexGuard<'_, std::collections::BTreeSet<u16>> {
+        input.pressed_keys.lock().unwrap()
+    }
 }
 #[derive(Debug, PartialEq, Eq)]
 enum Posted {
@@ -17,11 +22,13 @@ enum Posted {
 struct Calls {
     attempts: usize,
     fail_next: bool,
+    pause_first_until: Option<std::time::Instant>,
     posted: Vec<Posted>,
 }
 static CALLS: Mutex<Calls> = Mutex::new(Calls {
     attempts: 0,
     fail_next: false,
+    pause_first_until: None,
     posted: Vec::new(),
 });
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -84,6 +91,11 @@ mod recording_api {
                 super::Posted::Key(key.wVk, key.dwFlags & KEYEVENTF_KEYUP == 0)
             };
             calls.posted.push(posted);
+        }
+        if calls.attempts == 1 {
+            if let Some(until) = calls.pause_first_until {
+                std::thread::sleep(until.saturating_duration_since(std::time::Instant::now()));
+            }
         }
         count
     }
@@ -175,5 +187,76 @@ fn rejected_cleanup_blocks_new_input_until_known_unaccepted_up_is_cleared() {
             Posted::Key(0x41, false),
             Posted::Key(0x42, true)
         ]
+    );
+}
+
+#[test]
+fn fresh_deadline_posts_and_cleans_only_the_accepted_key() {
+    let _serial = SERIAL.lock().unwrap();
+    *CALLS.lock().unwrap() = Calls::default();
+    let input = actual::WindowsInputInjector::new().unwrap();
+    input
+        .inject_input_before(
+            InputEvent::KeyDown(0x41),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    input.release_all_input();
+    assert_eq!(
+        CALLS.lock().unwrap().posted,
+        vec![Posted::Key(0x41, true), Posted::Key(0x41, false)]
+    );
+}
+#[test]
+fn key_lock_wait_expiry_does_not_post_or_create_cleanup_up() {
+    let _serial = SERIAL.lock().unwrap();
+    *CALLS.lock().unwrap() = Calls::default();
+    let input = std::sync::Arc::new(actual::WindowsInputInjector::new().unwrap());
+    let lock = actual::held_lock(&input);
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let other = input.clone();
+    let worker = std::thread::spawn(move || {
+        tx.send(()).unwrap();
+        other
+            .inject_input_before(InputEvent::KeyDown(0x41), until)
+            .is_err()
+    });
+    rx.recv().unwrap();
+    std::thread::sleep(
+        until.saturating_duration_since(std::time::Instant::now())
+            + std::time::Duration::from_millis(2),
+    );
+    drop(lock);
+    assert!(worker.join().unwrap());
+    input.release_all_input();
+    assert_eq!(CALLS.lock().unwrap().attempts, 0);
+}
+#[test]
+fn batch_expiry_after_first_modifier_does_not_post_remaining_modifier_or_key() {
+    let _serial = SERIAL.lock().unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    *CALLS.lock().unwrap() = Calls {
+        pause_first_until: Some(until + std::time::Duration::from_millis(2)),
+        ..Default::default()
+    };
+    let input = actual::WindowsInputInjector::new().unwrap();
+    assert!(
+        input
+            .inject_input_before(
+                InputEvent::Key {
+                    key_code: 0,
+                    pressed: true,
+                    modifiers: input_modifiers::SHIFT | input_modifiers::CONTROL
+                },
+                until
+            )
+            .is_err()
+    );
+    assert_eq!(CALLS.lock().unwrap().posted, vec![Posted::Key(0xA0, true)]);
+    input.release_all_input();
+    assert_eq!(
+        CALLS.lock().unwrap().posted,
+        vec![Posted::Key(0xA0, true), Posted::Key(0xA0, false)]
     );
 }

@@ -50,7 +50,7 @@ mod ffmpeg_hevc;
 pub mod linux_audio;
 #[cfg(any(test, target_os = "linux"))]
 pub mod linux_capture;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod linux_input;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_pipewire;

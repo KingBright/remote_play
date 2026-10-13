@@ -1368,6 +1368,90 @@ async fn retire_input_before_control(peer:&mut Connection,owner:&mut ActiveInput
     if owner.owner==Some((addr,id)) {let _=owner.release(injector).await;}
 }
 
+fn input_deadline(
+    created: u64,
+    now_ms: u64,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    let age = now_ms.checked_sub(created)?;
+    let remaining = protocol::realtime_input::MAX_INPUT_AGE_MS.checked_sub(age)?;
+    Some(now + Duration::from_millis(remaining))
+}
+
+async fn dispatch_realtime_input(
+    peer: &mut Connection,
+    owner: &mut ActiveInput,
+    injector: &LazyInputInjector,
+    udp: &UdpSender,
+    addr: SocketAddr,
+    packet: RealtimeInput,
+) {
+    // Convert once, before any cleanup/await. Every item in a held-state batch
+    // keeps this deadline; later wall-clock reads cannot renew its budget.
+    let deadline = input_deadline(
+        packet.created_host_ms,
+        now_unix_ms(),
+        std::time::Instant::now(),
+    );
+    let Some(events) = peer.accept_input(&packet) else {
+        return;
+    };
+    let Some(deadline) = deadline else {
+        return;
+    };
+    let id = packet.binding.subscription_id;
+    if owner.owner == Some((addr, id)) && owner.binding != Some(packet.binding) {
+        if owner.release(injector).await.is_err() {
+            peer.input_leases.remove(&id);
+            return;
+        }
+    }
+    for event in events {
+        if !inject_fresh(injector, owner, peer, udp, addr, id, event, Some(deadline)).await {
+            peer.input_leases.remove(&id);
+            return;
+        }
+        owner.binding = Some(packet.binding);
+    }
+    if matches!(packet.payload, InputPayload::Release) {
+        send_session(
+            udp,
+            addr,
+            SessionCommand::InputHandled {
+                binding: packet.binding,
+                sequence: packet.sequence,
+            },
+        )
+        .await;
+    }
+}
+
+async fn expire_input_owners(
+    peers: &mut HashMap<SocketAddr, Connection>,
+    owner: &mut ActiveInput,
+    injector: &LazyInputInjector,
+) {
+    for peer in peers.values_mut() {
+        let expired = peer
+            .input_leases
+            .iter()
+            .filter(|(_, slot)| slot.lease.expired(now_unix_ms()))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in expired {
+            peer.input_leases.remove(&id);
+        }
+    }
+    if let Some(binding) = owner.binding {
+        let current = owner
+            .owner
+            .and_then(|(addr, id)| peers.get(&addr)?.input_leases.get(&id));
+        if current.is_none_or(|slot| slot.lease.binding != binding) {
+            let _ = owner.release(injector).await;
+        }
+    }
+}
+
 fn channel_if(
     enabled: bool,
 ) -> (
@@ -1394,7 +1478,7 @@ async fn inject_fresh(
     addr: SocketAddr,
     id: u32,
     event: InputEvent,
-    created_host_ms: Option<u64>,
+    deadline: Option<std::time::Instant>,
 ) -> bool {
     if !peer.can_input(id) {
         let reason = peer
@@ -1435,10 +1519,7 @@ async fn inject_fresh(
             owner.capture = capture.clone();
         }
     }
-    if created_host_ms.is_some_and(|created| {
-        let now=now_unix_ms();created>now || now-created>protocol::realtime_input::MAX_INPUT_AGE_MS
-    }) {return false;}
-    let deadline=created_host_ms.map(|created|std::time::Instant::now()+Duration::from_millis(protocol::realtime_input::MAX_INPUT_AGE_MS.saturating_sub(now_unix_ms().saturating_sub(created))));
+    if deadline.is_some_and(|deadline|std::time::Instant::now()>=deadline) {return false;}
     #[cfg(all(unix, any(test, target_os = "linux")))]
     let result = match capture {
         Some(capture) => {
@@ -1655,14 +1736,7 @@ async fn run_host_service_inner(
                 let _ = local;
             }
             _ = tick.tick() => {
-                for peer in peers.values_mut() {
-                    let expired=peer.input_leases.iter().filter(|(_,slot)|slot.lease.expired(now_unix_ms())).map(|(id,_)|*id).collect::<Vec<_>>();
-                    for id in expired {peer.input_leases.remove(&id);}
-                }
-                if let Some(binding)=input_owner.binding {
-                    let current=input_owner.owner.and_then(|(addr,id)|peers.get(&addr)?.input_leases.get(&id));
-                    if current.is_none_or(|slot|slot.lease.binding!=binding) {let _=input_owner.release(&injector).await;}
-                }
+                expire_input_owners(&mut peers,&mut input_owner,&injector).await;
                 let current_key = load_session_psk();
                 if current_key != psk {
                     for addr in authenticated.keys() { udp_sender.remove_peer_crypto(*addr); }
@@ -1748,21 +1822,8 @@ async fn run_host_service_inner(
                                     }
                                 }
                                 SessionCommand::RealtimeInput(packet) => {
-                                    if let Some(peer)=peers.get_mut(&addr) && let Some(events)=peer.accept_input(&packet) {
-                                        let id=packet.binding.subscription_id;
-                                        if input_owner.owner==Some((addr,id)) && input_owner.binding!=Some(packet.binding) {
-                                            if input_owner.release(&injector).await.is_err() {peer.input_leases.remove(&id);continue;}
-                                        }
-                                        let mut complete=true;
-                                        for event in events {
-                                            if !inject_fresh(&injector,&mut input_owner,peer,&udp_sender,addr,id,event,Some(packet.created_host_ms)).await {
-                                                peer.input_leases.remove(&id);complete=false;break;
-                                            }
-                                            input_owner.binding=Some(packet.binding);
-                                        }
-                                        if complete && matches!(packet.payload,InputPayload::Release) {
-                                            send_session(&udp_sender,addr,SessionCommand::InputHandled{binding:packet.binding,sequence:packet.sequence}).await;
-                                        }
+                                    if let Some(peer)=peers.get_mut(&addr) {
+                                        dispatch_realtime_input(peer,&mut input_owner,&injector,&udp_sender,addr,packet).await;
                                     }
                                 }
                                 SessionCommand::Configure { id, revision, width, height, fps, bitrate_kbps } => {
@@ -1911,6 +1972,158 @@ async fn run_host_service_inner(
 mod failure_admission_tests {
     use super::*;
 
+    #[test]
+    fn receive_deadline_preserves_age_and_is_independent_of_later_wall_clock_reads() {
+        let now = std::time::Instant::now();
+        let deadline = input_deadline(1000, 1200, now).unwrap();
+        assert_eq!(deadline.duration_since(now), Duration::from_millis(50));
+        // The downstream interface carries only Instant, never wall time.
+        assert!(input_deadline(1000, 1251, now).is_none());
+        assert!(input_deadline(1000, 999, now).is_none());
+    }
+
+    struct OwnershipProbe {
+        held: Arc<std::sync::atomic::AtomicBool>,
+        releases: Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+    }
+    impl InputInjector for OwnershipProbe {
+        fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+            if matches!(event, InputEvent::MouseDown(0)) {
+                self.held.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn release_all_input(&self) {
+            if self.held.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.releases
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            std::thread::sleep(self.delay);
+        }
+    }
+    #[tokio::test]
+    async fn cleanup_wait_cannot_renew_an_initially_valid_input_deadline() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut peer, addr) = fixture_peer(31).await;
+        let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        let held = Arc::new(AtomicBool::new(true));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((
+            InputTarget::Desktop,
+            Box::new(OwnershipProbe {
+                held: held.clone(),
+                releases: releases.clone(),
+                delay: Duration::from_millis(40),
+            }),
+        ))));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        owner.owner = Some(("127.0.0.1:29999".parse().unwrap(), 100));
+        let deadline = std::time::Instant::now() + Duration::from_millis(20);
+        assert!(
+            !inject_fresh(
+                &injector,
+                &mut owner,
+                &mut peer,
+                &udp,
+                addr,
+                100,
+                InputEvent::MouseDown(0),
+                Some(deadline)
+            )
+            .await
+        );
+        assert!(!held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        owner.release(&injector).await.unwrap();
+        assert_eq!(releases.load(SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn event_loop_old_a_timeout_after_b_takeover_preserves_b_held_input() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut a, addr_a) = fixture_peer(31).await;
+        let (mut b, _) = fixture_peer(32).await;
+        let addr_b = "127.0.0.1:39982".parse().unwrap();
+        for peer in [&mut a, &mut b] {
+            let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+            sub.settings.send_modify(|s| s.paused = false);
+            peer.subscriptions.insert(100, sub);
+        }
+        let SessionCommand::InputBinding {
+            binding: binding_a, ..
+        } = a.input_binding(31, 100, 10, 1).unwrap()
+        else {
+            panic!()
+        };
+        let SessionCommand::InputBinding {
+            binding: binding_b, ..
+        } = b.input_binding(32, 100, 10, 1).unwrap()
+        else {
+            panic!()
+        };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((
+            InputTarget::Desktop,
+            Box::new(OwnershipProbe {
+                held: held.clone(),
+                releases: releases.clone(),
+                delay: Duration::ZERO,
+            }),
+        ))));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        for (peer, addr, binding) in [(&mut a, addr_a, binding_a), (&mut b, addr_b, binding_b)] {
+            dispatch_realtime_input(
+                peer,
+                &mut owner,
+                &injector,
+                &udp,
+                addr,
+                RealtimeInput {
+                    binding,
+                    sequence: 1,
+                    created_host_ms: now_unix_ms(),
+                    payload: InputPayload::Event(InputEvent::MouseDown(0)),
+                },
+            )
+            .await;
+        }
+        assert_eq!(releases.load(SeqCst), 1);
+        assert_eq!(owner.binding, Some(binding_b));
+        // These are the same dispatch and timer bodies called by the production
+        // event loop. Refresh only B while A's original held lease times out.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        dispatch_realtime_input(
+            &mut b,
+            &mut owner,
+            &injector,
+            &udp,
+            addr_b,
+            RealtimeInput {
+                binding: binding_b,
+                sequence: 2,
+                created_host_ms: now_unix_ms(),
+                payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut peers = HashMap::from([(addr_a, a), (addr_b, b)]);
+        expire_input_owners(&mut peers, &mut owner, &injector).await;
+        assert!(!peers[&addr_a].input_leases.contains_key(&100));
+        assert!(peers[&addr_b].input_leases.contains_key(&100));
+        assert!(held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        assert_eq!(owner.owner, Some((addr_b, 100)));
+        assert_eq!(owner.binding, Some(binding_b));
+    }
+
     struct HeldButtonProbe(Arc<std::sync::atomic::AtomicUsize>);
     impl InputInjector for HeldButtonProbe {
         fn inject_input(&self,event:InputEvent)->Result<(),Box<dyn Error+Send+Sync>> {
@@ -1929,7 +2142,7 @@ mod failure_admission_tests {
         let held=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let injector=LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,Box::new(HeldButtonProbe(held.clone()))))));
         let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let (udp,_)=mux.split();let mut owner=ActiveInput::default();
-        assert!(inject_fresh(&injector,&mut owner,&mut peer,&udp,addr,100,InputEvent::MouseDown(0),Some(now_unix_ms())).await);
+        assert!(inject_fresh(&injector,&mut owner,&mut peer,&udp,addr,100,InputEvent::MouseDown(0),Some(std::time::Instant::now()+Duration::from_millis(250))).await);
         owner.binding=Some(binding);
         for command in [
             SessionCommand::Subscribe(request),
@@ -1973,7 +2186,7 @@ mod failure_admission_tests {
         peer.subscriptions.insert(100,sub);
         let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let (udp,_)=mux.split();let injector=LazyInputInjector::default();let mut owner=ActiveInput::default();
-        assert!(!inject_fresh(&injector,&mut owner,&mut peer,&udp,addr,100,InputEvent::MouseDown(0),Some(now_unix_ms()-251)).await);
+        assert!(!inject_fresh(&injector,&mut owner,&mut peer,&udp,addr,100,InputEvent::MouseDown(0),Some(std::time::Instant::now()-Duration::from_millis(1))).await);
         assert!(injector.0.lock().unwrap().is_none());
     }
 

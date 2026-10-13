@@ -3,9 +3,11 @@ use remote_core::InputInjector;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs::{File, OpenOptions};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::raw::{c_char, c_int, c_short, c_uint, c_ulong};
+use std::os::fd::AsRawFd;
+use std::os::raw::{c_char, c_int, c_ulong};
 use std::sync::Mutex;
+use std::time::Instant;
+type InputResult = Result<(), Box<dyn Error + Send + Sync>>;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 // Linux Input subsystem constants from <linux/input.h> and <linux/uinput.h>
@@ -58,12 +60,14 @@ struct UinputUserDev {
     absflat: [i32; 64],
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct TimeVal {
     tv_sec: c_ulong,
     tv_usec: c_ulong,
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct InputEventRaw {
     time: TimeVal,
@@ -79,6 +83,8 @@ unsafe extern "C" {
 
 pub struct LinuxUinputInjector {
     file: Mutex<Option<File>>,
+    #[cfg(test)]
+    record: Option<std::sync::Arc<dyn Fn(&[InputEventRaw]) -> isize + Send + Sync>>,
     pressed_buttons: AtomicU8,
     active_modifiers: AtomicU8,
     pressed_keys: Mutex<BTreeSet<u16>>,
@@ -164,36 +170,87 @@ impl LinuxUinputInjector {
 
         Ok(Self {
             file: Mutex::new(Some(file)),
+            #[cfg(test)]
+            record: None,
             pressed_buttons: AtomicU8::new(0),
             active_modifiers: AtomicU8::new(0),
             pressed_keys: Mutex::new(BTreeSet::new()),
         })
     }
 
-    fn write_event(&self, ev_type: u16, code: u16, value: i32) {
-        let lock = self.file.lock().unwrap();
-        if let Some(ref file) = *lock {
-            let ev = InputEventRaw {
+    fn write_event(
+        &self,
+        ev_type: u16,
+        code: u16,
+        value: i32,
+        deadline: Option<Instant>,
+    ) -> InputResult {
+        self.write_events(&[(ev_type, code, value)], deadline)
+    }
+    fn write_events(&self, batch: &[(u16, u16, i32)], deadline: Option<Instant>) -> InputResult {
+        let mut file = self.file.lock().unwrap();
+        let mut events = batch
+            .iter()
+            .map(|&(r#type, code, value)| InputEventRaw {
                 time: TimeVal {
                     tv_sec: 0,
                     tv_usec: 0,
                 },
-                r#type: ev_type,
+                r#type,
                 code,
                 value,
-            };
-            unsafe {
-                write(
-                    file.as_raw_fd(),
-                    &ev as *const _ as *const _,
-                    std::mem::size_of::<InputEventRaw>(),
-                );
-            }
+            })
+            .collect::<Vec<_>>();
+        events.push(InputEventRaw {
+            time: TimeVal {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            r#type: EV_SYN,
+            code: SYN_REPORT,
+            value: 0,
+        });
+        // Keep each logical event (including both pointer axes) and its report
+        // in one kernel call. No later expired event can flush a partial batch.
+        let size = std::mem::size_of_val(events.as_slice());
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err("input expired before uinput write".into());
         }
+        #[cfg(test)]
+        if let Some(record) = &self.record {
+            return if record(&events) == size as isize {
+                Ok(())
+            } else {
+                Err("recording uinput write failed".into())
+            };
+        }
+        let device = file.as_ref().ok_or("uinput device unavailable")?;
+        let written = unsafe { write(device.as_raw_fd(), events.as_ptr() as *const _, size) };
+        if written != size as isize {
+            // A partial/failed write is not safe to replay or flush later.
+            // Destroy only this injector's virtual device and fail closed.
+            if let Some(device) = file.take() {
+                unsafe {
+                    ioctl(device.as_raw_fd(), UI_DEV_DESTROY);
+                }
+            }
+            return Err("uinput write unconfirmed; owned virtual device retired".into());
+        }
+        Ok(())
     }
 
-    fn syn_report(&self) {
-        self.write_event(EV_SYN, SYN_REPORT, 0);
+    fn key(&self, key: u16, down: bool, deadline: Option<Instant>) -> InputResult {
+        let mut held = self.pressed_keys.lock().unwrap();
+        if held.contains(&key) == down {
+            return Ok(());
+        }
+        self.write_event(EV_KEY, key, i32::from(down), deadline)?;
+        if down {
+            held.insert(key);
+        } else {
+            held.remove(&key);
+        }
+        Ok(())
     }
 }
 
@@ -208,27 +265,31 @@ impl Drop for LinuxUinputInjector {
     }
 }
 
-impl InputInjector for LinuxUinputInjector {
-    fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+impl LinuxUinputInjector {
+    fn inject_before(&self, event: InputEvent, deadline: Option<Instant>) -> InputResult {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err("input expired before uinput dispatch".into());
+        }
         match event {
             InputEvent::MouseMove { dx, dy } => {
+                let mut batch = Vec::new();
                 if dx != 0 {
-                    self.write_event(EV_REL, REL_X, dx as i32);
+                    batch.push((EV_REL, REL_X, dx as i32));
                 }
                 if dy != 0 {
-                    self.write_event(EV_REL, REL_Y, dy as i32);
+                    batch.push((EV_REL, REL_Y, dy as i32));
                 }
-                self.syn_report();
+                self.write_events(&batch, deadline)?;
             }
             InputEvent::MouseMoveAbsolute { x, y } => {
-                let abs_x = ((x as i64 * ABS_MAX_RANGE as i64) / 65535) as i32;
-                let abs_y = ((y as i64 * ABS_MAX_RANGE as i64) / 65535) as i32;
-                self.write_event(EV_ABS, ABS_X, abs_x);
-                self.write_event(EV_ABS, ABS_Y, abs_y);
-                self.syn_report();
+                self.write_events(
+                    &[(EV_ABS, ABS_X, i32::from(x)), (EV_ABS, ABS_Y, i32::from(y))],
+                    deadline,
+                )?;
             }
-            InputEvent::MouseDown(button) => {
-                let btn_code = match button {
+            InputEvent::MouseDown(button) | InputEvent::MouseUp(button) => {
+                let down = matches!(event, InputEvent::MouseDown(_));
+                let key = match button {
                     0 => BTN_LEFT,
                     1 => BTN_RIGHT,
                     2 => BTN_MIDDLE,
@@ -236,63 +297,42 @@ impl InputInjector for LinuxUinputInjector {
                     4 => BTN_EXTRA,
                     _ => return Err("unsupported mouse button".into()),
                 };
-                self.pressed_buttons
-                    .fetch_or(1 << (button.min(7)), Ordering::Relaxed);
-                self.write_event(EV_KEY, btn_code, 1);
-                self.syn_report();
-            }
-            InputEvent::MouseUp(button) => {
-                let btn_code = match button {
-                    0 => BTN_LEFT,
-                    1 => BTN_RIGHT,
-                    2 => BTN_MIDDLE,
-                    3 => BTN_SIDE,
-                    4 => BTN_EXTRA,
-                    _ => return Err("unsupported mouse button".into()),
-                };
-                self.pressed_buttons
-                    .fetch_and(!(1 << (button.min(7))), Ordering::Relaxed);
-                self.write_event(EV_KEY, btn_code, 0);
-                self.syn_report();
+                let mask = 1 << button;
+                if (self.pressed_buttons.load(Ordering::Relaxed) & mask != 0) != down {
+                    self.write_event(EV_KEY, key, i32::from(down), deadline)?;
+                    if down {
+                        self.pressed_buttons.fetch_or(mask, Ordering::Relaxed);
+                    } else {
+                        self.pressed_buttons.fetch_and(!mask, Ordering::Relaxed);
+                    }
+                }
             }
             InputEvent::MouseScroll { delta_x, delta_y } => {
+                let mut batch = Vec::new();
                 if delta_y != 0 {
-                    let steps = if delta_y > 0 { 1 } else { -1 };
-                    self.write_event(EV_REL, REL_WHEEL, steps);
+                    batch.push((EV_REL, REL_WHEEL, delta_y.signum()));
                 }
                 if delta_x != 0 {
-                    let steps = if delta_x > 0 { 1 } else { -1 };
-                    self.write_event(EV_REL, REL_HWHEEL, steps);
+                    batch.push((EV_REL, REL_HWHEEL, delta_x.signum()));
                 }
-                self.syn_report();
+                self.write_events(&batch, deadline)?;
             }
-            InputEvent::KeyDown(scancode) => {
-                let linux_key = map_gpui_or_mac_to_linux_key(u16::try_from(scancode).map_err(|_|"unsupported key code")?).ok_or("unsupported key code")?;
-                if !self.pressed_keys.lock().unwrap().insert(linux_key) {return Ok(());}
-                self.write_event(EV_KEY, linux_key, 1);
-                self.syn_report();
-            }
-            InputEvent::KeyUp(scancode) => {
-                let linux_key = map_gpui_or_mac_to_linux_key(u16::try_from(scancode).map_err(|_|"unsupported key code")?).ok_or("unsupported key code")?;
-                if !self.pressed_keys.lock().unwrap().remove(&linux_key) {return Ok(());}
-                self.write_event(EV_KEY, linux_key, 0);
-                self.syn_report();
+            InputEvent::KeyDown(code) | InputEvent::KeyUp(code) => {
+                let down = matches!(event, InputEvent::KeyDown(_));
+                let key = map_gpui_or_mac_to_linux_key(
+                    u16::try_from(code).map_err(|_| "unsupported key code")?,
+                )
+                .ok_or("unsupported key code")?;
+                self.key(key, down, deadline)?;
             }
             InputEvent::Key {
                 key_code,
                 pressed,
                 modifiers,
             } => {
+                let key = map_gpui_or_mac_to_linux_key(key_code).ok_or("unsupported key code")?;
+                self.key(key, pressed, deadline)?;
                 self.active_modifiers.store(modifiers, Ordering::Relaxed);
-                let linux_key = map_gpui_or_mac_to_linux_key(key_code).ok_or("unsupported key code")?;
-                if pressed {
-                    if !self.pressed_keys.lock().unwrap().insert(linux_key) {return Ok(());}
-                    self.write_event(EV_KEY, linux_key, 1);
-                } else {
-                    if !self.pressed_keys.lock().unwrap().remove(&linux_key) {return Ok(());}
-                    self.write_event(EV_KEY, linux_key, 0);
-                }
-                self.syn_report();
             }
             InputEvent::ModifiersChanged(modifiers) => {
                 self.active_modifiers.store(modifiers, Ordering::Relaxed);
@@ -301,16 +341,32 @@ impl InputInjector for LinuxUinputInjector {
         }
         Ok(())
     }
+}
+impl InputInjector for LinuxUinputInjector {
+    fn inject_input(&self, event: InputEvent) -> InputResult {
+        self.inject_before(event, None)
+    }
+    fn inject_input_before(&self, event: InputEvent, deadline: Instant) -> InputResult {
+        self.inject_before(event, Some(deadline))
+    }
     fn release_all_input(&self) {
-        // This injector's virtual device owns only these recorded presses.
-        let keys=std::mem::take(&mut *self.pressed_keys.lock().unwrap());
-        for key in keys {self.write_event(EV_KEY,key,0);}
-        let buttons=self.pressed_buttons.swap(0,Ordering::Relaxed);
-        for (button,key) in [(0,BTN_LEFT),(1,BTN_RIGHT),(2,BTN_MIDDLE),(3,BTN_SIDE),(4,BTN_EXTRA)] {
-            if buttons & (1<<button)!=0 {self.write_event(EV_KEY,key,0);}
+        let keys = std::mem::take(&mut *self.pressed_keys.lock().unwrap());
+        for key in keys {
+            let _ = self.write_event(EV_KEY, key, 0, None);
         }
-        self.active_modifiers.store(0,Ordering::Relaxed);
-        self.syn_report();
+        let buttons = self.pressed_buttons.swap(0, Ordering::Relaxed);
+        for (button, key) in [
+            (0, BTN_LEFT),
+            (1, BTN_RIGHT),
+            (2, BTN_MIDDLE),
+            (3, BTN_SIDE),
+            (4, BTN_EXTRA),
+        ] {
+            if buttons & (1 << button) != 0 {
+                let _ = self.write_event(EV_KEY, key, 0, None);
+            }
+        }
+        self.active_modifiers.store(0, Ordering::Relaxed);
     }
 }
 
@@ -384,4 +440,99 @@ fn map_gpui_or_mac_to_linux_key(code: u16) -> Option<u16> {
         0x7E => 103, // KEY_UP
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::sync::Arc;
+    fn fixture(
+        until: Option<Instant>,
+    ) -> (Arc<LinuxUinputInjector>, Arc<Mutex<Vec<(u16, u16, i32)>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let sink = calls.clone();
+        let input = LinuxUinputInjector {
+            file: Mutex::new(None),
+            pressed_buttons: AtomicU8::new(0),
+            active_modifiers: AtomicU8::new(0),
+            pressed_keys: Mutex::new(BTreeSet::new()),
+            record: Some(Arc::new(move |events| {
+                let mut calls = sink.lock().unwrap();
+                let first = calls.is_empty();
+                calls.extend(events.iter().map(|e| (e.r#type, e.code, e.value)));
+                if first {
+                    if let Some(until) = until {
+                        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+                    }
+                }
+                std::mem::size_of_val(events) as isize
+            })),
+        };
+        (Arc::new(input), calls)
+    }
+    #[test]
+    fn fresh_deadline_posts_and_cleans_only_the_accepted_key() {
+        let (input, calls) = fixture(None);
+        input
+            .inject_input_before(
+                InputEvent::KeyDown(0),
+                Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        input.release_all_input();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (EV_KEY, 30, 1),
+                (EV_SYN, 0, 0),
+                (EV_KEY, 30, 0),
+                (EV_SYN, 0, 0)
+            ]
+        );
+    }
+    #[test]
+    fn file_lock_wait_expiry_does_not_post_or_create_cleanup_up() {
+        let (input, calls) = fixture(None);
+        let held = input.file.lock().unwrap();
+        let until = Instant::now() + std::time::Duration::from_millis(40);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let other = input.clone();
+        let worker = std::thread::spawn(move || {
+            tx.send(()).unwrap();
+            other
+                .inject_input_before(InputEvent::MouseDown(0), until)
+                .is_err()
+        });
+        rx.recv().unwrap();
+        std::thread::sleep(
+            until.saturating_duration_since(Instant::now()) + std::time::Duration::from_millis(2),
+        );
+        drop(held);
+        assert!(worker.join().unwrap());
+        input.release_all_input();
+        assert!(calls.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn batch_expiry_only_cleans_first_accepted_press() {
+        let until = Instant::now() + std::time::Duration::from_millis(40);
+        let (input, calls) = fixture(Some(until + std::time::Duration::from_millis(2)));
+        input
+            .inject_input_before(InputEvent::KeyDown(0), until)
+            .unwrap();
+        assert!(
+            input
+                .inject_input_before(InputEvent::KeyDown(11), until)
+                .is_err()
+        );
+        input.release_all_input();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                (EV_KEY, 30, 1),
+                (EV_SYN, 0, 0),
+                (EV_KEY, 30, 0),
+                (EV_SYN, 0, 0)
+            ]
+        );
+    }
 }
