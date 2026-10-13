@@ -57,3 +57,14 @@ The product default is the original GPUI, not desktop::run/egui. gpui-preview re
 The per-profile lock includes runtime renderer identity. A new original GUI must not report success by waking an alpha.7 unidentified/diagnostic owner; report the mismatch without spawning a second network runtime. This new metadata file is process state, not network identity; preserve all persistent configuration protections.
 
 Use --product-info-json to inspect the actual compiled default without starting a window/profile. The release GUI gate verifies identity only; native screenshot and interaction acceptance are separate. Do not claim an installed program changed because a test/preview/staging main was compiled or launched. Versioned production packages and launchers still require explicit successful deployment receipts.
+
+
+## Single main checkout (2026-10-13)
+
+The user requires development and subsequent validation from this repository's
+primary `main` checkout. Do not create or maintain a second source checkout,
+development branch, or worktree for routine validation. Historical test source
+copies were archived; their retained artifact stores are not build entrypoints.
+Use `docs/testing/MAIN-WORKSPACE-VALIDATION.md` for the environment reconciliation.
+Keep lifecycle ownership checks and protected user changes. An incomplete build
+storage contract must be integrated here, not bypassed by cloning the source.
