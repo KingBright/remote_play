@@ -26,6 +26,8 @@
         </provider>
         <service android:name=".SessionConnectionService" android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+        <service android:name=".FileReceiverService" android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
         <service android:name=".ProjectionService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <activity
             android:name=".MainActivity"

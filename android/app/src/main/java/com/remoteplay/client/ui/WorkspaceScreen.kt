@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,14 +31,19 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
-fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
+fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, deviceId: String = "", onClose: () -> Unit) {
     val context = LocalContext.current
+    val sessionKey = remember(endpoint, deviceId) { java.util.UUID.randomUUID().toString() }
+    var requestedFilePicker by rememberSaveable(endpoint, deviceId) { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val state by WorkspaceClient.state.collectAsState()
     var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) }
     var localError by remember { mutableStateOf<String?>(null) }
     var receivedFiles by remember { mutableStateOf(false) }
     var backgroundSettings by remember { mutableStateOf(false) }
+    var shareSelection by rememberSaveable(endpoint, deviceId) { mutableStateOf(false) }
+    var pickerSessionKey by rememberSaveable(endpoint, deviceId) { mutableStateOf("") }
+    var sharedFilesOpen by remember { mutableStateOf(false) }
     val preferences = remember { context.getSharedPreferences("stream", android.content.Context.MODE_PRIVATE) }
     var keepAlive by remember { mutableStateOf(preferences.getInt("background_keepalive_seconds", 300).toString()) }
     var adaptive by remember { mutableStateOf(preferences.getBoolean("adaptive_background", true)) }
@@ -60,13 +66,15 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 backgroundSettings = false
             }
         }) { Text("Save") } })
-    DisposableEffect(endpoint) {
-        WorkspaceClient.open(context, endpoint)
+    DisposableEffect(endpoint, deviceId) {
+        WorkspaceClient.open(context, endpoint, sessionKey, deviceId)
         val observer = LifecycleEventObserver { _, _ -> foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); WorkspaceClient.close() }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val publishSelection = shareSelection
+        val selectedSessionKey = pickerSessionKey
         if (uri != null) scope.launch(Dispatchers.IO) {
             runCatching {
                 val name = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
@@ -75,8 +83,17 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 val directory = File(context.cacheDir, "outgoing/${java.util.UUID.randomUUID()}").apply { mkdirs() }
                 val file = File(directory, name)
                 checkNotNull(context.contentResolver.openInputStream(uri)).use { input -> file.outputStream().use { output -> input.copyTo(output, 64 * 1024) } }
-                WorkspaceClient.sendFile(file)
+                if (publishSelection) WorkspaceClient.publishSharedFile(file, selectedSessionKey) else WorkspaceClient.sendFile(file, selectedSessionKey)
             }.onFailure { withContext(Dispatchers.Main) { localError = it.message } }
+        }
+    }
+    LaunchedEffect(state.sessionKey, state.connected, state.files, sendFileOnConnect) {
+        // Wait for this connection's capability response, not a previous device's state.
+        if (sendFileOnConnect && !requestedFilePicker && state.sessionKey == sessionKey && state.connected && state.files) {
+            requestedFilePicker = true
+            pickerSessionKey = sessionKey
+            shareSelection = false
+            filePicker.launch(arrayOf("*/*"))
         }
     }
     MaterialTheme {
@@ -85,7 +102,10 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 TextButton(onClick = onClose) { Text("Disconnect") }
                 if (!state.connected) TextButton(onClick = { WorkspaceClient.reconnect() }) { Text("Reconnect") }
                 TextButton(onClick = { WorkspaceClient.layout(!state.grid) }) { Text(if (state.grid) "Use tabs" else "Show together") }
-                TextButton(onClick = { filePicker.launch(arrayOf("*/*")) }, enabled = state.connected && state.files) { Text("Send file") }
+                TextButton(onClick = { pickerSessionKey = sessionKey; shareSelection = false; filePicker.launch(arrayOf("*/*")) }, enabled = state.connected && state.files) { Text("Send file") }
+                TextButton(onClick = { pickerSessionKey = sessionKey; shareSelection = true; filePicker.launch(arrayOf("*/*")) }, enabled = state.connected) { Text("Share file with network") }
+                TextButton(onClick = { WorkspaceClient.clearSharedFiles() }, enabled = state.connected) { Text("Clear my shared list") }
+                TextButton(onClick = { sharedFilesOpen = true; WorkspaceClient.listSharedFiles() }, enabled = state.connected && state.files && !state.sharedBusy) { Text("Retrieve shared files") }
                 TextButton(onClick = { receivedFiles = true }) { Text("Received files") }
                 TextButton(onClick = { backgroundSettings = true }) { Text("Background") }
                 TextButton(onClick = { WorkspaceClient.enableClipboard(!state.clipboard) }, enabled = state.connected && state.clipboardAvailable) { Text(if (state.clipboard) "Clipboard ✓" else "Clipboard") }
@@ -155,7 +175,10 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                     }
                 }
             }
-            if (state.panes.isEmpty()) Text("Choose a display or application window above. Files work without opening a video.", color = Color.LightGray)
+            if (state.panes.isEmpty()) Text(
+                if (state.sources.isEmpty()) "No screen is currently shared by this device. File transfers work independently."
+                else "Choose a display or application window above. Files work without opening a video.",
+                color = Color.LightGray)
             if (foreground && state.connected) visible.mapNotNull { it.audioOwner }.distinct().forEach { owner ->
                 key(owner) { WorkspaceAudio(owner, volumes[owner] ?: 1f, onError = { localError = it }) }
             }
@@ -170,6 +193,18 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                     if (f != null && k != null && f > 0 && k > 0) { WorkspaceClient.settings(pane.id, fps = f, kbps = k); selectedSettings = null }
                 }) { Text("Apply") } })
         }
+        if (sharedFilesOpen) AlertDialog(onDismissRequest = { sharedFilesOpen = false }, title = { Text("Remote shared files") },
+            text = { Column {
+                Text(state.status)
+                Text("Only explicitly shared files are listed. No remote filesystem paths are accepted.")
+                state.remoteFiles.forEach { file ->
+                    TextButton(onClick = { WorkspaceClient.fetchSharedFile(file.id, sessionKey) }, enabled = state.connected && !state.sharedBusy) { Text("Get ${file.name} (${file.sizeBytes} bytes)") }
+                }
+                Row {
+                    TextButton(onClick = { WorkspaceClient.listSharedFiles() }, enabled = state.connected && !state.sharedBusy) { Text("Refresh") }
+                    state.sharedNext?.let { next -> TextButton(onClick = { WorkspaceClient.listSharedFiles(next) }, enabled = state.connected && !state.sharedBusy) { Text("Next page") } }
+                }
+            } }, confirmButton = { TextButton(onClick = { sharedFilesOpen = false }) { Text("Close") } })
         if (receivedFiles) ReceivedFilesDialog { receivedFiles = false }
     }
 }

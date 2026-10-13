@@ -15,7 +15,8 @@ import java.util.concurrent.Executors
 data class WorkspaceSource(val source: Any, val title: String, val width: Int, val height: Int)
 data class WorkspacePane(val id: Int, val source: WorkspaceSource, val fps: Int, val kbps: Int,
     val width: Int = 1280, val height: Int = 720, val audioOwner: Int? = null, val input: Boolean = false)
-data class WorkspaceState(val connected: Boolean = false, val clipboard: Boolean = false, val maxSubscriptions: Int = 4,
+data class RemoteSharedFile(val id: Long, val name: String, val sizeBytes: Long)
+data class WorkspaceState(val remoteFiles: List<RemoteSharedFile> = emptyList(), val sharedNext: Long? = null, val sharedBusy: Boolean = false, val sessionKey: String = "", val connected: Boolean = false, val clipboard: Boolean = false, val maxSubscriptions: Int = 4,
     val files: Boolean = false, val clipboardAvailable: Boolean = false, val sources: List<WorkspaceSource> = emptyList(),
     val panes: List<WorkspacePane> = emptyList(), val status: String = "Connecting…", val grid: Boolean = true, val selected: Int = 0)
 
@@ -31,8 +32,11 @@ object WorkspaceClient {
     private var backgroundAt = 0L
     private var context: Context? = null
     private var endpoint = ""
+    private var deviceId = ""
     private var nextId = 256
     private var revision = 0L
+    private var shareRequestId = 0L
+    private var pendingShareList = 0L
     private var polling: Job? = null
     private var asleep = false
     @Volatile var retainingConnection = false
@@ -53,11 +57,12 @@ object WorkspaceClient {
         runCatching(block).onFailure { mutable.value = mutable.value.copy(status = it.message ?: "Connection failed") }
     }
 
-    fun open(context: Context, endpoint: String) = guarded {
+    fun open(context: Context, endpoint: String, sessionKey: String = "", deviceId: String = "") = guarded {
         closeNative()
         this.context = context.applicationContext
         this.endpoint = endpoint
-        mutable.value = WorkspaceState()
+        this.deviceId = deviceId
+        mutable.value = WorkspaceState(sessionKey = sessionKey)
         nextId = 256; revision = 0; asleep = false; background = false; transfersActive = false
         connectNative()
         active = true
@@ -78,9 +83,12 @@ object WorkspaceClient {
     }
     private fun connectNative() {
         val directory = File(checkNotNull(context).filesDir, "received").apply { mkdirs() }
-        action(0, JSONObject().put("endpoint", endpoint).put("directory", directory.absolutePath).toString())
+        RemotePlayClient.refreshDevices()
+        val target = resolveNetworkEndpoint(deviceId, endpoint, RemotePlayClient.devices.value)
+        action(0, JSONObject().put("endpoint", target).put("directory", directory.absolutePath).toString())
         retainingConnection = true
-        mutable.value = mutable.value.copy(connected = true, status = "Connected")
+        pendingShareList = 0L
+        mutable.value = mutable.value.copy(connected = true, remoteFiles = emptyList(), sharedNext = null, sharedBusy = false, status = "Connected")
     }
     private fun closeNative() { polling?.cancel(); polling = null; if (active) action(1); active = false; retainingConnection = false }
     fun close() = guarded { closeNative(); mutable.value = WorkspaceState(status = "Disconnected") }
@@ -138,7 +146,38 @@ object WorkspaceClient {
         action(3, request(updated).toString())
         mutable.value = mutable.value.copy(panes = mutable.value.panes.map { if (it.id == id) updated else it })
     }
-    fun sendFile(file: File) = guarded { lastFileAction = SystemClock.elapsedRealtime(); action(4, file.absolutePath) }
+    fun sendFile(file: File, expectedSessionKey: String) = guarded {
+        check(active && mutable.value.connected && mutable.value.sessionKey == expectedSessionKey) {
+            "The destination changed or disconnected. Select the file again for the intended device."
+        }
+        lastFileAction = SystemClock.elapsedRealtime()
+        action(4, file.absolutePath)
+    }
+    fun publishSharedFile(file: File, expectedSessionKey: String) = guarded {
+        check(active && mutable.value.connected && mutable.value.sessionKey == expectedSessionKey) { "The selected device session changed" }
+        action(8, file.absolutePath)
+        mutable.value = mutable.value.copy(status = "File shared with this network until cleared, network change, or app exit. Enable file reception on this phone for new incoming connections.")
+    }
+    fun clearSharedFiles() = guarded {
+        action(10)
+        mutable.value = mutable.value.copy(status = "Shared list cleared. Already accepted transfers may finish.")
+    }
+    fun listSharedFiles(afterId: Long = 0L) = guarded {
+        check(active && mutable.value.connected && mutable.value.files) { "File connection is unavailable" }
+        check(!mutable.value.sharedBusy) { "A shared-file list request is already pending" }
+        val id = ++shareRequestId
+        action(9, JSONObject().put("request_id", id).put("request", JSONObject().put("List", JSONObject().put("after_id", afterId))).toString())
+        pendingShareList = id
+        lastFileAction = SystemClock.elapsedRealtime()
+        mutable.value = mutable.value.copy(sharedBusy = true, status = "Requesting shared files...")
+    }
+    fun fetchSharedFile(fileId: Long, expectedSessionKey: String) = guarded {
+        check(active && mutable.value.connected && mutable.value.sessionKey == expectedSessionKey) { "The selected device session changed" }
+        check(mutable.value.remoteFiles.any { it.id == fileId }) { "Refresh the remote shared list first" }
+        action(9, JSONObject().put("request_id", ++shareRequestId).put("request", JSONObject().put("Fetch", JSONObject().put("file_id", fileId))).toString())
+        lastFileAction = SystemClock.elapsedRealtime()
+        mutable.value = mutable.value.copy(status = "File requested; waiting for transfer confirmation")
+    }
     fun enableClipboard(enabled: Boolean) = guarded {
         command("SetClipboard", JSONObject().put("enabled", enabled))
         mutable.value = mutable.value.copy(clipboard = enabled)
@@ -196,6 +235,24 @@ object WorkspaceClient {
             }
             control?.optJSONObject("Error")?.let { mutable.value = mutable.value.copy(status = it.getString("reason")) }
             if (event.has("file")) mutable.value = mutable.value.copy(status = event.getString("file").take(220))
+            event.optJSONObject("detail")?.let { detail ->
+                val response = detail.optJSONObject("shared_response")
+                val id = detail.optLong("shared_request_id")
+                response?.optJSONObject("Page")?.takeIf { id == pendingShareList }?.let { page ->
+                    val entries = page.getJSONArray("entries")
+                    val files = (0 until entries.length()).map { index ->
+                        val item = entries.getJSONObject(index)
+                        RemoteSharedFile(item.getLong("id"), item.getString("name"), item.getLong("size_bytes"))
+                    }
+                    pendingShareList = 0L
+                    mutable.value = mutable.value.copy(remoteFiles = files, sharedNext = if (page.isNull("next_after_id")) null else page.getLong("next_after_id"), sharedBusy = false, status = if (files.isEmpty()) "No files explicitly shared by this device" else "Choose a shared file to retrieve")
+                }
+                response?.optJSONObject("Queued")?.let { mutable.value = mutable.value.copy(status = "Request accepted; delivery is not complete yet") }
+                response?.optJSONObject("Rejected")?.let { rejected ->
+                    if (id == pendingShareList) pendingShareList = 0L
+                    mutable.value = mutable.value.copy(sharedBusy = pendingShareList != 0L, status = rejected.getString("message"))
+                }
+            }
         }
     }
 }

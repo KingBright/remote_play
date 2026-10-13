@@ -21,6 +21,12 @@ static WORKSPACE: std::sync::Mutex<Option<Arc<crate::workspace_bridge::MobileWor
 static PUBLISHER: std::sync::Mutex<Option<Arc<crate::publisher_bridge::MobilePublisher>>> =
     std::sync::Mutex::new(None);
 
+// All updates are serialized by PUBLISHER. Media and file reception own the
+// same inbound endpoint independently; media authorization is never implicit.
+static FILE_RECEIVER_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CAPTURE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn refresh_network_ownership() {
     client().set_network_enabled(
         VIEWER_NETWORK_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
@@ -38,7 +44,7 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
 ) -> jstring {
     let result = (|| -> Result<String, String> {
         let value: String = env.get_string(&payload).map_err(|e| e.to_string())?.into();
-        if operation == 0 {
+        if operation == 0 || operation == 5 {
             let value: serde_json::Value =
                 serde_json::from_str(&value).map_err(|e| e.to_string())?;
             let bind = value["bind"]
@@ -46,37 +52,74 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
                 .unwrap_or("0.0.0.0:5001")
                 .parse()
                 .map_err(|_| "invalid listen address")?;
-            let directory = value["directory"]
+            let directory: std::path::PathBuf = value["directory"]
                 .as_str()
                 .ok_or("missing receive directory")?
                 .into();
-            if PUBLISHER.lock().unwrap().is_some() {
+            let mut node = PUBLISHER.lock().unwrap();
+            if node.as_ref().is_some_and(|p| p.is_finished()) {
+                return Err("Inbound service stopped; disable receiving and screen sharing before restarting".into());
+            }
+            if operation == 0 && CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err("screen sharing is already running".into());
             }
-            let publisher =
-                client()
-                    .runtime()
-                    .block_on(crate::publisher_bridge::MobilePublisher::start(
-                        bind,
-                        directory,
-                        value["audio"].as_bool().unwrap_or(false),
-                    ))?;
+            let newly_started = node.is_none();
+            if newly_started {
+                *node = Some(Arc::new(client().runtime().block_on(
+                    crate::publisher_bridge::MobilePublisher::start_receiver(bind, directory),
+                )?));
+            }
+            let publisher = node.as_ref().unwrap();
+            if operation == 0 {
+                publisher.set_capture_available(true, value["audio"].as_bool().unwrap_or(false));
+                CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                FILE_RECEIVER_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             let address = publisher.address.to_string();
             crate::PUBLISHING_PORT.store(
                 publisher.address.port(),
                 std::sync::atomic::Ordering::Relaxed,
             );
-            *PUBLISHER.lock().unwrap() = Some(Arc::new(publisher));
+            drop(node);
             client().set_network_enabled(true);
-            let _ = client().network_reload_tx.send(());
+            // Only a new endpoint changes routes. Capture changes are source-list
+            // updates on the existing connection, not a P2P/relay teardown.
+            if newly_started {
+                let _ = client().network_reload_tx.send(());
+            }
             return Ok(address);
         }
-        if operation == 1 {
-            PUBLISHER.lock().unwrap().take();
-            crate::PUBLISHING_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
+        if operation == 1 || operation == 6 {
+            let mut node = PUBLISHER.lock().unwrap();
+            if operation == 1 {
+                CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+                if let Some(publisher) = node.as_ref() {
+                    publisher.set_capture_available(false, false);
+                }
+            } else {
+                FILE_RECEIVER_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+            let stop = !CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+                && !FILE_RECEIVER_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+            if stop {
+                node.take();
+                crate::PUBLISHING_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            drop(node);
             refresh_network_ownership();
-            let _ = client().network_reload_tx.send(());
+            if stop {
+                let _ = client().network_reload_tx.send(());
+            }
             return Ok(String::new());
+        }
+        if operation == 7 {
+            let node = PUBLISHER.lock().unwrap();
+            return Ok(serde_json::json!({
+                "receiving": FILE_RECEIVER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+                    && node.as_ref().is_some_and(|p| !p.is_finished()),
+            })
+            .to_string());
         }
         let publisher = PUBLISHER
             .lock()
@@ -98,7 +141,12 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
                 Ok(String::new())
             }
             4 => {
-                publisher.fail(value);
+                // Capture failure does not terminate an independently enabled file service.
+                if FILE_RECEIVER_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+                    publisher.set_capture_available(false, false);
+                } else {
+                    publisher.fail(value);
+                }
                 Ok(String::new())
             }
             _ => Err("unknown publisher command".into()),
@@ -219,6 +267,18 @@ pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeAction(
                 7 => client
                     .runtime()
                     .block_on(workspace.send_clipboard(&payload))?,
+                8 => {
+                    let catalog = remote_core::shared_files::shared_file_catalog();
+                    let scope = remote_core::shared_files::current_share_scope();
+                    let info = client
+                        .runtime()
+                        .block_on(catalog.publish(std::path::Path::new(&payload), scope))?;
+                    return serde_json::to_string(&info).map_err(|e| e.to_string());
+                }
+                9 => client
+                    .runtime()
+                    .block_on(workspace.shared_request(&payload))?,
+                10 => remote_core::shared_files::shared_file_catalog().clear(),
                 _ => return Err("unknown workspace operation".into()),
             }
             Ok(String::new())
@@ -423,7 +483,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetScre
     width: jint,
     height: jint,
 ) {
-    client().set_screen_bounds(width.max(1) as u16, height.max(1) as u16);
+    client().set_screen_bounds(width.clamp(1, 65535) as u16, height.clamp(1, 65535) as u16);
 }
 
 #[cfg(feature = "android")]
@@ -490,6 +550,18 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSess
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSessionError(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let error = client().last_error_rx.borrow().clone();
+    env.new_string(error)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollAudioPacket(
     env: JNIEnv,
     _class: JClass,
@@ -532,17 +604,30 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeJoinPai
         Ok(s) => s.into(),
         Err(_) => return std::ptr::null_mut(),
     };
-    let result = match client().join_pairing_payload(&raw) {
-        Ok(message) => {
-            if let Some(publisher) = PUBLISHER.lock().unwrap().as_ref() {
-                publisher.fail("Device group changed; restart screen sharing".into());
-            }
-            message
-        }
+    let inbound = PUBLISHER.lock().unwrap();
+    if inbound.is_some() {
+        return env
+            .new_string("error:Stop file reception and screen sharing before changing networks")
+            .map(|s| s.into_raw())
+            .unwrap_or(std::ptr::null_mut());
+    }
+    let result = match client().join_pairing_payload_with_change(&raw) {
+        Ok((message, _changed)) => message,
         Err(err) => format!("error:{err}"),
     };
     match env.new_string(result) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetNetworkIdentityJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    env.new_string(client().network_identity_json())
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }

@@ -23,11 +23,12 @@ android {
         applicationId = "com.remoteplay.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0.0-alpha.1"
+        versionCode = 9
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionName = "2.0.0-alpha.8"
 
         ndk {
-            abiFilters.addAll(setOf("arm64-v8a", "x86_64"))
+            abiFilters.addAll(setOf("arm64-v8a"))
         }
     }
 
@@ -69,6 +70,11 @@ android {
 }
 
 dependencies {
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.02.00"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("junit:junit:4.13.2")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
@@ -80,9 +86,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
-    implementation("androidx.camera:camera-core:1.3.4")
-    implementation("androidx.camera:camera-camera2:1.3.4")
-    implementation("androidx.camera:camera-lifecycle:1.3.4")
-    implementation("androidx.camera:camera-view:1.3.4")
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
     implementation("com.google.zxing:core:3.5.3")
 }
