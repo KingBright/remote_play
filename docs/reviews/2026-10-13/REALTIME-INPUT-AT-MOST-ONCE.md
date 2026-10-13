@@ -165,11 +165,12 @@ still cannot promise strict isolation from simultaneous local physical keys.
 The same-path review also confirmed that raw legacy `ControlMessage::Input` and
 unsequenced Session input are rejected by the protected host. Android's workspace
 path uses `WorkspaceConnection` sealing. Its older single-viewport/manual-address
-bridge still emits legacy raw input and therefore cannot claim control against
-the new protected host. This remains a compatibility gap; it is not made safe by
-re-enabling unbound input, and the Android source commit is not a device-release
-acceptance. Native Windows/Linux ABI, real Android instrumentation, physical
-input and all current cross-device installed-version checks remain separate.
+bridge emitted legacy raw input and could not control the new protected host.
+The subsequent [manual-session repair](ANDROID-MANUAL-PROTECTED-SESSION.md)
+reuses the shared protected connection without re-enabling unbound input.
+That source fix is not device-release acceptance. Native Windows/Linux ABI,
+real Android instrumentation, physical input and all current cross-device
+installed-version checks remain separate.
 
 Final follow-up verification: host198 passed/2ignored; protocol45 passed.
 These overlap the earlier focused checks and must not be added as independent

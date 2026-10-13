@@ -9,6 +9,7 @@ pub(crate) struct InputState {
     next_request: u64,
 }
 struct Slot {
+    enabled: bool,
     revision: u32,
     request: u64,
     lease: Option<Lease>,
@@ -39,6 +40,7 @@ impl InputState {
         self.slots.insert(
             id,
             Slot {
+                enabled: true,
                 revision,
                 request: 0,
                 lease: None,
@@ -50,7 +52,8 @@ impl InputState {
     }
     pub(crate) fn ready(&self, id: u32, revision: u32) -> bool {
         self.slots.get(&id).is_some_and(|slot| {
-            slot.revision == revision
+            slot.enabled
+                && slot.revision == revision
                 && slot
                     .lease
                     .as_ref()
@@ -67,7 +70,8 @@ impl InputState {
         let Some(slot) = self.slots.get_mut(&binding.subscription_id) else {
             return;
         };
-        if binding.connection_id != connection
+        if !slot.enabled
+            || binding.connection_id != connection
             || slot.revision != binding.source_revision
             || slot.request != request
             || request == 0
@@ -96,6 +100,9 @@ impl InputState {
         self.slots
             .iter_mut()
             .filter_map(|(id, slot)| {
+                if !slot.enabled {
+                    return None;
+                }
                 self.next_request = self.next_request.checked_add(1)?;
                 slot.request = self.next_request;
                 Some(SessionCommand::RequestInputBinding {
@@ -148,9 +155,11 @@ impl InputState {
                 video,
                 audio,
             } => {
-                if !video {
-                    if let Some(slot) = self.slots.get_mut(&id) {
+                if let Some(slot) = self.slots.get_mut(&id) {
+                    slot.enabled = video;
+                    if !video {
                         slot.lease = None;
+                        slot.request = 0;
                     }
                 }
                 return Ok(SessionCommand::SetActivity {
@@ -186,6 +195,26 @@ impl InputState {
                 .sequence
                 .checked_add(1)
                 .ok_or("input sequence exhausted")?;
+            // Preserve the caller's chord. A changed lease must reject stale
+            // modifier intent, not silently turn Ctrl+C into a bare C.
+            if let Some(protocol::InputEvent::Key {
+                pressed: true,
+                modifiers,
+                ..
+            }) = &event
+            {
+                let owned = lease
+                    .held
+                    .snapshot()
+                    .iter()
+                    .fold(0, |mask, (press, _)| match press {
+                        protocol::realtime_input::Press::Modifier(bit) => mask | bit,
+                        _ => mask,
+                    });
+                if *modifiers != owned {
+                    return Err("input modifier ownership changed".into());
+                }
+            }
             InputPayload::Event(
                 lease
                     .held
@@ -319,4 +348,101 @@ mod tests {
         }
     }
 
+    #[test]
+    fn paused_input_cannot_be_regranted_or_replay_held_intent() {
+        let mut state = InputState::default();
+        state.source(7, 0);
+        grant(&mut state, 1);
+        state
+            .seal(SessionCommand::Input {
+                id: 7,
+                event: protocol::InputEvent::ModifiersChanged(2),
+            })
+            .unwrap();
+        let SessionCommand::RequestInputBinding { request, .. } = state.requests(1).remove(0)
+        else {
+            panic!()
+        };
+        state
+            .seal(SessionCommand::SetActivity {
+                id: 7,
+                revision: 1,
+                video: false,
+                audio: false,
+            })
+            .unwrap();
+        state.grant(
+            1,
+            InputBinding {
+                connection_id: 1,
+                subscription_id: 7,
+                source_revision: 0,
+                epoch: [1; 16],
+            },
+            request,
+            1000,
+        );
+        assert!(!state.ready(7, 0));
+        assert!(state.requests(1).is_empty());
+        assert!(state.snapshots().is_empty());
+        state
+            .seal(SessionCommand::SetActivity {
+                id: 7,
+                revision: 2,
+                video: true,
+                audio: true,
+            })
+            .unwrap();
+        grant(&mut state, 2);
+        assert!(
+            state
+                .seal(SessionCommand::Input {
+                    id: 7,
+                    event: protocol::InputEvent::Key {
+                        key_code: 8,
+                        pressed: true,
+                        modifiers: 2
+                    }
+                })
+                .is_err()
+        );
+        assert!(
+            matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty())
+        );
+    }
+
+    #[test]
+    fn lost_grants_expire_and_late_grants_cannot_revive_a_paused_hold() {
+        let mut state = InputState::default();
+        state.source(7, 0);
+        grant(&mut state, 1);
+        state
+            .seal(SessionCommand::Input {
+                id: 7,
+                event: protocol::InputEvent::MouseDown(0),
+            })
+            .unwrap();
+        state
+            .slots
+            .get_mut(&7)
+            .unwrap()
+            .lease
+            .as_mut()
+            .unwrap()
+            .received = Instant::now() - std::time::Duration::from_millis(751);
+        assert!(!state.ready(7, 0));
+        assert!(state.snapshots().is_empty());
+        assert!(
+            state
+                .seal(SessionCommand::Input {
+                    id: 7,
+                    event: protocol::InputEvent::MouseUp(0)
+                })
+                .is_err()
+        );
+        grant(&mut state, 2);
+        assert!(
+            matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty())
+        );
+    }
 }
