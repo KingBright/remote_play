@@ -69,13 +69,13 @@ Use `docs/testing/MAIN-WORKSPACE-VALIDATION.md` for the environment reconciliati
 Keep lifecycle ownership checks and protected user changes. An incomplete build
 storage contract must be integrated here, not bypassed by cloning the source.
 
-Keep at most two complete delivery generations through the shared release-only
-lifecycle helper; platform/ABI files are components of one generation. Preserve
-active outputs, installation rollback tuples and unverified legacy artifacts.
-Use the same explicit `REMOTEPLAY_RELEASE_GENERATION` across platform builds of
-one delivery (required for prebuilt inputs). Automatic clean-checkout grouping
-is a producer observation, never a replacement for fresh-target identity receipts.
-Rebuilding an already registered platform component requires a new explicit
-delivery generation; reuse the same generation only to add another platform.
-Automatic retention covers newly registered deliveries; it does not prove that
-historical artifacts or installed device versions have all converged to this limit.
+Keep one verified current artifact per platform in the established default output
+and retain necessary shared compilation caches. The existing public authority owns
+atomic output replacement and exact temporary cleanup; do not create generations,
+archive directories or APK snapshots. Production macOS uses `~/rust-target` and
+`package/macos/RemotePlay-macos-arm64.zip`; Android uses its default `app-release.apk`.
+Use the formal packaging scripts; bare release Gradle packaging requires their
+active public transaction. Debug/native incremental builds do not publish artifacts.
+Wait for failed producers before cleaning their temporary files; recover interrupted
+transactions before producing again. Preserve unknown historical files and installed
+rollback identity tuples. A packaging signature is never a fresh-target source receipt.

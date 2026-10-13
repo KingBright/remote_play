@@ -69,6 +69,23 @@ android {
     }
 }
 
+// onlyIf runs before Gradle cleans outputDirectory; doFirst would be too late.
+// The formal wrapper redirects only APK output to its public-owned temporary.
+tasks.withType<com.android.build.gradle.tasks.PackageAndroidArtifact>().configureEach {
+    if (name == "packageRelease") onlyIf {
+        val helper = rootProject.projectDir.parentFile.resolve("scripts/release_artifact_lifecycle.py")
+        val checked = project.exec {
+            commandLine("python3", "-B", helper.absolutePath, "check-current",
+                "--apk-output-directory", outputDirectory.get().asFile.absolutePath)
+            isIgnoreExitValue = true
+        }
+        if (checked.exitValue != 0) {
+            throw GradleException("Use scripts/build_android_release.sh; an active verified current-output transaction is required")
+        }
+        true
+    }
+}
+
 dependencies {
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.02.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

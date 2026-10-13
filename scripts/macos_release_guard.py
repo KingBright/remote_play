@@ -227,17 +227,36 @@ def verify_stage(stage: Path, policy: Policy) -> list[dict]:
     return verified
 
 
-def package(binary: Path, output: Path, version: str, build: str, policy: Policy) -> dict:
+@contextmanager
+def packaging_workspace(output: Path, owned: Path | None):
+    if owned is not None:
+        if owned.is_symlink() or not owned.is_dir() or any(owned.iterdir()):
+            raise ReleaseRejected('Expected the empty public-owned packaging workspace')
+        yield owned  # The shared transaction owns its cleanup, including crash recovery.
+        return
+    # Direct function callers are isolated acceptance fixtures, not the production CLI.
+    stage = output / '.remoteplay-macos-package.pending'
+    stage.mkdir(mode=0o700)
+    try:
+        yield stage
+    finally:
+        shutil.rmtree(stage)
+
+
+def package(binary: Path, output: Path, version: str, build: str, policy: Policy, *,
+            archive: Path | None = None, receipt: Path | None = None,
+            workspace: Path | None = None, current_archive: Path | None = None) -> dict:
     signer = preflight(policy)  # Check before altering any existing output.
     version_key(version); build_key(build)
     if not binary.is_file() or binary.is_symlink():
         raise ReleaseRejected('Missing build output')
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / f'RemotePlay-macos-arm64-{version}-{build}.zip'
-    if archive.exists():
-        raise ReleaseRejected('Versioned artifact already exists; not overwriting it')
-    with tempfile.TemporaryDirectory(prefix='.rp-package-', dir=output) as directory:
-        stage = Path(directory); app = stage / 'RemotePlay.app'
+    archive = archive or output / 'RemotePlay-macos-arm64.zip'
+    receipt = receipt or archive.with_suffix('.verification.json')
+    if archive.exists() or archive.is_symlink() or receipt.exists() or receipt.is_symlink():
+        raise ReleaseRejected('Output already exists; update current through the production entrypoint')
+    with packaging_workspace(output, workspace) as stage:
+        app = stage / 'RemotePlay.app'
         macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
         macos.mkdir(parents=True); resources.mkdir(parents=True)
         shutil.copy2(binary, macos / policy.executable); os.chmod(macos / policy.executable, 0o755)
@@ -262,10 +281,11 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
         run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(candidate)], 120)
         with verified_archive(candidate, policy) as (_, extracted):
             check_upgrade(report, extracted)
-        # Atomic no-clobber publication on the same filesystem.
-        os.link(candidate, archive)
-        report.update(archive=str(archive), archive_sha256=sha256(archive), size_bytes=archive.stat().st_size)
-        archive.with_suffix('.verification.json').write_text(json.dumps(report, indent=2) + '\n')
+        # This is the transaction's private stage; shared publish atomically updates current.
+        os.replace(candidate, archive)
+        report.update(archive=str(current_archive or archive), archive_sha256=sha256(archive), size_bytes=archive.stat().st_size)
+        with receipt.open('x') as outgoing:
+            json.dump(report, outgoing, indent=2); outgoing.write('\n'); outgoing.flush(); os.fsync(outgoing.fileno())
     return report
 
 
@@ -287,14 +307,28 @@ def main() -> None:
     else:
         preflight(policy)  # Preserve signer refusal before any retention mutation.
         import release_artifact_lifecycle as lifecycle
-        with lifecycle.producer('macos', explicit_required=True) as (_, delivery):
+        with lifecycle.producer('macos') as (_, delivery):
             version_key(args.version); build_key(args.build)
             if not args.binary.is_file() or args.binary.is_symlink():
                 raise ReleaseRejected('Missing build output')
-            lifecycle.admit_macos(delivery, args.output, args.version, args.build)
-            result = package(args.binary, args.output, args.version, args.build, policy)
-            retention = lifecycle.publish_macos(delivery, result)
-            result = dict(result, delivery_retention=retention)
+            output = args.output.resolve()
+            lifecycle.require(output == lifecycle.macos_output_root(), 'Use the configured default macOS package directory')
+            archive = output / 'RemotePlay-macos-arm64.zip'
+            files = [archive, archive.with_suffix('.verification.json')]
+            current = None
+            if any(path.exists() or path.is_symlink() for path in files):
+                recorded, current = lifecycle.macos_evidence(*files, archive)
+                with verified_archive(archive, policy) as (_, checked):
+                    lifecycle.require(all(recorded.get(key) == value for key, value in checked.items()),
+                                      'Existing current archive differs from its original verified receipt')
+            admission = lifecycle.admit(delivery, 'macos-arm64-release', files, current=current,
+                                        aux_stage=output / '.remoteplay-macos-package.pending')
+            staged_archive, staged_receipt = map(Path, admission['staged_files'])
+            result = package(args.binary, output, args.version, args.build, policy,
+                             archive=staged_archive, receipt=staged_receipt,
+                             workspace=Path(admission['owned_aux_stages'][0]), current_archive=archive)
+            current_output = lifecycle.publish_macos(delivery, admission, result)
+            result = dict(result, current_output=current_output)
     print('MACOS_RELEASE_VERIFIED ' + json.dumps(result), flush=True)
 
 
