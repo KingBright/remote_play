@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-APK="${1:-$ROOT/android/app/build/outputs/apk/debug/app-debug.apk}"
+APK="${1:-$ROOT/android/app/build/outputs/apk/release/app-release.apk}"
 NAS_HOST="${REMOTEPLAY_NAS_HOST:-root@hackerlife.fun}"
 NAS_PORT="${REMOTEPLAY_NAS_PORT:-222}"
 REMOTE_DIR="${REMOTEPLAY_NAS_DOWNLOAD_DIR:-/opt/remoteplay/downloads}"
@@ -19,6 +19,7 @@ require() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 
 for tool in ssh scp curl python3 shasum tar; do require "$tool"; done
 [ -f "$APK" ] || fail "APK not found: $APK"
+python3 "$ROOT/scripts/verify_release_apk.py" "$APK"
 [ -f "$INDEX_TEMPLATE" ] || fail "landing page template not found: $INDEX_TEMPLATE"
 
 GRADLE="$ROOT/android/app/build.gradle.kts"
@@ -46,6 +47,8 @@ cp "$APK" "$STAGE/$APK_NAME"
 cp "$INDEX_TEMPLATE" "$STAGE/index.html"
 
 export VERSION VERSION_CODE MIN_SDK COMMIT PUBLISHED_AT APK_NAME SHA256 SIZE_BYTES CHANNEL RELEASE_NOTES
+export RELEASE_SOURCE_ID="${REMOTEPLAY_RELEASE_SOURCE_ID:-unknown}"
+export RELEASE_VERIFICATION_JSON="${APK%.apk}.verification.json"
 python3 - "$STAGE" <<'PY'
 import json, os, sys
 from pathlib import Path
@@ -55,6 +58,8 @@ entry = {
     "version_code": int(os.environ["VERSION_CODE"]),
     "commit": os.environ["COMMIT"],
     "channel": os.environ["CHANNEL"],
+    "source_id": os.environ["RELEASE_SOURCE_ID"],
+    "commit_is_base": True,
     "published_at": os.environ["PUBLISHED_AT"],
     "file": os.environ["APK_NAME"],
     "size_bytes": int(os.environ["SIZE_BYTES"]),
@@ -67,7 +72,8 @@ release = {
     "min_sdk": int(os.environ["MIN_SDK"]),
     "url": f'/download/{entry["file"]}',
     "latest_url": "/download/RemotePlay-Android-latest.apk",
-    "notes": [os.environ["RELEASE_NOTES"]],
+    "notes": os.environ["RELEASE_NOTES"].split("\n"),
+    "validation": json.loads(Path(os.environ["RELEASE_VERIFICATION_JSON"]).read_text()),
 }
 (stage / "release.json").write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n")
 (stage / "entry.json").write_text(json.dumps(entry, ensure_ascii=False, indent=2) + "\n")

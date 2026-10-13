@@ -40,38 +40,32 @@ export CXX_x86_64_linux_android="$TOOLCHAIN/x86_64-linux-android${API}-clang++"
 export CMAKE_TOOLCHAIN_FILE_aarch64_linux_android="$ROOT/scripts/cmake/android-arm64.cmake"
 export CMAKE_TOOLCHAIN_FILE_x86_64_linux_android="$ROOT/scripts/cmake/android-x86_64.cmake"
 
-mkdir -p "$OUT_DIR/arm64-v8a" "$OUT_DIR/x86_64"
-
-export AR_aarch64_linux_android="${AR_aarch64_linux_android:-$TOOLCHAIN/llvm-ar}"
-export AR_x86_64_linux_android="${AR_x86_64_linux_android:-$TOOLCHAIN/llvm-ar}"
-
-if command -v cargo-ndk >/dev/null 2>&1; then
-  cargo ndk -t arm64-v8a -t x86_64 -o "$OUT_DIR" --platform "$API" \
-    build -p remote_client_bridge --features android --release
-else
-  echo "Using NDK $NDK ($HOST_TAG)"
-  cargo build -p remote_client_bridge --features android --release --target aarch64-linux-android
-  if rustup target list --installed | grep -qx 'x86_64-linux-android'; then
-    cargo build -p remote_client_bridge --features android --release --target x86_64-linux-android
-  else
-    echo "Skipping x86_64-linux-android (rust-std not installed)"
-  fi
-fi
-
-if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
-  CARGO_TARGET_DIR="$(cargo metadata --format-version 1 --no-deps --offline 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null \
-    || true)"
-fi
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
-if [[ -f "$CARGO_TARGET_DIR/aarch64-linux-android/release/libremote_play_android.so" ]]; then
-  cp "$CARGO_TARGET_DIR/aarch64-linux-android/release/libremote_play_android.so" \
-    "$OUT_DIR/arm64-v8a/libremote_play_android.so"
-fi
-if [[ -f "$CARGO_TARGET_DIR/x86_64-linux-android/release/libremote_play_android.so" ]]; then
-  cp "$CARGO_TARGET_DIR/x86_64-linux-android/release/libremote_play_android.so" \
-    "$OUT_DIR/x86_64/libremote_play_android.so"
-fi
-
-echo "Native libraries staged under $OUT_DIR"
-ls -l "$OUT_DIR"/* 2>/dev/null || true
+# Only stage ABIs built successfully in this invocation. Never package a stale sibling ABI.
+TARGETS="${REMOTEPLAY_ANDROID_TARGETS:-aarch64-linux-android}"
+export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
+cd "$ROOT"
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps --locked | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/remoteplay-native.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+for target in $TARGETS; do
+  case "$target" in
+    aarch64-linux-android) abi=arm64-v8a ;;
+    x86_64-linux-android) abi=x86_64 ;;
+    *) echo "Unsupported Android target: $target" >&2; exit 1 ;;
+  esac
+  rustup target list --installed | grep -qx "$target" || { echo "Missing Rust target: $target" >&2; exit 1; }
+  cargo build -p remote_client_bridge --features android --release --locked --target "$target" -j "${CARGO_BUILD_JOBS:-2}"
+  lib="$TARGET_DIR/$target/release/libremote_play_android.so"
+  test -s "$lib"
+  mkdir -p "$STAGE/$abi"
+  cp "$lib" "$STAGE/$abi/libremote_play_android.so"
+done
+mkdir -p "$OUT_DIR"
+# Remove only this product's generated libraries, not third-party JNI files.
+find "$OUT_DIR" -name libremote_play_android.so -type f -delete
+cp -R "$STAGE"/. "$OUT_DIR"/
+echo "Native ABI build complete: $TARGETS"
+find "$OUT_DIR" -name libremote_play_android.so -exec shasum -a 256 {} \;

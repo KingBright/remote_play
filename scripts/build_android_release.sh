@@ -24,12 +24,13 @@ trap 'unset PASSWORD REMOTEPLAY_ANDROID_KEYSTORE_PASSWORD REMOTEPLAY_ANDROID_KEY
 cd "$ROOT"
 ./scripts/build_android_native.sh
 cd android
-./gradlew --no-daemon --max-workers=4 -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:clean :app:assembleRelease :app:lintRelease
+./gradlew --no-daemon --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
 APK="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
 [ -f "$APK" ] || { echo "Signed release APK not found: $APK" >&2; exit 1; }
 APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"
 [ -x "$APKSIGNER" ] || { echo "apksigner not found under $SDK/build-tools" >&2; exit 1; }
 "$APKSIGNER" verify --verbose --print-certs "$APK"
+python3 "$ROOT/scripts/verify_release_apk.py" "$APK"
 echo "Release APK: $APK"
 echo "Size: $(stat -f %z "$APK")"
 echo "SHA-256: $(shasum -a 256 "$APK" | awk '{print $1}')"
