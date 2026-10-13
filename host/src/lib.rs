@@ -49,7 +49,7 @@ pub use linux_portal::{
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod ffmpeg_hevc;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 pub mod linux_audio;
 #[cfg(any(test, target_os = "linux"))]
 pub mod linux_capture;
@@ -525,6 +525,26 @@ where
         } = runtime;
         let _worker = crate::lifecycle::WorkerGuard::new(resources);
         let mut audio_capturer = audio_capturer;
+        // Keep the group's stream identity and RTP sequence through device loss.
+        let mut seq_num: u16 = 0;
+        let mut retry_delay = Duration::from_millis(250);
+        'recover: loop {
+        macro_rules! restart_capture {
+            () => {{
+                if let Err(error) = audio_capturer.stop().await {
+                    eprintln!("{label} audio stop failed; replacement not started: {error}");
+                    return;
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancel_rx.recv() => return,
+                    _ = tokio::time::sleep(retry_delay) => {},
+                }
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(2));
+                continue 'recover;
+            }};
+        }
+
 
         // Honor pause before opening any native source and while awaiting the
         // first sample (a quiet loopback endpoint may not produce one promptly).
@@ -545,7 +565,7 @@ where
             };
             if let Err(err) = start {
                 eprintln!("{label} audio capture failed to start: {err}");
-                return;
+                restart_capture!();
             }
             loop {
                 tokio::select! {
@@ -559,7 +579,13 @@ where
                     } => {
                         match changed {
                             Ok(false) => continue,
-                            Ok(true) => { let _ = audio_capturer.stop().await; break; },
+                            Ok(true) => {
+                                if let Err(error) = audio_capturer.stop().await {
+                                    eprintln!("{label} audio stop failed; replacement not started: {error}");
+                                    return;
+                                }
+                                break;
+                            },
                             Err(_) => { let _ = audio_capturer.stop().await; return; },
                         }
                     }
@@ -568,13 +594,14 @@ where
                             Ok(frame) => break 'first frame,
                             Err(err) => {
                                 eprintln!("Failed to capture first {label} audio frame: {err}");
-                                let _ = audio_capturer.stop().await; return;
+                                restart_capture!();
                             }
                         }
                     }
                 }
             }
         };
+        retry_delay = Duration::from_millis(250);
         stats.audio_frames_captured.fetch_add(1, Relaxed);
 
         let sample_rate = first_frame.sample_rate();
@@ -584,12 +611,10 @@ where
             Ok(e) => e,
             Err(e) => {
                 eprintln!("Failed to initialize {label} Opus encoder: {}", e);
-                let _ = audio_capturer.stop().await;
-                return;
+                restart_capture!();
             }
         };
 
-        let mut seq_num: u16 = 0;
         let timestamp_step = u32::try_from(audio_encoder.samples_per_packet_per_channel())
             .unwrap_or(sample_rate / 50);
         let audio_stream_config = host_audio_stream_config(
@@ -639,17 +664,33 @@ where
         }
 
         let mut paused = false;
+        // Configuration uses the existing best-effort media envelope. Reassert
+        // it so a lost first datagram cannot permanently misclassify the source.
+        let mut config_repeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(2), Duration::from_secs(2));
+        config_repeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                biased;
                 _ = cancel_rx.recv() => {
-                    break;
+                    let _ = audio_capturer.stop().await;
+                    return;
+                }
+                _ = config_repeat.tick(), if !paused => {
+                    if let Ok(size) = send_audio_stream_config(&udp_sender, scheduled_sender.as_ref(),
+                        &audio_stream_config, client_addr, use_data_plane_media).await {
+                        if size > 0 {
+                            stats.udp_packets_sent.fetch_add(1, Relaxed);
+                            stats.udp_bytes_sent.fetch_add(size, Relaxed);
+                        }
+                    }
                 }
                 changed = async {
                     if let Some(rx) = &mut media_settings_rx {
                         rx.changed().await.map(|_| rx.borrow().paused)
                     } else { std::future::pending().await }
                 } => {
-                    let Ok(next_paused) = changed else { break };
+                    let Ok(next_paused) = changed else { let _ = audio_capturer.stop().await; return; };
                     if next_paused != paused {
                         let result = if next_paused { audio_capturer.pause().await }
                             else { audio_capturer.resume().await };
@@ -690,7 +731,8 @@ where
             }
         }
 
-        let _ = audio_capturer.stop().await;
+        restart_capture!();
+        }
     })
 }
 
@@ -1316,3 +1358,6 @@ pub async fn prepare_pipewire_capture(mut lease: PortalCaptureLease) -> Result<P
     frame.stamp.generation = lease.selected_source().generation;
     lease.prepare_owned_capture(frame)
 }
+
+#[cfg(test)]
+mod audio_recovery_tests;

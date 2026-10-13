@@ -56,15 +56,20 @@ pub async fn run_restored_gui(
     config.enable_viewer_media = false;
     config.enable_workspace_viewer = true;
     // Use the unified runtime configuration; paired-device authentication and OS consent remain mandatory.
+    let profile = config.mesh_dir.clone();
     let runtime = Arc::new(start_unified_runtime(config).await?);
+    let _service = crate::background_service::Service::start_for_gui(&profile, runtime.clone(), &instance)?;
     run_original_dashboard(runtime, Some(instance), activation)
 }
 
 /// A manually launched window attaches to the existing background owner.
 /// Session media/native presentation remains entirely in this GUI process.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub async fn run_attached_gui(config: UnifiedRuntimeConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let service = crate::background_service::Client::connect(&config.mesh_dir)?;
+    if service.owner_mode() == crate::background_service::OwnerMode::Standalone {
+        return Instance::activate_existing(&config.mesh_dir).map_err(Into::into);
+    }
     let Some(mut instance) = Instance::acquire_frontend(&config.mesh_dir)? else { return Ok(()); };
     let activation = Arc::new(AtomicBool::new(false));
     let signal = activation.clone();
@@ -151,9 +156,9 @@ fn open_restored_window(
                 true
             } else if primary {
                 let _ = weak.update(cx, |this, _| {
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     this.stop_directed_receive();
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     this.directed_send.take();
                     this.owner.release_input();
                     this.window_active = false;
@@ -193,7 +198,7 @@ fn open_restored_window(
                         let handle = view.window_handle;
                         let _ = handle.update(cx, |_, window, _| window.activate_window());
                     }
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     view.poll_directed_receive(cx);
                     owned_gui_stage(1);
                     view.owner.poll();
@@ -291,9 +296,9 @@ struct RestoredDashboard {
     runtime: Arc<UnifiedRuntimeHandle>,
     owner: Arc<OriginalOwner>,
     _instance: Option<Instance>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     directed_receive: Option<crate::desktop::directed_receive::Adapter>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     directed_send: Option<crate::desktop::directed_send::SendHandle>,
     activation: Arc<AtomicBool>,
     bound_source: Option<(u32, Instant)>,
@@ -378,7 +383,7 @@ impl RestoredDashboard {
         window.focus(&root_focus);
         #[cfg(target_os = "linux")]
         let local_share_owner = crate::desktop::local_share::linux::Owner::new(runtime.owner.local_portal_shares());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let directed_receive = instance.as_ref().and_then(|instance| {
             match crate::desktop::directed_receive::Adapter::start(instance.state_directory()) {
                 Ok(adapter) => Some(adapter),
@@ -389,9 +394,9 @@ impl RestoredDashboard {
             runtime,
             owner,
             _instance: instance,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             directed_receive,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             directed_send: None,
             activation,
             bound_source: None,
@@ -560,7 +565,7 @@ impl RestoredDashboard {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn stop_directed_receive(&mut self) {
         if self.directed_receive.as_mut().and_then(|adapter| adapter.lease.take()).is_some() {
             self.session_commands.begin();
@@ -572,7 +577,7 @@ impl RestoredDashboard {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn poll_directed_receive(&mut self, cx: &mut Context<Self>) {
         if let Some(sender)=&self.directed_send {let _=sender.poll();}
         use crate::desktop::directed_receive::{Request, Lease};
@@ -662,7 +667,7 @@ impl RestoredDashboard {
     }
 
     fn create_mesh_group(&mut self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
             self.status = "Disconnect current sessions before changing the device network.".into();
@@ -677,7 +682,7 @@ impl RestoredDashboard {
     }
 
     fn join_mesh_group_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
             self.status = "Disconnect current sessions before changing the device network.".into();
@@ -1858,9 +1863,9 @@ impl Render for RestoredDashboard {
                     self.mesh_pairing_snapshot.clone(),
                     self.active_tab,
                     &self.device_list_state,
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     self.directed_receive.as_ref().and_then(|a| a.lease.as_ref()).map(|lease| format!("Receiving from {} · {}s remaining", compact_device_id(&lease.source), lease.expires.saturating_duration_since(Instant::now()).as_secs())),
-                    #[cfg(unix)]
+                    #[cfg(any(unix, windows))]
                     self.directed_send.as_ref().map(|sender|format!("To {} · {}",compact_device_id(&sender.target),sender.poll())),
                     #[cfg(target_os = "linux")]
                     &self.local_share_state,
@@ -2838,8 +2843,8 @@ fn slide_over_management_drawer(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
-    #[cfg(unix)] receive_label: Option<String>,
-    #[cfg(unix)] send_label: Option<String>,
+    #[cfg(any(unix, windows))] receive_label: Option<String>,
+    #[cfg(any(unix, windows))] send_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     input_locked: bool,
@@ -2961,8 +2966,8 @@ fn slide_over_management_drawer(
                         devices,
                         role,
                         device_list_state,
-                        #[cfg(unix)] receive_label,
-                        #[cfg(unix)] send_label,
+                        #[cfg(any(unix, windows))] receive_label,
+                        #[cfg(any(unix, windows))] send_label,
                         #[cfg(target_os = "linux")] local_share_state,
                         #[cfg(target_os = "linux")] local_share_active,
                         owner.clone(),
@@ -3023,8 +3028,8 @@ fn drawer_tab_button(
 
 fn drawer_devices_tab(
     devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
-    #[cfg(unix)] receive_label: Option<String>,
-    #[cfg(unix)] send_label: Option<String>,
+    #[cfg(any(unix, windows))] receive_label: Option<String>,
+    #[cfg(any(unix, windows))] send_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
@@ -3033,7 +3038,7 @@ fn drawer_devices_tab(
     let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
     let content = div().flex().flex_col().gap_3();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let content = if let Some(label) = receive_label {
         let stop = cx.weak_entity();
         content.child(div().flex().flex_col().gap_2().child(label).child(
@@ -3042,7 +3047,7 @@ fn drawer_devices_tab(
                 .on_click(move |_, _, cx| { let _ = stop.update(cx, |this, cx| { this.stop_directed_receive(); cx.notify(); }); })
         ))
     } else { content };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let content = if let Some(label) = send_label {
         let stop=cx.weak_entity();
         content.child(div().flex().flex_col().gap_2().child(label).child(
@@ -3179,7 +3184,7 @@ impl RestoredDashboard {
     }
 
     fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         self.stop_directed_receive();
         let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
         self.invalidate_source_commands();
@@ -3253,12 +3258,12 @@ impl RestoredDashboard {
                 }).detach();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn send_screen(&mut self,device_id:String)->Result<(),String>{
         if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){return Err("Stop the current delivery before choosing another target".into());}
         let instance=self._instance.as_ref().ok_or("Send from the main device window")?;
-        if !instance.is_frontend(){return Err("Automatic delivery requires the installed background service and its attached GUI".into());}
-        let profile=instance.state_directory().parent().ok_or("Missing profile")?.to_owned();
+        let directory=instance.state_directory();
+        let profile=if instance.is_frontend(){directory.parent().ok_or("Missing profile")?}else{directory}.to_owned();
         let identity=remote_core::mesh::AppPrivateMeshConfigStore::new(&profile).load().map_err(|e|e.to_string())?.ok_or("Missing device identity")?;
         let generation=self.directed_receive.as_ref().ok_or("GUI generation is unavailable")?.generation.clone();
         let routes=self.runtime.owner.discovery_snapshot_rx().map(|rx|crate::desktop::model::candidate_routes(&rx.borrow(),&device_id)).unwrap_or_default();
@@ -3267,7 +3272,7 @@ impl RestoredDashboard {
         self.status="Contacting target to receive this screen".into();Ok(())
     }
     fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if !matches!(action, DeviceListAction::SelectFilter(_) | DeviceListAction::CopyReceiveCommand(_) | DeviceListAction::SendScreen(_)) { self.stop_directed_receive(); }
         let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
         match effect {
@@ -3292,9 +3297,9 @@ impl RestoredDashboard {
                 }).detach();
             }
             DeviceListEffect::SendScreen(device_id) => {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 if let Err(error)=self.send_screen(device_id){self.status=error;}
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 {let _=device_id;self.status="Automatic delivery GUI adapter is currently available on macOS/Linux".into();}
             }
             DeviceListEffect::CopyReceiveCommand(device_id) => {

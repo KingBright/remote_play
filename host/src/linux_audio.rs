@@ -5,6 +5,7 @@ use remote_core::{AudioCapturer, AudioFrame};
 use std::error::Error;
 use tokio::sync::mpsc;
 
+#[derive(Debug)]
 pub struct LinuxAudioFrame {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
@@ -30,7 +31,7 @@ impl AudioFrame for LinuxAudioFrame {
 pub struct LinuxAudioCapturer {
     rx: mpsc::Receiver<LinuxAudioFrame>,
     stream: Option<cpal::Stream>,
-    tx: mpsc::Sender<LinuxAudioFrame>,
+    errors: mpsc::Receiver<String>,
     source: AudioSource,
 }
 
@@ -43,12 +44,20 @@ impl LinuxAudioCapturer {
         capturer.source = AudioSource::RemoteSystem;
         capturer
     }
-    pub fn microphone() -> Self {
+    fn replace_channels(&mut self) -> (mpsc::Sender<LinuxAudioFrame>, mpsc::Sender<String>) {
         let (tx, rx) = mpsc::channel(100);
+        let (error_tx, errors) = mpsc::channel(1);
+        self.rx = rx;
+        self.errors = errors;
+        (tx, error_tx)
+    }
+    pub fn microphone() -> Self {
+        let (_, rx) = mpsc::channel(100);
+        let (_, errors) = mpsc::channel(1);
         Self {
             rx,
             stream: None,
-            tx,
+            errors,
             source: AudioSource::RemoteMicrophone,
         }
     }
@@ -59,22 +68,39 @@ impl AudioCapturer for LinuxAudioCapturer {
     type Frame = LinuxAudioFrame;
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        if self.stream.is_some() {
+            return Err("Audio capture is already running".into());
+        }
+        // Each native stream owns fresh queues; late callbacks from a retired
+        // endpoint cannot corrupt a replacement stream or lose errors in PCM.
+        let (tx, error_tx) = self.replace_channels();
         let host = cpal::default_host();
         let system = self.source == AudioSource::RemoteSystem;
-        let device = if system { host.default_output_device() } else { host.default_input_device() }
-            .ok_or("No audio endpoint available")?;
-        let default_config = if system { device.default_output_config()? } else { device.default_input_config()? };
+        let device = if system {
+            host.default_output_device()
+        } else {
+            host.default_input_device()
+        }
+        .ok_or("No audio endpoint available")?;
+        let default_config = if system {
+            device.default_output_config()?
+        } else {
+            device.default_input_config()?
+        };
         let mut config: cpal::StreamConfig = default_config.clone().into();
         config.sample_rate = 48000;
         // Explicit Opus-compatible loopback format; unsupported endpoint formats
         // fail instead of mislabelling samples or capturing the microphone.
-        if system { config.channels = 2; }
+        if system {
+            config.channels = 2;
+        }
         let sample_rate = config.sample_rate;
         let channels = config.channels;
 
-        let tx = self.tx.clone();
         let source = self.source;
-        let err_fn = |err| eprintln!("[Audio] stream error: {err}");
+        let err_fn = move |err: cpal::StreamError| {
+            let _ = error_tx.try_send(err.to_string());
+        };
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
@@ -117,6 +143,7 @@ impl AudioCapturer for LinuxAudioCapturer {
 
     async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.stream = None;
+        while self.rx.try_recv().is_ok() {}
         Ok(())
     }
 
@@ -139,9 +166,49 @@ impl AudioCapturer for LinuxAudioCapturer {
     }
 
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
-        self.rx
-            .recv()
-            .await
-            .ok_or_else(|| "Linux audio stream closed".into())
+        tokio::select! {
+            biased;
+            error = self.errors.recv() => Err(error.unwrap_or_else(|| "Native audio callback ended".into()).into()),
+            frame = self.rx.recv() => frame.ok_or_else(|| "Native audio stream closed".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn frame() -> LinuxAudioFrame {
+        LinuxAudioFrame {
+            samples: vec![0.; 2],
+            sample_rate: 48000,
+            channels: 2,
+            source: AudioSource::RemoteSystem,
+        }
+    }
+    #[tokio::test]
+    async fn native_error_is_not_lost_behind_a_full_pcm_queue() {
+        let mut capture = LinuxAudioCapturer::microphone();
+        let (pcm, errors) = capture.replace_channels();
+        for _ in 0..100 {
+            pcm.try_send(frame()).unwrap();
+        }
+        errors.try_send("endpoint removed".into()).unwrap();
+        assert_eq!(
+            capture.capture_frame().await.err().unwrap().to_string(),
+            "endpoint removed"
+        );
+    }
+    #[tokio::test]
+    async fn retired_native_callbacks_cannot_fail_a_replacement_stream() {
+        let mut capture = LinuxAudioCapturer::microphone();
+        let (old_pcm, old_errors) = capture.replace_channels();
+        let (pcm, _errors) = capture.replace_channels();
+        assert!(old_errors.try_send("late device error".into()).is_err());
+        assert!(old_pcm.try_send(frame()).is_err());
+        pcm.send(frame()).await.unwrap();
+        assert_eq!(
+            capture.capture_frame().await.unwrap().source,
+            AudioSource::RemoteSystem
+        );
     }
 }

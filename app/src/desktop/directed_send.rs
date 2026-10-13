@@ -66,7 +66,7 @@ pub(crate) async fn claim(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod sender {
     use super::*;
     use host::directed_delivery::LocalIntent;
@@ -247,5 +247,5 @@ mod sender {
         result
     }
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) use sender::SendHandle;

@@ -14,7 +14,7 @@ struct RendererIdentity {
 
 pub struct Instance {
     pub visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    _lock: File,
+    _lock: std::sync::Arc<File>,
     socket: Option<UdpSocket>,
     info: PathBuf,
     renderer_info: PathBuf,
@@ -50,6 +50,7 @@ impl Instance {
                 return Err("Frontend process-state directory is unsafe".into());
             }
         }
+        #[cfg(windows)] {std::fs::create_dir_all(&directory).map_err(|e|e.to_string())?;crate::private_ipc::private_directory(&directory).map_err(|e|e.to_string())?;}
         Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)
     }
     pub fn acquire_headless(directory: &Path) -> Result<Option<Self>, String> {
@@ -58,6 +59,7 @@ impl Instance {
     fn acquire_mode(directory: &Path, renderer: Option<&str>) -> Result<Option<Self>, String> {
         let graphical = renderer.is_some();
         std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        #[cfg(windows)] crate::private_ipc::private_directory(directory).map_err(|e|e.to_string())?;
         let lock_path = directory.join("desktop-instance.lock");
         let info = directory.join("desktop-instance.addr");
         let renderer_info = directory.join("desktop-instance.renderer.json");
@@ -67,6 +69,9 @@ impl Instance {
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
+        }
+        #[cfg(windows)] for path in [&lock_path,&info,&renderer_info] {
+            match path.symlink_metadata(){Ok(_)=>crate::private_ipc::private_file(path).map_err(|e|e.to_string())?,Err(e)if e.kind()==io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
         }
         let file = options.open(lock_path).map_err(|e| e.to_string())?;
         if file.try_lock().is_err() {
@@ -140,12 +145,31 @@ impl Instance {
             .map_err(|e| e.to_string())?;
         Ok(Some(Self {
             visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            _lock: file,
+            _lock: std::sync::Arc::new(file),
             socket: Some(socket),
             info,
             renderer_info,
             task: None,
         }))
+    }
+    /// A verified standalone service may only activate its existing window.
+    /// If its owner vanished, do not acquire the profile or start a runtime.
+    pub(crate) fn activate_existing(directory: &Path) -> Result<(), String> {
+        crate::private_ipc::private_directory(directory).map_err(|e|e.to_string())?;
+        let info=directory.join("desktop-instance.addr");
+        let renderer=directory.join("desktop-instance.renderer.json");
+        crate::private_ipc::private_file(&info).map_err(|e|e.to_string())?;
+        crate::private_ipc::private_file(&renderer).map_err(|e|e.to_string())?;
+        let identity:RendererIdentity=serde_json::from_slice(&std::fs::read(renderer).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        if identity.schema!=1||identity.renderer!=crate::gui_backend::ORIGINAL_RENDERER{return Err("Existing owner has no compatible GUI".into());}
+        let endpoint:SocketAddr=std::fs::read_to_string(info).map_err(|e|e.to_string())?.trim().parse().map_err(|_|"Existing GUI activation address is unavailable")?;
+        if !endpoint.ip().is_loopback(){return Err("Refusing a nonlocal activation address".into());}
+        UdpSocket::bind("127.0.0.1:0").and_then(|s|s.send_to(b"show",endpoint)).map_err(|e|e.to_string())?;
+        Ok(())
+    }
+    pub(crate) fn service_lock(&self)->Result<std::sync::Arc<File>,String>{
+        if self.is_frontend(){return Err("A frontend cannot own another background runtime".into());}
+        Ok(self._lock.clone())
     }
     pub(crate) fn state_directory(&self) -> &Path { self.info.parent().expect("instance state directory") }
 

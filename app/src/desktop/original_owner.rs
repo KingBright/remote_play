@@ -193,7 +193,7 @@ impl Pool {
 
 pub(crate) struct OriginalOwner {
     backend: Arc<UnifiedServiceOwner>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     observed_service_epoch: std::sync::atomic::AtomicU64,
     pool: Mutex<Pool>,
     updates: tokio::sync::watch::Sender<u64>,
@@ -223,7 +223,7 @@ impl OriginalOwner {
             .unwrap_or_default();
         let (updates, _) = tokio::sync::watch::channel(0);
         Arc::new(Self {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             observed_service_epoch: std::sync::atomic::AtomicU64::new(backend.frontend_epoch().map(|e| e.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0)),
             backend,
             updates,
@@ -244,7 +244,7 @@ impl OriginalOwner {
         self.updates.subscribe()
     }
     pub fn poll(&self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(epoch) = self.backend.frontend_epoch() {
             let next = epoch.load(std::sync::atomic::Ordering::Acquire);
             if self.observed_service_epoch.swap(next, std::sync::atomic::Ordering::AcqRel) != next { self.close_all(); }

@@ -80,6 +80,13 @@ pub(crate) type OriginalGuiSession =
     SessionState<Arc<client::MacDecodedVideoFrame>, gpui::Point<f32>>;
 
 impl<Texture, Pan: Default> SessionState<Texture, Pan> {
+    fn clear_transient_error(&mut self) {
+        self.error = match self.media.as_ref().map(|media| &media.status) {
+            Some(client::ClientMediaRuntimeStatus::AudioUnavailable { reason }) =>
+                format!("Audio unavailable: {reason}"),
+            _ => String::new(),
+        };
+    }
     pub fn new(
         key: String,
         name: String,
@@ -237,12 +244,12 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                 }
             }));
             if let client::ClientMediaRuntimeStatus::AudioUnavailable { reason } = &media.status {
-                self.error = format!("Video ready; audio unavailable: {reason}");
+                self.error = format!("Audio unavailable: {reason}");
             }
         }
         self.confirmed = false;
         self.locked = true;
-        self.error.clear();
+        self.clear_transient_error();
         self.status = "Requesting video; waiting for the first decoded frame".into();
         self.request.source = self.source;
         self.request.id = self.video_id;
@@ -524,7 +531,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.source_revision = request_id;
                     self.request.source = source;
                     self.supports_input = supports_input;
-                    self.error.clear();
+                    self.clear_transient_error();
                     self.pending = None;
                     self.confirmed = true;
                     self.uploaded_at = None;
@@ -652,7 +659,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                             }
                             self.files = entries;
                             self.next_file_page = next_after_id;
-                            self.error.clear();
+                            self.clear_transient_error();
                         }
                         SharedFileResponse::Queued { .. } => {
                             self.status = "Pull accepted; awaiting verified file delivery".into()

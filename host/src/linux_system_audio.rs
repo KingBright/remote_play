@@ -79,10 +79,9 @@ impl AudioCapturer for SystemAudioCapturer {
         self.start().await
     }
     async fn capture_frame(&mut self) -> Result<Self::Frame, CaptureError> {
-        // Bound missing/silent-device waits; the owner also races cancellation.
-        tokio::time::timeout(Duration::from_secs(10), self.rx.recv())
-            .await?
-            .ok_or_else(|| "System audio stream closed".into())
+        // A silent sink is healthy. Native disconnect closes this queue; the
+        // shared worker independently races cancellation and pause requests.
+        self.rx.recv().await.ok_or_else(|| "System audio stream closed".into())
     }
 }
 impl Drop for SystemAudioCapturer {

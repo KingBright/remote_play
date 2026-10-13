@@ -18,6 +18,7 @@ impl Drop for EndOffer {
 pub(crate) async fn receive_worker(
     profile: PathBuf,
     hash: String,
+    owner_mode: crate::background_service::OwnerMode,
     mut rx: tokio::sync::mpsc::Receiver<Arc<Incoming>>,
 ) {
     while let Some(offer) = rx.recv().await {
@@ -25,7 +26,7 @@ pub(crate) async fn receive_worker(
         if !offer.alive() {
             continue;
         }
-        if let Err(error) = receive(&profile, &hash, &offer).await {
+        if let Err(error) = receive(&profile, &hash, owner_mode, &offer).await {
             offer.finish(DeliveryState::Rejected, &error.to_string());
         }
     }
@@ -33,32 +34,17 @@ pub(crate) async fn receive_worker(
 async fn receive(
     profile: &std::path::Path,
     hash: &str,
+    owner_mode: crate::background_service::OwnerMode,
     offer: &Arc<Incoming>,
 ) -> Result<(), Error> {
-    let directory = profile.join("gui-state");
+    let directory = if owner_mode == crate::background_service::OwnerMode::Background { profile.join("gui-state") } else { profile.to_owned() };
     let mut status = ipc(directory.clone(), Request::Status).await;
     if status.is_err() {
         // Only absence permits activation. Ownership/permissions and version
         // mismatches must never be treated as a missing GUI.
         crate::background_service::private_directory(profile)?;
-        let missing = match directory.symlink_metadata() {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-            Err(error) => return Err(error.into()),
-            Ok(_) => {
-                crate::background_service::private_directory(&directory)?;
-                let socket = directory.join("gui-receive.sock");
-                match socket.symlink_metadata() {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(error) => return Err(error.into()),
-                    Ok(_) => {
-                        crate::background_service::private_socket(&socket)?;
-                        std::os::unix::net::UnixStream::connect(socket)
-                            .err()
-                            .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)
-                    }
-                }
-            }
-        };
+        if owner_mode != crate::background_service::OwnerMode::Background { return Err("The running device window has no available receive adapter".into()); }
+        let missing = crate::private_ipc::absent(&directory, "gui-receive.sock")?;
         if !missing {
             return Err("Existing GUI endpoint is unavailable".into());
         }
@@ -160,19 +146,8 @@ async fn receive(
             if receiving_status(&status, &generation, &request_id, &offer.source) {
                 offer.finish(DeliveryState::Receiving, "");
             }
-            let failed = status["sessions"]["sessions"]
-                .as_array()
-                .is_some_and(|sessions| {
-                    sessions.iter().any(|s| {
-                        s["device_id"].as_str() == Some(&offer.source)
-                            && (!s["error"].is_null() || !s["video_error"].is_null())
-                    })
-                });
-            if status["sessions"]["directed_receive_failed"] == true {
-                return Err("Receiver could not connect to the source".into());
-            }
-            if failed {
-                return Err("Receiver could not start video".into());
+            if receiving_failed(&status, &generation, &request_id, &offer.source) {
+                return Err("Receiver could not connect or continue video".into());
             }
             if revision > applied {
                 let lease_ms = expires
@@ -214,6 +189,12 @@ async fn receive(
     result
 }
 
+fn receiving_failed(status:&serde_json::Value,generation:&str,request:&str,source:&str)->bool {
+    if status["generation"].as_str()!=Some(generation)||status["lease"]["request_id"].as_str()!=Some(request){return false;}
+    status["sessions"]["directed_receive_failed"]==true || status["sessions"]["sessions"].as_array().is_some_and(|sessions|sessions.iter().any(|s|{
+        s["device_id"].as_str()==Some(source) && (s["connected"]==false || s["video_error"].as_str().is_some_and(|error|!error.trim().is_empty()))
+    }))
+}
 fn receiving_status(
     status: &serde_json::Value,
     generation: &str,
@@ -222,6 +203,7 @@ fn receiving_status(
 ) -> bool {
     status["generation"].as_str() == Some(generation)
         && status["lease"]["request_id"].as_str() == Some(request)
+        && !receiving_failed(status,generation,request,source)
         && has_submitted_video(status, source)
 }
 fn has_submitted_video(status: &serde_json::Value, source: &str) -> bool {
@@ -257,4 +239,17 @@ mod tests {
         status["sessions"]["sessions"][0]["connected"] = false.into();
         assert!(!has_submitted_video(&status, "source"));
     }
+    #[test]
+    fn normal_status_and_audio_warning_do_not_end_video_delivery() {
+        let mut status=serde_json::json!({"generation":"gui","lease":{"request_id":"r"},"sessions":{"directed_receive_failed":false,"sessions":[{"device_id":"source","connected":true,"error":"","video_error":null,"decoded_frames":1,"scene_submitted_frame":true}]}});
+        assert!(!receiving_failed(&status,"gui","r","source"));assert!(receiving_status(&status,"gui","r","source"));
+        status["sessions"]["sessions"][0]["error"]="Audio unavailable: device disconnected".into();
+        assert!(!receiving_failed(&status,"gui","r","source"));assert!(receiving_status(&status,"gui","r","source"));
+        status["sessions"]["sessions"][0]["video_error"]="decoder failed".into();
+        assert!(receiving_failed(&status,"gui","r","source"));assert!(!receiving_status(&status,"gui","r","source"));
+        assert!(!receiving_failed(&status,"gui","r","other-source"));assert!(!receiving_failed(&status,"gui","old-request","source"));
+        status["sessions"]["sessions"][0]["video_error"]=serde_json::Value::Null;status["sessions"]["sessions"][0]["connected"]=false.into();
+        assert!(receiving_failed(&status,"gui","r","source"));
+    }
+
 }

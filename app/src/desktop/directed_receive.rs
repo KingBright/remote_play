@@ -5,7 +5,6 @@ use std::{
     collections::HashMap,
     fs,
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -117,22 +116,7 @@ impl Adapter {
         crate::background_service::private_directory(directory)?;
         let executable_sha256=crate::background_service::executable_hash()?;
         let path = directory.join(SOCKET);
-        match path.symlink_metadata() {
-            Ok(_) => {
-                crate::background_service::private_socket(&path)?;
-                match std::os::unix::net::UnixStream::connect(&path) {
-                    Ok(_) => return Err("Another GUI receive adapter owns this endpoint".into()),
-                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                        fs::remove_file(&path)?
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-        let listener = tokio::net::UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        let mut listener = crate::private_ipc::Listener::bind(directory, SOCKET)?;
         let generation = format!(
             "{}-{}",
             std::process::id(),
@@ -144,10 +128,7 @@ impl Adapter {
         let task = tokio::spawn(async move {
             // Serial, bounded requests. A stalled same-user client holds this
             // adapter for at most two seconds, never the GUI or media runtime.
-            while let Ok((mut socket, _)) = listener.accept().await {
-                if socket.peer_cred().map(|c| c.uid()).ok() != Some(unsafe { libc::geteuid() }) {
-                    continue;
-                }
+            while let Ok(mut socket) = listener.accept().await {
                 let _ = tokio::time::timeout(Duration::from_secs(2), async {
                     let mut header = [0; 4];
                     socket.read_exact(&mut header).await?;
@@ -272,17 +253,11 @@ impl Drop for Adapter {
     fn drop(&mut self) {
         self.lease.take();
         self.task.abort();
-        let _ = fs::remove_file(&self.path);
+        crate::private_ipc::remove_endpoint(&self.path);
     }
 }
 pub(crate) fn exchange(directory: &Path, request: &Request) -> Result<serde_json::Value, Error> {
-    crate::background_service::private_directory(directory)?;
-    let path = directory.join(SOCKET);
-    crate::background_service::private_socket(&path)?;
-    let mut socket = std::os::unix::net::UnixStream::connect(&path)?;
-    socket.set_read_timeout(Some(Duration::from_secs(3)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(3)))?;
-    crate::background_service::private_socket(&path)?;
+    let mut socket = crate::private_ipc::connect(directory, SOCKET, Duration::from_secs(3))?;
     let bytes = serde_json::to_vec(request)?;
     length((bytes.len() as u32).to_be_bytes())?;
     socket.write_all(&(bytes.len() as u32).to_be_bytes())?;
@@ -299,20 +274,8 @@ pub(crate) fn exchange(directory: &Path, request: &Request) -> Result<serde_json
     Ok(serde_json::from_slice(&bytes)?)
 }
 pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Value, Error> {
-    crate::background_service::private_directory(profile)?;
-    let frontend = profile.join("gui-state");
-    let attached = frontend.join(SOCKET).symlink_metadata().is_ok();
-    let standalone = profile.join(SOCKET).symlink_metadata().is_ok();
-    if attached == standalone {
-        return Err(
-            "Expected exactly one running GUI receive adapter; open the installed GUI first".into(),
-        );
-    }
-    let directory = if attached {
-        frontend.as_path()
-    } else {
-        profile
-    };
+    let directory = crate::private_ipc::gui_directory(profile)?;
+    let directory = directory.as_path();
     let args = if args.len() == 5 && args[0] == "--gui-receive" && args[3] == "--receiver" {
         let identity = remote_core::mesh::AppPrivateMeshConfigStore::new(profile)
             .load()?
@@ -349,8 +312,9 @@ pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Val
     Ok(result)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
     use super::*;
     #[test]
     fn rejects_stale_generation_deadline_and_unbounded_ids() {

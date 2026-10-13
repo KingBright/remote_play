@@ -13,7 +13,7 @@ pub(crate) mod session_recovery;
 #[cfg(all(feature = "gpui-restoration", any(target_os = "linux", test)))]
 pub(crate) mod local_share;
 pub(crate) mod instance;
-#[cfg(all(unix, feature = "gpui-restoration"))]
+#[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
 pub(crate) mod directed_receive;
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod directed_send;
