@@ -1,6 +1,7 @@
 pub mod publisher_bridge;
 pub mod touch_mapper;
 pub mod workspace_bridge;
+mod workspace_touch;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;
@@ -961,7 +962,9 @@ async fn run_bridge_network(
             Err(err) => eprintln!("Bridge P2P unavailable; relay fallback remains active: {err}"),
         }
 
-        match start_bridge_relay(&identity, discovery_target, cancel_tx.clone()).await {
+        let host_target = (announcement.control_port != 0)
+            .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
+        match start_bridge_relay(&identity, host_target, discovery_target, cancel_tx.clone()).await {
             Ok((control_endpoint, discovery_endpoint, routes, tasks)) => {
                 discovery_config
                     .relay_routes
@@ -1036,19 +1039,22 @@ async fn start_bridge_p2p(
         &identity.network_name,
         identity.network_secret.expose_secret(),
     )?;
-    let tunnel = BoundP2pTunnel::bind(
-        P2pTunnelConfig::new(
-            bind_addr,
-            rendezvous_addrs[0],
-            group_id,
-            identity.node_id.clone(),
-            announcement.encode()?,
-        )?
-        .with_rendezvous_addrs(rendezvous_addrs)
-        .with_live_capabilities(live_capabilities)
-        .with_discovery_target_addr(discovery_target),
-    )
-    .await?;
+    let mut config = P2pTunnelConfig::new(
+        bind_addr,
+        rendezvous_addrs[0],
+        group_id,
+        identity.node_id.clone(),
+        announcement.encode()?,
+    )?
+    .with_rendezvous_addrs(rendezvous_addrs)
+    .with_live_capabilities(live_capabilities)
+    .with_routing_key(remote_core::routed_relay::derive_routing_key(
+        identity.network_secret.expose_secret().as_bytes(),
+    ))
+    .with_discovery_target_addr(discovery_target);
+    config.local_target_addr = (announcement.control_port != 0)
+        .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
+    let tunnel = BoundP2pTunnel::bind(config).await?;
     let (snapshot_tx, _snapshot_rx) = watch::channel(Default::default());
     Ok(tokio::spawn(async move {
         if let Err(err) = tunnel.run(cancel_tx.subscribe(), snapshot_tx).await {
@@ -1059,6 +1065,7 @@ async fn start_bridge_p2p(
 
 async fn start_bridge_relay(
     identity: &MeshConfig,
+    host_target: Option<SocketAddr>,
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<
@@ -1087,7 +1094,7 @@ async fn start_bridge_relay(
         remote_core::routed_relay::derive_routing_key(
             identity.network_secret.expose_secret().as_bytes(),
         ),
-        None,
+        host_target,
     )
     .await?;
     let router_target = router.local_addr()?;
@@ -1786,6 +1793,80 @@ mod tests {
             .unwrap();
             binding
         })
+    }
+
+    #[test]
+    fn workspace_touch_uses_shared_grant_and_releases_cancelled_drag() {
+        use protocol::realtime_input::{InputBinding, InputPayload};
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        let directory = std::env::temp_dir().join(format!("rp-workspace-touch-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        client.runtime().block_on(async {
+            let workspace = workspace_bridge::MobileWorkspace::connect(address, directory.clone()).await.unwrap();
+            workspace.command(&serde_json::to_string(&SessionCommand::Subscribe(SubscriptionRequest {
+                id: 256, source: CaptureSource::Display(1), width: 1280, height: 720,
+                fps: 60, bitrate_kbps: 20_000, audio: false,
+            })).unwrap()).await.unwrap();
+            let (binding, request, peer) = loop {
+                let (message, peer) = next_control(&mut rx).await;
+                if let ControlMessage::Session(command) = message
+                    && let SessionCommand::RequestInputBinding { connection_id, id, source_revision, request } = *command {
+                    break (InputBinding { connection_id, subscription_id: id, source_revision, epoch: [9; 16] }, request, peer);
+                }
+            };
+            sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                binding, request, host_time_ms: remote_core::session_crypto::now_unix_ms(),
+            })), peer).await.unwrap();
+            let held = next_input(&mut rx, false).await;
+            assert_eq!(held.binding, binding);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !workspace.events().contains("Subscribed") { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.unwrap();
+            let surface = |phase| serde_json::json!({"id":256,"token":1,"phase":phase}).to_string();
+            let gesture = |action, x| serde_json::json!({"id":256,"token":1,"event":{"Touch":{
+                "action":action,"pointer_id":7,"normalized_x":x,"normalized_y":0.5,"pressure":1.0}}}).to_string();
+            workspace.surface(&surface("begin")).unwrap();
+            workspace.touch(&gesture("Down", 0.1)).unwrap(); // No frame: cannot accumulate a press.
+            workspace.surface(&surface("ready")).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            workspace.touch(&gesture("Down", 0.1)).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            let first = next_input(&mut rx, true).await;
+            assert!(matches!(first.payload, InputPayload::Event(protocol::InputEvent::MouseMoveAbsolute { x, .. }) if x < 10000));
+            let drag = next_input(&mut rx, true).await;
+            assert_eq!(drag.binding, binding);
+            assert!(matches!(drag.payload, InputPayload::Event(protocol::InputEvent::MouseDown(0))));
+            workspace.surface(&surface("cancel")).unwrap();
+            workspace.touch(&gesture("Up", 0.8)).unwrap();
+            loop {
+                let packet = next_input(&mut rx, false).await;
+                if matches!(packet.payload, InputPayload::Release) { assert_eq!(packet.binding, binding); break; }
+            }
+            let held = next_input(&mut rx, false).await;
+            assert!(matches!(held.payload, InputPayload::Held(held) if held.is_empty()));
+            // The UI producer now goes silent while the native transport keeps running.
+            workspace.touch(&gesture("Down", 0.1)).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            tokio::time::timeout(Duration::from_millis(650), async {
+                loop {
+                    let packet = next_input(&mut rx, false).await;
+                    if matches!(packet.payload, InputPayload::Release) {
+                        assert_eq!(packet.binding, binding); break;
+                    }
+                }
+            }).await.expect("native watchdog must release a silent UI producer");
+            workspace.surface(&surface("alive")).unwrap();
+            workspace.touch(&gesture("Up", 0.8)).unwrap();
+            let held = next_input(&mut rx, false).await;
+            assert!(matches!(held.payload, InputPayload::Held(held) if held.is_empty()));
+            let raw = serde_json::json!({"Input":{"id":256,"event":{"Touch":{
+                "action":"Down","pointer_id":7,"normalized_x":0.5,"normalized_y":0.5,"pressure":1.0}}}});
+            assert!(workspace.command(&raw.to_string()).await.is_err());
+            drop(workspace);
+        });
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

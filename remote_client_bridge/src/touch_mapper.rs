@@ -80,6 +80,10 @@ impl TouchStateTracker {
         releases
     }
 
+    pub(crate) fn has_active_pointers(&self) -> bool {
+        !self.active_pointers.is_empty()
+    }
+
     pub fn cancel_all(&mut self) -> Vec<InputEvent> {
         let releases = if self.is_left_down {
             vec![InputEvent::MouseUp(0)]

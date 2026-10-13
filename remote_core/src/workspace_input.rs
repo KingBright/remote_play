@@ -60,6 +60,26 @@ impl InputState {
                     .is_some_and(|lease| lease.received.elapsed().as_millis() <= 750)
         })
     }
+    pub(crate) fn binding(&self, id: u32, revision: u32) -> Option<InputBinding> {
+        self.ready(id, revision).then(|| self.slots[&id].lease.as_ref().unwrap().binding)
+    }
+    pub(crate) fn seal_bound(
+        &mut self,
+        binding: InputBinding,
+        event: Option<protocol::InputEvent>,
+    ) -> Result<SessionCommand, String> {
+        if self.binding(binding.subscription_id, binding.source_revision) != Some(binding) {
+            return Err("input binding changed".into());
+        }
+        self.seal(match event {
+            Some(event) => SessionCommand::SourceInput {
+                id: binding.subscription_id,
+                source_revision: binding.source_revision,
+                event,
+            },
+            None => SessionCommand::ReleaseInput { id: binding.subscription_id },
+        })
+    }
     pub(crate) fn grant(
         &mut self,
         connection: u32,
@@ -264,6 +284,28 @@ mod tests {
             request,
             1000,
         );
+    }
+    #[test]
+    fn exact_grant_rejects_changed_epoch_without_mutating_new_holds() {
+        let mut state = InputState::default();
+        state.source(7, 0); grant(&mut state, 1);
+        let old = state.binding(7, 0).unwrap();
+        state.seal_bound(old, Some(protocol::InputEvent::MouseDown(0))).unwrap();
+        grant(&mut state, 2);
+        let current = state.binding(7, 0).unwrap();
+        assert_ne!(old, current);
+        assert!(state.seal_bound(old, Some(protocol::InputEvent::MouseUp(0))).is_err());
+        assert!(state.seal_bound(old, Some(protocol::InputEvent::MouseDown(0))).is_err());
+        assert!(state.seal_bound(old, None).is_err());
+        assert!(matches!(state.snapshots().remove(0).payload, InputPayload::Held(held) if held.is_empty()));
+        assert!(state.seal_bound(current, Some(protocol::InputEvent::Touch {
+            action: protocol::TouchAction::Down, pointer_id: 0,
+            normalized_x: 0.5, normalized_y: 0.5, pressure: 1.0,
+        })).is_err(), "raw touch must still fail closed");
+        state.seal_bound(current, Some(protocol::InputEvent::MouseDown(0))).unwrap();
+        let SessionCommand::RealtimeInput(release) = state.seal_bound(current, None).unwrap() else { panic!() };
+        assert_eq!(release.binding, current);
+        assert!(matches!(release.payload, InputPayload::Release));
     }
     #[test]
     fn queued_input_is_stamped_before_switch_and_never_rebound() {

@@ -283,6 +283,8 @@ pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeAction(
                     .runtime()
                     .block_on(workspace.shared_request(&payload))?,
                 10 => remote_core::shared_files::shared_file_catalog().clear(),
+                11 => workspace.surface(&payload)?,
+                12 => workspace.touch(&payload)?,
                 _ => return Err("unknown workspace operation".into()),
             }
             Ok(String::new())

@@ -1,5 +1,5 @@
 //! Native mobile adapter for the same independent-subscription protocol as desktop.
-use crate::{EncodedAudioPacket, EncodedVideoNalu, hevc_keyframe};
+use crate::{EncodedAudioPacket, EncodedVideoNalu, hevc_keyframe, workspace_touch::WorkspaceTouch};
 use protocol::{
     ControlMessage,
     session::{SessionCommand, SubscriptionRequest},
@@ -105,6 +105,7 @@ pub struct MobileWorkspace {
     connection: Arc<WorkspaceConnection>,
     queues: Arc<Mutex<Queues>>,
     pumps: Mutex<HashMap<u32, tokio::task::AbortHandle>>,
+    touches: Arc<Mutex<HashMap<u32, WorkspaceTouch>>>,
     events: tokio::task::JoinHandle<()>,
     clipboard: MobileClipboard,
     clipboard_cancel: tokio::sync::broadcast::Sender<()>,
@@ -113,6 +114,11 @@ pub struct MobileWorkspace {
 
 impl Drop for MobileWorkspace {
     fn drop(&mut self) {
+        for touch in self.touches.lock().unwrap().values_mut() {
+            if let Some(binding) = touch.invalidate() {
+                self.connection.try_bound_input(binding, None);
+            }
+        }
         self.events.abort();
         let _ = self.clipboard_cancel.send(());
         self.clipboard_worker.abort();
@@ -155,12 +161,42 @@ impl MobileWorkspace {
             Default::default(),
         ));
         let state = queues.clone();
+        let touches = Arc::new(Mutex::new(HashMap::<u32, WorkspaceTouch>::new()));
+        let event_touches = touches.clone();
+        let input_connection = Arc::downgrade(&connection);
         let task = tokio::spawn(async move {
             let mut configs = HashMap::new();
             let mut owners = HashMap::new();
+            let mut input_tick = tokio::time::interval(std::time::Duration::from_millis(
+                protocol::realtime_input::INPUT_WATCHDOG_INTERVAL_MS,
+            ));
+            input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
+                    _ = input_tick.tick() => {
+                        let mut touches = event_touches.lock().unwrap();
+                        let now = std::time::Instant::now();
+                        for touch in touches.values_mut() {
+                            if let Some(binding) = touch.expire(now)
+                                && let Some(connection) = input_connection.upgrade() {
+                                connection.try_bound_input(binding, None);
+                            }
+                        }
+                    }
                     Some(event) = events.control.recv() => {
+                        {
+                            let mut touches = event_touches.lock().unwrap();
+                            let release = match &event {
+                                SessionCommand::Subscribed { id, supports_input, .. }
+                                | SessionCommand::SourceSwitched { id, supports_input, .. } => touches.get_mut(id).and_then(|t| t.support(*supports_input)),
+                                SessionCommand::Unsubscribed { id } => touches.remove(id).and_then(|mut t| t.invalidate()),
+                                SessionCommand::Closed { .. } => { touches.clear(); None },
+                                _ => None,
+                            };
+                            if let Some(binding) = release && let Some(connection) = input_connection.upgrade() {
+                                connection.try_bound_input(binding, None);
+                            }
+                        }
                         let mut state = state.lock().unwrap();
                         if let SessionCommand::Subscribed { id, audio_owner:Some(owner), .. } = &event { owners.insert(*id, *owner); }
                         if let SessionCommand::Unsubscribed { id } = &event {
@@ -208,6 +244,7 @@ impl MobileWorkspace {
             connection,
             queues,
             pumps: Mutex::new(HashMap::new()),
+            touches,
             events: task,
             clipboard,
             clipboard_cancel,
@@ -217,6 +254,30 @@ impl MobileWorkspace {
 
     pub async fn command(&self, json: &str) -> Result<(), String> {
         let command: SessionCommand = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        {
+            let mut touches = self.touches.lock().unwrap();
+            let release = match &command {
+                SessionCommand::SetActivity { id, video, .. } => {
+                    touches.get_mut(id).and_then(|t| t.activity(*video))
+                }
+                SessionCommand::SwitchSource { id, request_id, .. } => {
+                    touches.get_mut(id).and_then(|t| {
+                        let release = t.invalidate();
+                        t.revision = *request_id;
+                        t.support(false);
+                        release
+                    })
+                }
+                SessionCommand::Unsubscribe { id } => {
+                    touches.remove(id).and_then(|mut t| t.invalidate())
+                }
+                SessionCommand::ReleaseInput { id } => touches.get_mut(id).and_then(|t| t.cancel()),
+                _ => None,
+            };
+            if let Some(binding) = release {
+                self.connection.try_bound_input(binding, None);
+            }
+        }
         match command {
             SessionCommand::Subscribe(request) => self.subscribe(request).await,
             SessionCommand::Unsubscribe { id } => {
@@ -237,6 +298,10 @@ impl MobileWorkspace {
         if self.pumps.lock().unwrap().len() >= protocol::session::MAX_SUBSCRIPTIONS {
             return Err("too many subscriptions".into());
         }
+        self.touches
+            .lock()
+            .unwrap()
+            .insert(id, WorkspaceTouch::new());
         let (tx, mut rx) = mpsc::channel(4);
         self.connection
             .subscribe(
@@ -287,6 +352,65 @@ impl MobileWorkspace {
         Ok(())
     }
 
+    pub fn surface(&self, json: &str) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        struct Surface {
+            id: u32,
+            token: u64,
+            phase: String,
+        }
+        let event: Surface = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        if !matches!(
+            event.phase.as_str(),
+            "begin" | "ready" | "reset" | "end" | "cancel" | "alive"
+        ) {
+            return Err("invalid workspace surface phase".into());
+        }
+        let mut touches = self.touches.lock().unwrap();
+        if let Some(touch) = touches.get_mut(&event.id) {
+            let release = if event.phase == "alive" {
+                touch.alive(event.token, std::time::Instant::now())
+            } else {
+                touch.surface(event.token, &event.phase)
+            };
+            if let Some(binding) = release {
+                self.connection.try_bound_input(binding, None);
+            }
+        }
+        Ok(())
+    }
+    pub fn touch(&self, json: &str) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        struct Touch {
+            id: u32,
+            token: u64,
+            event: protocol::InputEvent,
+        }
+        let event: Touch = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        if !matches!(event.event, protocol::InputEvent::Touch { .. }) {
+            return Err("expected a local touch gesture".into());
+        }
+        let mut touches = self.touches.lock().unwrap();
+        let Some(touch) = touches.get_mut(&event.id) else {
+            return Ok(());
+        };
+        let current = self.connection.input_binding(event.id, touch.revision);
+        let (release, events) =
+            touch.touch(event.token, event.event, current, std::time::Instant::now());
+        if let Some(binding) = release {
+            self.connection.try_bound_input(binding, None);
+        }
+        if let Some(binding) = touch.binding() {
+            for event in events {
+                if !self.connection.try_bound_input(binding, Some(event)) {
+                    touch.cancel();
+                    self.connection.try_bound_input(binding, None);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn send_file(&self, path: PathBuf) -> Result<(), String> {
         if !self.connection.files_available {
             return Err("peer does not support file transfer".into());

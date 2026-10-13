@@ -199,6 +199,16 @@ impl WorkspaceConnection {
     pub fn input_ready(&self, id:u32, source_revision:u32) -> bool {
         self.input.lock().unwrap().ready(id,source_revision)
     }
+    pub fn input_binding(&self, id: u32, source_revision: u32) -> Option<protocol::realtime_input::InputBinding> {
+        self.input.lock().unwrap().binding(id, source_revision)
+    }
+    /// Bind a gesture to the exact grant observed before translation, including its epoch.
+    /// None releases that grant's held state; a newer grant is never substituted.
+    pub fn try_bound_input(&self, binding: protocol::realtime_input::InputBinding, event: Option<protocol::InputEvent>) -> bool {
+        let mut input = self.input.lock().unwrap();
+        let Ok(SessionCommand::RealtimeInput(packet)) = input.seal_bound(binding, event) else { return false; };
+        self.commands.try_send(Command::Realtime(packet, Instant::now())).is_ok()
+    }
     pub fn control(&self, command: SessionCommand) -> impl std::future::Future<Output=Result<(),String>> + Send + '_ {
         // async fn bodies are lazy: seal at API invocation, before the returned
         // future can wait or a newer source can replace the current binding.

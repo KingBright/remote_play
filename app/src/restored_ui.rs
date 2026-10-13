@@ -55,13 +55,7 @@ pub async fn run_restored_gui(
     config.enable_client_receiver = false;
     config.enable_viewer_media = false;
     config.enable_workspace_viewer = true;
-    #[cfg(target_os = "windows")]
-    if std::env::var("REMOTE_PLAY_ENABLE_HOST").as_deref() != Ok("1") {
-        config.enable_passive_host = false;
-    }
-    if std::env::var("REMOTE_PLAY_ENABLE_HOST").as_deref() == Ok("0") {
-        config.enable_passive_host = false;
-    }
+    // Use the unified runtime configuration; paired-device authentication and OS consent remain mandatory.
     let runtime = Arc::new(start_unified_runtime(config).await?);
     run_original_dashboard(runtime, Some(instance), activation)
 }

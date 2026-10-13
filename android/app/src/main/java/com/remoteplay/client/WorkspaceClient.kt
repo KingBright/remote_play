@@ -16,7 +16,7 @@ data class WorkspaceSource(val source: Any, val title: String, val width: Int, v
 data class WorkspacePane(val id: Int, val source: WorkspaceSource, val fps: Int, val kbps: Int,
     val width: Int = 1280, val height: Int = 720, val audioOwner: Int? = null, val input: Boolean = false)
 data class RemoteSharedFile(val id: Long, val name: String, val sizeBytes: Long)
-data class WorkspaceState(val remoteFiles: List<RemoteSharedFile> = emptyList(), val sharedNext: Long? = null, val sharedBusy: Boolean = false, val sessionKey: String = "", val connected: Boolean = false, val clipboard: Boolean = false, val maxSubscriptions: Int = 4,
+data class WorkspaceState(val remoteFiles: List<RemoteSharedFile> = emptyList(), val sharedNext: Long? = null, val sharedBusy: Boolean = false, val sessionKey: String = "", val connectionGeneration: Long = 0, val connected: Boolean = false, val clipboard: Boolean = false, val maxSubscriptions: Int = 4,
     val files: Boolean = false, val clipboardAvailable: Boolean = false, val sources: List<WorkspaceSource> = emptyList(),
     val panes: List<WorkspacePane> = emptyList(), val status: String = "Connecting…", val grid: Boolean = true, val selected: Int = 0)
 
@@ -33,6 +33,9 @@ object WorkspaceClient {
     private var context: Context? = null
     private var endpoint = ""
     private var deviceId = ""
+    private var connectionGeneration = 0L
+    private val surfaceTokens = java.util.concurrent.atomic.AtomicLong()
+    fun nextSurfaceToken(): Long = surfaceTokens.incrementAndGet()
     private var nextId = 256
     private var revision = 0L
     private var shareRequestId = 0L
@@ -88,7 +91,7 @@ object WorkspaceClient {
         action(0, JSONObject().put("endpoint", target).put("directory", directory.absolutePath).toString())
         retainingConnection = true
         pendingShareList = 0L
-        mutable.value = mutable.value.copy(connected = true, remoteFiles = emptyList(), sharedNext = null, sharedBusy = false, status = "Connected")
+        mutable.value = mutable.value.copy(connected = true, connectionGeneration = ++connectionGeneration, panes = mutable.value.panes.map { it.copy(input = false) }, remoteFiles = emptyList(), sharedNext = null, sharedBusy = false, status = "Connected")
     }
     private fun closeNative() { polling?.cancel(); polling = null; if (active) action(1); active = false; retainingConnection = false }
     fun close() = guarded { closeNative(); mutable.value = WorkspaceState(status = "Disconnected") }
@@ -208,7 +211,25 @@ object WorkspaceClient {
         }
     }
     fun keyframe(id: Int) = guarded { action(6, id.toString()) }
-    fun touch(id: Int, event: JSONObject) = guarded { command("Input", JSONObject().put("id", id).put("event", JSONObject().put("Touch", event))) }
+    private fun currentView(id: Int, sessionKey: String, generation: Long, visible: Boolean): Boolean {
+        val s = mutable.value
+        return active && s.connected && s.sessionKey == sessionKey && s.connectionGeneration == generation &&
+            s.panes.any { it.id == id } && (!visible || (!background && (s.grid || s.selected == id)))
+    }
+    fun surface(id: Int, sessionKey: String, generation: Long, token: Long, phase: String, eventTime: Long = SystemClock.uptimeMillis()) = guarded {
+        if (!currentView(id, sessionKey, generation, phase == "begin" || phase == "ready" || phase == "alive")) return@guarded
+        val currentPhase = if (phase == "alive" && SystemClock.uptimeMillis() - eventTime !in 0L..250L) "cancel" else phase
+        action(11, JSONObject().put("id", id).put("token", token).put("phase", currentPhase).toString())
+    }
+    fun touch(id: Int, sessionKey: String, generation: Long, token: Long, eventTime: Long, event: JSONObject) = guarded {
+        if (!currentView(id, sessionKey, generation, true)) return@guarded
+        // Include time waiting on this serial executor; do not replay an old Android event as fresh input.
+        if (SystemClock.uptimeMillis() - eventTime !in 0L..250L) {
+            action(11, JSONObject().put("id", id).put("token", token).put("phase", "cancel").toString())
+            return@guarded
+        }
+        action(12, JSONObject().put("id", id).put("token", token).put("event", JSONObject().put("Touch", event)).toString())
+    }
     private fun drainEvents() {
         val events = JSONArray(action(5))
         for (i in 0 until events.length()) {
