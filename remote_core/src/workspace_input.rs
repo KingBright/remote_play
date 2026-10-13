@@ -273,4 +273,50 @@ mod tests {
         grant(&mut state, 2);
         assert!(!state.release_ack(release.binding, release.sequence));
     }
+    #[test]
+    fn host_input_time_is_opaque_and_compatible_with_existing_viewer_estimation() {
+        use protocol::realtime_input::InputLease;
+        for epoch_ms in [0_u64, 1_700_000_000_000] {
+            let mut state = InputState::default();
+            state.source(7, 0);
+            let SessionCommand::RequestInputBinding { request, .. } = state.requests(1).remove(0)
+            else {
+                panic!()
+            };
+            let binding = InputBinding {
+                connection_id: 1,
+                subscription_id: 7,
+                source_revision: 0,
+                epoch: [1; 16],
+            };
+            state.grant(1, binding, request, epoch_ms);
+            state
+                .slots
+                .get_mut(&7)
+                .unwrap()
+                .lease
+                .as_mut()
+                .unwrap()
+                .received = Instant::now() - std::time::Duration::from_millis(40);
+            let SessionCommand::RealtimeInput(packet) = state
+                .seal(SessionCommand::Input {
+                    id: 7,
+                    event: protocol::InputEvent::MouseDown(0),
+                })
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert!(packet.created_host_ms >= epoch_ms + 40);
+            // A host clock near zero is valid: no client wall-clock comparison,
+            // epoch reinterpretation, new wire field or handshake is required.
+            let received_host_ms = packet.created_host_ms + 20;
+            let mut receiver = InputLease::new(binding, epoch_ms);
+            assert_eq!(
+                receiver.accept(&packet, received_host_ms),
+                Some(vec![protocol::InputEvent::MouseDown(0)])
+            );
+        }
+    }
+
 }

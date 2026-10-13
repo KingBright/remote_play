@@ -25,6 +25,32 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::Instant;
 
+// One epoch per host process. Wall time is read only while establishing the
+// anchor; input grants, admission and expiry all advance on the same Instant.
+// The wire value remains an opaque host-millisecond timestamp to the viewer.
+struct HostInputClock {
+    epoch_ms: u64,
+    started: std::time::Instant,
+}
+impl HostInputClock {
+    fn new(wall_time: impl FnOnce() -> u64, started: std::time::Instant) -> Self {
+        Self {
+            epoch_ms: wall_time(),
+            started,
+        }
+    }
+    fn at(&self, now: std::time::Instant) -> u64 {
+        let elapsed = u64::try_from(now.saturating_duration_since(self.started).as_millis())
+            .unwrap_or(u64::MAX);
+        self.epoch_ms.saturating_add(elapsed)
+    }
+}
+fn host_input_time_ms() -> u64 {
+    static CLOCK: std::sync::OnceLock<HostInputClock> = std::sync::OnceLock::new();
+    let clock = CLOCK.get_or_init(|| HostInputClock::new(now_unix_ms, std::time::Instant::now()));
+    clock.at(std::time::Instant::now())
+}
+
 /// Local process capability; a network address alone cannot authorize a grant.
 #[cfg(all(unix, any(test, target_os = "linux")))]
 #[derive(Clone)]
@@ -516,7 +542,7 @@ impl Connection {
         if connection!=self.id || request==0 {return None;}
         let (current,target,generation)=self.input_signature(id)?;
         if current!=revision {return None;}
-        let now=now_unix_ms();
+        let now=host_input_time_ms();
         let rotate=self.input_leases.get(&id).is_none_or(|slot|
             slot.lease.expired(now) || slot.lease.binding.source_revision!=revision
             || slot.target!=target || slot.portal_generation!=generation);
@@ -533,7 +559,7 @@ impl Connection {
         let slot=self.input_leases.get_mut(&id)?;
         if packet.binding.connection_id!=self.id || packet.binding.source_revision!=revision
             || slot.target!=target || slot.portal_generation!=generation {return None;}
-        slot.lease.accept(packet,now_unix_ms())
+        slot.lease.accept(packet,host_input_time_ms())
     }
     async fn unsubscribe(&mut self, id: u32) -> Result<(), String> {
         if let Some(receipt) = self.retired.get(&id) {
@@ -1390,7 +1416,7 @@ async fn dispatch_realtime_input(
     // keeps this deadline; later wall-clock reads cannot renew its budget.
     let deadline = input_deadline(
         packet.created_host_ms,
-        now_unix_ms(),
+        host_input_time_ms(),
         std::time::Instant::now(),
     );
     let Some(events) = peer.accept_input(&packet) else {
@@ -1435,7 +1461,7 @@ async fn expire_input_owners(
         let expired = peer
             .input_leases
             .iter()
-            .filter(|(_, slot)| slot.lease.expired(now_unix_ms()))
+            .filter(|(_, slot)| slot.lease.expired(host_input_time_ms()))
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         for id in expired {
@@ -1685,6 +1711,7 @@ async fn run_host_service_inner(
         mpsc::Receiver<LocalPortalShareCommand>,
     >,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let _ = host_input_time_ms(); // Establish this process's input clock at service startup.
     let multiplexer = UdpMultiplexer::bind(&config.bind_addr.to_string()).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
     let injector = LazyInputInjector::default();
@@ -1972,6 +1999,98 @@ async fn run_host_service_inner(
 mod failure_admission_tests {
     use super::*;
 
+    fn assert_wall_jump_does_not_change_input_age(jumped_wall: u64) {
+        use std::cell::Cell;
+        let wall = Cell::new(1_700_000_000_000_u64);
+        let reads = Cell::new(0);
+        let start = std::time::Instant::now();
+        let clock = HostInputClock::new(
+            || {
+                reads.set(reads.get() + 1);
+                wall.get()
+            },
+            start,
+        );
+        let grant_ms = clock.at(start);
+        let binding = InputBinding {
+            connection_id: 1,
+            subscription_id: 7,
+            source_revision: 0,
+            epoch: [1; 16],
+        };
+        let mut lease = InputLease::new(binding, grant_ms);
+        // Existing viewers add monotonic elapsed time to the host grant value.
+        let mut packet = RealtimeInput {
+            binding,
+            sequence: 1,
+            created_host_ms: grant_ms + 100,
+            payload: InputPayload::Event(InputEvent::MouseDown(0)),
+        };
+        wall.set(jumped_wall);
+        let received = start + Duration::from_millis(200);
+        let now_ms = clock.at(received);
+        assert_eq!(now_ms, grant_ms + 200);
+        assert_eq!(
+            lease.accept(&packet, now_ms),
+            Some(vec![InputEvent::MouseDown(0)])
+        );
+        assert_eq!(
+            input_deadline(packet.created_host_ms, now_ms, received).unwrap(),
+            start + Duration::from_millis(350)
+        );
+        packet.sequence = 2;
+        let late = start + Duration::from_millis(351);
+        assert!(lease.accept(&packet, clock.at(late)).is_none());
+        assert!(input_deadline(packet.created_host_ms, clock.at(late), late).is_none());
+        assert!(lease.expired(clock.at(start + Duration::from_millis(951))));
+        assert_eq!(
+            reads.get(),
+            1,
+            "wall time must not be reread after the process anchor"
+        );
+    }
+    #[test]
+    fn host_wall_clock_forward_jump_preserves_fresh_input_and_drops_expired_input() {
+        assert_wall_jump_does_not_change_input_age(1_700_003_600_000);
+    }
+    #[test]
+    fn host_wall_clock_backward_jump_preserves_fresh_input_and_drops_expired_input() {
+        assert_wall_jump_does_not_change_input_age(1_699_996_400_000);
+    }
+    #[test]
+    fn restarted_host_rejects_old_epoch_even_when_timestamp_matches_new_clock() {
+        let start = std::time::Instant::now();
+        let old_clock = HostInputClock::new(|| 10_000, start);
+        let new_clock = HostInputClock::new(|| 10_000, start);
+        let old = InputBinding {
+            connection_id: 1,
+            subscription_id: 7,
+            source_revision: 0,
+            epoch: [1; 16],
+        };
+        let new = InputBinding {
+            epoch: [2; 16],
+            ..old
+        };
+        let old_packet = RealtimeInput {
+            binding: old,
+            sequence: 1,
+            created_host_ms: old_clock.at(start),
+            payload: InputPayload::Event(InputEvent::MouseDown(0)),
+        };
+        let mut lease = InputLease::new(new, new_clock.at(start));
+        assert!(lease.accept(&old_packet, new_clock.at(start)).is_none());
+        let new_packet = RealtimeInput {
+            binding: new,
+            ..old_packet
+        };
+        assert_eq!(
+            lease.accept(&new_packet, new_clock.at(start)),
+            Some(vec![InputEvent::MouseDown(0)])
+        );
+    }
+
+
     #[test]
     fn receive_deadline_preserves_age_and_is_independent_of_later_wall_clock_reads() {
         let now = std::time::Instant::now();
@@ -2088,7 +2207,7 @@ mod failure_admission_tests {
                 RealtimeInput {
                     binding,
                     sequence: 1,
-                    created_host_ms: now_unix_ms(),
+                    created_host_ms: host_input_time_ms(),
                     payload: InputPayload::Event(InputEvent::MouseDown(0)),
                 },
             )
@@ -2108,7 +2227,7 @@ mod failure_admission_tests {
             RealtimeInput {
                 binding: binding_b,
                 sequence: 2,
-                created_host_ms: now_unix_ms(),
+                created_host_ms: host_input_time_ms(),
                 payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
             },
         )
@@ -2197,7 +2316,7 @@ mod failure_admission_tests {
         sub.settings.send_modify(|s|s.paused=false);
         peer.subscriptions.insert(100,sub);
         let SessionCommand::InputBinding{binding,..}=peer.input_binding(31,100,10,1).unwrap() else{panic!()};
-        let packet=RealtimeInput{binding,sequence:1,created_host_ms:now_unix_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))};
+        let packet=RealtimeInput{binding,sequence:1,created_host_ms:host_input_time_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))};
         // This is the production ingress method, before OS APIs or await points.
         // A fake native call with unknown outcome cannot undo its consumption.
         let events=peer.accept_input(&packet).unwrap();
@@ -2205,14 +2324,14 @@ mod failure_admission_tests {
         let mut calls=0;
         for _ in events {calls+=1;let _unknown:Result<(),&str>=Err("native reply lost");}
         assert!(peer.accept_input(&packet).is_none());assert_eq!(calls,1);
-        let mut stale=packet.clone();stale.sequence=2;stale.created_host_ms=now_unix_ms()-251;
+        let mut stale=packet.clone();stale.sequence=2;stale.created_host_ms=host_input_time_ms()-251;
         assert!(peer.accept_input(&stale).is_none());
         let mut old_release=packet.clone();old_release.sequence=3;old_release.payload=InputPayload::Release;
         // Same tuple/source revision, new lease: delayed release remains old.
         peer.input_leases.remove(&100);
         let SessionCommand::InputBinding{binding:new,..}=peer.input_binding(31,100,10,2).unwrap() else{panic!()};
         assert_ne!(binding.epoch,new.epoch);
-        let mut new_down=packet.clone();new_down.binding=new;new_down.created_host_ms=now_unix_ms();
+        let mut new_down=packet.clone();new_down.binding=new;new_down.created_host_ms=host_input_time_ms();
         assert_eq!(peer.accept_input(&new_down).unwrap(),vec![InputEvent::MouseDown(0)]);
         assert!(peer.accept_input(&old_release).is_none());
         peer.subscriptions.get_mut(&100).unwrap().source_revision=11;
@@ -2228,7 +2347,7 @@ mod failure_admission_tests {
         assert!(peer.input_binding(32,100,10,1).is_none());
         assert!(peer.input_binding(31,100,9,1).is_none());
         let SessionCommand::InputBinding{binding,..}=peer.input_binding(31,100,10,1).unwrap() else{panic!()};
-        let packet=RealtimeInput{binding,sequence:1,created_host_ms:now_unix_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))};
+        let packet=RealtimeInput{binding,sequence:1,created_host_ms:host_input_time_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))};
         // Actual target identity changed without a revision acknowledgement.
         peer.subscriptions.get_mut(&100).unwrap().input_target=Some(InputTarget::Display{id:77});
         assert!(peer.accept_input(&packet).is_none());
