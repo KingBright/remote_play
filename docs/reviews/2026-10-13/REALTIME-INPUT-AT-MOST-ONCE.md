@@ -26,7 +26,10 @@ before dispatch is distinguished from a missing reply. On an unknown Portal
 transport result the host revokes that exact compositor lease. Mac and Windows
 record transitions before native calls, discard duplicate downs/unowned ups,
 and do not track a down that was definitely never posted. Windows cleanup sends
-button-up only for owned buttons. Linux uinput cleanup drains its own device's
+button-up only for owned buttons. Rejected Windows calls stop the current input
+operation: a rejected modifier cannot turn a shortcut into a bare printable key.
+Failed cleanup blocks further native input until this injector's owned state is
+cleared. Linux uinput cleanup drains its own device's
 recorded keys/buttons, and unknown key/button codes no longer become guessed
 printable keys or left clicks. A destroyed Mac window never redirects releases
 to another application through a global fallback.
@@ -47,9 +50,12 @@ repository's existing 104 dirty files remain outside this change. The integrated
 base is b83d64d0f939877ecf23df9ebec9eb10d509938e, retaining all 66 migration commits.
 The final source manifest and logs are retained in task-4/realtime-input-safety-20261013.
 
-- protocol: 40 passed; remote_core: 301 passed; host: 168 passed, 2 ignored.
+- protocol: 40 passed; remote_core: 301 passed; host: 171 passed, 2 ignored.
 - desktop: 120 passed, 2 ignored, including the real loopback protected-wire test.
 - Explicit GPUI synthetic event recorder: 1 passed; no native input or screen capture.
+- Actual Windows injector source compiled against a recording SendInput API on
+  MacBook: 3 ownership/failure-path tests passed, included in the host count.
+  This checks source control flow; it does not check Windows ABI or native execution.
 - Private D-Bus target: lost key-up reply is observed exactly once, including cleanup.
 - Host production ingress: replay, stale events, wrong connection/revision/target,
   target epoch replacement and late old release are rejected before injection.
@@ -64,13 +70,16 @@ prove ownership of a simultaneously held physical user key, freeze foreground
 focus, or retract an already queued OS event. Window IDs/PIDs alone are not an
 atomic lifetime lock on the target process. This change therefore does not claim
 strict physical-input isolation or a guarantee about when an accepted OS event
-is delivered. Those limitations require a stronger target-scoped OS primitive,
+is delivered. Microsoft documents both the accepted-event count and interference
+from already-held keys in [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput). Those limitations require a stronger target-scoped OS primitive,
 and physical acceptance remains pending.
 
 The new Windows and Linux uinput code has not been natively built or executed in
 this run. Linux Portal tests use a private bus on MacBook; they are not desktop
 consent receipts. No installed product was replaced. Windows cube is offline;
-MacStudio is in Remote Hosts maintenance draining. The old Studio transfer
+At the Gateway observation on 2026-10-13 04:28:10 UTC, MacStudio was offline and
+in Remote Hosts maintenance draining (reported agent 0.10.37; upgrade state
+preflight with target 0.10.35). This is not a product-upgrade success receipt. The old Studio transfer
 9532b631-9b71-47bf-b7d5-5ad572cf1fe5 is still paused and was not replayed. HO5's
 previous b83 candidate remains immutable; safe idle cannot be established from
 its current product because it lacks authoritative live-session counters.

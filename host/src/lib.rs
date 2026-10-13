@@ -66,6 +66,8 @@ mod windows_capture;
 mod windows_input;
 #[cfg(any(target_os = "windows", test))]
 mod windows_keymap;
+#[cfg(all(test, not(target_os = "windows")))]
+mod windows_input_contract_tests;
 #[cfg(target_os = "windows")]
 mod windows_video_encode;
 
