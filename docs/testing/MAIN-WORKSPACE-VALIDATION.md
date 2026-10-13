@@ -15,15 +15,24 @@ The six differences in the retired build copy were resolved as follows:
 | `docs/testing/2026-10-10-INPUT-STAGE-MATRIX.json` | Keep the newer primary version; archive the stale copy, including its missing delivery evidence and matrix definition. |
 | `docs/testing/2026-10-10-PORTAL-INPUT-STAGE.md` | Keep the newer primary version; archive the stale copy rather than losing delivery and regression records. |
 
-Start lifecycle assessment from this checkout with
-`python3 -B scripts/check_artifact_lifecycle.py check`. This command is observation
-only: it neither compiles nor cleans. At retirement it refused because the
-adoption binding records an older `Cargo.lock` digest. The existing authoritative
-inventory also declares `build_ready: false`, shared-cache ownership, and missing
-build-lock/closure integration. Reassess the lockfile and integrate a reviewed
-primary-checkout build entry before compiling. Do not copy the retired environment's
-policy over this binding, silently redirect the shared cache, or recreate a source
-mirror to bypass the refusal.
+Run the existing focused Rust entry from this checkout:
+`python3 -B scripts/test_stream_settings_model.py`. It resolves the source root
+from its own location, reports the source directory and Git identity, then uses
+the existing Cargo target. Its lifecycle observation must pass before Cargo runs.
+The existing 4 GiB emergency reserve, owned-process cancellation on low space,
+source-change detection, offline/locked dependency resolution and Cargo target
+locking remain in effect. This fixed test runs only `stream_settings::tests`.
+
+The stale adoption digest was refreshed using the installed helper's supported
+`adopt --write-binding` operation into a new file, reviewed and then replaced.
+Only the recorded `Cargo.lock` digest changed; the lockfile itself, dependencies,
+profiles, target configuration and ownership protections did not change.
+
+`python3 -B scripts/check_artifact_lifecycle.py check` remains observation only.
+Its `build_ready: false` describes the unintegrated generic lifecycle wrapper,
+not a prohibition on this existing project-specific, explicitly authorized test
+entry. Do not mark shared-target budgets or cleanup/IDE coverage as implemented.
+The shared target stays protected; no cache cleanup is performed by this script.
 
 The retired artifact store preserves its signed unique candidates, logs, registry
 and cache in place. Its policy describes a historical environment; no executable
@@ -33,6 +42,5 @@ not rebuild, deploy, push, change device permissions, or clear any shared cache.
 
 For release-script checks in the primary checkout, use
 `python3 -B -m unittest discover -s scripts/tests -v`; `-B` preserves existing
-user bytecode files. No full test run was needed for this documentation and local
-source-retirement change. Earlier compiled evidence remains tied to its recorded
-source hashes, profiles and original build location.
+user bytecode files. A focused Rust run verifies the primary source entry. Earlier compiled evidence
+remains tied to its recorded source hashes, profiles and original build location.

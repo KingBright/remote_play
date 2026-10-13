@@ -17,7 +17,7 @@
   },
   "contract_sha256": {
     "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
-    "Cargo.lock": "faf56fedc02b9a09974af3aaed4abcf2b7b55c289f3954faf70aaaced43e6a1e",
+    "Cargo.lock": "9d56fba21e5bb3db6206fe0a4d1b8f6f0f743358fe04a34c5003c83dc46e7be5",
     ".cargo/config": null,
     ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c"
   },

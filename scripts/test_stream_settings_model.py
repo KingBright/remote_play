@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -19,6 +20,19 @@ def main():
     parser.add_argument("--target-dir", type=Path)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
+    # Refresh stale evidence explicitly with the existing adoption tool; never
+    # compile through a failed lifecycle observation.
+    preflight = subprocess.run(
+        [sys.executable, "-B", str(root / "scripts/check_artifact_lifecycle.py"), "check"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if preflight.returncode:
+        print(preflight.stderr or preflight.stdout, file=sys.stderr)
+        return preflight.returncode
+    print(f"Source workspace: {root}", flush=True)
+    print("Git source: " + subprocess.check_output(
+        ["git", "log", "-1", "--format=%H %D"], cwd=root, text=True
+    ).strip(), flush=True)
     cargo = shutil.which("cargo")
     if not cargo:
         parser.error("cargo is required")
