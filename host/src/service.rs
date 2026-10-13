@@ -1419,25 +1419,43 @@ async fn dispatch_realtime_input(
         host_input_time_ms(),
         std::time::Instant::now(),
     );
+    let id = packet.binding.subscription_id;
+    let previous_modifiers = peer.input_leases.get(&id)
+        .map_or(0, |slot| slot.lease.held_modifiers());
+    // Cleanup acknowledges the sender's old state; it is never new intent to
+    // take control. A nonzero modifier mask may still only remove old bits.
+    let active_intent = match &packet.payload {
+        InputPayload::Event(InputEvent::MouseDown(_) | InputEvent::KeyDown(_)
+            | InputEvent::Key { pressed: true, .. }
+            | InputEvent::MouseMove { .. } | InputEvent::MouseMoveAbsolute { .. }
+            | InputEvent::MouseScroll { .. }) => true,
+        InputPayload::Event(InputEvent::ModifiersChanged(mask)) =>
+            mask & !previous_modifiers & 0x0f != 0,
+        _ => false,
+    };
     let Some(events) = peer.accept_input(&packet) else {
         return;
     };
     let Some(deadline) = deadline else {
         return;
     };
-    let id = packet.binding.subscription_id;
-    if owner.owner == Some((addr, id)) && owner.binding != Some(packet.binding) {
-        if owner.release(injector).await.is_err() {
-            peer.input_leases.remove(&id);
-            return;
+    let owns_input = owner.owner == Some((addr, id)) && owner.binding == Some(packet.binding);
+    // accept_input still consumes sequence/held state for suppressed cleanup;
+    // Release acknowledgements below remain available to the old sender.
+    if owns_input || active_intent {
+        if owner.owner == Some((addr, id)) && owner.binding != Some(packet.binding) {
+            if owner.release(injector).await.is_err() {
+                peer.input_leases.remove(&id);
+                return;
+            }
         }
-    }
-    for event in events {
-        if !inject_fresh(injector, owner, peer, udp, addr, id, event, Some(deadline)).await {
-            peer.input_leases.remove(&id);
-            return;
+        for event in events {
+            if !inject_fresh(injector, owner, peer, udp, addr, id, event, Some(deadline)).await {
+                peer.input_leases.remove(&id);
+                return;
+            }
+            owner.binding = Some(packet.binding);
         }
-        owner.binding = Some(packet.binding);
     }
     if matches!(packet.payload, InputPayload::Release) {
         send_session(
@@ -1722,6 +1740,9 @@ async fn run_host_service_inner(
     let mut psk = load_session_psk();
     let mut require_auth = require_session_auth() || psk.is_some();
     let mut input_owner = ActiveInput::default();
+    let mut input_watchdog = tokio::time::interval(Duration::from_millis(
+        protocol::realtime_input::INPUT_WATCHDOG_INTERVAL_MS));
+    input_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1762,8 +1783,10 @@ async fn run_host_service_inner(
                 #[cfg(not(all(unix, any(test, target_os = "linux"))))]
                 let _ = local;
             }
-            _ = tick.tick() => {
+            _ = input_watchdog.tick() => {
                 expire_input_owners(&mut peers,&mut input_owner,&injector).await;
+            }
+            _ = tick.tick() => {
                 let current_key = load_session_psk();
                 if current_key != psk {
                     for addr in authenticated.keys() { udp_sender.remove_peer_crypto(*addr); }
@@ -2108,8 +2131,10 @@ mod failure_admission_tests {
     }
     impl InputInjector for OwnershipProbe {
         fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
-            if matches!(event, InputEvent::MouseDown(0)) {
-                self.held.store(true, std::sync::atomic::Ordering::SeqCst);
+            match event {
+                InputEvent::MouseDown(0) => self.held.store(true, std::sync::atomic::Ordering::SeqCst),
+                InputEvent::MouseUp(0) => self.held.store(false, std::sync::atomic::Ordering::SeqCst),
+                _ => {}
             }
             Ok(())
         }
@@ -2217,7 +2242,7 @@ mod failure_admission_tests {
         assert_eq!(owner.binding, Some(binding_b));
         // These are the same dispatch and timer bodies called by the production
         // event loop. Refresh only B while A's original held lease times out.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         dispatch_realtime_input(
             &mut b,
             &mut owner,
@@ -2228,11 +2253,11 @@ mod failure_admission_tests {
                 binding: binding_b,
                 sequence: 2,
                 created_host_ms: host_input_time_ms(),
-                payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
+                payload: InputPayload::Held(vec![(protocol::realtime_input::Press::Button(0), 1)]),
             },
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(220)).await;
         let mut peers = HashMap::from([(addr_a, a), (addr_b, b)]);
         expire_input_owners(&mut peers, &mut owner, &injector).await;
         assert!(!peers[&addr_a].input_leases.contains_key(&100));
@@ -2241,6 +2266,154 @@ mod failure_admission_tests {
         assert_eq!(releases.load(SeqCst), 1);
         assert_eq!(owner.owner, Some((addr_b, 100)));
         assert_eq!(owner.binding, Some(binding_b));
+    }
+
+    #[tokio::test]
+    async fn event_loop_missing_held_refresh_stops_drag_and_requires_new_intent() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut peer, addr) = fixture_peer(31).await;
+        let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        let SessionCommand::InputBinding { binding, .. } =
+            peer.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,
+            Box::new(OwnershipProbe { held: held.clone(), releases: releases.clone(), delay: Duration::ZERO })) )));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        dispatch_realtime_input(&mut peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding, sequence: 1, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Neither the grant/connection path nor ongoing pointer motion is a
+        // replacement for the missing periodic assertion that the button is held.
+        assert!(peer.input_binding(31, 100, 10, 2).is_some());
+        dispatch_realtime_input(&mut peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding, sequence: 2, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }) }).await;
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let mut peers = HashMap::from([(addr, peer)]);
+        expire_input_owners(&mut peers, &mut owner, &injector).await;
+        assert!(!held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        assert!(owner.owner.is_none());
+        let peer = peers.get_mut(&addr).unwrap();
+        let SessionCommand::InputBinding { binding: fresh, .. } =
+            peer.input_binding(31, 100, 10, 3).unwrap() else { panic!() };
+        assert_ne!(fresh, binding);
+        for (binding, sequence) in [(binding, 3), (fresh, 1)] {
+            dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+                RealtimeInput { binding, sequence, created_host_ms: host_input_time_ms(),
+                    payload: InputPayload::Held(vec![(protocol::realtime_input::Press::Button(0), 1)]) }).await;
+            assert!(!held.load(SeqCst));
+            assert!(owner.owner.is_none());
+        }
+        dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding: fresh, sequence: 2, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst)); // A fresh press can deliberately resume.
+        dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding: fresh, sequence: 3, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Release }).await;
+        assert!(!held.load(SeqCst)); // Current-owner cleanup still works.
+    }
+
+    async fn check_takeover_packet(payload: InputPayload, takes_over: bool) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut a, addr_a) = fixture_peer(31).await;
+        let (mut b, _) = fixture_peer(32).await;
+        let addr_b = "127.0.0.1:39982".parse().unwrap();
+        for peer in [&mut a, &mut b] {
+            let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+            sub.settings.send_modify(|s| s.paused = false);
+            peer.subscriptions.insert(100, sub);
+        }
+        let SessionCommand::InputBinding { binding: binding_a, .. } =
+            a.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+        let SessionCommand::InputBinding { binding: binding_b, .. } =
+            b.input_binding(32, 100, 10, 1).unwrap() else { panic!() };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((
+            InputTarget::Desktop,
+            Box::new(OwnershipProbe {
+                held: held.clone(), releases: releases.clone(), delay: Duration::ZERO,
+            }),
+        ))));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        // A owns button, key and two modifiers before B actively takes over.
+        for (index, event) in [InputEvent::MouseDown(0), InputEvent::KeyDown(0),
+                              InputEvent::ModifiersChanged(3)].into_iter().enumerate() {
+            dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
+                RealtimeInput { binding: binding_a, sequence: index as u64 + 1,
+                    created_host_ms: host_input_time_ms(), payload: InputPayload::Event(event) }).await;
+        }
+        dispatch_realtime_input(&mut b, &mut owner, &injector, &udp, addr_b,
+            RealtimeInput { binding: binding_b, sequence: 1,
+                created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        let description = format!("{payload:?}");
+        let packet = RealtimeInput { binding: binding_a, sequence: 4,
+            created_host_ms: host_input_time_ms(), payload };
+        // This is the production loop's dispatch, while A's old lease is live.
+        dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a, packet.clone()).await;
+        if takes_over {
+            assert_eq!(owner.owner, Some((addr_a, 100)), "{description}");
+            assert_eq!(owner.binding, Some(binding_a), "{description}");
+            assert_eq!(releases.load(SeqCst), 2, "{description}");
+        } else {
+            assert!(held.load(SeqCst), "{description} released B");
+            assert_eq!(releases.load(SeqCst), 1, "{description}");
+            assert_eq!(owner.owner, Some((addr_b, 100)), "{description}");
+            assert_eq!(owner.binding, Some(binding_b), "{description}");
+            // Suppressed cleanup still consumes its sequence. A changed-payload
+            // duplicate cannot turn that sequence into a new takeover.
+            dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
+                RealtimeInput { payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
+                    ..packet }).await;
+            assert_eq!(owner.binding, Some(binding_b));
+            assert!(held.load(SeqCst));
+            assert_eq!(releases.load(SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_late_old_owner_release_and_snapshots_preserve_current_owner() {
+        use protocol::realtime_input::Press;
+        for payload in [InputPayload::Release, InputPayload::Held(vec![]),
+            InputPayload::Held(vec![(Press::Button(0), 1)])] {
+            check_takeover_packet(payload, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_late_old_owner_up_and_modifier_reductions_preserve_current_owner() {
+        for event in [InputEvent::MouseUp(0), InputEvent::KeyUp(0),
+            InputEvent::Key { key_code: 0, pressed: false, modifiers: 3 },
+            InputEvent::KeyUp(0x3b), InputEvent::ModifiersChanged(0),
+            InputEvent::ModifiersChanged(1), InputEvent::ModifiersChanged(3)] {
+            check_takeover_packet(InputPayload::Event(event), false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_new_active_input_still_takes_over() {
+        for event in [InputEvent::MouseDown(1), InputEvent::KeyDown(1),
+            InputEvent::Key { key_code: 1, pressed: true, modifiers: 3 },
+            InputEvent::MouseMove { dx: 1, dy: 0 },
+            InputEvent::MouseMoveAbsolute { x: 10, y: 20 },
+            InputEvent::MouseScroll { delta_x: 0, delta_y: 1 },
+            InputEvent::ModifiersChanged(7)] {
+            check_takeover_packet(InputPayload::Event(event), true).await;
+        }
     }
 
     struct HeldButtonProbe(Arc<std::sync::atomic::AtomicUsize>);

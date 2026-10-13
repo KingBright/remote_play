@@ -432,7 +432,7 @@ impl Actor {
         let mut rejection_log_at: Option<Instant> = None;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         let mut retry = tokio::time::interval(Duration::from_millis(250));
-        let mut input_tick = tokio::time::interval(Duration::from_millis(100));
+        let mut input_tick = tokio::time::interval(Duration::from_millis(protocol::realtime_input::INPUT_REFRESH_INTERVAL_MS));
         input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut input_requests_at = Instant::now() - Duration::from_secs(1);
         let mut media = tokio::time::interval(Duration::from_millis(10));

@@ -15,8 +15,14 @@ Unknown native outcomes never restore a consumed sequence or trigger a retry.
 
 Every owned key/button press has its own sequence identity. A 100 ms held-state
 snapshot only releases known missing presses and never synthesizes missing
-presses. After 750 ms without valid state, the host invalidates the binding and
-cleans only its current owner. Old releases cannot affect a newer target epoch;
+presses. After 300 ms without a matching fresh held-state snapshot, the host
+invalidates the binding and cleans only its current owner. Packet age is deducted
+from this budget; ordinary motion, unrelated new presses and binding/connection
+heartbeats do not extend existing holds. The host checks every 50 ms, giving a
+nominal stop bound of 350 ms from the last accepted state creation time when the
+executor is scheduled promptly. Executor stalls, native cleanup and OS delivery
+can add delay; this is not a hard real-time OS guarantee. A new binding starts
+empty, so a delayed snapshot cannot restart an expired hold. Old releases cannot affect a newer target epoch;
 releases use this same protected input lane, with a correlated receipt and no
 automatic retry. Key-up cannot introduce modifiers, alternate key encodings
 share a press identity, and unsupported touch input is dropped.
@@ -24,7 +30,7 @@ share a press identity, and unsupported touch input is dropped.
 Portal records downs before RPCs and consumes ups before RPCs. A known expiry
 before dispatch is distinguished from a missing reply. On an unknown Portal
 transport result the host revokes that exact compositor lease. Mac and Windows
-record transitions before native calls, discard duplicate downs/unowned ups,
+record accepted transitions, discard duplicate downs/unowned ups,
 and do not track a down that was definitely never posted. Windows cleanup sends
 button-up only for owned buttons. Rejected Windows calls stop the current input
 operation: a rejected modifier cannot turn a shortcut into a bare printable key.
@@ -42,7 +48,40 @@ ends must be updated before physical control acceptance. Legacy ClientSession
 input paths have not gained protected input negotiation and fail closed against
 this host; independent Remote Hosts callers are outside this protocol lane.
 
-## Verified source
+## Main-checkout safety follow-up (2026-10-13)
+
+- Old-owner Release, Held snapshots, key/button-up and modifier reductions update
+  only the old sender's logical state and sequence; they cannot take ownership or
+  release the current owner's input. Fresh deliberate presses, movement, scrolling
+  and newly added modifiers retain normal takeover behavior.
+- The receiving lease rejects an explicit key-down whose modifier intent differs
+  from accepted modifier state, before adding a held key. Lost/reordered Ctrl-down
+  therefore drops Ctrl+C instead of typing c. Legacy KeyDown has no explicit mask
+  and keeps its compatibility semantics; key-up never introduces modifiers.
+- The pre-existing uinput modifier omission is fixed: modifiers produce actual
+  EV_KEY transitions before characters. Each step uses the same deadline; failure
+  or expiry prevents the character and cleanup covers only accepted presses.
+- Mac selected-window clicks carry that same deadline through WindowServer/AX
+  reads to the AXFrontmost write, preventing expired requests from focusing an app.
+
+Validation used `/Users/jinliang/remote_play` on main and its existing Cargo target.
+Eight recorded failures first reproduced the owner/protocol/uinput defects. Final
+focused checks passed 65 distinct tests: protocol 44, host 18, sender sealing 3.
+Host cases use production dispatch/timer bodies with recording injectors; macOS
+focus tests record callbacks and uinput tests record writes without native input.
+Hold tests cover refresh, dropped snapshots, duplicate/old-epoch/stale traffic,
+delayed receipt/polling, drag timeout despite motion and grant requests, and no
+automatic restart from old held state. Current-owner release and new takeover pass.
+
+This protocol currently has no supported continuous joystick/velocity control;
+touch input is rejected. Discrete clicks, text/key presses, scroll and relative
+motion are never replayed by held snapshots. macOS/Windows global native input and
+compositor-managed Portal input cannot strictly distinguish overlapping physical
+user key state; native queues cannot be retracted and OS delivery latency is not
+bounded by the protocol. uinput cleanup targets this injector's own virtual device.
+No permission expansion, physical input, deployment or push occurred in this follow-up.
+
+## Earlier checkpoint verification
 
 The new implementation was tested on the managed MacBook checkout's main branch
 using its existing owned Rust target, profiles, lock and 8 GiB budget. The primary
