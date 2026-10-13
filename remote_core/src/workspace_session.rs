@@ -190,9 +190,14 @@ impl WorkspaceConnection {
     pub fn input_ready(&self, id:u32, source_revision:u32) -> bool {
         self.input.lock().unwrap().ready(id,source_revision)
     }
-    pub async fn control(&self, command: SessionCommand) -> Result<(), String> {
-        let command=self.prepare_command(command)?;
-        self.commands.send(command).await.map_err(|_| "connection closed".into())
+    pub fn control(&self, command: SessionCommand) -> impl std::future::Future<Output=Result<(),String>> + Send + '_ {
+        // async fn bodies are lazy: seal at API invocation, before the returned
+        // future can wait or a newer source can replace the current binding.
+        let command=self.prepare_command(command);
+        async move {
+            let command=command?;
+            self.commands.send(command).await.map_err(|_| "connection closed".into())
+        }
     }
     pub fn try_control(&self, command: SessionCommand) -> bool {
         self.prepare_command(command).is_ok_and(|command|self.commands.try_send(command).is_ok())
@@ -257,6 +262,38 @@ struct Actor {
     subscriptions: HashMap<u32, View>,
     pending: HashMap<(u8, u32), Pending>,
     clipboard: Option<Arc<dyn EnvelopeIngress>>,
+}
+
+#[cfg(test)]
+mod input_api_tests {
+    use super::*;
+    #[tokio::test]
+    async fn unpolled_input_future_cannot_be_rebound_to_a_new_generation() {
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target=mux.local_addr().unwrap();let (sender,_)=mux.split();
+        let input=Arc::new(std::sync::Mutex::new(InputState::default()));
+        let grant=|epoch:u8| {
+            let mut state=input.lock().unwrap();state.source(7,0);
+            let SessionCommand::RequestInputBinding{request,..}=state.requests(1).remove(0) else{panic!()};
+            state.grant(1,protocol::realtime_input::InputBinding{connection_id:1,subscription_id:7,source_revision:0,epoch:[epoch;16]},request,now_unix_ms());
+        };
+        grant(1);
+        let (_,last_response_rx)=tokio::sync::watch::channel(Instant::now());
+        let (file_commands,_)=mpsc::channel(1);let (commands,mut queued)=mpsc::channel(1);
+        let (cancel,_)=broadcast::channel(1);
+        let conn=WorkspaceConnection {
+            last_response_rx,input:input.clone(),max_subscriptions:8,files_available:false,clipboard_available:false,
+            settings_revision:std::sync::atomic::AtomicU64::new(0),id:1,sender,target,file_commands,
+            file_activity:Arc::new(std::sync::atomic::AtomicBool::new(false)),commands,cancel,
+            task:tokio::spawn(std::future::pending()),
+        };
+        let delayed=conn.control(SessionCommand::Input{id:7,event:protocol::InputEvent::MouseDown(0)});
+        // Replace the binding while the caller has not polled its future yet.
+        grant(2);delayed.await.unwrap();
+        let Command::Realtime(packet,_)=queued.recv().await.unwrap() else{panic!()};
+        assert_eq!(packet.binding.epoch,[1;16]);
+        conn.task.abort();
+    }
 }
 
 fn request_key(command: &SessionCommand) -> Option<(u8, u32)> {

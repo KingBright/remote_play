@@ -267,6 +267,7 @@ struct InputLeaseSlot {
 }
 
 struct Connection {
+    versioned_control: bool,
     id: u32,
     last_seen: Instant,
     cancel: broadcast::Sender<()>,
@@ -489,6 +490,19 @@ fn stream_settings(request: &SubscriptionRequest) -> crate::StreamSettings {
 }
 
 impl Connection {
+    fn accepts_legacy_control(&self) -> bool { !self.versioned_control }
+    fn accepts_initial_subscribe(&self, request:&SubscriptionRequest) -> bool {
+        self.subscriptions.get(&request.id).is_none_or(|sub|
+            !sub.task.is_finished() && sub.request.source==request.source && sub.request.audio==request.audio)
+    }
+    fn retires_input(&self, command:&SessionCommand) -> Option<u32> {
+        match command {
+            SessionCommand::Subscribe(request) if !self.subscriptions.contains_key(&request.id)=>Some(request.id),
+            SessionCommand::SwitchSource{id,request_id,..} if self.subscriptions.get(id).is_some_and(|sub|*request_id>sub.source_revision)=>Some(*id),
+            SessionCommand::SetActivity{id,revision,video,..} if self.subscriptions.get(id).is_some_and(|sub|*revision>sub.revision && sub.settings.borrow().paused==*video)=>Some(*id),
+            _=>None,
+        }
+    }
     fn input_signature(&self,id:u32) -> Option<(u32,InputTarget,Option<u64>)> {
         if !self.can_input(id) {return None;}
         let sub=self.subscriptions.get(&id)?;
@@ -510,6 +524,7 @@ impl Connection {
             let binding=InputBinding{connection_id:connection,subscription_id:id,source_revision:revision,epoch:random_bytes_16()};
             self.input_leases.insert(id,InputLeaseSlot{lease:InputLease::new(binding,now),target,portal_generation:generation});
         }
+        self.versioned_control=true;
         Some(SessionCommand::InputBinding{binding:self.input_leases.get(&id)?.lease.binding,request,host_time_ms:now})
     }
     fn accept_input(&mut self,packet:&RealtimeInput) -> Option<Vec<InputEvent>> {
@@ -807,6 +822,7 @@ impl Connection {
         let resources = Arc::new(crate::lifecycle::Resources::default());
         crate::lifecycle::publish(id, &resources, "open");
         Self {
+            versioned_control: false,
             id,
             last_seen: Instant::now(),
             cancel,
@@ -1346,6 +1362,12 @@ impl ActiveInput {
     }
 }
 
+async fn retire_input_before_control(peer:&mut Connection,owner:&mut ActiveInput,injector:&LazyInputInjector,addr:SocketAddr,command:&SessionCommand) {
+    let Some(id)=peer.retires_input(command) else{return;};
+    peer.input_leases.remove(&id);
+    if owner.owner==Some((addr,id)) {let _=owner.release(injector).await;}
+}
+
 fn channel_if(
     enabled: bool,
 ) -> (
@@ -1702,6 +1724,7 @@ async fn run_host_service_inner(
                         }
                         match message {
                             ControlMessage::StartStream { width, height, fps, bitrate_kbps, session_id } => {
+                                if peers.get(&addr).is_some_and(|peer|!peer.accepts_legacy_control()) {continue;}
                                 if validate_host_video_settings(width, height, fps, bitrate_kbps).is_err() { continue; }
                                 if connection_admission_error(addr, &peers, &closing, &closed).is_some() { continue; }
                                 let peer = peers.entry(addr).or_insert_with(|| Connection::new(session_id, addr, udp_sender.clone(), &config));
@@ -1769,7 +1792,7 @@ async fn run_host_service_inner(
                                     let reply = if version != SESSION_VERSION || connection_id == 0 { SessionCommand::Error { request_id: connection_id, reason: "unsupported connection version or ID".into() } }
                                     else if let Some(reason) = connection_admission_error(addr, &peers, &closing, &closed) { SessionCommand::Error { request_id: connection_id, reason: reason.into() } }
                                     else if peers.get(&addr).is_some_and(|p| p.id != connection_id) { SessionCommand::Error { request_id: connection_id, reason: "close the existing connection first".into() } }
-                                    else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
+                                    else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); peer.versioned_control=true; SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
                                     send_session(&udp_sender, addr, reply).await;
                                 }
                                 SessionCommand::ListSources { request_id } if peers.contains_key(&addr) => {
@@ -1778,8 +1801,13 @@ async fn run_host_service_inner(
                                 }
                                 SessionCommand::Subscribe(request) => {
                                     let id = request.id;
-                                    if let Some(peer)=peers.get_mut(&addr) {peer.input_leases.remove(&id);}
-                                    if input_owner.owner == Some((addr,id)) { let _ = input_owner.release(&injector).await; }
+                                    if let Some(peer)=peers.get_mut(&addr) {
+                                        if !peer.accepts_initial_subscribe(&request) {
+                                            send_session(&udp_sender,addr,SessionCommand::Error{request_id:id,reason:"use SwitchSource or a new subscription ID to replace a capture".into()}).await;
+                                            continue;
+                                        }
+                                        retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::Subscribe(request.clone())).await;
+                                    }
                                     let result = match peers.get_mut(&addr) {
                                         Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
                                         None => Err("open a connection first".to_owned()),
@@ -1792,9 +1820,9 @@ async fn run_host_service_inner(
                                     }
                                 }
                                 SessionCommand::SwitchSource { id, request_id, source } => {
-                                    if let Some(peer)=peers.get_mut(&addr) {peer.input_leases.remove(&id);}
-                                    // Never carry a held button/key across capture sources.
-                                    if input_owner.owner == Some((addr, id)) { let _ = input_owner.release(&injector).await; }
+                                    if let Some(peer)=peers.get_mut(&addr) {
+                                        retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::SwitchSource{id,request_id,source}).await;
+                                    }
                                     let result = match peers.get_mut(&addr) {
                                         Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
                                         None => Err("open a connection first".to_owned()),
@@ -1819,19 +1847,23 @@ async fn run_host_service_inner(
                                     // No fallback: these packets cannot prove epoch, order or age.
                                 }
                                 SessionCommand::SetActivity { id, revision, video, audio } => {
-                                    if let Some(peer)=peers.get_mut(&addr) {peer.input_leases.remove(&id);}
+                                    if let Some(peer)=peers.get_mut(&addr) {
+                                        retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::SetActivity{id,revision,video,audio}).await;
+                                    }
                                     if let Some(reply) = peers.get_mut(&addr).and_then(|p| p.set_activity(id, revision, video, audio)) { send_session(&udp_sender, addr, reply).await; }
                                 }
                                 _ => {}
                             },
                             ControlMessage::StopStream => {
+                                if peers.get(&addr).is_some_and(|peer|!peer.accepts_legacy_control()) {continue;}
                                 if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
                                 begin_close(&mut peers,&mut closing,addr,false);
                             }
                             ControlMessage::Input(_) => {},
                             ControlMessage::Ping { client_send_ts } if peers.contains_key(&addr) => { let now = now_unix_ms(); let _ = udp_sender.send_control(&ControlMessage::Pong { client_send_ts, host_recv_ts: now, host_send_ts: now }, addr).await; }
                             ControlMessage::SetMediaPaused { session_id, revision, paused } => {
-                                if let Some(peer) = peers.get_mut(&addr) { peer.input_leases.remove(&session_id); peer.set_activity(session_id, revision, !paused, !paused);
+                                if peers.get(&addr).is_some_and(|peer|!peer.accepts_legacy_control()) {continue;}
+                                if let Some(peer) = peers.get_mut(&addr) { peer.set_activity(session_id, revision, !paused, !paused);
                                     if let Some(s) = peer.subscriptions.get(&session_id) {
                                         let paused = s.settings.borrow().paused;
                                         let reply = ControlMessage::MediaPauseState { session_id, revision: s.revision, paused };
@@ -1840,6 +1872,7 @@ async fn run_host_service_inner(
                                 }
                             }
                             ControlMessage::UpdateStreamSettings { width, height, fps, bitrate_kbps, session_id } => {
+                                if peers.get(&addr).is_some_and(|peer|!peer.accepts_legacy_control()) {continue;}
                                 if validate_host_video_settings(width, height, fps, bitrate_kbps).is_ok()
                                     && let Some(s) = peers.get_mut(&addr).and_then(|p| p.subscriptions.get_mut(&session_id)) {
                                     s.settings.send_modify(|value| { value.width = width; value.height = height; value.fps = fps; value.bitrate_kbps = bitrate_kbps; });
@@ -1877,6 +1910,60 @@ async fn run_host_service_inner(
 #[cfg(test)]
 mod failure_admission_tests {
     use super::*;
+
+    struct HeldButtonProbe(Arc<std::sync::atomic::AtomicUsize>);
+    impl InputInjector for HeldButtonProbe {
+        fn inject_input(&self,event:InputEvent)->Result<(),Box<dyn Error+Send+Sync>> {
+            if matches!(event,InputEvent::MouseDown(0)) {self.0.store(1, std::sync::atomic::Ordering::SeqCst);}
+            Ok(())
+        }
+        fn release_all_input(&self) {self.0.store(0,std::sync::atomic::Ordering::SeqCst);}
+    }
+    #[tokio::test]
+    async fn duplicate_or_stale_capture_controls_cannot_release_the_new_target() {
+        let (mut peer,addr)=fixture_peer(31).await;
+        let (sub,_)=mock_subscription(CaptureSource::MainDisplay);
+        sub.settings.send_modify(|s|s.paused=false);
+        let request=sub.request.clone();peer.subscriptions.insert(100,sub);
+        let SessionCommand::InputBinding{binding,..}=peer.input_binding(31,100,10,1).unwrap() else{panic!()};
+        let held=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let injector=LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,Box::new(HeldButtonProbe(held.clone()))))));
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let (udp,_)=mux.split();let mut owner=ActiveInput::default();
+        assert!(inject_fresh(&injector,&mut owner,&mut peer,&udp,addr,100,InputEvent::MouseDown(0),Some(now_unix_ms())).await);
+        owner.binding=Some(binding);
+        for command in [
+            SessionCommand::Subscribe(request),
+            SessionCommand::SwitchSource{id:100,request_id:10,source:CaptureSource::MainDisplay},
+            SessionCommand::SwitchSource{id:100,request_id:9,source:CaptureSource::Window(7)},
+            SessionCommand::SetActivity{id:100,revision:6,video:false,audio:false},
+            SessionCommand::SetActivity{id:100,revision:7,video:true,audio:false},
+            SessionCommand::SetActivity{id:100,revision:8,video:true,audio:false},
+        ] {
+            // The actual pre-dispatch cleanup function, with a fake native sink.
+            retire_input_before_control(&mut peer,&mut owner,&injector,addr,&command).await;
+            assert_eq!(held.load(std::sync::atomic::Ordering::SeqCst),1);
+            assert_eq!(owner.binding,Some(binding));
+            assert_eq!(peer.input_leases.get(&100).unwrap().lease.binding,binding);
+        }
+        retire_input_before_control(&mut peer,&mut owner,&injector,addr,&SessionCommand::SwitchSource{id:100,request_id:11,source:CaptureSource::Window(7)}).await;
+        assert_eq!(held.load(std::sync::atomic::Ordering::SeqCst),0);
+        assert!(owner.binding.is_none() && !peer.input_leases.contains_key(&100));
+    }
+    #[tokio::test]
+    async fn versioned_capture_cannot_be_replaced_by_initial_or_legacy_controls() {
+        let (mut peer,_)=fixture_peer(31).await;
+        assert!(peer.accepts_legacy_control());
+        let (sub,_)=mock_subscription(CaptureSource::MainDisplay);
+        sub.settings.send_modify(|s|s.paused=false);
+        let mut request=sub.request.clone();peer.subscriptions.insert(100,sub);
+        peer.input_binding(31,100,10,1).unwrap();
+        assert!(!peer.accepts_legacy_control());
+        assert!(peer.accepts_initial_subscribe(&request));
+        request.source=CaptureSource::Window(9);
+        assert!(!peer.accepts_initial_subscribe(&request));
+        request.source=CaptureSource::MainDisplay;request.audio=!request.audio;
+        assert!(!peer.accepts_initial_subscribe(&request));
+    }
 
     #[tokio::test]
     async fn stale_event_is_rejected_before_lazy_native_injector_creation() {
