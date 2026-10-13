@@ -34,6 +34,7 @@ pub mod timing;
 pub mod trace;
 pub mod traits;
 pub mod workspace_session;
+mod workspace_input;
 
 // Re-export traits for convenience
 pub use client_session::{

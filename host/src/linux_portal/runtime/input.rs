@@ -70,6 +70,7 @@ fn frame_binding(frame: &OwnedFrame) -> Option<FrameBinding> {
 struct Held {
     keys: BTreeSet<i32>,
     buttons: BTreeSet<i32>,
+    deadline: Option<std::time::Instant>,
 }
 
 pub(super) struct PortalInput {
@@ -163,7 +164,7 @@ impl PortalInput {
         }
         Ok(())
     }
-    async fn notify<B: Serialize + Type>(&self, name: &str, body: &B) -> Result<()> {
+    async fn notify<B: Serialize + Type>(&self, name: &str, body: &B, deadline:Option<std::time::Instant>) -> Result<()> {
         tokio::time::timeout(Duration::from_millis(500), async {
             let portal = proxy(
                 &self.connection,
@@ -173,6 +174,7 @@ impl PortalInput {
             )
             .await
             .map_err(|_| PortalInputError::Transport)?;
+            if deadline.is_some_and(|deadline|std::time::Instant::now()>=deadline) {return Err(PortalInputError::InvalidEvent);}
             portal
                 .call::<_, _, ()>(name, body)
                 .await
@@ -186,32 +188,32 @@ impl PortalInput {
         // not inject the down event. A later release must include that key.
         if pressed {
             self.status()?;
-            held.keys.insert(key);
-        }
-        self.notify(
+            if !held.keys.insert(key) {return Ok(());}
+        } else if !held.keys.remove(&key) {return Ok(());}
+        let result=self.notify(
             "NotifyKeyboardKeycode",
-            &(&self.session, options(), key, u32::from(pressed)),
-        )
-        .await?;
-        if !pressed {
-            held.keys.remove(&key);
+            &(&self.session, options(), key, u32::from(pressed)),held.deadline,
+        ).await;
+        if result==Err(PortalInputError::InvalidEvent) {
+            // Definitely not dispatched: retain an earlier owned down for cleanup.
+            if pressed {held.keys.remove(&key);} else {held.keys.insert(key);}
         }
-        Ok(())
+        result
     }
     async fn button(&self, held: &mut Held, button: i32, pressed: bool) -> Result<()> {
         if pressed {
             self.status()?;
-            held.buttons.insert(button);
-        }
-        self.notify(
+            if !held.buttons.insert(button) {return Ok(());}
+        } else if !held.buttons.remove(&button) {return Ok(());}
+        let result=self.notify(
             "NotifyPointerButton",
-            &(&self.session, options(), button, u32::from(pressed)),
-        )
-        .await?;
-        if !pressed {
-            held.buttons.remove(&button);
+            &(&self.session, options(), button, u32::from(pressed)),held.deadline,
+        ).await;
+        if result==Err(PortalInputError::InvalidEvent) {
+            // Definitely not dispatched: retain an earlier owned down for cleanup.
+            if pressed {held.buttons.remove(&button);} else {held.buttons.insert(button);}
         }
-        Ok(())
+        result
     }
     async fn modifiers(&self, held: &mut Held, flags: u8) -> Result<()> {
         if flags
@@ -239,8 +241,11 @@ impl PortalInput {
         }
         Ok(())
     }
-    pub(super) async fn inject(&self, event: InputEvent) -> Result<()> {
+    pub(super) async fn inject(&self,event:InputEvent) -> Result<()> {self.inject_before(event,None).await}
+    pub(super) async fn inject_before(&self, event: InputEvent, deadline:Option<std::time::Instant>) -> Result<()> {
         let mut held = self.held.lock().await;
+        held.deadline=deadline;
+        if deadline.is_some_and(|deadline|std::time::Instant::now()>=deadline) {return Err(PortalInputError::InvalidEvent);}
         self.status()?;
         let result = async {
             match event {
@@ -255,7 +260,7 @@ impl PortalInput {
                     let y = f64::from(y) * f64::from(height - 1) / f64::from(u16::MAX);
                     self.notify(
                         "NotifyPointerMotionAbsolute",
-                        &(&self.session, options(), self.source.node_id, x, y),
+                        &(&self.session, options(), self.source.node_id, x, y),deadline,
                     )
                     .await
                 }
@@ -273,7 +278,7 @@ impl PortalInput {
                             options(),
                             f64::from(delta_x),
                             f64::from(delta_y),
-                        ),
+                        ),deadline,
                     )
                     .await
                 }
@@ -299,6 +304,8 @@ impl PortalInput {
                     modifiers,
                 } => {
                     let code = key_code(code)?;
+                    let owned_modifiers=[(1,42),(2,29),(4,56),(8,125)].into_iter().fold(0,|mask,(flag,key)|if held.keys.contains(&key){mask|flag}else{mask});
+                    let modifiers=if pressed {modifiers} else {modifiers & owned_modifiers};
                     self.modifiers(&mut held, modifiers).await?;
                     self.key(&mut held, code, pressed).await
                 }
@@ -328,6 +335,7 @@ impl PortalInput {
     }
     async fn release_inner(&self) -> Result<()> {
         let mut held = self.held.lock().await;
+        held.deadline=None;
         let mut result = Ok(());
         for key in held.keys.clone() {
             if self.key(&mut held, key, false).await.is_err() {

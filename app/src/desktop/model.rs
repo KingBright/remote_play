@@ -377,6 +377,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                 CaptureSource::Window(_) => "This host cannot control the selected window. Check RemotePlay Accessibility on that host or choose an input-enabled source",
                 CaptureSource::MainDisplay | CaptureSource::Display(_) => "Display control unavailable. Read the host reason below; after correcting permission or source availability, reselect this source before enabling control",
             }
+        } else if !self.conn.input_ready(self.video_id,self.source_revision) {
+            "Waiting for this host to bind safe input to the current source"
         } else if self.paused || self.background_paused || self.activity_pending.is_some() {
             "Remote control paused. Resume video and wait for a frame from this source"
         } else if self
@@ -405,6 +407,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             && self.confirmed
             && self.pending.is_none()
             && self.supports_input
+            && self.conn.input_ready(self.video_id,self.source_revision)
             && !self.locked
             && !self.paused
             && !self.background_paused
@@ -416,24 +419,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             )
     }
     pub fn input_command(&self, event: InputEvent) -> SessionCommand {
-        // Selected displays, like windows, are bound to an exact host target.
-        // Their host rejects legacy desktop Input; retain the source revision
-        // so late events cannot follow a switch to another selected source.
-        if matches!(
-            self.source,
-            CaptureSource::Window(_) | CaptureSource::Display(_)
-        ) {
-            SessionCommand::SourceInput {
-                id: self.video_id,
-                source_revision: self.source_revision,
-                event,
-            }
-        } else {
-            SessionCommand::Input {
-                id: self.video_id,
-                event,
-            }
-        }
+        SessionCommand::SourceInput {id:self.video_id,source_revision:self.source_revision,event}
     }
     pub fn input(&mut self, event: InputEvent) {
         if self.can_input() {
@@ -790,7 +776,7 @@ mod static_input_tests {
     // No GUI, capture, permission request, clipboard start or OS input injection.
     #[tokio::test]
     async fn selected_display_input_reaches_the_wire_with_current_source_revision() {
-        assert!(remote_core::session_crypto::load_session_psk().is_none());
+        let psk=remote_core::session_crypto::load_session_psk();
         remote_core::init_crypto_provider();
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let addr = mux.local_addr().unwrap();
@@ -799,8 +785,23 @@ mod static_input_tests {
         let recorder = tokio::spawn(async move {
             while let Ok(packet) = receiver.recv().await {
                 match packet {
+                    MultiplexedPacket::Control(ControlMessage::SessionHello{nonce,timestamp_ms,mac},from) => {
+                        use remote_core::session_crypto::*;
+                        let key=psk.as_deref().unwrap();
+                        verify_session_mac(&mac_session_hello(key,&nonce,timestamp_ms),&mac,timestamp_ms,now_unix_ms()).unwrap();
+                        let salt=random_bytes_16();let timestamp_ms=now_unix_ms();
+                        sender.send_control(&ControlMessage::SessionAccept{salt,timestamp_ms,mac:mac_session_accept(key,&salt,timestamp_ms)},from).await.unwrap();
+                        sender.install_peer_crypto(from,SessionCrypto::from_psk(key,&salt).unwrap());
+                    }
                     MultiplexedPacket::Control(ControlMessage::Session(command), from) => {
-                        if let SessionCommand::Open { connection_id, .. } = *command {
+                        if let SessionCommand::RequestInputBinding{connection_id,id,source_revision,request}=*command {
+                            sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                                binding:protocol::realtime_input::InputBinding{connection_id,subscription_id:id,source_revision,epoch:[source_revision as u8;16]},
+                                request,host_time_ms:remote_core::session_crypto::now_unix_ms(),
+                            })),from).await.unwrap();
+                        } else if let SessionCommand::RealtimeInput(packet)=*command {
+                            if matches!(packet.payload,protocol::realtime_input::InputPayload::Event(_)) {recorded_tx.send(packet).unwrap();}
+                        } else if let SessionCommand::Open { connection_id, .. } = *command {
                             sender
                                 .send_control(
                                     &ControlMessage::Session(Box::new(SessionCommand::Opened {
@@ -815,8 +816,6 @@ mod static_input_tests {
                                 )
                                 .await
                                 .unwrap();
-                        } else {
-                            recorded_tx.send(*command).unwrap();
                         }
                     }
                     MultiplexedPacket::Control(ControlMessage::Ping { client_send_ts }, from) => {
@@ -881,6 +880,12 @@ mod static_input_tests {
             session.source = source;
             for revision in [0, 12] {
                 session.source_revision = revision;
+                let (video,_)=tokio::sync::mpsc::channel(1);
+                session.conn.subscribe(session.request.clone(),video,session.stats.clone(),session.host_stats.clone()).await.unwrap();
+                if revision!=0 {session.conn.control(SessionCommand::SwitchSource{id:session.video_id,request_id:revision,source}).await.unwrap();}
+                tokio::time::timeout(Duration::from_secs(2),async {
+                    while !session.conn.input_ready(session.video_id,revision) {tokio::time::sleep(Duration::from_millis(5)).await;}
+                }).await.unwrap();
                 for event in &inputs {
                     assert!(session.can_input());
                     session.input(event.clone());
@@ -888,28 +893,24 @@ mod static_input_tests {
                         .await
                         .unwrap()
                         .unwrap();
-                    assert_eq!(
-                        serde_json::to_value(received).unwrap(),
-                        serde_json::to_value(SessionCommand::SourceInput {
-                            id: session.video_id,
-                            source_revision: revision,
-                            event: event.clone(),
-                        })
-                        .unwrap(),
-                        "selected source {source:?} must not use unscoped desktop input"
-                    );
+                    assert_eq!(received.binding.connection_id,session.conn.id);
+                    assert_eq!(received.binding.subscription_id,session.video_id);
+                    assert_eq!(received.binding.source_revision,revision);
+                    let protocol::realtime_input::InputPayload::Event(recorded)=received.payload else{panic!()};
+                    assert_eq!(&recorded,event,"selected source {source:?} must retain exact input intent");
                 }
             }
         }
         session.source = CaptureSource::MainDisplay;
         assert_eq!(
             serde_json::to_value(session.input_command(inputs[0].clone())).unwrap(),
-            serde_json::to_value(SessionCommand::Input {
+            serde_json::to_value(SessionCommand::SourceInput {
                 id: session.video_id,
+                source_revision:session.source_revision,
                 event: inputs[0].clone(),
             })
             .unwrap(),
-            "retain compatibility for the default desktop subscription"
+            "default desktop input also retains the exact source revision"
         );
         recorder.abort();
     }

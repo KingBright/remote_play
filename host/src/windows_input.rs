@@ -28,13 +28,9 @@ impl WindowsInputInjector {
     }
 
     fn post_key(&self, vk: VIRTUAL_KEY, pressed: bool) {
-        send_key(vk, pressed);
         let mut keys = self.pressed_keys.lock().unwrap();
-        if pressed {
-            keys.insert(vk);
-        } else {
-            keys.remove(&vk);
-        }
+        let changed=if pressed {keys.insert(vk)} else {keys.remove(&vk)};
+        if changed && !send_key(vk,pressed) && pressed {keys.remove(&vk);}
     }
 
     fn set_modifiers(&self, modifiers: u8) {
@@ -52,7 +48,7 @@ impl WindowsInputInjector {
     }
 }
 
-fn send_mouse(flags: u32, dx: i32, dy: i32, data: u32) {
+fn send_mouse(flags: u32, dx: i32, dy: i32, data: u32) -> bool {
     let mut input = INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -67,11 +63,11 @@ fn send_mouse(flags: u32, dx: i32, dy: i32, data: u32) {
         },
     };
     unsafe {
-        SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32);
+        SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32)==1
     }
 }
 
-fn send_key(vk: VIRTUAL_KEY, pressed: bool) {
+fn send_key(vk: VIRTUAL_KEY, pressed: bool) -> bool {
     let extended = matches!(vk, 0x21..=0x28 | 0x2D | 0x2E | 0x5B | 0x5C | 0xA3 | 0xA5);
     let mut input = INPUT {
         r#type: INPUT_KEYBOARD,
@@ -87,7 +83,7 @@ fn send_key(vk: VIRTUAL_KEY, pressed: bool) {
         },
     };
     unsafe {
-        SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32);
+        SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32)==1
     }
 }
 
@@ -116,13 +112,10 @@ impl InputInjector for WindowsInputInjector {
                     _ => 0,
                 };
                 if flags != 0 {
-                    send_mouse(flags, 0, 0, 0);
-                    if down {
-                        self.pressed.fetch_or(1 << button.min(7), Ordering::Relaxed);
-                    } else {
-                        self.pressed
-                            .fetch_and(!(1 << button.min(7)), Ordering::Relaxed);
-                    }
+                    let mask=1 << button;
+                    let previous=if down {self.pressed.fetch_or(mask,Ordering::Relaxed)}
+                                 else {self.pressed.fetch_and(!mask,Ordering::Relaxed)};
+                    if (previous & mask != 0)!=down && !send_mouse(flags,0,0,0) && down {self.pressed.fetch_and(!mask,Ordering::Relaxed);}
                 }
             }
             InputEvent::MouseScroll {
@@ -136,6 +129,7 @@ impl InputInjector for WindowsInputInjector {
                 pressed,
                 modifiers,
             } => {
+                let modifiers=if pressed {modifiers} else {modifiers & self.modifiers.load(Ordering::Relaxed)};
                 self.set_modifiers(modifiers);
                 if let Some(vk) = mac_key_to_vk(key_code) {
                     self.post_key(vk, pressed);
@@ -154,9 +148,9 @@ impl InputInjector for WindowsInputInjector {
         for vk in std::mem::take(&mut *self.pressed_keys.lock().unwrap()) {
             send_key(vk, false);
         }
-        self.pressed.store(0, Ordering::Relaxed);
-        send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0);
-        send_mouse(MOUSEEVENTF_RIGHTUP, 0, 0, 0);
-        send_mouse(MOUSEEVENTF_MIDDLEUP, 0, 0, 0);
+        let buttons=self.pressed.swap(0,Ordering::Relaxed);
+        for (mask,flag) in [(1,MOUSEEVENTF_LEFTUP),(2,MOUSEEVENTF_RIGHTUP),(4,MOUSEEVENTF_MIDDLEUP)] {
+            if buttons & mask!=0 {send_mouse(flag,0,0,0);}
+        }
     }
 }

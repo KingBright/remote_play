@@ -63,15 +63,12 @@ impl MacInputInjector {
             pressed_keys: Mutex::new(BTreeSet::new()),
         })
     }
-    fn post(&self, event: &CGEvent) {
+    fn post(&self, event: &CGEvent) -> bool {
         if let Some(window) = &self.window {
             if !window.alive() {
-                // A destroyed target must still release input that this
-                // injector posted. Never post a new press to another window.
-                if is_release_event(event.get_type()) {
-                    event.post(CGEventTapLocation::HID);
-                }
-                return;
+                // A destroyed target has no safe global release destination.
+                // Consume ownership, drop the post, never redirect to a new app.
+                return false;
             }
             event.set_integer_value_field(
                 EventField::MOUSE_EVENT_WINDOW_UNDER_MOUSE_POINTER,
@@ -86,6 +83,7 @@ impl MacInputInjector {
         } else {
             event.post(CGEventTapLocation::HID);
         }
+        true
     }
     fn pointer_position(&self) -> CGPoint {
         if let Some(window) = &self.window {
@@ -210,6 +208,7 @@ impl MacInputInjector {
                 pressed,
                 modifiers,
             } => {
+                let modifiers=if pressed {modifiers} else {modifiers & self.current_modifiers()};
                 self.set_modifiers(modifiers);
                 self.post_tracked_key(key_code, pressed, modifiers);
             }
@@ -336,29 +335,27 @@ impl MacInputInjector {
         self.active_modifiers.load(Ordering::Relaxed)
     }
 
-    fn post_key(&self, key_code: u16, pressed: bool, modifiers: u8) {
+    fn post_key(&self, key_code: u16, pressed: bool, modifiers: u8) -> bool {
         if let Ok(cg_event) = CGEvent::new_keyboard_event(self.source.clone(), key_code, pressed) {
             cg_event.set_flags(modifier_event_flags(modifiers));
-            self.post(&cg_event);
+            return self.post(&cg_event);
         }
+        false
     }
 
     fn post_tracked_key(&self, key_code: u16, pressed: bool, modifiers: u8) {
         let mut keys = self.pressed_keys.lock().expect("pressed keys lock");
-        if !pressed && !keys.contains(&key_code) { return; }
-        self.post_key(key_code, pressed, modifiers);
-        if pressed {
-            keys.insert(key_code);
-        } else {
-            keys.remove(&key_code);
-        }
+        let changed=if pressed {keys.insert(key_code)} else {keys.remove(&key_code)};
+        if !changed {return;}
+        if !self.post_key(key_code, pressed, modifiers) && pressed {keys.remove(&key_code);}
     }
 
     fn set_modifiers(&self, modifiers: u8) {
         let previous = self.active_modifiers.swap(modifiers, Ordering::Relaxed);
         for (flag, key_code) in modifier_key_codes() {
             if (previous & flag != 0) != (modifiers & flag != 0) {
-                self.post_key(key_code, modifiers & flag != 0, modifiers);
+                let pressed=modifiers & flag!=0;
+                if !self.post_key(key_code,pressed,modifiers) && pressed {self.active_modifiers.fetch_and(!flag,Ordering::Relaxed);}
             }
         }
     }
@@ -394,14 +391,11 @@ impl MacInputInjector {
         };
         cg_event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button as i64);
         cg_event.set_flags(modifier_event_flags(self.current_modifiers()));
-        self.post(&cg_event);
-
         let mask = 1_u8 << button;
-        if pressed {
-            self.pressed_buttons.fetch_or(mask, Ordering::Relaxed);
-        } else {
-            self.pressed_buttons.fetch_and(!mask, Ordering::Relaxed);
-        }
+        let previous=if pressed {self.pressed_buttons.fetch_or(mask,Ordering::Relaxed)}
+                     else {self.pressed_buttons.fetch_and(!mask,Ordering::Relaxed)};
+        if (previous & mask != 0)==pressed {return;}
+        if !self.post(&cg_event) && pressed {self.pressed_buttons.fetch_and(!mask,Ordering::Relaxed);}
     }
 }
 
@@ -456,9 +450,6 @@ fn pointer_coordinates(point: CGPoint, bounds: core_graphics::geometry::CGRect) 
      (((point.y - bounds.origin.y) / bounds.size.height) * f64::from(u16::MAX)).round() as u16)
 }
 
-fn is_release_event(kind: CGEventType) -> bool {
-    matches!(kind, CGEventType::KeyUp | CGEventType::LeftMouseUp | CGEventType::RightMouseUp | CGEventType::OtherMouseUp)
-}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -578,6 +569,14 @@ impl InputInjector for MacInputInjector {
         Ok(())
     }
 
+    fn inject_input_before(&self,event:InputEvent,deadline:std::time::Instant) -> Result<(),Box<dyn Error+Send+Sync>> {
+        require_post_event_access(unsafe {CGPreflightPostEventAccess()})?;
+        self.prepare_window_event(&event)?;
+        // AX focus/identity validation may have waited; check after it as well.
+        if std::time::Instant::now()>=deadline {return Err("input expired after target validation".into());}
+        self.inject(event);
+        Ok(())
+    }
     fn release_all_input(&self) {
         self.release_all_input();
     }
@@ -665,13 +664,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn destroyed_window_cleanup_permits_releases_but_no_new_press_or_move() {
-        for kind in [CGEventType::KeyUp, CGEventType::LeftMouseUp, CGEventType::RightMouseUp, CGEventType::OtherMouseUp] {
-            assert!(is_release_event(kind));
-        }
-        for kind in [CGEventType::KeyDown, CGEventType::LeftMouseDown, CGEventType::MouseMoved, CGEventType::LeftMouseDragged] {
-            assert!(!is_release_event(kind));
-        }
-    }
+
 }

@@ -259,6 +259,10 @@ pub trait ClipboardFileStore {
 
 pub trait InputInjector {
     fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>>;
+    fn inject_input_before(&self,event:InputEvent,deadline:std::time::Instant) -> Result<(),Box<dyn Error+Send+Sync>> {
+        if std::time::Instant::now()>=deadline {return Err("input expired before native dispatch".into());}
+        self.inject_input(event)
+    }
     fn release_all_input(&self) {}
 }
 

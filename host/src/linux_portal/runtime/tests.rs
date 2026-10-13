@@ -27,6 +27,7 @@ struct Calls {
     serial: AtomicU64,
     geometry: Mutex<Option<(i32, i32)>>,
     fail_key_down: std::sync::atomic::AtomicBool,
+    fail_key_up: std::sync::atomic::AtomicBool,
     issue_restores: std::sync::atomic::AtomicBool,
     issued_restores: AtomicU64,
     restore_requests: Mutex<Vec<(bool, u32, Option<String>)>>,
@@ -555,7 +556,7 @@ impl FakeRemoteDesktop {
         drop(target);
         self.calls
             .record(if state == 1 { "key_down" } else { "key_up" });
-        if state == 1 && self.calls.fail_key_down.load(Ordering::Relaxed) {
+        if (state == 1 && self.calls.fail_key_down.load(Ordering::Relaxed)) || (state==0 && self.calls.fail_key_up.load(Ordering::Relaxed)) {
             return Err(zbus::fdo::Error::Failed(
                 "private target rejected reply after observing event".into(),
             ));

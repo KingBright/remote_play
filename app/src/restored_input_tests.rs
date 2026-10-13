@@ -59,6 +59,20 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
                                 )
                                 .await
                                 .unwrap();
+                        } else if let SessionCommand::RequestInputBinding{connection_id,id,source_revision,request}=*cmd {
+                            sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                                binding:protocol::realtime_input::InputBinding{connection_id,subscription_id:id,source_revision,epoch:[9;16]},request,
+                                host_time_ms:remote_core::session_crypto::now_unix_ms(),
+                            })),from).await.unwrap();
+                        } else if let SessionCommand::RealtimeInput(packet)=*cmd {
+                            // Compare GPUI routing intent after protected-wire decoding.
+                            // The dedicated desktop wire test checks the actual envelope.
+                            let command=match packet.payload {
+                                protocol::realtime_input::InputPayload::Event(event)=>Some(SessionCommand::SourceInput{id:packet.binding.subscription_id,source_revision:packet.binding.source_revision,event}),
+                                protocol::realtime_input::InputPayload::Release=>Some(SessionCommand::ReleaseInput{id:packet.binding.subscription_id}),
+                                _=>None,
+                            };
+                            if let Some(command)=command {events_out.lock().unwrap().push(command);}
                         } else {
                             events_out.lock().unwrap().push(*cmd);
                         }
@@ -106,6 +120,11 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
         );
         session.media =
             Some(client::ClientMediaRuntime::start_video_only(session.stats.clone()).unwrap());
+        let (video,_)=tokio::sync::mpsc::channel(1);
+        session.conn.subscribe(session.request.clone(),video,session.stats.clone(),session.host_stats.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2),async {
+            while !session.conn.input_ready(session.video_id,0) {tokio::time::sleep(Duration::from_millis(5)).await;}
+        }).await.unwrap();
         let recovery = session.stats.clone();
         // This fixture supplies a displayed-frame precondition rather than real
         // compressed video. Wait for the decoder task to publish its startup

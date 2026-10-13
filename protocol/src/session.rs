@@ -138,6 +138,10 @@ pub enum SessionCommand {
         source_revision: u32,
         event: crate::InputEvent,
     },
+    RequestInputBinding { connection_id: u32, id: u32, source_revision: u32, request: u64 },
+    InputBinding { binding: crate::realtime_input::InputBinding, request: u64, host_time_ms: u64 },
+    RealtimeInput(crate::realtime_input::RealtimeInput),
+    InputHandled { binding: crate::realtime_input::InputBinding, sequence: u64 },
 }
 
 /// Fit inside both requested dimensions, preserve source aspect and align 4:2:0

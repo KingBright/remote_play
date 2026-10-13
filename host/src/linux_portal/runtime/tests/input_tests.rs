@@ -3,6 +3,33 @@ use super::*;
 use crate::linux_frame::{PixelFormat, Transform};
 use protocol::{InputEvent, input_modifiers};
 
+#[tokio::test]
+async fn expired_native_input_neither_posts_a_press_nor_creates_a_cleanup_release() {
+    let fixture=Fixture::new(Behavior::EarlyResponse,1).await;
+    let capture=control(&fixture).await;
+    let deadline=std::time::Instant::now()-std::time::Duration::from_millis(1);
+    assert_eq!(capture.inject_input_before(InputEvent::KeyDown(0),Some(deadline)).await,Err(PortalInputError::InvalidEvent));
+    capture.release_input().await.unwrap();
+    assert_eq!(fixture.calls.count("key_down"),0);
+    assert_eq!(fixture.calls.count("key_up"),0);
+    capture.revoke();
+}
+
+#[tokio::test]
+async fn observed_key_up_with_lost_reply_is_never_replayed_by_cleanup() {
+    let fixture=Fixture::new(Behavior::EarlyResponse,1).await;
+    let capture=control(&fixture).await;
+    capture.inject_input(InputEvent::KeyDown(0)).await.unwrap();
+    fixture.calls.fail_key_up.store(true,std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(capture.inject_input(InputEvent::KeyUp(0)).await,Err(PortalInputError::Transport));
+    // The target observed key-up before rejecting its reply. Both transport
+    // cleanup and explicit cleanup must consume, never replay, that call.
+    let _=capture.release_input().await;
+    assert_eq!(fixture.calls.count("key_up"),1);
+    assert!(fixture.calls.target.lock().unwrap().keys.is_empty());
+    capture.revoke();
+}
+
 fn frame(generation: u64) -> OwnedFrame {
     let mut frame = crate::linux_raw_encode::tests::frame(
         PixelFormat::Nv12,

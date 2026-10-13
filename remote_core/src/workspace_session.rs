@@ -1,6 +1,7 @@
 //! One authenticated device connection with independent video subscriptions and
 //! shared audio/file services. Media never owns the connection lifetime.
 use crate::Statistics;
+use crate::workspace_input::InputState;
 use crate::client_session::{
     AudioIngressEvent, EnvelopeIngress, MediaPacketHandler, SharedHostStats,
 };
@@ -24,6 +25,7 @@ use tokio::time::Instant;
 type VideoIngress = mpsc::Sender<(RtpPacket, FrameTimingCheckpoints)>;
 enum Command {
     Control(SessionCommand),
+    Realtime(protocol::realtime_input::RealtimeInput, Instant),
     Subscribe(
         SubscriptionRequest,
         VideoIngress,
@@ -41,6 +43,7 @@ pub struct WorkspaceEvents {
 
 pub struct WorkspaceConnection {
     last_response_rx: tokio::sync::watch::Receiver<Instant>,
+    input: Arc<std::sync::Mutex<InputState>>,
     pub max_subscriptions: usize,
     pub files_available: bool,
     pub clipboard_available: bool,
@@ -130,8 +133,10 @@ impl WorkspaceConnection {
                 ..Default::default()
             },
         ));
+        let input = Arc::new(std::sync::Mutex::new(InputState::default()));
         let mut actor = Actor {
             last_response_tx,
+            input: input.clone(),
             id,
             target,
             sender: sender.clone(),
@@ -153,6 +158,7 @@ impl WorkspaceConnection {
         Ok((
             Self {
                 last_response_rx,
+                input,
                 max_subscriptions,
                 files_available,
                 clipboard_available,
@@ -174,14 +180,22 @@ impl WorkspaceConnection {
         ))
     }
 
+    fn prepare_command(&self, command: SessionCommand) -> Result<Command, String> {
+        let command = self.input.lock().unwrap().seal(command)?;
+        Ok(match command {
+            SessionCommand::RealtimeInput(packet) => Command::Realtime(packet, Instant::now()),
+            other => Command::Control(other),
+        })
+    }
+    pub fn input_ready(&self, id:u32, source_revision:u32) -> bool {
+        self.input.lock().unwrap().ready(id,source_revision)
+    }
     pub async fn control(&self, command: SessionCommand) -> Result<(), String> {
-        self.commands
-            .send(Command::Control(command))
-            .await
-            .map_err(|_| "connection closed".into())
+        let command=self.prepare_command(command)?;
+        self.commands.send(command).await.map_err(|_| "connection closed".into())
     }
     pub fn try_control(&self, command: SessionCommand) -> bool {
-        self.commands.try_send(Command::Control(command)).is_ok()
+        self.prepare_command(command).is_ok_and(|command|self.commands.try_send(command).is_ok())
     }
     pub async fn subscribe(
         &self,
@@ -190,6 +204,7 @@ impl WorkspaceConnection {
         stats: Arc<Statistics>,
         host_stats: Arc<SharedHostStats>,
     ) -> Result<(), String> {
+        self.input.lock().unwrap().source(request.id,0);
         self.commands
             .send(Command::Subscribe(request, video, stats, host_stats))
             .await
@@ -229,6 +244,7 @@ struct Pending {
     last_sent: Instant,
 }
 struct Actor {
+    input: Arc<std::sync::Mutex<InputState>>,
     last_response_tx: tokio::sync::watch::Sender<Instant>,
     id: u32,
     target: SocketAddr,
@@ -379,6 +395,9 @@ impl Actor {
         let mut rejection_log_at: Option<Instant> = None;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         let mut retry = tokio::time::interval(Duration::from_millis(250));
+        let mut input_tick = tokio::time::interval(Duration::from_millis(100));
+        input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut input_requests_at = Instant::now() - Duration::from_secs(1);
         let mut media = tokio::time::interval(Duration::from_millis(10));
         for interval in [&mut heartbeat, &mut retry, &mut media] {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -404,6 +423,15 @@ impl Actor {
                     }
                     for key in expired { self.expire_request(key); }
                 }
+                _ = input_tick.tick() => {
+                    if input_requests_at.elapsed() >= Duration::from_millis(300) {
+                        let requests=self.input.lock().unwrap().requests(self.id);
+                        for request in requests { self.send(&request).await; }
+                        input_requests_at=Instant::now();
+                    }
+                    let snapshots=self.input.lock().unwrap().snapshots();
+                    for packet in snapshots { self.send(&SessionCommand::RealtimeInput(packet)).await; }
+                }
                 _ = media.tick(), if self.subscriptions.values().any(|s| s.active) => {
                     for (id, view) in &mut self.subscriptions {
                         if !view.active || self.pending.values().any(|pending|
@@ -424,6 +452,13 @@ impl Actor {
                         self.subscriptions.insert(request.id, View { handler, active: true });
                         self.request(SessionCommand::Subscribe(request)).await;
                     }
+                    Some(Command::Realtime(packet, queued)) => {
+                        // Enqueue-time identity is immutable across awaits and switches.
+                        if queued.elapsed().as_millis() <= protocol::realtime_input::MAX_INPUT_AGE_MS as u128
+                            && self.input.lock().unwrap().ready(packet.binding.subscription_id,packet.binding.source_revision) {
+                            self.send(&SessionCommand::RealtimeInput(packet)).await;
+                        }
+                    }
                     Some(Command::Clipboard(ingress)) => self.clipboard = ingress,
                     Some(Command::Control(command)) => {
                         self.prepare_control(&command);
@@ -434,6 +469,19 @@ impl Actor {
                     match packet {
                         Ok(MultiplexedPacket::Control(ControlMessage::Session(command), addr)) if addr == self.target => {
                             let command = *command;
+                            match &command {
+                                SessionCommand::InputBinding{binding,request,host_time_ms} => {
+                                    self.input.lock().unwrap().grant(self.id,*binding,*request,*host_time_ms);
+                                    continue;
+                                }
+                                SessionCommand::InputHandled{binding,sequence} => {
+                                    if self.input.lock().unwrap().release_ack(*binding,*sequence) {
+                                        let _=self.control_tx.send(SessionCommand::InputReleased{id:binding.subscription_id});
+                                    }
+                                    continue;
+                                }
+                                _=>{}
+                            }
                             if !self.accept_control(&command) { continue; }
                             let _ = self.control_tx.send(command);
                         }
@@ -634,7 +682,7 @@ mod tests {
         let (control_tx, _) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(8);
         let (files_tx, _) = mpsc::channel(1);
-        (Actor {last_response_tx,id:90108,target,sender,receiver,commands,
+        (Actor {input:Arc::new(std::sync::Mutex::new(InputState::default())),last_response_tx,id:90108,target,sender,receiver,commands,
             control_tx,audio_tx,files_tx,subscriptions:HashMap::new(),pending:HashMap::new(),clipboard:None},audio_rx)
     }
     fn source_switch_view(actor: &mut Actor, id: u32) -> mpsc::Receiver<(RtpPacket,FrameTimingCheckpoints)> {
@@ -853,6 +901,7 @@ mod tests {
             ),
         };
         let mut actor = Actor {
+            input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 55,
             target,
@@ -977,6 +1026,7 @@ mod tests {
         let (audio_tx, _) = mpsc::channel(1);
         let (files_tx, _) = mpsc::channel(1);
         let mut actor = Actor {
+            input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 90100,
             target,
@@ -1136,6 +1186,7 @@ mod rejected_datagram_tests {
         let (audio_tx, _) = mpsc::channel(2);
         let (files_tx, _) = mpsc::channel(2);
         let mut actor = Actor {
+            input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 91,
             target,

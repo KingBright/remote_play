@@ -234,7 +234,7 @@ impl InputInjector for LinuxUinputInjector {
                     2 => BTN_MIDDLE,
                     3 => BTN_SIDE,
                     4 => BTN_EXTRA,
-                    _ => BTN_LEFT,
+                    _ => return Err("unsupported mouse button".into()),
                 };
                 self.pressed_buttons
                     .fetch_or(1 << (button.min(7)), Ordering::Relaxed);
@@ -248,7 +248,7 @@ impl InputInjector for LinuxUinputInjector {
                     2 => BTN_MIDDLE,
                     3 => BTN_SIDE,
                     4 => BTN_EXTRA,
-                    _ => BTN_LEFT,
+                    _ => return Err("unsupported mouse button".into()),
                 };
                 self.pressed_buttons
                     .fetch_and(!(1 << (button.min(7))), Ordering::Relaxed);
@@ -267,14 +267,14 @@ impl InputInjector for LinuxUinputInjector {
                 self.syn_report();
             }
             InputEvent::KeyDown(scancode) => {
-                let linux_key = map_gpui_or_mac_to_linux_key(scancode as u16);
-                self.pressed_keys.lock().unwrap().insert(linux_key);
+                let linux_key = map_gpui_or_mac_to_linux_key(u16::try_from(scancode).map_err(|_|"unsupported key code")?).ok_or("unsupported key code")?;
+                if !self.pressed_keys.lock().unwrap().insert(linux_key) {return Ok(());}
                 self.write_event(EV_KEY, linux_key, 1);
                 self.syn_report();
             }
             InputEvent::KeyUp(scancode) => {
-                let linux_key = map_gpui_or_mac_to_linux_key(scancode as u16);
-                self.pressed_keys.lock().unwrap().remove(&linux_key);
+                let linux_key = map_gpui_or_mac_to_linux_key(u16::try_from(scancode).map_err(|_|"unsupported key code")?).ok_or("unsupported key code")?;
+                if !self.pressed_keys.lock().unwrap().remove(&linux_key) {return Ok(());}
                 self.write_event(EV_KEY, linux_key, 0);
                 self.syn_report();
             }
@@ -284,12 +284,12 @@ impl InputInjector for LinuxUinputInjector {
                 modifiers,
             } => {
                 self.active_modifiers.store(modifiers, Ordering::Relaxed);
-                let linux_key = map_gpui_or_mac_to_linux_key(key_code);
+                let linux_key = map_gpui_or_mac_to_linux_key(key_code).ok_or("unsupported key code")?;
                 if pressed {
-                    self.pressed_keys.lock().unwrap().insert(linux_key);
+                    if !self.pressed_keys.lock().unwrap().insert(linux_key) {return Ok(());}
                     self.write_event(EV_KEY, linux_key, 1);
                 } else {
-                    self.pressed_keys.lock().unwrap().remove(&linux_key);
+                    if !self.pressed_keys.lock().unwrap().remove(&linux_key) {return Ok(());}
                     self.write_event(EV_KEY, linux_key, 0);
                 }
                 self.syn_report();
@@ -301,12 +301,23 @@ impl InputInjector for LinuxUinputInjector {
         }
         Ok(())
     }
+    fn release_all_input(&self) {
+        // This injector's virtual device owns only these recorded presses.
+        let keys=std::mem::take(&mut *self.pressed_keys.lock().unwrap());
+        for key in keys {self.write_event(EV_KEY,key,0);}
+        let buttons=self.pressed_buttons.swap(0,Ordering::Relaxed);
+        for (button,key) in [(0,BTN_LEFT),(1,BTN_RIGHT),(2,BTN_MIDDLE),(3,BTN_SIDE),(4,BTN_EXTRA)] {
+            if buttons & (1<<button)!=0 {self.write_event(EV_KEY,key,0);}
+        }
+        self.active_modifiers.store(0,Ordering::Relaxed);
+        self.syn_report();
+    }
 }
 
 /// Translate cross-platform virtual key code to standard Linux evdev key code (linux/input-event-codes.h)
-fn map_gpui_or_mac_to_linux_key(code: u16) -> u16 {
-    // If it's already an evdev keycode (< 255 and standard range), or macOS standard:
-    match code {
+fn map_gpui_or_mac_to_linux_key(code: u16) -> Option<u16> {
+    // Unknown codes never become guessed printable keys.
+    Some(match code {
         0x00 => 30,  // KEY_A
         0x01 => 31,  // KEY_S
         0x02 => 32,  // KEY_D
@@ -371,7 +382,6 @@ fn map_gpui_or_mac_to_linux_key(code: u16) -> u16 {
         0x7C => 106, // KEY_RIGHT
         0x7D => 108, // KEY_DOWN
         0x7E => 103, // KEY_UP
-        other if other < 255 => other,
-        _ => 30,
-    }
+        _ => return None,
+    })
 }

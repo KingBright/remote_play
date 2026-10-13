@@ -425,6 +425,11 @@ impl PreparedPortalCapture {
             .inject(event)
             .await
     }
+    pub async fn inject_input_before(&self,event:protocol::InputEvent,deadline:Option<std::time::Instant>) -> std::result::Result<(),PortalInputError> {
+        self.input_status()?;
+        self.input().ok_or(PortalInputError::ViewOnly)?.inject_before(event,deadline).await
+    }
+
     pub async fn release_input(&self) -> std::result::Result<(), PortalInputError> {
         match self.input() {
             Some(input) => input.release().await,
