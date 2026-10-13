@@ -83,6 +83,15 @@ impl Drop for ViewSession {
         *self.frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
+struct DirectedReceiveBinding {
+    request_id: String,
+    scope: ShareScope,
+    source: String,
+    expires: Instant,
+    cancel: tokio::sync::watch::Sender<()>,
+    attempt: Option<u64>,
+    connection: Option<u32>,
+}
 struct Pool {
     sessions: Vec<ViewSession>,
     tabs: SessionTabsState,
@@ -92,8 +101,41 @@ struct Pool {
     receive_dir: PathBuf,
     talkback: Option<(u32, client::TalkbackRuntimeControl)>,
     clipboard_preference: bool,
+    directed_receive: Option<DirectedReceiveBinding>,
 }
 impl Pool {
+    fn receive_matches(&self, source: &str, request: Option<&str>) -> bool {
+        match (&self.directed_receive, request) {
+            (None, None) => true,
+            (Some(binding), Some(request)) => binding.request_id == request && binding.source == source && binding.scope == remote_core::shared_files::current_share_scope() && Instant::now() < binding.expires,
+            _ => false,
+        }
+    }
+    fn cancel_receive(&mut self, request_id: &str) {
+        if !self.directed_receive.as_ref().is_some_and(|b| b.request_id == request_id) { return; }
+        let binding = self.directed_receive.take().unwrap();
+        if let Some(attempt) = binding.attempt {
+            self.pending_settings.take(&binding.source, attempt);
+            let count = self.sessions.len();
+            // complete(false) consumes only this exact pending generation. A
+            // newer manual request, even to the same device, remains untouched.
+            self.tabs.complete(&binding.source, attempt, false, count);
+            if self.tabs.failed().is_some_and(|f| f.device_id == binding.source && f.attempt == attempt) {
+                self.tabs.dismiss_failure();
+            }
+            if self.retry_binding.is_some_and(|r| r.attempt == attempt) { self.retry_binding = None; }
+        }
+        if let Some(connection) = binding.connection {
+            if let Some(index) = self.sessions.iter().position(|s| s.session.conn.id == connection) {
+                let active = self.active().is_some_and(|s| s.session.conn.id == connection);
+                let count = self.sessions.len();
+                self.tabs.close_index(index, count);
+                // Session drop sends release-input and closes the exact peer.
+                self.sessions.remove(index);
+                if active { if let Some((_, talkback)) = self.talkback.take() { talkback.stop(); } }
+            }
+        }
+    }
     fn retry(&self, scope: ShareScope) -> Option<(&remote_core::session_tabs::FailedSession, RetryBinding)> {
         let failed = self.tabs.failed()?;
         let binding = self.retry_binding?;
@@ -189,6 +231,7 @@ impl OriginalOwner {
                 receive_dir: prefs.receive_dir,
                 talkback: None,
                 clipboard_preference: false,
+                directed_receive: None,
             }),
         })
     }
@@ -418,21 +461,47 @@ impl OriginalOwner {
         };
         super::original_presenter::acknowledge_paint(&mut e.session, frame);
     }
+    pub(crate) fn begin_directed_receive(self: &Arc<Self>, request_id: &str, source: &str, duration: std::time::Duration) -> Result<tokio::task::JoinHandle<()>, Error> {
+        let expires = Instant::now() + duration;
+        let mut pool = self.pool.lock().unwrap();
+        if pool.directed_receive.is_some() || !pool.tabs.can_change_network(pool.sessions.len()) {
+            return Err("Close this window's current sessions before receiving".into());
+        }
+        pool.directed_receive = Some(DirectedReceiveBinding { request_id: request_id.into(), scope: remote_core::shared_files::current_share_scope(), source: source.into(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None });
+        drop(pool);
+        let owner = Arc::downgrade(self);
+        let request = request_id.to_string();
+        Ok(tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await;
+            if let Some(owner) = owner.upgrade() { owner.cancel_directed_receive(&request); }
+        }))
+    }
+    pub(crate) fn cancel_directed_receive(&self, request: &str) {
+        self.pool.lock().unwrap().cancel_receive(request);
+        let _ = self.updates.send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+    pub(crate) fn directed_receive_current(&self, request: &str) -> bool {
+        self.pool.lock().unwrap().directed_receive.as_ref().is_some_and(|b| b.request_id == request && Instant::now() < b.expires)
+    }
+    pub(crate) async fn connect_received_device(&self, key: &str, options: StreamStartOptions, request: &str) -> Result<(), Error> {
+        self.connect_mode(key, options, true, true, None, Some(request)).await
+    }
+
     pub async fn connect_device(
         &self,
         key: &str,
         options: StreamStartOptions,
         _now: u64,
     ) -> Result<(), Error> {
-        self.connect_mode(key, options, true, true, None).await
+        self.connect_mode(key, options, true, true, None, None).await
     }
     pub async fn connect_files(&self, key: &str) -> Result<(), Error> {
-        self.connect_mode(key, StreamStartOptions::default(), false, true, None)
+        self.connect_mode(key, StreamStartOptions::default(), false, true, None, None)
             .await
     }
 
     pub async fn connect_silent_files(&self, key: &str) -> Result<(), Error> {
-        self.connect_mode(key, StreamStartOptions::default(), false, false, None)
+        self.connect_mode(key, StreamStartOptions::default(), false, false, None, None)
             .await
     }
     async fn connect_mode(
@@ -442,6 +511,7 @@ impl OriginalOwner {
         video: bool,
         audio: bool,
         expected_scope: Option<ShareScope>,
+        receive: Option<&str>,
     ) -> Result<(), Error> {
         protocol::validate_video_settings(
             options.width,
@@ -477,6 +547,7 @@ impl OriginalOwner {
         } else { None };
         if let Some(message) = rejected {
             let mut p = self.pool.lock().unwrap();
+            if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
             if let Some(e) = p.active_mut() {
                 e.session.release_input(); e.session.set_background(true);
             }
@@ -485,13 +556,15 @@ impl OriginalOwner {
             let count = p.sessions.len();
             let name = device.as_ref().map(|d| d.display_name.as_str()).unwrap_or(key);
             let attempt = p.tabs.reject_open(key, name, count).ok_or("Connection generation exhausted")?;
+            if let Some(binding) = p.directed_receive.as_mut() { binding.attempt = Some(attempt); }
             p.retry_binding = Some(RetryBinding { attempt, scope, video, audio });
             p.message = message.into();
             return Err(connection_failure(key, attempt, scope, message.into()));
         }
         let device = device.unwrap();
-        let (attempt, receive_dir) = {
+        let (attempt, receive_dir, mut receive_cancel) = {
             let mut p = self.pool.lock().unwrap();
+            if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
             let existing = p.sessions.iter().position(|e| e.session.key == key).map(|index| {
                 let s = &p.sessions[index].session;
                 SessionCandidate { index, health: SessionHealth {
@@ -547,6 +620,7 @@ impl OriginalOwner {
                 OpenDecision::GenerationExhausted => return Err("Connection generation exhausted".into()),
                 OpenDecision::Start(attempt) => attempt,
             };
+            if let Some(binding) = p.directed_receive.as_mut() { binding.attempt = Some(attempt); }
             p.retry_binding = Some(RetryBinding { attempt, scope, video, audio });
             p.pending_settings.begin(key, attempt, initial_settings);
             let previous = p.tabs.selected_index();
@@ -555,12 +629,21 @@ impl OriginalOwner {
                 e.session.set_background(true);
             }
             p.message = format!("Connecting to {}", device.display_name);
-            (attempt, p.receive_dir.clone())
+            let cancel = p.directed_receive.as_ref().map(|binding| (binding.cancel.subscribe(), binding.expires));
+            (attempt, p.receive_dir.clone(), cancel)
         };
         let mut failures = Vec::new();
         let mut connected = None;
         for (route, endpoint) in routes {
-            match WorkspaceConnection::connect(endpoint, receive_dir.clone()).await {
+            let result = if let Some((cancel, deadline)) = &mut receive_cancel {
+                tokio::select! {
+                    biased;
+                    _ = cancel.changed() => return Err("Receive lease was cancelled".into()),
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(*deadline)) => return Err("Receive lease expired".into()),
+                    result = WorkspaceConnection::connect(endpoint, receive_dir.clone()) => result,
+                }
+            } else { WorkspaceConnection::connect(endpoint, receive_dir.clone()).await };
+            match result {
                 Ok(c) => {
                     connected = Some((route, c));
                     break;
@@ -573,6 +656,11 @@ impl OriginalOwner {
             failures.push("Device network changed during connection".into());
         }
         let mut p = self.pool.lock().unwrap();
+        if !p.receive_matches(key, receive) || (receive.is_some() && p.directed_receive.as_ref().and_then(|b| b.attempt) != Some(attempt)) {
+            if let Some(request) = receive { p.cancel_receive(request); }
+            drop(connected);
+            return Err("Receive lease expired or was superseded".into());
+        }
         let count = p.sessions.len();
         let settings = p.pending_settings.take(key, attempt);
         let completion = p.tabs.complete(key, attempt, connected.is_some() && settings.is_some(), count);
@@ -614,6 +702,7 @@ impl OriginalOwner {
         if selected && let Some(e) = p.sessions.get_mut(previous) {
             e.session.release_input();
         }
+        if let Some(binding) = p.directed_receive.as_mut() { binding.connection = Some(session.conn.id); }
         p.sessions.push(ViewSession {
             session,
             frame: Arc::new(Mutex::new(None)),
@@ -647,7 +736,7 @@ impl OriginalOwner {
             p.reconnect_target(remote_core::shared_files::current_share_scope()).ok_or("No selected device")?
         };
         if let Some(mode) = mode {
-            return self.connect_mode(&key, options, mode.video, mode.audio, Some(mode.scope)).await;
+            return self.connect_mode(&key, options, mode.video, mode.audio, Some(mode.scope), None).await;
         }
         self.disconnect_active().await?;
         self.connect_device(&key, options, 0).await
@@ -1088,6 +1177,13 @@ impl OriginalOwner {
             serde_json::json!({"connected":s.connected,"peer_responsive":s.conn.peer_is_responsive(),
                 "supports_input":s.supports_input,"input_eligible":s.can_input(),
                 "request_audio":s.request.audio,"volume":s.volume,"muted":s.muted,
+                "audio_output_status":s.media.as_ref().map(|m|format!("{:?}",m.status)),
+                "audio_playback_verified":false,
+                "audio_output_callback_evidence": {
+                    "callbacks":s.stats.audio_output_callbacks.load(std::sync::atomic::Ordering::Relaxed),
+                    "nonzero_samples":s.stats.audio_output_nonzero_samples.load(std::sync::atomic::Ordering::Relaxed),
+                    "errors":s.stats.audio_output_errors.load(std::sync::atomic::Ordering::Relaxed),
+                },
                 "paused":s.paused,"background_paused":s.background_paused,
                 "activity_pending":s.media_activity_pending(),
                 "decoder_status":s.media.as_ref().and_then(|m|m.decode_status.try_lock().ok().map(|v|v.clone())),
@@ -1123,6 +1219,7 @@ impl OriginalOwner {
 
     pub fn close_all(&self) {
         let mut p = self.pool.lock().unwrap();
+        p.directed_receive = None;
         p.tabs.clear();
         p.pending_settings.clear();
         p.retry_binding = None;
@@ -1147,7 +1244,7 @@ mod restoration_regression_tests {
             pending_settings: PendingStreamSettingsState::default(),
             retry_binding: None,
             message: String::new(), receive_dir: PathBuf::new(),
-            talkback: None, clipboard_preference: false,
+            talkback: None, clipboard_preference: false, directed_receive: None,
         }
     }
     fn begin(pool: &mut Pool, key: &str, values: StreamSettingsValues) -> u64 {
@@ -1160,6 +1257,66 @@ mod restoration_regression_tests {
     }
     fn values() -> StreamSettingsValues {
         StreamSettingsValues { width: 1920, height: 1080, fps: 60, bitrate_kbps: 10_000 }
+    }
+
+    fn bind_receive(pool: &mut Pool, request: &str, expires: Instant) {
+        pool.directed_receive = Some(DirectedReceiveBinding { request_id: request.into(), source: "a".into(),
+            scope: remote_core::shared_files::current_share_scope(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None });
+    }
+    #[test]
+    fn receive_expiry_before_allocation_and_commit_never_admits_late_work() {
+        let mut pool = pending_pool();
+        bind_receive(&mut pool, "before-start", Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!pool.receive_matches("a", Some("before-start")));
+        pool.cancel_receive("before-start");
+        bind_receive(&mut pool, "handshake", Instant::now() + std::time::Duration::from_secs(10));
+        let attempt = begin(&mut pool, "a", values());
+        pool.directed_receive.as_mut().unwrap().attempt = Some(attempt);
+        assert!(pool.receive_matches("a", Some("handshake")));
+        pool.directed_receive.as_mut().unwrap().expires = Instant::now();
+        assert!(!pool.receive_matches("a", Some("handshake")));
+        pool.cancel_receive("handshake");
+        assert_eq!(pool.tabs.complete("a", attempt, true, 0), Completion::Cancelled);
+        assert!(pool.pending_settings.take("a", attempt).is_none());
+    }
+    #[test]
+    fn late_receive_cancel_preserves_new_manual_attempt_to_same_device() {
+        let mut pool = pending_pool();
+        bind_receive(&mut pool, "old", Instant::now() + std::time::Duration::from_secs(10));
+        let old = begin(&mut pool, "a", values());
+        pool.directed_receive.as_mut().unwrap().attempt = Some(old);
+        pool.cancel_receive("old");
+        let manual = begin(&mut pool, "a", values());
+        pool.cancel_receive("old");
+        assert!(manual > old);
+        assert_eq!(pool.tabs.pending_attempt("a"), Some(manual));
+        assert_eq!(pool.tabs.complete("a", old, true, 0), Completion::Cancelled);
+        assert_eq!(pool.pending_settings.take("a", manual), Some(values()));
+        assert_eq!(pool.tabs.complete("a", manual, true, 0), Completion::Selected);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_cancels_without_any_gui_poll() {
+        let backend = Arc::new(crate::UnifiedServiceOwner::start(crate::UnifiedServiceOwnerConfig::default()).await.unwrap());
+        let owner = OriginalOwner::new(backend);
+        let timer = owner.begin_directed_receive("watchdog", "a", std::time::Duration::from_millis(30)).unwrap();
+        let attempt = {
+            let mut pool = owner.pool.lock().unwrap();
+            let attempt = begin(&mut pool, "a", values());
+            pool.directed_receive.as_mut().unwrap().attempt = Some(attempt);
+            attempt
+        };
+        let mut handshake_cancel = owner.pool.lock().unwrap().directed_receive.as_ref().unwrap().cancel.subscribe();
+        // Simulate the GUI caller ceasing to poll while Tokio workers continue.
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        tokio::time::timeout(std::time::Duration::from_secs(1), timer).await.unwrap().unwrap();
+        assert!(handshake_cancel.changed().await.is_err());
+        let mut pool = owner.pool.lock().unwrap();
+        assert!(pool.directed_receive.is_none());
+        assert_eq!(pool.tabs.pending_count(), 0);
+        assert_eq!(pool.tabs.complete("a", attempt, true, 0), Completion::Cancelled);
+        let manual = begin(&mut pool, "a", values());
+        pool.cancel_receive("watchdog");
+        assert_eq!(pool.tabs.pending_attempt("a"), Some(manual));
     }
 
     #[test]

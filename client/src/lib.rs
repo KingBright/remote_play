@@ -389,7 +389,7 @@ impl ClientMediaRuntime {
         let (audio_player, status) = if !enable_audio {
             (None, ClientMediaRuntimeStatus::Ready)
         } else {
-            match audio_player::AudioPlayer::new(audio_rx) {
+            match audio_player::AudioPlayer::with_statistics(audio_rx, stats.clone()) {
                 Ok(player) => (Some(player), ClientMediaRuntimeStatus::Ready),
                 Err(err) => {
                     let reason = err.to_string();

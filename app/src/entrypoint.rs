@@ -80,6 +80,17 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
     };
 
     match command.as_str() {
+        "--gui-status-json" | "--gui-receive" | "--gui-stop-receive" => {
+            #[cfg(all(unix, feature = "gpui-restoration"))]
+            {
+                let config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
+                let arguments = std::iter::once(command).chain(args).collect::<Vec<_>>();
+                println!("{}", crate::desktop::directed_receive::command(&config.mesh_dir, &arguments)?);
+                Ok(true)
+            }
+            #[cfg(not(all(unix, feature = "gpui-restoration")))]
+            { Err("The private GUI receive adapter is available on macOS/Linux".into()) }
+        }
         "--background-status-json" => {
             if args.next().is_some() { return Err("--background-status-json takes no extra arguments".into()); }
             #[cfg(target_os = "macos")]

@@ -35,14 +35,14 @@ struct Snapshot {
 enum Response { Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
 
 fn uid() -> u32 { unsafe { libc::geteuid() } }
-fn private_directory(path: &Path) -> io::Result<()> {
+pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
     let metadata = path.symlink_metadata()?;
     if !metadata.is_dir() || metadata.uid() != uid() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Background profile must be a private, same-user directory"));
     }
     Ok(())
 }
-fn private_socket(path: &Path) -> io::Result<()> {
+pub(crate) fn private_socket(path: &Path) -> io::Result<()> {
     let metadata = path.symlink_metadata()?;
     if !metadata.file_type().is_socket() || metadata.uid() != uid() || metadata.permissions().mode() & 0o077 != 0 {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Background endpoint must be a private, same-user socket"));

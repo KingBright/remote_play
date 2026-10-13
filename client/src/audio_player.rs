@@ -5,6 +5,7 @@ use remote_core::audio::AudioMixer;
 use remote_core::jitter_buffer::JitterBuffer;
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, atomic::Ordering::Relaxed};
 use tokio::sync::mpsc;
 
 pub struct AudioPlayer {
@@ -53,7 +54,14 @@ impl AudioPlayerSettings {
 
 impl AudioPlayer {
     pub fn new(
+        rx: mpsc::Receiver<AudioPlayerEvent>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::with_statistics(rx, remote_core::Statistics::new())
+    }
+
+    pub fn with_statistics(
         mut rx: mpsc::Receiver<AudioPlayerEvent>,
+        stats: Arc<remote_core::Statistics>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         {
             let host = cpal::default_host();
@@ -69,13 +77,18 @@ impl AudioPlayer {
             let (sample_tx, sample_rx) = crossbeam_channel::bounded::<PlaybackChunk>(32);
             let mut mixer = AudioMixer::new(output_channels, output_rate as usize * 60 / 1000, 16);
 
-            let err_fn = |err| eprintln!("an error occurred on audio output stream: {}", err);
+            let error_stats = stats.clone();
+            let err_fn = move |err| {
+                error_stats.audio_output_errors.fetch_add(1, Relaxed);
+                eprintln!("an error occurred on audio output stream: {}", err);
+            };
 
             let stream = match default_config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     &output_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         fill_audio_buffer(data, &sample_rx, &mut mixer, |s| s);
+                        record_output(&stats, data.iter().filter(|s| s.is_finite() && s.abs() > 0.0001).count());
                     },
                     err_fn,
                     None,
@@ -86,6 +99,7 @@ impl AudioPlayer {
                         fill_audio_buffer(data, &sample_rx, &mut mixer, |s| {
                             (s * i16::MAX as f32) as i16
                         });
+                        record_output(&stats, data.iter().filter(|s| i32::from(**s).abs() > 3).count());
                     },
                     err_fn,
                     None,
@@ -372,6 +386,11 @@ fn select_output_config(
         }
     }
     Err("Audio output has no Opus-compatible sample rate; a platform resampler is required".into())
+}
+
+fn record_output(stats: &remote_core::Statistics, nonzero_samples: usize) {
+    stats.audio_output_nonzero_samples.fetch_add(nonzero_samples, Relaxed);
+    stats.audio_output_callbacks.fetch_add(1, Relaxed);
 }
 
 fn fill_audio_buffer<T>(

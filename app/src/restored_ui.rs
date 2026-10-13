@@ -151,6 +151,8 @@ fn open_restored_window(
                 true
             } else if primary {
                 let _ = weak.update(cx, |this, _| {
+                    #[cfg(unix)]
+                    this.stop_directed_receive();
                     this.owner.release_input();
                     this.window_active = false;
                 });
@@ -189,6 +191,8 @@ fn open_restored_window(
                         let handle = view.window_handle;
                         let _ = handle.update(cx, |_, window, _| window.activate_window());
                     }
+                    #[cfg(unix)]
+                    view.poll_directed_receive(cx);
                     owned_gui_stage(1);
                     view.owner.poll();
                     owned_gui_stage(2);
@@ -285,6 +289,8 @@ struct RestoredDashboard {
     runtime: Arc<UnifiedRuntimeHandle>,
     owner: Arc<OriginalOwner>,
     _instance: Option<Instance>,
+    #[cfg(unix)]
+    directed_receive: Option<crate::desktop::directed_receive::Adapter>,
     activation: Arc<AtomicBool>,
     bound_source: Option<(u32, Instant)>,
     quitting: bool,
@@ -368,10 +374,19 @@ impl RestoredDashboard {
         window.focus(&root_focus);
         #[cfg(target_os = "linux")]
         let local_share_owner = crate::desktop::local_share::linux::Owner::new(runtime.owner.local_portal_shares());
+        #[cfg(unix)]
+        let directed_receive = instance.as_ref().and_then(|instance| {
+            match crate::desktop::directed_receive::Adapter::start(instance.state_directory()) {
+                Ok(adapter) => Some(adapter),
+                Err(error) => { eprintln!("GUI receive adapter unavailable: {error}"); None }
+            }
+        });
         Self {
             runtime,
             owner,
             _instance: instance,
+            #[cfg(unix)]
+            directed_receive,
             activation,
             bound_source: None,
             quitting: false,
@@ -536,6 +551,78 @@ impl RestoredDashboard {
     fn reset_host_stats(&self) {
         if let Some(stats) = &self.host_stats {
             stats.reset();
+        }
+    }
+
+    #[cfg(unix)]
+    fn stop_directed_receive(&mut self) {
+        if self.directed_receive.as_mut().and_then(|adapter| adapter.lease.take()).is_some() {
+            self.session_commands.begin();
+            self.invalidate_source_commands();
+            // Lease::drop and its independent watchdog revoke only their exact
+            // pending attempt/connection; a later manual session remains intact.
+            self.pointer_input = PointerInputTracker::default();
+            self.status = "Directed receive stopped".into();
+        }
+    }
+
+    #[cfg(unix)]
+    fn poll_directed_receive(&mut self, cx: &mut Context<Self>) {
+        use crate::desktop::directed_receive::{Request, Lease};
+        if self.directed_receive.as_ref().and_then(|a| a.lease.as_ref()).is_some_and(|lease| !self.owner.directed_receive_current(&lease.request_id)) {
+            self.stop_directed_receive();
+        }
+        loop {
+            let Some(command) = self.directed_receive.as_mut().and_then(|a| a.commands.try_recv().ok()) else { break; };
+            if command.reply.is_closed() { continue; }
+            let adapter = self.directed_receive.as_mut().unwrap();
+            if let Err(error) = adapter.admit(&command.request, crate::unix_now_ms()) {
+                let _ = command.reply.send(serde_json::json!({"ok":false,"error":error}).into()); continue;
+            }
+            let generation = adapter.generation.clone();
+            let mut newly_accepted = false;
+            let response = match command.request {
+                Request::Status => serde_json::json!({"ok":true,"generation":generation,
+                    "renderer":crate::gui_backend::ORIGINAL_RENDERER,
+                    "lease":adapter.lease.as_ref().map(|lease| serde_json::json!({"request_id":lease.request_id,
+                        "source_device_id":lease.source,"remaining_ms":lease.expires.saturating_duration_since(Instant::now()).as_millis()})),
+                    "sessions":self.owner.diagnostic_snapshot()}),
+                Request::Receive { request_id, source_device_id, lease_ms, .. } => {
+                    let tabs = self.owner.session_tabs();
+                    if adapter.lease.is_some() || !tabs.tabs.is_empty() || tabs.connecting.is_some() {
+                        serde_json::json!({"ok":false,"error":"Close the current window's sessions before receiving a directed stream"})
+                    } else if !self.owner.snapshot().devices.iter().any(|d| d.device_id == source_device_id && d.is_streamable()) {
+                        serde_json::json!({"ok":false,"error":"Source is not a currently available paired streaming device"})
+                    } else {
+                        let duration = Duration::from_millis(lease_ms);
+                        let watchdog = match self.owner.begin_directed_receive(&request_id, &source_device_id, duration) {
+                            Ok(watchdog) => watchdog,
+                            Err(error) => { let _ = command.reply.send(serde_json::json!({"ok":false,"error":error.to_string()}).into()); continue; }
+                        };
+                        self.directed_receive.as_mut().unwrap().lease = Some(Lease {
+                            request_id:request_id.clone(),source:source_device_id.clone(), expires:Instant::now()+duration,
+                            owner:Arc::downgrade(&self.owner), watchdog,
+                        });
+                        // Shared real UI action; only an in-process ownership
+                        // receipt differs from the ordinary pull connect path.
+                        self.start_stream_connection(source_device_id, Some(request_id.clone()), cx);
+                        self.activation.store(true, Ordering::Release);
+                        newly_accepted = true;
+                        serde_json::json!({"ok":true,"state":"accepted","generation":generation,"request_id":request_id,"lease_ms":lease_ms})
+                    }
+                }
+                Request::Stop { request_id, .. } => {
+                    if adapter.lease.as_ref().is_some_and(|lease| lease.request_id == request_id) {
+                        self.stop_directed_receive();
+                        serde_json::json!({"ok":true,"state":"stopped","generation":generation,"request_id":request_id})
+                    } else { serde_json::json!({"ok":false,"error":"Receive lease is no longer current"}) }
+                }
+            };
+            let response = if newly_accepted { crate::desktop::directed_receive::Reply::accepted(response, &self.owner) } else { response.into() };
+            if command.reply.send(response).is_err() && newly_accepted {
+                // A lost acknowledgement never leaves a newly accepted lease running.
+                self.stop_directed_receive();
+            }
         }
     }
 
@@ -1749,6 +1836,8 @@ impl Render for RestoredDashboard {
                     self.mesh_pairing_snapshot.clone(),
                     self.active_tab,
                     &self.device_list_state,
+                    #[cfg(unix)]
+                    self.directed_receive.as_ref().and_then(|a| a.lease.as_ref()).map(|lease| format!("Receiving from {} · {}s remaining", compact_device_id(&lease.source), lease.expires.saturating_duration_since(Instant::now()).as_secs())),
                     #[cfg(target_os = "linux")]
                     &self.local_share_state,
                     #[cfg(target_os = "linux")]
@@ -2725,6 +2814,7 @@ fn slide_over_management_drawer(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
+    #[cfg(unix)] receive_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     input_locked: bool,
@@ -2846,6 +2936,7 @@ fn slide_over_management_drawer(
                         devices,
                         role,
                         device_list_state,
+                        #[cfg(unix)] receive_label,
                         #[cfg(target_os = "linux")] local_share_state,
                         #[cfg(target_os = "linux")] local_share_active,
                         owner.clone(),
@@ -2906,6 +2997,7 @@ fn drawer_tab_button(
 
 fn drawer_devices_tab(
     devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
+    #[cfg(unix)] receive_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
@@ -2914,6 +3006,15 @@ fn drawer_devices_tab(
     let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
     let content = div().flex().flex_col().gap_3();
+    #[cfg(unix)]
+    let content = if let Some(label) = receive_label {
+        let stop = cx.weak_entity();
+        content.child(div().flex().flex_col().gap_2().child(label).child(
+            command_button("stop_directed_receive", ActionVariantKind::Neutral, cx)
+                .child("Stop receiving")
+                .on_click(move |_, _, cx| { let _ = stop.update(cx, |this, cx| { this.stop_directed_receive(); cx.notify(); }); })
+        ))
+    } else { content };
     #[cfg(target_os = "linux")]
     let content = {
         let share_view = cx.weak_entity();
@@ -3043,6 +3144,8 @@ impl RestoredDashboard {
     }
 
     fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
+        #[cfg(unix)]
+        self.stop_directed_receive();
         let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
         self.invalidate_source_commands();
         let ticket = self.session_commands.begin();
@@ -3081,10 +3184,7 @@ impl RestoredDashboard {
         cx.notify();
     }
 
-    fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
-        let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
-        match effect {
-            DeviceListEffect::ConnectStream(device_id) => {
+    fn start_stream_connection(&mut self, device_id: String, receive: Option<String>, cx: &mut Context<Self>) {
                 self.invalidate_source_commands();
                 let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
@@ -3099,7 +3199,10 @@ impl RestoredDashboard {
                             fps: values.fps, bitrate_kbps: values.bitrate_kbps,
                         })
                     }).unwrap_or(None) else { return; };
-                    let result = owner.connect_device(&device_id, options, crate::unix_now_ms()).await;
+                    let result = match receive {
+                        Some(request) => owner.connect_received_device(&device_id, options, &request).await,
+                        None => owner.connect_device(&device_id, options, crate::unix_now_ms()).await,
+                    };
                     let _ = view.update(cx, |this, cx| {
                         if !this.session_commands.is_current(ticket) { return; }
                         match result {
@@ -3113,7 +3216,14 @@ impl RestoredDashboard {
                         cx.notify();
                     });
                 }).detach();
-            }
+    }
+
+    fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
+        #[cfg(unix)]
+        if !matches!(action, DeviceListAction::SelectFilter(_) | DeviceListAction::CopyReceiveCommand(_)) { self.stop_directed_receive(); }
+        let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
+        match effect {
+            DeviceListEffect::ConnectStream(device_id) => self.start_stream_connection(device_id, None, cx),
             DeviceListEffect::ConnectFiles(device_id) => {
                 self.invalidate_source_commands();
                 let ticket = self.session_commands.begin();
@@ -3132,6 +3242,23 @@ impl RestoredDashboard {
                         } cx.notify();
                     });
                 }).detach();
+            }
+            DeviceListEffect::CopyReceiveCommand(device_id) => {
+                let result = (|| -> Result<String, String> {
+                    let instance = self._instance.as_ref().ok_or("Prepare delivery from the main device window")?;
+                    let directory = instance.state_directory();
+                    let profile = if instance.is_frontend() { directory.parent().ok_or("Missing profile directory")? } else { directory };
+                    let identity = remote_core::mesh::AppPrivateMeshConfigStore::new(profile).load()
+                        .map_err(|error| error.to_string())?.ok_or("Device identity is unavailable")?;
+                    crate::desktop::device_list::receive_command(&identity.node_id, &device_id).map_err(str::to_owned)
+                })();
+                match result {
+                    Ok(command) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(command));
+                        self.status = format!("macOS receive command copied for {}. Open its RemotePlay GUI, then run the command through your remote-host connection. Delivery has not started.", compact_device_id(&device_id));
+                    }
+                    Err(error) => self.status = error,
+                }
             }
             DeviceListEffect::OpenWorkspace(device_id) => self.open_device_window(&device_id,cx),
         }

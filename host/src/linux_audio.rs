@@ -35,6 +35,14 @@ pub struct LinuxAudioCapturer {
 }
 
 impl LinuxAudioCapturer {
+    /// CPAL's WASAPI backend enables AUDCLNT_STREAMFLAGS_LOOPBACK when an
+    /// output endpoint is opened as an input stream. Never use an input device.
+    #[cfg(target_os = "windows")]
+    pub fn system() -> Self {
+        let mut capturer = Self::microphone();
+        capturer.source = AudioSource::RemoteSystem;
+        capturer
+    }
     pub fn microphone() -> Self {
         let (tx, rx) = mpsc::channel(100);
         Self {
@@ -52,19 +60,21 @@ impl AudioCapturer for LinuxAudioCapturer {
 
     async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or("No Linux audio input device available")?;
-
-        let default_config = device.default_input_config()?;
+        let system = self.source == AudioSource::RemoteSystem;
+        let device = if system { host.default_output_device() } else { host.default_input_device() }
+            .ok_or("No audio endpoint available")?;
+        let default_config = if system { device.default_output_config()? } else { device.default_input_config()? };
         let mut config: cpal::StreamConfig = default_config.clone().into();
         config.sample_rate = 48000;
+        // Explicit Opus-compatible loopback format; unsupported endpoint formats
+        // fail instead of mislabelling samples or capturing the microphone.
+        if system { config.channels = 2; }
         let sample_rate = config.sample_rate;
         let channels = config.channels;
 
         let tx = self.tx.clone();
         let source = self.source;
-        let err_fn = |err| eprintln!("[LinuxAudio] stream error: {err}");
+        let err_fn = |err| eprintln!("[Audio] stream error: {err}");
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(

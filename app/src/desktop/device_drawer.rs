@@ -88,6 +88,8 @@ impl RenderOnce for DeviceDrawer {
             let stream_id = row.device_id.clone();
             let files_id = row.device_id.clone();
             let workspace_id = row.device_id.clone();
+            let receive_id = row.device_id.clone();
+            let receive = self.send.clone();
             let stream = self.send.clone();
             let files = self.send.clone();
             let workspace = self.send.clone();
@@ -173,6 +175,11 @@ impl RenderOnce for DeviceDrawer {
                             .on_click(move |_, _, cx| {
                                 stream(DeviceListAction::Connect(stream_id.clone()), cx)
                             }),
+                    )
+                    .child(
+                        Button::new(format!("copy_receive_{receive_id}"), "Copy macOS receive command")
+                            .control_size(ControlSize::Sm).full_width().disabled(!row.online)
+                            .on_click(move |_, _, cx| receive(DeviceListAction::CopyReceiveCommand(receive_id.clone()), cx)),
                     )
                     .child(
                         Button::new(format!("drawer_files_{files_id}"), "Files")

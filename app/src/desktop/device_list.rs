@@ -130,6 +130,7 @@ pub(crate) enum DeviceListAction {
     Connect(String),
     OpenFiles(String),
     OpenWorkspace(String),
+    CopyReceiveCommand(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +138,7 @@ pub(crate) enum DeviceListEffect {
     ConnectStream(String),
     ConnectFiles(String),
     OpenWorkspace(String),
+    CopyReceiveCommand(String),
 }
 
 impl DeviceListState {
@@ -154,11 +156,22 @@ impl DeviceListState {
             DeviceListAction::OpenFiles(device_id) => {
                 Some(DeviceListEffect::ConnectFiles(device_id))
             }
+            DeviceListAction::CopyReceiveCommand(device_id) => Some(DeviceListEffect::CopyReceiveCommand(device_id)),
             DeviceListAction::OpenWorkspace(device_id) => {
                 Some(DeviceListEffect::OpenWorkspace(device_id))
             }
         }
     }
+}
+
+/// This prepares a command for the existing remote-host channel; it does not
+/// claim to execute a remote action. IDs are data, never shell fragments.
+pub(crate) fn receive_command(source: &str, receiver: &str) -> Result<String, &'static str> {
+    if [source, receiver].iter().any(|id| id.is_empty() || id.len() > 256
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))) {
+        return Err("Device identity cannot be represented in a receive command");
+    }
+    Ok(format!("\"$HOME/Applications/RemotePlay.app/Contents/MacOS/remote_play\" --gui-receive '{source}' 60 --receiver '{receiver}'"))
 }
 
 fn matches_filter(filter: DeviceFilterKind, scope: DiscoveryScope) -> bool {
@@ -265,4 +278,13 @@ mod tests {
             DeviceConnectionStatus::Available
         );
     }
+    #[test]
+    fn receive_command_preserves_target_and_rejects_shell_fragments() {
+        assert!(receive_command("source; touch /tmp/file", "target").is_err());
+        assert!(receive_command("source", "$(other)").is_err());
+        assert!(receive_command("source", "").is_err());
+        let command = receive_command("source-1", "receiver-2").unwrap();
+        assert_eq!(command, "\"$HOME/Applications/RemotePlay.app/Contents/MacOS/remote_play\" --gui-receive 'source-1' 60 --receiver 'receiver-2'");
+    }
+
 }

@@ -1150,10 +1150,8 @@ impl Connection {
         let capture_reservation = Arc::new(WindowsVideoCaptureReservation::acquire()?);
         #[cfg(target_os = "windows")]
         let task_reservation = capture_reservation.clone();
-        #[cfg(target_os = "windows")]
-        let wants_audio_group = legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE");
-        #[cfg(not(target_os = "windows"))]
-        let wants_audio_group = request.audio || legacy;
+        let wants_audio_group = request.audio
+            || (legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"));
         let audio_key = if wants_audio_group {
             Some(
                 selected

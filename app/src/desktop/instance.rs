@@ -147,6 +147,8 @@ impl Instance {
             task: None,
         }))
     }
+    pub(crate) fn state_directory(&self) -> &Path { self.info.parent().expect("instance state directory") }
+
     pub(crate) fn is_frontend(&self) -> bool { self.info.parent().is_some_and(|p| p.ends_with("gui-state")) }
 
     /// Same lock/activation protocol for every renderer. The callback only signals

@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 mod audio_capture;
 mod audio_encode;
+#[cfg(target_os = "linux")]
+mod linux_system_audio;
 #[cfg(target_os = "macos")]
 mod capture;
 #[cfg(target_os = "windows")]
@@ -523,18 +525,53 @@ where
         let _worker = crate::lifecycle::WorkerGuard::new(resources);
         let mut audio_capturer = audio_capturer;
 
-        if let Err(err) = audio_capturer.start().await {
-            eprintln!("{label} audio capture failed to start: {}", err);
-            return;
-        }
-        println!("{label} audio capture started.");
-
-        let first_frame = match audio_capturer.capture_frame().await {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Failed to capture first {label} audio frame: {}", e);
-                let _ = audio_capturer.stop().await;
+        // Honor pause before opening any native source and while awaiting the
+        // first sample (a quiet loopback endpoint may not produce one promptly).
+        let first_frame = 'first: loop {
+            while media_settings_rx.as_ref().is_some_and(|rx| rx.borrow().paused) {
+                tokio::select! {
+                    biased;
+                    _ = cancel_rx.recv() => return,
+                    changed = async { media_settings_rx.as_mut().unwrap().changed().await } => {
+                        if changed.is_err() { return; }
+                    }
+                }
+            }
+            let start = tokio::select! {
+                biased;
+                _ = cancel_rx.recv() => return,
+                result = audio_capturer.start() => result,
+            };
+            if let Err(err) = start {
+                eprintln!("{label} audio capture failed to start: {err}");
                 return;
+            }
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_rx.recv() => { let _ = audio_capturer.stop().await; return; },
+                    changed = async {
+                        match &mut media_settings_rx {
+                            Some(rx) => rx.changed().await.map(|_| rx.borrow().paused),
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match changed {
+                            Ok(false) => continue,
+                            Ok(true) => { let _ = audio_capturer.stop().await; break; },
+                            Err(_) => { let _ = audio_capturer.stop().await; return; },
+                        }
+                    }
+                    frame = audio_capturer.capture_frame() => {
+                        match frame {
+                            Ok(frame) => break 'first frame,
+                            Err(err) => {
+                                eprintln!("Failed to capture first {label} audio frame: {err}");
+                                let _ = audio_capturer.stop().await; return;
+                            }
+                        }
+                    }
+                }
             }
         };
         stats.audio_frames_captured.fetch_add(1, Relaxed);
@@ -791,8 +828,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
     } = config;
     let scheduled_media_sender = Some(scheduled_sender);
     let use_data_plane_media = true;
-    #[cfg(not(target_os = "macos"))]
-    let _ = (source, include_audio);
+
     #[cfg(target_os = "macos")]
     let microphone_audio_task = if include_microphone {
         Some(spawn_audio_capture_task(
@@ -865,11 +901,28 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
         None
     };
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let system_audio_task = if include_audio && !matches!(source, protocol::session::CaptureSource::Window(_)) {
+        #[cfg(target_os = "windows")]
+        let capturer = crate::linux_audio::LinuxAudioCapturer::system();
+        #[cfg(target_os = "linux")]
+        let capturer = crate::linux_system_audio::SystemAudioCapturer::new(resources.clone());
+        Some(spawn_audio_capture_task("Remote system", capturer, AudioCaptureTaskRuntime {
+            stream_id: remote_system_audio_stream_id(session_id),
+            udp_sender: udp_sender.clone(), stats: stats.clone(),
+            cancel_rx: cancel_rx.resubscribe(), client_addr, use_data_plane_media,
+            scheduled_sender: scheduled_media_sender.clone(),
+            media_settings_rx: stream_settings_rx.clone(), resources: resources.clone(),
+        }))
+    } else {
+        if include_audio { eprintln!("Application-only system audio is unavailable on this platform; no broader audio source was opened"); }
+        None
+    };
+
     let mut tasks = Vec::new();
     if let Some(task) = microphone_audio_task {
         tasks.push(task);
     }
-    #[cfg(target_os = "macos")]
     if let Some(task) = system_audio_task {
         tasks.push(task);
     }

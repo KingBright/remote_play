@@ -38,6 +38,10 @@ pub struct Statistics {
     pub video_decoder_reference_skipped: AtomicUsize,
     pub video_keyframe_requests: AtomicUsize,
     pub audio_ingress_dropped: AtomicUsize,
+    /// Cumulative native output callback diagnostics, not acoustic acceptance.
+    pub audio_output_callbacks: AtomicUsize,
+    pub audio_output_nonzero_samples: AtomicUsize,
+    pub audio_output_errors: AtomicUsize,
 }
 
 impl Statistics {
