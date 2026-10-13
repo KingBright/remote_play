@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+if [[ -z "${REMOTEPLAY_RELEASE_LOCK_FD:-}" ]]; then
+    exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" run android-release "$@"
+fi
+python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" check-lock android-release
 SIGN_DIR="${REMOTEPLAY_ANDROID_SIGNING_DIR:-$HOME/Library/Application Support/RemotePlay/Signing}"
 KEYSTORE="${REMOTEPLAY_ANDROID_KEYSTORE:-$SIGN_DIR/remoteplay-release.p12}"
 ALIAS="${REMOTEPLAY_ANDROID_KEY_ALIAS:-remoteplay}"
@@ -31,6 +35,7 @@ APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort 
 [ -x "$APKSIGNER" ] || { echo "apksigner not found under $SDK/build-tools" >&2; exit 1; }
 "$APKSIGNER" verify --verbose --print-certs "$APK"
 python3 "$ROOT/scripts/verify_release_apk.py" "$APK"
+python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" publish-android
 echo "Release APK: $APK"
 echo "Size: $(stat -f %z "$APK")"
 echo "SHA-256: $(shasum -a 256 "$APK" | awk '{print $1}')"

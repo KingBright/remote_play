@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -z "${REMOTEPLAY_RELEASE_LOCK_FD:-}" ]]; then
+  exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" run android-native "$@"
+fi
+python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" check-lock android-native
 OUT_DIR="$ROOT/android/app/src/main/jniLibs"
 
 if ! command -v cargo >/dev/null 2>&1; then

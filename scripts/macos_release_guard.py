@@ -284,7 +284,13 @@ def main() -> None:
     elif args.command == 'verify-archive':
         with verified_archive(args.path, policy) as (_, result): pass
     elif args.command == 'verify-stage': result = verify_stage(args.path, policy)
-    else: result = package(args.binary, args.output, args.version, args.build, policy)
+    else:
+        preflight(policy)  # Preserve signer refusal before any retention mutation.
+        import release_artifact_lifecycle as lifecycle
+        with lifecycle.producer('macos', explicit_required=True) as (_, delivery):
+            result = package(args.binary, args.output, args.version, args.build, policy)
+            retention = lifecycle.publish_macos(delivery, result)
+            result = dict(result, delivery_retention=retention)
     print('MACOS_RELEASE_VERIFIED ' + json.dumps(result), flush=True)
 
 

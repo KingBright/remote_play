@@ -68,3 +68,14 @@ copies were archived; their retained artifact stores are not build entrypoints.
 Use `docs/testing/MAIN-WORKSPACE-VALIDATION.md` for the environment reconciliation.
 Keep lifecycle ownership checks and protected user changes. An incomplete build
 storage contract must be integrated here, not bypassed by cloning the source.
+
+Keep at most two complete delivery generations through the shared release-only
+lifecycle helper; platform/ABI files are components of one generation. Preserve
+active outputs, installation rollback tuples and unverified legacy artifacts.
+Use the same explicit `REMOTEPLAY_RELEASE_GENERATION` across platform builds of
+one delivery (required for prebuilt inputs). Automatic clean-checkout grouping
+is a producer observation, never a replacement for fresh-target identity receipts.
+Rebuilding an already registered platform component requires a new explicit
+delivery generation; reuse the same generation only to add another platform.
+Automatic retention covers newly registered deliveries; it does not prove that
+historical artifacts or installed device versions have all converged to this limit.

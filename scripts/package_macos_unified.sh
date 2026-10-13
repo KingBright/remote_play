@@ -2,6 +2,10 @@
 # Production-only packaging. Missing pinned identity is an error, never ad-hoc fallback.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${REMOTEPLAY_RELEASE_LOCK_FD:-}" ]]; then
+  exec python3 -B "$ROOT_DIR/scripts/release_artifact_lifecycle.py" run macos "$@"
+fi
+python3 -B "$ROOT_DIR/scripts/release_artifact_lifecycle.py" check-lock macos
 cd "$ROOT_DIR"
 [[ "${REMOTE_PLAY_APP_NAME:-RemotePlay}" == "RemotePlay" ]] || { echo "Release app identity cannot be overridden" >&2; exit 1; }
 [[ "${REMOTE_PLAY_BUNDLE_ID:-com.remoteplay.unified}" == "com.remoteplay.unified" ]] || { echo "Release bundle ID cannot be overridden" >&2; exit 1; }
