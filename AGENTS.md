@@ -13,7 +13,7 @@
 
 ## Regression checks
 
-Run `python3 -m unittest discover -s scripts/tests -v` for release tests. On the existing signing Mac, `RP_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
+Run `./scripts/test_release.sh` from the primary `main` checkout for release tests. On the existing signing Mac, `RP_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
 
 ## Desktop visual quality and migration invariants
 
