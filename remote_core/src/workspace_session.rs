@@ -359,6 +359,20 @@ impl Actor {
         }
         true
     }
+    fn expire_request(&mut self, key: (u8, u32)) {
+        // The local retry timer knows the exact command category. A numeric
+        // subscription/request ID alone can also name an input release or a
+        // settings request whose independent acknowledgement is still pending.
+        let Some(pending) = self.pending.remove(&key) else { return; };
+        if let SessionCommand::SwitchSource { id, .. } = pending.command
+            && let Some(view) = self.subscriptions.get_mut(&id) {
+            view.handler.reset_video_source();
+        }
+        let _ = self.control_tx.send(SessionCommand::Error {
+            request_id: key.1,
+            reason: "host confirmation timed out".into(),
+        });
+    }
     async fn run(&mut self, mut cancel: broadcast::Receiver<()>) {
         let mut last_pong = Instant::now();
         let mut rejected_count = 0u64;
@@ -388,7 +402,7 @@ impl Actor {
                             pending.last_sent = Instant::now();
                         }
                     }
-                    for key in expired { self.reject_request(key.1); let _ = self.control_tx.send(SessionCommand::Error { request_id: key.1, reason: "host confirmation timed out".into() }); }
+                    for key in expired { self.expire_request(key); }
                 }
                 _ = media.tick(), if self.subscriptions.values().any(|s| s.active) => {
                     for (id, view) in &mut self.subscriptions {
@@ -710,6 +724,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_expiry_keeps_input_release_configure_and_switch_with_same_numeric_id() {
+        let (mut actor, _) = source_switch_actor().await;
+        let _video = source_switch_view(&mut actor, 7);
+        for command in [
+            SessionCommand::SetActivity { id: 7, revision: 1, video: true, audio: false },
+            SessionCommand::ReleaseInput { id: 7 },
+            SessionCommand::Configure { id: 7, revision: 2, width: 640, height: 360, fps: 30, bitrate_kbps: 2000 },
+            SessionCommand::SwitchSource { id: 7, request_id: 7, source: CaptureSource::Display(88) },
+        ] {
+            actor.request(command).await;
+        }
+        let mut sent = std::collections::HashSet::new();
+        for _ in 0..4 {
+            match tokio::time::timeout(Duration::from_secs(1), actor.receiver.recv()).await.unwrap().unwrap() {
+                MultiplexedPacket::Control(ControlMessage::Session(command), addr) => {
+                    assert_eq!(addr, actor.target);
+                    sent.insert(request_key(&command).unwrap());
+                }
+                _ => panic!("expected actual loopback control datagram"),
+            }
+        }
+        assert_eq!(sent, [(4, 7), (7, 7), (6, 7), (8, 7)].into_iter().collect());
+        actor.expire_request((4, 7));
+        assert!(!actor.pending.contains_key(&(4, 7)));
+        assert!(actor.pending.contains_key(&(7, 7)), "activity timeout must retain input-release retransmission");
+        assert!(actor.pending.contains_key(&(6, 7)), "activity timeout must retain settings confirmation");
+        assert!(actor.source_switch_pending(7), "an unrelated timeout must not reopen old video");
+        assert!(actor.accept_control(&SessionCommand::InputReleased { id: 7 }));
+        assert!(!actor.pending.contains_key(&(7, 7)));
+        assert!(actor.accept_control(&SessionCommand::Configured { id: 7, revision: 2 }));
+        assert!(actor.accept_control(&SessionCommand::SourceSwitched { id: 7, request_id: 7, source: CaptureSource::Display(88), supports_input: true }));
+        assert!(actor.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_expiry_keeps_actual_release_retransmission_after_activity_timeout() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let (_, receiver) = server.split();
+        let (mut actor, _) = source_switch_actor().await;
+        actor.target = target;
+        let (commands, command_rx) = mpsc::channel(1);
+        actor.commands = command_rx; // Keep the real actor alive for its retry timer.
+        actor.request(SessionCommand::SetActivity { id: 7, revision: 1, video: true, audio: false }).await;
+        actor.pending.get_mut(&(4, 7)).unwrap().started = Instant::now() - Duration::from_secs(9);
+        actor.request(SessionCommand::ReleaseInput { id: 7 }).await;
+        let (cancel, rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move { actor.run(rx).await; });
+        let repeated_release = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut count = 0;
+            while count < 2 {
+                if let MultiplexedPacket::Control(ControlMessage::Session(command), _) = receiver.recv().await.unwrap()
+                    && matches!(*command, SessionCommand::ReleaseInput { id: 7 }) {
+                    count += 1;
+                }
+            }
+        }).await;
+        cancel.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        drop(commands);
+        assert!(repeated_release.is_ok(), "the real retry timer must retransmit ReleaseInput after an unrelated activity request expires");
+    }
+
+    #[tokio::test]
+    async fn request_expiry_of_source_switch_recovers_video_without_cancelling_input_release() {
+        let (mut actor, _) = source_switch_actor().await;
+        let mut video = source_switch_view(&mut actor, 7);
+        actor.packet(source_video(7, 10), FrameTimingCheckpoints::default()).await;
+        video.try_recv().unwrap();
+        actor.request(SessionCommand::SwitchSource { id: 7, request_id: 7, source: CaptureSource::Display(88) }).await;
+        actor.request(SessionCommand::ReleaseInput { id: 7 }).await;
+        actor.packet(source_video(7, 11), FrameTimingCheckpoints::default()).await;
+        assert!(video.try_recv().is_err());
+        actor.expire_request((8, 7));
+        assert!(!actor.source_switch_pending(7));
+        assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(), Some((actor.target, 7)));
+        assert!(actor.pending.contains_key(&(7, 7)), "source timeout must retain input-release retransmission");
+        actor.packet(source_video(7, 12), FrameTimingCheckpoints::default()).await;
+        assert!(video.try_recv().is_ok(), "recover the retained source after a known switch timeout");
+    }
+
+    #[tokio::test]
     async fn source_switch_timeout_recovers_only_the_affected_subscription() {
         let (mut actor,_)=source_switch_actor().await;
         let mut ours=source_switch_view(&mut actor,7);
@@ -718,7 +814,7 @@ mod tests {
         actor.packet(source_video(8,10),FrameTimingCheckpoints::default()).await;
         ours.try_recv().unwrap();other.try_recv().unwrap();
         actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
-        actor.reject_request(100); // Same transition used by the bounded retry timer.
+        actor.expire_request((8, 100)); // Same transition used by the bounded retry timer.
         assert!(!actor.source_switch_pending(7));
         assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(),Some((actor.target,7)));
         assert_eq!(actor.subscriptions.get_mut(&8).unwrap().handler.take_keyframe_request(),None);
