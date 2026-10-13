@@ -107,6 +107,21 @@ impl DiscoveryAnnouncement {
         Ok(())
     }
 
+    pub(crate) fn encode_with_capabilities(
+        &self,
+        live: Option<&watch::Receiver<DiscoveryCapabilities>>,
+    ) -> Result<Vec<u8>, DiscoveryError> {
+        let Some(live) = live else { return self.encode(); };
+        let mut current = self.clone();
+        current.capabilities = *live.borrow();
+        // The last tick of a viewer-only runtime cannot claim an inbound service.
+        if current.control_port == 0 {
+            current.capabilities.can_stream = false;
+            current.capabilities.file_transfer = false;
+        }
+        current.encode()
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, DiscoveryError> {
         self.validate()?;
 
@@ -388,6 +403,8 @@ pub struct DiscoveryRuntimeConfig {
     pub route_overrides: Vec<DiscoveryRouteOverride>,
     pub relay_routes: Vec<(SocketAddr, crate::routed_relay::PeerRelayRoutes)>,
     pub announcement: DiscoveryAnnouncement,
+    /// Update media capability without replacing the endpoint or its sessions.
+    pub live_capabilities: Option<watch::Receiver<DiscoveryCapabilities>>,
     pub announce_interval: Duration,
     pub prune_interval: Duration,
     pub accept_any_network: bool,
@@ -405,6 +422,7 @@ impl DiscoveryRuntimeConfig {
             route_overrides: Vec::new(),
             relay_routes: Vec::new(),
             announcement,
+            live_capabilities: None,
             announce_interval: DEFAULT_ANNOUNCE_INTERVAL,
             prune_interval: Duration::from_secs(1),
             accept_any_network: false,
@@ -427,7 +445,7 @@ pub async fn run_discovery_runtime(
     mut cancel_rx: broadcast::Receiver<()>,
 ) -> Result<(), DiscoveryError> {
     config.announcement.validate()?;
-    let packet = config.announcement.encode()?;
+    config.announcement.encode_with_capabilities(config.live_capabilities.as_ref())?;
     let socket = Arc::new(bind_discovery_socket(config.bind_addr)?);
     if config
         .announce_targets
@@ -452,7 +470,8 @@ pub async fn run_discovery_runtime(
     let own_device = config.announcement.device_id.clone();
 
     let send_socket = socket.clone();
-    let send_packet = packet.clone();
+    let send_announcement = config.announcement.clone();
+    let live_capabilities = config.live_capabilities.clone();
     let send_targets = config.announce_targets.clone();
     let sender_events_tx = events_tx.clone();
     let mut send_cancel_rx = cancel_rx.resubscribe();
@@ -462,6 +481,13 @@ pub async fn run_discovery_runtime(
             tokio::select! {
                 _ = send_cancel_rx.recv() => break,
                 _ = interval.tick() => {
+                    let send_packet = match send_announcement.encode_with_capabilities(live_capabilities.as_ref()) {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            let _ = sender_events_tx.send(DiscoveryEvent::Error(error.to_string()));
+                            continue;
+                        }
+                    };
                     for target in &send_targets {
                         if let Err(err) = send_socket.send_to(&send_packet, target).await {
                             let _ = sender_events_tx.send(DiscoveryEvent::Error(format!(
@@ -1072,6 +1098,7 @@ mod tests {
                 route_overrides: Vec::new(),
                 relay_routes: Vec::new(),
                 announcement: local,
+                live_capabilities: None,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),
                 accept_any_network: false,
@@ -1087,6 +1114,7 @@ mod tests {
                 route_overrides: Vec::new(),
                 relay_routes: Vec::new(),
                 announcement: peer,
+                live_capabilities: None,
                 announce_interval: Duration::from_millis(50),
                 prune_interval: Duration::from_millis(50),
                 accept_any_network: false,
@@ -1107,6 +1135,61 @@ mod tests {
             peer_seen.endpoint,
             SocketAddr::from(([127, 0, 0, 1], DEFAULT_CONTROL_PORT))
         );
+    }
+
+    #[tokio::test]
+    async fn live_capabilities_update_announcements_without_replacing_the_socket() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let original = sample_announcement();
+        let mut config = DiscoveryRuntimeConfig::lan_on_port(original.clone(), 0);
+        config.bind_addr = "127.0.0.1:0".parse().unwrap();
+        config.announce_targets = vec![peer.local_addr().unwrap()];
+        config.announce_interval = Duration::from_millis(15);
+        let mut caps = original.capabilities;
+        caps.can_stream = false;
+        caps.file_transfer = true;
+        let (caps_tx, caps_rx) = watch::channel(caps);
+        config.live_capabilities = Some(caps_rx);
+        let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (snapshot_tx, _snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
+        let (cancel, cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(run_discovery_runtime(config, events_tx, snapshot_tx, cancel_rx));
+        let mut sender = None;
+        for capture in [false, true, false] {
+            caps.can_stream = capture;
+            caps_tx.send_replace(caps);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let mut buf = [0; DISCOVERY_RECV_BUFFER_LEN];
+                loop {
+                    let (len, address) = peer.recv_from(&mut buf).await.unwrap();
+                    if let Some(previous) = sender { assert_eq!(address, previous); }
+                    sender = Some(address);
+                    let received = DiscoveryAnnouncement::decode(&buf[..len]).unwrap();
+                    assert_eq!(received.device_id, original.device_id);
+                    assert_eq!(received.network_name, original.network_name);
+                    assert_eq!(received.control_port, original.control_port);
+                    assert!(received.capabilities.file_transfer);
+                    if received.capabilities.can_stream == capture { break; }
+                }
+            }).await.expect("capability change reaches the same announce socket");
+        }
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn viewer_only_endpoint_cannot_gain_inbound_capabilities_from_a_later_runtime() {
+        let announcement = DiscoveryAnnouncement {
+            control_port: 0,
+            capabilities: DiscoveryCapabilities { can_view: true, ..Default::default() },
+            ..sample_announcement()
+        };
+        let (_tx, rx) = watch::channel(DiscoveryCapabilities::all_interactive());
+        let packet = announcement.encode_with_capabilities(Some(&rx)).unwrap();
+        let updated = DiscoveryAnnouncement::decode(&packet).unwrap();
+        assert_eq!(updated.control_port, 0);
+        assert!(!updated.capabilities.can_stream);
+        assert!(!updated.capabilities.file_transfer);
     }
 
     #[tokio::test]

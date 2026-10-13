@@ -45,6 +45,22 @@ const DEFAULT_RELAY_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
 static BRIDGE_DEVICE_GROUP_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub(crate) static PUBLISHING_PORT: std::sync::atomic::AtomicU16 =
     std::sync::atomic::AtomicU16::new(0);
+static PUBLISHER_CAPABILITIES: Mutex<Option<watch::Receiver<DiscoveryCapabilities>>> = Mutex::new(None);
+
+fn inbound_capabilities(port: u16, capture_authorized: bool) -> DiscoveryCapabilities {
+    DiscoveryCapabilities {
+        can_view: true,
+        can_stream: port != 0 && capture_authorized,
+        file_transfer: port != 0,
+        clipboard_sync: false,
+        talkback: false,
+    }
+}
+
+fn publisher_capabilities() -> watch::Receiver<DiscoveryCapabilities> {
+    PUBLISHER_CAPABILITIES.lock().unwrap().clone()
+        .unwrap_or_else(|| watch::channel(inbound_capabilities(0, false)).1)
+}
 
 pub fn configure_device_group_dir(path: impl Into<PathBuf>) -> Result<(), PathBuf> {
     BRIDGE_DEVICE_GROUP_DIR.set(path.into())
@@ -912,25 +928,21 @@ async fn run_bridge_network(
     let mut cancel_rx = cancel_tx.subscribe();
     let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
     let identity = store.load_or_generate("RemotePlay Android")?;
+    let live_capabilities = publisher_capabilities();
     let announcement = DiscoveryAnnouncement {
         network_name: identity.network_name.clone(),
         device_id: identity.node_id.clone(),
         display_name: identity.display_name.clone(),
         control_port: PUBLISHING_PORT.load(Relaxed),
         virtual_ip: None,
-        capabilities: DiscoveryCapabilities {
-            can_view: true,
-            can_stream: PUBLISHING_PORT.load(Relaxed) != 0,
-            file_transfer: PUBLISHING_PORT.load(Relaxed) != 0,
-            clipboard_sync: false,
-            talkback: false,
-        },
+        capabilities: *live_capabilities.borrow(),
         scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
     let discovery_target = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DISCOVERY_PORT));
     let mut discovery_config = DiscoveryRuntimeConfig::lan_default(announcement.clone());
     discovery_config.accept_any_network = false;
+    discovery_config.live_capabilities = Some(live_capabilities.clone());
     let mut network_tasks = Vec::new();
 
     // Unit tests stay hermetic. Android/native builds use the same public P2P + relay
@@ -939,6 +951,7 @@ async fn run_bridge_network(
         match start_bridge_p2p(
             &identity,
             &announcement,
+            live_capabilities.clone(),
             discovery_target,
             cancel_tx.clone(),
         )
@@ -1011,6 +1024,7 @@ async fn run_bridge_network(
 async fn start_bridge_p2p(
     identity: &MeshConfig,
     announcement: &DiscoveryAnnouncement,
+    live_capabilities: watch::Receiver<DiscoveryCapabilities>,
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1031,6 +1045,7 @@ async fn start_bridge_p2p(
             announcement.encode()?,
         )?
         .with_rendezvous_addrs(rendezvous_addrs)
+        .with_live_capabilities(live_capabilities)
         .with_discovery_target_addr(discovery_target),
     )
     .await?;
@@ -1165,6 +1180,17 @@ fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscover
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_receiver_does_not_advertise_screen_capture_authorization() {
+        let files = inbound_capabilities(5001, false);
+        assert!(files.can_view && files.file_transfer);
+        assert!(!files.can_stream);
+        let capture = inbound_capabilities(5001, true);
+        assert!(capture.can_stream && capture.file_transfer);
+        assert_eq!(inbound_capabilities(0, true), inbound_capabilities(0, false));
+        assert!(!inbound_capabilities(0, false).file_transfer);
+    }
 
     #[test]
     fn bridge_client_starts_disconnected() {

@@ -81,6 +81,7 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
                 publisher.address.port(),
                 std::sync::atomic::Ordering::Relaxed,
             );
+            *crate::PUBLISHER_CAPABILITIES.lock().unwrap() = Some(publisher.capabilities());
             drop(node);
             client().set_network_enabled(true);
             // Only a new endpoint changes routes. Capture changes are source-list
@@ -105,6 +106,9 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
             if stop {
                 node.take();
                 crate::PUBLISHING_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            if stop {
+                *crate::PUBLISHER_CAPABILITIES.lock().unwrap() = None;
             }
             drop(node);
             refresh_network_ownership();

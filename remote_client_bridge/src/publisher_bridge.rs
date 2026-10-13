@@ -58,11 +58,22 @@ pub struct MobilePublisher {
     frames: mpsc::Sender<Frame>,
     errors: mpsc::Sender<String>,
     permission: watch::Sender<MediaPermission>,
+    capabilities: watch::Sender<remote_core::discovery::DiscoveryCapabilities>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for MobilePublisher {
     fn drop(&mut self) {
+        self.capabilities.send_replace(crate::inbound_capabilities(0, false));
         self.task.abort();
+    }
+}
+
+// The actual serving task owns the advertised lifetime. A failed or aborted
+// worker must not leave a stale screen/file claim in discovery.
+struct AdvertisedPublisher(watch::Sender<remote_core::discovery::DiscoveryCapabilities>);
+impl Drop for AdvertisedPublisher {
+    fn drop(&mut self) {
+        self.0.send_replace(crate::inbound_capabilities(0, false));
     }
 }
 struct Peer {
@@ -133,7 +144,10 @@ impl MobilePublisher {
             audio: capture_enabled && allow_audio,
             epoch: 1,
         });
+        let (capabilities, _) = watch::channel(crate::inbound_capabilities(address.port(), capture_enabled));
+        let advertised_lifetime = AdvertisedPublisher(capabilities.clone());
         let task = tokio::spawn(async move {
+            let _advertised_lifetime = advertised_lifetime;
             let mut peer: Option<Peer> = None;
             let mut authenticated: Option<(SocketAddr, [u8; 16], [u8; 16], u64)> = None;
             let mut maintenance = tokio::time::interval(Duration::from_secs(1));
@@ -275,6 +289,7 @@ impl MobilePublisher {
             frames,
             errors,
             permission,
+            capabilities,
             task,
         })
     }
@@ -290,9 +305,19 @@ impl MobilePublisher {
             permission.epoch = permission.epoch.wrapping_add(1);
             true
         });
+        self.capabilities.send_modify(|capabilities| {
+            // Once the task has retired its file endpoint, a late permission
+            // callback cannot resurrect the capture announcement.
+            // Read the current permission while publishing, rather than replaying
+            // a stale callback argument after a concurrent revoke.
+            capabilities.can_stream = capabilities.file_transfer && self.permission.borrow().enabled;
+        });
         if !enabled {
             *self.demand.lock().unwrap() = CaptureDemand::default();
         }
+    }
+    pub fn capabilities(&self) -> watch::Receiver<remote_core::discovery::DiscoveryCapabilities> {
+        self.capabilities.subscribe()
     }
     pub fn demand(&self) -> CaptureDemand {
         let mut demand = self.demand.lock().unwrap().clone();
@@ -327,6 +352,7 @@ impl MobilePublisher {
         }
     }
     pub fn fail(&self, reason: String) {
+        self.set_capture_available(false, false);
         let _ = self.errors.try_send(reason);
     }
 }
@@ -593,6 +619,34 @@ mod tests {
             SessionCommand::Error { .. }
         ));
         assert!(!publisher.demand().active);
+    }
+
+    #[tokio::test]
+    async fn capture_revocation_and_worker_exit_retract_live_capabilities() {
+        let directory = ReceiverTestDir::new();
+        let publisher = MobilePublisher::start_with_permissions(
+            "127.0.0.1:0".parse().unwrap(), directory.0.clone(),
+            b"capability-fixture-key".to_vec(), false, false,
+        ).await.unwrap();
+        let capabilities = publisher.capabilities();
+        assert!(capabilities.borrow().file_transfer);
+        assert!(!capabilities.borrow().can_stream);
+        publisher.set_capture_available(true, false);
+        assert!(capabilities.borrow().can_stream);
+        publisher.set_capture_available(false, false);
+        assert!(!capabilities.borrow().can_stream);
+        assert!(capabilities.borrow().file_transfer);
+        assert!(!publisher.is_finished());
+        publisher.set_capture_available(true, false);
+        publisher.fail("fixture capture failure".into());
+        assert!(!capabilities.borrow().can_stream);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !publisher.is_finished() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert!(!capabilities.borrow().file_transfer);
+        publisher.set_capture_available(true, true);
+        assert!(!capabilities.borrow().can_stream);
+        assert!(!capabilities.borrow().file_transfer);
     }
 
     struct ReceiverTestDir(PathBuf);

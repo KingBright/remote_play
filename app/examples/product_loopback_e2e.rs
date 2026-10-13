@@ -99,6 +99,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 scope: DiscoveryScope::Lan,
                 ttl: Duration::from_secs(4),
             },
+            live_capabilities: None,
             announce_interval: Duration::from_secs(1),
             prune_interval: Duration::from_secs(1),
             accept_any_network: false,
