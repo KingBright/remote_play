@@ -288,6 +288,10 @@ def main() -> None:
         preflight(policy)  # Preserve signer refusal before any retention mutation.
         import release_artifact_lifecycle as lifecycle
         with lifecycle.producer('macos', explicit_required=True) as (_, delivery):
+            version_key(args.version); build_key(args.build)
+            if not args.binary.is_file() or args.binary.is_symlink():
+                raise ReleaseRejected('Missing build output')
+            lifecycle.admit_macos(delivery, args.output, args.version, args.build)
             result = package(args.binary, args.output, args.version, args.build, policy)
             retention = lifecycle.publish_macos(delivery, result)
             result = dict(result, delivery_retention=retention)

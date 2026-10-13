@@ -31,7 +31,8 @@ class ReleaseHookTests(unittest.TestCase):
         self.calls = []
         def public(action, *arguments):
             self.calls.append((action, list(map(str, arguments))))
-            return {'status': 'completed', 'registered_deliveries': [], 'registered_deliveries_complete': True}
+            return {'status': 'completed', 'admission': 'reserved', 'registration': 'created',
+                    'registered_deliveries': [], 'registered_deliveries_complete': True}
         patch.object(hook, 'public', side_effect=public).start()
         patch.object(hook, 'macos_output_root', return_value=self.root / 'cargo-shared/package/macos').start()
         patch.object(hook, 'git', side_effect=lambda *args: '' if args[0] == 'status' else 'a' * 40).start()
@@ -178,6 +179,7 @@ class ReleaseHookTests(unittest.TestCase):
         self.assertIn('--snapshot', args)
         self.assertEqual(args.count('--file'), 2)
         self.assertEqual(apk.read_bytes(), b'synthetic signed APK bytes')
+        self.assertEqual([call[0] for call in self.calls], ['release-admit', 'release-publish'])
 
     def test_unknown_coverage_never_bootstraps_existing_apk(self):
         apk, _, _ = self.apk(); self.state['deliveries_complete'] = False
@@ -206,6 +208,117 @@ class ReleaseHookTests(unittest.TestCase):
         args = self.calls[-1][1]
         self.assertEqual(args[args.index('--generation') + 1], 'prior-source-generation')
         self.assertEqual(args[args.index('--validation-kind') + 1], 'signing')
+        self.assertEqual([call[0] for call in self.calls], ['release-publish'])
+
+    def test_release_admission_refusal_never_starts_android_producer(self):
+        original = hook.public.side_effect
+        def full(action, *args):
+            result = original(action, *args)
+            if action == 'release-admit':
+                raise hook.Refusal('two complete generations protected; no slot')
+            return result
+        with patch.object(hook, 'public', side_effect=full), patch.object(hook.subprocess, 'Popen') as child:
+            with self.assertRaisesRegex(hook.Refusal, 'no slot'):
+                hook.run('android-release', [])
+            child.assert_not_called()
+        self.assertEqual([call[0] for call in self.calls], ['release-setup', 'release-preflight', 'release-admit'])
+        self.assertFalse(hook.android_files()[0].exists())
+
+    def test_old_apk_snapshot_precedes_new_admission_and_refusal_keeps_fixed_apk(self):
+        apk, _, report = self.apk(); original = hook.public.side_effect
+        def full(action, *args):
+            result = original(action, *args)
+            if action == 'release-admit' and args[args.index('--generation') + 1] != 'legacy-' + report['sha256']:
+                raise hook.Refusal('no new delivery slot')
+            return result
+        with patch.object(hook, 'public', side_effect=full), patch.object(hook, 'verify_existing_android_signer'), \
+                patch.object(hook.subprocess, 'Popen') as child:
+            with self.assertRaisesRegex(hook.Refusal, 'no new delivery slot'):
+                hook.run('android-release', [])
+            child.assert_not_called()
+        self.assertEqual([call[0] for call in self.calls],
+                         ['release-setup', 'release-preflight', 'release-admit', 'release-publish', 'release-admit'])
+        self.assertEqual(apk.read_bytes(), b'synthetic signed APK bytes')
+
+    def test_unconfirmed_legacy_registration_never_permits_overwrite(self):
+        apk, _, _ = self.apk(); original = hook.public.side_effect
+        def unconfirmed(action, *args):
+            result = original(action, *args)
+            return {'status': 'deferred'} if action == 'release-publish' else result
+        with patch.object(hook, 'public', side_effect=unconfirmed), patch.object(hook, 'verify_existing_android_signer'), \
+                patch.object(hook.subprocess, 'Popen') as child:
+            with self.assertRaisesRegex(hook.Refusal, 'registration was not confirmed'):
+                hook.run('android-release', [])
+            child.assert_not_called()
+        self.assertEqual([call[0] for call in self.calls].count('release-admit'), 1)
+        self.assertTrue(apk.exists())
+
+    def test_failed_release_keeps_exact_pending_group_and_cannot_change_generation(self):
+        original = hook.public.side_effect; pending = []
+        def reserve_once(action, *args):
+            result = original(action, *args)
+            if action == 'release-admit':
+                if pending and pending[0] != list(args):
+                    raise hook.Refusal('different pending output group')
+                if not pending:
+                    pending.append(list(args))
+            return result
+        with patch.object(hook, 'public', side_effect=reserve_once), patch.object(hook.subprocess, 'Popen') as child:
+            child.return_value.wait.return_value = 7
+            self.assertEqual(hook.run('android-release', []), 7)
+            child.reset_mock()
+            os.environ[hook.GENERATION_ENV] = 'try-bypass-pending'
+            with self.assertRaisesRegex(hook.Refusal, 'different pending'):
+                hook.run('android-release', [])
+            child.assert_not_called()
+        self.assertEqual(len(pending), 1)
+        self.assertNotIn('release-publish', [call[0] for call in self.calls])
+
+    def test_native_does_not_reserve_or_publish_when_release_quota_is_full(self):
+        summary = {'mode': 'deferred', 'registered_deliveries_complete': True,
+                   'registered_deliveries': [{'generation': name, 'component': 'macos-arm64-release',
+                                             'archived': False} for name in ('first', 'second')]}
+        with patch.object(hook, 'public', return_value=summary) as public, patch.object(hook.subprocess, 'Popen') as child:
+            child.return_value.wait.return_value = 0
+            self.assertEqual(hook.run('android-native', []), 0)
+            self.assertEqual([call.args[0] for call in public.call_args_list], ['release-setup', 'release-preflight'])
+
+    def test_unconfirmed_admission_never_starts_product_build(self):
+        original = hook.public.side_effect
+        def ambiguous(action, *args):
+            result = original(action, *args)
+            return {'status': 'deferred'} if action == 'release-admit' else result
+        with patch.object(hook, 'public', side_effect=ambiguous), patch.object(hook.subprocess, 'Popen') as child:
+            with self.assertRaisesRegex(hook.Refusal, 'admission was not confirmed'):
+                hook.run('android-release', [])
+            child.assert_not_called()
+
+    def test_macos_reserves_exact_immutable_pair_without_snapshot(self):
+        output = self.root / 'cargo-shared/package/macos'
+        hook.admit_macos(self.state, output, '2.0.0-alpha.8', '20261013.8')
+        action, args = self.calls[-1]
+        self.assertEqual(action, 'release-admit')
+        self.assertEqual(args[args.index('--generation') + 1], self.state['generation'])
+        archive = output / 'RemotePlay-macos-arm64-2.0.0-alpha.8-20261013.8.zip'
+        self.assertIn(str(archive), args); self.assertIn(str(archive.with_suffix('.verification.json')), args)
+        self.assertNotIn('--snapshot', args)
+        self.assertFalse(archive.exists())
+
+    def test_macos_guard_admission_precedes_any_package_production(self):
+        # Exercise the existing CLI dispatch using synthetic outputs and mocked signature policy.
+        spec = importlib.util.spec_from_file_location('rp_admission_guard_fixture', SCRIPT.with_name('macos_release_guard.py'))
+        guard = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {spec.name: guard, 'release_artifact_lifecycle': hook}):
+            spec.loader.exec_module(guard)
+            binary = self.root / 'synthetic-binary'; binary.write_bytes(b'fixture')
+            argv = ['macos_release_guard.py', 'package', '--binary', str(binary), '--output', str(self.root / 'package'),
+                    '--version', '2.0.0-alpha.8', '--build', '20261013.8']
+            os.environ[hook.GENERATION_ENV] = 'explicit-fixture'
+            with patch.object(sys, 'argv', argv), patch.object(guard, 'load_policy'), patch.object(guard, 'preflight'), \
+                    patch.object(guard, 'package') as package, patch.object(hook, 'admit_macos', side_effect=hook.Refusal('no slot')):
+                with self.assertRaisesRegex(hook.Refusal, 'no slot'):
+                    guard.main()
+                package.assert_not_called()
 
     def test_archived_apk_identity_is_not_reminted_as_legacy(self):
         apk, receipt, _ = self.apk(); value, _ = hook.hashed(receipt)

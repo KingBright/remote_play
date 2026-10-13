@@ -186,7 +186,10 @@ def publish(state, component, files, validation_kind, receipt, expected, snapsho
     try:
         if snapshot:
             require(sum(regular(path).stat().st_size for path in files) <= MAX_SNAPSHOT, 'Exact release group exceeds snapshot budget')
-        return public('release-publish', *args)
+        result = public('release-publish', *args)
+        require(result.get('registration') in ('created', 'unchanged'),
+                'Release registration was not confirmed; retain the pending output group')
+        return result
     except (Refusal, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         if not defer_failure:
             raise
@@ -194,6 +197,25 @@ def publish(state, component, files, validation_kind, receipt, expected, snapsho
                   'installed_status': 'not-asserted', 'reason': str(error)}
         print('RELEASE_RETENTION_DEFERRED ' + json.dumps(result), file=sys.stderr)
         return result
+
+
+def admit(state, component, files, snapshot=False, selected=None):
+    """Reserve one exact output group before production; failures retain the public reservation."""
+    chosen = selected or state.get('generation')
+    require(chosen, 'Complete delivery generation is required before production')
+    args = ['--generation', chosen, '--component', component]
+    for path in files:
+        args.extend(['--file', str(Path(path).absolute())])
+    if snapshot:
+        args.append('--snapshot')
+    result = public('release-admit', *args)
+    require(result.get('admission') == 'reserved', 'Release output admission was not confirmed')
+    return result
+
+
+def admit_macos(state, output, version, build):
+    archive = Path(output) / f'RemotePlay-macos-arm64-{version}-{build}.zip'
+    return admit(state, 'macos-arm64-release', [archive, archive.with_suffix('.verification.json')])
 
 
 def publish_macos(state, report):
@@ -251,6 +273,9 @@ def preserve_existing_android(state):
         return publish(state, 'android-arm64-release', [apk, receipt], known[0]['validation_kind'], receipt,
                        [report['sha256'], receipt_sha], snapshot=True, selected=known[0]['generation'])
     # Legacy bootstrap preserves exactly observed signing evidence, not source/install identity.
+    require(sum(regular(path).stat().st_size for path in (apk, receipt)) <= MAX_SNAPSHOT,
+            'Exact release group exceeds snapshot budget')
+    admit(state, 'android-arm64-release', [apk, receipt], snapshot=True, selected='legacy-' + report['sha256'])
     return publish(state, 'android-arm64-release', [apk, receipt], 'existing-signing-evidence', receipt,
                    [report['sha256'], receipt_sha], snapshot=True, selected='legacy-' + report['sha256'])
 
@@ -270,6 +295,7 @@ def run(kind, arguments):
     with producer(kind) as (fd, state):
         if kind == 'android-release':
             preserve_existing_android(state)
+            admit(state, 'android-arm64-release', android_files(), snapshot=True)
         env = dict(os.environ, **{LOCK_ENV: str(fd)})
         command = ['bash', str(ROOT / 'scripts' / ENTRIES[kind]), *arguments]
         child = subprocess.Popen(command, env=env, pass_fds=(fd,), start_new_session=True)
