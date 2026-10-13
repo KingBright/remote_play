@@ -131,6 +131,7 @@ pub(crate) enum DeviceListAction {
     OpenFiles(String),
     OpenWorkspace(String),
     CopyReceiveCommand(String),
+    SendScreen(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +140,7 @@ pub(crate) enum DeviceListEffect {
     ConnectFiles(String),
     OpenWorkspace(String),
     CopyReceiveCommand(String),
+    SendScreen(String),
 }
 
 impl DeviceListState {
@@ -156,6 +158,7 @@ impl DeviceListState {
             DeviceListAction::OpenFiles(device_id) => {
                 Some(DeviceListEffect::ConnectFiles(device_id))
             }
+            DeviceListAction::SendScreen(device_id) => Some(DeviceListEffect::SendScreen(device_id)),
             DeviceListAction::CopyReceiveCommand(device_id) => Some(DeviceListEffect::CopyReceiveCommand(device_id)),
             DeviceListAction::OpenWorkspace(device_id) => {
                 Some(DeviceListEffect::OpenWorkspace(device_id))

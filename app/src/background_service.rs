@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
+enum Request { Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Snapshot {
@@ -63,7 +63,7 @@ fn valid_length(header: [u8; 4]) -> io::Result<usize> {
 
 /// Bind only after obtaining the existing canonical runtime lock. Refuse a live
 /// endpoint; remove an owned stale socket only when no server is listening.
-pub(crate) struct Service { path: PathBuf, task: tokio::task::JoinHandle<()> }
+pub(crate) struct Service { path: PathBuf, task: tokio::task::JoinHandle<()>, delivery_task:tokio::task::JoinHandle<()> }
 impl Service {
     pub(crate) fn start(profile: &Path, runtime: Arc<UnifiedRuntimeHandle>, guard: crate::desktop::HeadlessInstanceGuard) -> Result<Self, Error> {
         private_directory(profile)?;
@@ -84,8 +84,17 @@ impl Service {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         let executable_sha256 = executable_hash()?;
         let generation = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos());
+        let identity=AppPrivateMeshConfigStore::new(profile).load()?.ok_or("Background identity unavailable")?;
+        runtime.owner.delivery.set_identity(identity.node_id);
+        let incoming=runtime.owner.delivery_incoming.lock().unwrap().take().ok_or("Delivery worker already attached")?;
+        #[cfg(feature="gpui-restoration")]
+        let delivery_task=tokio::spawn(crate::directed_delivery::receive_worker(profile.to_owned(),executable_sha256.clone(),incoming));
+        #[cfg(not(feature="gpui-restoration"))]
+        let delivery_task=tokio::spawn(async move {let mut incoming=incoming;while let Some(offer)=incoming.recv().await {offer.finish(protocol::session::DeliveryState::Rejected,"Receiver GUI is not compiled");}});
         let limit = Arc::new(Semaphore::new(8));
         let guard = Arc::new(guard);
+        let profile=profile.to_owned();
+        let registration_lock=Arc::new(tokio::sync::Mutex::new(()));
         let task = tokio::spawn(async move {
             let mut children = tokio::task::JoinSet::new();
             while let Ok((mut socket, _)) = listener.accept().await {
@@ -93,6 +102,7 @@ impl Service {
                 if socket.peer_cred().map(|c| c.uid()).ok() != Some(uid()) { continue; }
                 let Ok(permit) = limit.clone().try_acquire_owned() else { continue; };
                 let guard = guard.clone(); let runtime = runtime.clone(); let generation = generation.clone(); let executable_sha256 = executable_sha256.clone();
+                let profile=profile.clone();let registration_lock=registration_lock.clone();
                 children.spawn(async move {
                     let _guard = guard;
                     let _permit = permit;
@@ -100,20 +110,39 @@ impl Service {
                         let mut header = [0; 4]; socket.read_exact(&mut header).await?;
                         let mut bytes = vec![0; valid_length(header)?]; socket.read_exact(&mut bytes).await?;
                         let request: Request = serde_json::from_slice(&bytes)?;
-                        let response = answer(request, &runtime, generation, executable_sha256);
+                        let registration=match &request {
+                            Request::Delivery{generation:service,executable_sha256:hash,intent:host::directed_delivery::LocalIntent::Register{generation:gui,..}} if service==&generation&&hash==&executable_sha256=>Some(gui.clone()),
+                            _=>None,
+                        };
+                        let response=if let Some(gui)=registration {
+                            let _serial=registration_lock.lock().await;
+                            let directory=profile.join("gui-state");
+                            #[cfg(feature="gpui-restoration")]
+                            let verified=tokio::task::spawn_blocking(move||crate::desktop::directed_receive::exchange(&directory,&crate::desktop::directed_receive::Request::Status)).await
+                                .ok().and_then(Result::ok).is_some_and(|status|status["ok"]==true&&status["generation"].as_str()==Some(&gui)&&status["executable_sha256"].as_str()==Some(&executable_sha256));
+                            #[cfg(not(feature="gpui-restoration"))]
+                            let verified={let _=directory;false};
+                            if verified {runtime.owner.delivery.verified_gui_generation(&gui);answer(request,&runtime,generation,executable_sha256)}
+                            else {Response::Rejected("Sending GUI generation or executable changed".into())}
+                        } else {answer(request,&runtime,generation,executable_sha256)};
                         socket.write_all(&frame(&serde_json::to_vec(&response)?)?).await?;
                         Ok::<(), Error>(())
                     }).await;
                 });
             }
         });
-        Ok(Self { path, task })
+        Ok(Self { path, task, delivery_task })
     }
 }
 impl Drop for Service {
-    fn drop(&mut self) { self.task.abort(); let _ = fs::remove_file(&self.path); }
+    fn drop(&mut self) { self.delivery_task.abort(); self.task.abort(); let _ = fs::remove_file(&self.path); }
 }
-fn answer(request: Request, runtime: &UnifiedRuntimeHandle, generation: String, executable_sha256: String) -> Response {
+fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: String, executable_sha256: String) -> Response {
+    if let Request::Delivery {generation:expected,executable_sha256:hash,intent} = request {
+        if expected!=generation || hash!=executable_sha256 {return Response::Rejected("Background generation changed".into());}
+        if let Err(error)=runtime.owner.delivery.local(intent){return Response::Rejected(error);}
+        request=Request::Snapshot;
+    }
     if let Request::InspectConnection{connection_id}=request {
         return Response::ConnectionDiagnostics(host::lifecycle::inspect_connection(connection_id));
     }
@@ -127,7 +156,7 @@ fn answer(request: Request, runtime: &UnifiedRuntimeHandle, generation: String, 
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
         Request::Reload(message) => pairing.request_runtime_reload(message),
-        Request::InspectConnection{..}=>unreachable!(),
+        Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
     };
     let peers = runtime.owner.discovery_snapshot_rx().map(|rx| rx.borrow().clone()).unwrap_or_default();
     Response::Snapshot(Snapshot { schema: SCHEMA, version: env!("CARGO_PKG_VERSION").into(), generation, executable_sha256, pid: std::process::id(), peers, pairing })
@@ -151,6 +180,12 @@ impl Client {
             refresh_secret(&self.profile)?;
         }
         let peers = snapshot.peers.clone(); *cached = snapshot; Ok(peers)
+    }
+    pub(crate) fn delivery(&self,intent:host::directed_delivery::LocalIntent)->Result<(),Error> {
+        let generation=self.cached.lock().unwrap().generation.clone();
+        let snapshot=request(&self.profile,&Request::Delivery{generation:generation.clone(),executable_sha256:self.executable_sha256.clone(),intent},&self.executable_sha256)?;
+        if snapshot.generation!=generation {return Err("Background generation changed".into());}
+        Ok(())
     }
     pub fn background_pid(&self) -> u32 { self.cached.lock().unwrap().pid }
     pub fn status(&self) -> serde_json::Value {
@@ -197,7 +232,7 @@ impl Client {
         self.snapshot()
     }
 }
-fn executable_hash() -> Result<String, Error> {
+pub(crate) fn executable_hash() -> Result<String, Error> {
     Ok(format!("{:x}", Sha256::digest(fs::read(std::env::current_exe()?)?)))
 }
 fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result<Snapshot, Error> {

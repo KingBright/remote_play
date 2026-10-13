@@ -219,7 +219,24 @@ fn mac_input_status(target: InputTarget) -> Result<(), String> {
     }.map_err(|e| e.to_string())
 }
 
+/// Resource-local bridge: source revocation reaches existing capture workers
+/// even while the host control loop is awaiting another connection's startup.
+struct DeliveryCancellation(tokio::task::JoinHandle<()>);
+impl Drop for DeliveryCancellation {fn drop(&mut self){self.0.abort();}}
+fn forward_delivery_cancel(lease:Option<watch::Receiver<bool>>,cancel:broadcast::Sender<()>,tasks:Vec<tokio::task::AbortHandle>)->Option<DeliveryCancellation>{
+    let mut lease=lease?;
+    // Match Subscription/AudioGroup Drop: signal graceful shutdown and also
+    // cancel a worker stuck awaiting capture startup/pause/submit. Native stop
+    // remains owned by the existing RAII guards and lifecycle receipts.
+    let revoke=move||{let _=cancel.send(());for task in &tasks {task.abort();}};
+    if *lease.borrow() || lease.has_changed().is_err(){revoke();return None;}
+    Some(DeliveryCancellation(tokio::spawn(async move{
+        loop {if lease.changed().await.is_err()||*lease.borrow(){revoke();break;}}
+    })))
+}
+
 struct Subscription {
+    _delivery_cancel: Option<DeliveryCancellation>,
     settings_revision: u64,
     request: SubscriptionRequest,
     settings: watch::Sender<crate::StreamSettings>,
@@ -270,6 +287,7 @@ impl Drop for Subscription {
     }
 }
 struct AudioGroup {
+    _delivery_cancel: Option<DeliveryCancellation>,
     owner: u32,
     settings: watch::Sender<crate::StreamSettings>,
     cancel: broadcast::Sender<()>,
@@ -294,6 +312,8 @@ struct InputLeaseSlot {
 
 struct Connection {
     versioned_control: bool,
+    delivery_owner: Option<(crate::directed_delivery::Peer,[u8;32])>,
+    delivery_cancel: Option<watch::Receiver<bool>>,
     id: u32,
     last_seen: Instant,
     cancel: broadcast::Sender<()>,
@@ -849,6 +869,8 @@ impl Connection {
         crate::lifecycle::publish(id, &resources, "open");
         Self {
             versioned_control: false,
+            delivery_owner: None,
+            delivery_cancel: None,
             id,
             last_seen: Instant::now(),
             cancel,
@@ -1143,6 +1165,9 @@ impl Connection {
             }
         }
         self.subscriptions.remove(&request.id);
+        if self.delivery_owner.is_some() && self.delivery_cancel.as_ref().is_none_or(|lease|*lease.borrow()||lease.has_changed().is_err()) {
+            return Err("Sending intent ended before capture allocation".into());
+        }
         // Replacement subscriptions must release the previous Windows capture
         // reservation before acquiring the next one. Otherwise same-session
         // display/source switches fail against their own reservation.
@@ -1180,7 +1205,9 @@ impl Connection {
                     include_microphone: legacy
                         && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"),
                 });
+                let bridge=forward_delivery_cancel(self.delivery_cancel.clone(),cancel.clone(),tasks.iter().map(tokio::task::JoinHandle::abort_handle).collect());
                 AudioGroup {
+                    _delivery_cancel:bridge,
                     owner: request.id,
                     settings,
                     cancel,
@@ -1229,10 +1256,12 @@ impl Connection {
                 .await;
             }
         });
+        let bridge=forward_delivery_cancel(self.delivery_cancel.clone(),cancel.clone(),vec![task.abort_handle()]);
         let audio_owner = audio_key.and_then(|key| self.audio_groups.get(&key).map(|g| g.owner));
         self.subscriptions.insert(
             id,
             Subscription {
+                _delivery_cancel:bridge,
                 request,
                 settings,
                 revision: activity_revision,
@@ -1709,7 +1738,7 @@ pub async fn run_host_service(
     config: HostServiceConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     run_host_service_inner(
-        config,
+        config, None,
         #[cfg(all(unix, any(test, target_os = "linux")))]
         None,
     )
@@ -1723,11 +1752,23 @@ pub async fn run_host_service_with_portal_shares(
     config: HostServiceConfig,
     controls: mpsc::Receiver<LocalPortalShareCommand>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    run_host_service_inner(config, Some(controls)).await
+    run_host_service_inner(config, None, Some(controls)).await
+}
+
+pub async fn run_host_service_with_delivery(
+    config: HostServiceConfig,
+    delivery: Arc<crate::directed_delivery::Broker>,
+    #[cfg(target_os="linux")] controls: mpsc::Receiver<LocalPortalShareCommand>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    run_host_service_inner(config, Some(delivery),
+        #[cfg(target_os="linux")] Some(controls),
+        #[cfg(all(unix,test,not(target_os="linux")))] None,
+    ).await
 }
 
 async fn run_host_service_inner(
     config: HostServiceConfig,
+    delivery: Option<Arc<crate::directed_delivery::Broker>>,
     #[cfg(all(unix, any(test, target_os = "linux")))] mut local_shares: Option<
         mpsc::Receiver<LocalPortalShareCommand>,
     >,
@@ -1796,6 +1837,13 @@ async fn run_host_service_inner(
                     for addr in peers.keys().copied().collect::<Vec<_>>(){begin_close(&mut peers,&mut closing,addr,false);}
                     closed.retain(|_,receipt|receipt.resources_live());authenticated.clear(); psk = current_key;
                     require_auth = require_session_auth() || psk.is_some();
+                }
+                if let Some(broker)=&delivery {
+                    broker.reconcile(|owner| peers.get(&owner.addr).is_some_and(|p|p.id==owner.connection)
+                        && authenticated.get(&owner.addr).is_some_and(|(n,_,_)|*n==owner.nonce)
+                        && owner.scope==remote_core::shared_files::current_share_scope());
+                    let revoked=peers.iter().filter(|(_,p)|p.delivery_owner.is_some_and(|(o,t)|!broker.claim_alive(o,t))).map(|(a,_)|*a).collect::<Vec<_>>();
+                    for addr in revoked {begin_close(&mut peers,&mut closing,addr,true);}
                 }
                 let expired: Vec<_> = peers.iter().filter(|(_, peer)| peer.last_seen.elapsed() > Duration::from_secs(15)).map(|(addr, _)| *addr).collect();
                 for addr in expired {begin_close(&mut peers,&mut closing,addr,true);}
@@ -1909,6 +1957,36 @@ async fn run_host_service_inner(
                                     else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); peer.versioned_control=true; SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
                                     send_session(&udp_sender, addr, reply).await;
                                 }
+                                SessionCommand::DeliveryOffer{request_id,source_device_id,target_device_id,ticket,revision} => {
+                                    let owner=peers.get(&addr).and_then(|p|authenticated.get(&addr).map(|(nonce,_,_)|crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()}));
+                                    let reply=match (&delivery,owner) {
+                                        (Some(broker),Some(owner)) if load_session_psk()==psk => broker.offer(owner,request_id,source_device_id,target_device_id,ticket,revision),
+                                        _=>SessionCommand::DeliveryReceipt{request_id,revision,state:protocol::session::DeliveryState::Rejected,reason:"Directed delivery unavailable".into()},
+                                    };
+                                    send_session(&udp_sender,addr,reply).await;
+                                }
+                                SessionCommand::DeliveryClaim{request_id,target_device_id,ticket} => {
+                                    let owner=peers.get(&addr).and_then(|p|authenticated.get(&addr).map(|(nonce,_,_)|crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()}));
+                                    let reply=match (&delivery,owner) {
+                                        (Some(broker),Some(owner)) if load_session_psk()==psk => {
+                                            let reply=if peers.get(&addr).is_some_and(|p|p.delivery_owner.is_some_and(|binding|binding!=(owner,ticket)) || (p.delivery_owner.is_none()&&!p.subscriptions.is_empty())) {
+                                                SessionCommand::DeliveryReceipt{request_id,revision:0,state:protocol::session::DeliveryState::Rejected,reason:"Connection already belongs to another activity".into()}
+                                            } else {broker.claim(owner,request_id,&target_device_id,ticket)};
+                                            if matches!(reply,SessionCommand::DeliveryReceipt{state:protocol::session::DeliveryState::Claimed,..}) {
+                                                let p=peers.get_mut(&addr).unwrap();p.delivery_owner=Some((owner,ticket));p.delivery_cancel=broker.claim_cancel(owner,ticket);
+                                            }
+                                            reply
+                                        },
+                                        _=>SessionCommand::DeliveryReceipt{request_id,revision:0,state:protocol::session::DeliveryState::Rejected,reason:"Sending intent unavailable".into()},
+                                    };
+                                    send_session(&udp_sender,addr,reply).await;
+                                }
+                                SessionCommand::DeliveryCancel{request_id} => {
+                                    if let (Some(broker),Some(p),Some((nonce,_,_)))=(&delivery,peers.get(&addr),authenticated.get(&addr)) {
+                                        let owner=crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()};
+                                        send_session(&udp_sender,addr,broker.cancel(owner,request_id)).await;
+                                    }
+                                }
                                 SessionCommand::ListSources { request_id } if peers.contains_key(&addr) => {
                                     let reply = match peers.get(&addr).unwrap().capture_sources() { Ok(sources) => SessionCommand::Sources { request_id, sources }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
                                     send_session(&udp_sender, addr, reply).await;
@@ -1923,9 +2001,23 @@ async fn run_host_service_inner(
                                         retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::Subscribe(request.clone())).await;
                                     }
                                     let result = match peers.get_mut(&addr) {
-                                        Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
+                                        Some(p) => {
+                                            if let Some((owner,ticket))=p.delivery_owner {
+                                                if !delivery.as_ref().is_some_and(|b|b.claim_alive(owner,ticket)) {Err("Sending intent ended".into())}
+                                                else if let Some(mut cancelled)=p.delivery_cancel.clone() {
+                                                    if *cancelled.borrow() {Err("Sending intent ended".into())}
+                                                    else {tokio::select!{biased;
+                                                        _=cancelled.changed()=>Err("Sending intent ended during capture startup".into()),
+                                                        result=p.subscribe(request,addr,udp_sender.clone(),config.stats.clone(),false)=>result,
+                                                    }}
+                                                } else {Err("Sending intent ended".into())}
+                                            } else {p.subscribe(request,addr,udp_sender.clone(),config.stats.clone(),false).await}
+                                        },
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let result=if peers.get(&addr).and_then(|p|p.delivery_owner).is_some_and(|(o,t)|!delivery.as_ref().is_some_and(|b|b.claim_alive(o,t))) {
+                                        begin_close(&mut peers,&mut closing,addr,true);Err("Sending intent ended before subscription commit".into())
+                                    } else {result};
                                     let accepted = result.is_ok();
                                     let reply = result.unwrap_or_else(|reason| SessionCommand::Error { request_id: id, reason });
                                     send_session(&udp_sender, addr, reply).await;
@@ -1938,9 +2030,23 @@ async fn run_host_service_inner(
                                         retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::SwitchSource{id,request_id,source}).await;
                                     }
                                     let result = match peers.get_mut(&addr) {
-                                        Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
+                                        Some(p) => {
+                                            if let Some((owner,ticket))=p.delivery_owner {
+                                                if !delivery.as_ref().is_some_and(|b|b.claim_alive(owner,ticket)){Err("Sending intent ended".into())}
+                                                else if let Some(mut cancelled)=p.delivery_cancel.clone() {
+                                                    if *cancelled.borrow(){Err("Sending intent ended".into())}
+                                                    else {tokio::select!{biased;
+                                                        _=cancelled.changed()=>Err("Sending intent ended during source switch".into()),
+                                                        result=p.switch_source(id,request_id,source,addr,udp_sender.clone(),config.stats.clone())=>result,
+                                                    }}
+                                                } else {Err("Sending intent ended".into())}
+                                            } else {p.switch_source(id,request_id,source,addr,udp_sender.clone(),config.stats.clone()).await}
+                                        },
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let result=if peers.get(&addr).and_then(|p|p.delivery_owner).is_some_and(|(o,t)|!delivery.as_ref().is_some_and(|b|b.claim_alive(o,t))) {
+                                        begin_close(&mut peers,&mut closing,addr,true);Err("Sending intent ended before source switch commit".into())
+                                    } else {result};
                                     let accepted = result.is_ok();
                                     send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason })).await;
                                     if accepted && let Some(peer) = peers.get_mut(&addr) {
@@ -3420,6 +3526,7 @@ mod failure_admission_tests {
         });
         (
             Subscription {
+                _delivery_cancel:None,
                 request,
                 settings,
                 revision: 7,
@@ -4159,4 +4266,42 @@ mod input_target_tests {
             None
         );
     }
+    #[tokio::test]
+    async fn directed_capture_cancellation_does_not_need_host_loop_polling(){
+        let(ticket,lease)=watch::channel(false);let(video,mut video_rx)=broadcast::channel(2);let(audio,mut audio_rx)=broadcast::channel(2);
+        let _video_bridge=forward_delivery_cancel(Some(lease.clone()),video,vec![]);
+        let _audio_bridge=forward_delivery_cancel(Some(lease),audio,vec![]);
+        // No host service/tick is running in this test.
+        ticket.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1),video_rx.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1),audio_rx.recv()).await.unwrap().unwrap();
+        let(late,mut late_rx)=broadcast::channel(2);forward_delivery_cancel(Some(ticket.subscribe()),late,vec![]);
+        late_rx.try_recv().unwrap();
+    }
+    #[tokio::test]
+    async fn dropping_old_capture_bridge_never_cancels_replacement_resource(){
+        let(old,lease)=watch::channel(false);let(resource,mut resource_rx)=broadcast::channel(2);
+        let bridge=forward_delivery_cancel(Some(lease),resource,vec![]);drop(bridge);
+        let(_next,next_lease)=watch::channel(false);let(next_resource,mut next_rx)=broadcast::channel(2);
+        let _next_bridge=forward_delivery_cancel(Some(next_lease),next_resource,vec![]);
+        old.send_replace(true);tokio::task::yield_now().await;
+        assert!(matches!(resource_rx.try_recv(),Err(broadcast::error::TryRecvError::Closed)));
+        assert!(matches!(next_rx.try_recv(),Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn directed_revocation_aborts_native_start_that_does_not_poll_broadcast(){
+        let(ticket,lease)=watch::channel(false);let(cancel,_ignored)=broadcast::channel(2);
+        let(started,ready)=tokio::sync::oneshot::channel();
+        let worker=tokio::spawn(async move {let _=started.send(());std::future::pending::<()>().await;});
+        let _bridge=forward_delivery_cancel(Some(lease),cancel,vec![worker.abort_handle()]);
+        ready.await.unwrap();ticket.send_replace(true);
+        let error=tokio::time::timeout(Duration::from_secs(1),worker).await.unwrap().unwrap_err();assert!(error.is_cancelled());
+        // A resource allocated just as the ticket expires is cancelled even if
+        // no later watch change occurs.
+        let late=tokio::spawn(std::future::pending::<()>());let(cancel,_ignored)=broadcast::channel(2);
+        forward_delivery_cancel(Some(ticket.subscribe()),cancel,vec![late.abort_handle()]);
+        assert!(tokio::time::timeout(Duration::from_secs(1),late).await.unwrap().unwrap_err().is_cancelled());
+    }
+
 }

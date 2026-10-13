@@ -153,6 +153,8 @@ fn open_restored_window(
                 let _ = weak.update(cx, |this, _| {
                     #[cfg(unix)]
                     this.stop_directed_receive();
+                    #[cfg(unix)]
+                    this.directed_send.take();
                     this.owner.release_input();
                     this.window_active = false;
                 });
@@ -291,6 +293,8 @@ struct RestoredDashboard {
     _instance: Option<Instance>,
     #[cfg(unix)]
     directed_receive: Option<crate::desktop::directed_receive::Adapter>,
+    #[cfg(unix)]
+    directed_send: Option<crate::desktop::directed_send::SendHandle>,
     activation: Arc<AtomicBool>,
     bound_source: Option<(u32, Instant)>,
     quitting: bool,
@@ -387,6 +391,8 @@ impl RestoredDashboard {
             _instance: instance,
             #[cfg(unix)]
             directed_receive,
+            #[cfg(unix)]
+            directed_send: None,
             activation,
             bound_source: None,
             quitting: false,
@@ -568,6 +574,7 @@ impl RestoredDashboard {
 
     #[cfg(unix)]
     fn poll_directed_receive(&mut self, cx: &mut Context<Self>) {
+        if let Some(sender)=&self.directed_send {let _=sender.poll();}
         use crate::desktop::directed_receive::{Request, Lease};
         if self.directed_receive.as_ref().and_then(|a| a.lease.as_ref()).is_some_and(|lease| !self.owner.directed_receive_current(&lease.request_id)) {
             self.stop_directed_receive();
@@ -583,11 +590,11 @@ impl RestoredDashboard {
             let mut newly_accepted = false;
             let response = match command.request {
                 Request::Status => serde_json::json!({"ok":true,"generation":generation,
-                    "renderer":crate::gui_backend::ORIGINAL_RENDERER,
+                    "renderer":crate::gui_backend::ORIGINAL_RENDERER,"executable_sha256":adapter.executable_sha256,
                     "lease":adapter.lease.as_ref().map(|lease| serde_json::json!({"request_id":lease.request_id,
                         "source_device_id":lease.source,"remaining_ms":lease.expires.saturating_duration_since(Instant::now()).as_millis()})),
                     "sessions":self.owner.diagnostic_snapshot()}),
-                Request::Receive { request_id, source_device_id, lease_ms, .. } => {
+                Request::Receive { request_id, source_device_id, lease_ms, claim, .. } => {
                     let tabs = self.owner.session_tabs();
                     if adapter.lease.is_some() || !tabs.tabs.is_empty() || tabs.connecting.is_some() {
                         serde_json::json!({"ok":false,"error":"Close the current window's sessions before receiving a directed stream"})
@@ -599,9 +606,10 @@ impl RestoredDashboard {
                             Ok(watchdog) => watchdog,
                             Err(error) => { let _ = command.reply.send(serde_json::json!({"ok":false,"error":error.to_string()}).into()); continue; }
                         };
+                        self.owner.set_receive_claim(&request_id,claim);
                         self.directed_receive.as_mut().unwrap().lease = Some(Lease {
                             request_id:request_id.clone(),source:source_device_id.clone(), expires:Instant::now()+duration,
-                            owner:Arc::downgrade(&self.owner), watchdog,
+                            owner:Arc::downgrade(&self.owner), watchdog, revision:1,
                         });
                         // Shared real UI action; only an in-process ownership
                         // receipt differs from the ordinary pull connect path.
@@ -610,6 +618,16 @@ impl RestoredDashboard {
                         newly_accepted = true;
                         serde_json::json!({"ok":true,"state":"accepted","generation":generation,"request_id":request_id,"lease_ms":lease_ms})
                     }
+                }
+                Request::Renew { request_id,revision,lease_ms,.. } => {
+                    let accepted=adapter.lease.as_mut().filter(|l|l.request_id==request_id).is_some_and(|lease| {
+                        if revision<lease.revision {return false;}
+                        if revision==lease.revision {return self.owner.directed_receive_current(&request_id);}
+                        let duration=Duration::from_millis(lease_ms);
+                        if !self.owner.renew_directed_receive(&request_id,duration){return false;}
+                        lease.revision=revision;lease.expires=Instant::now()+duration;true
+                    });
+                    serde_json::json!({"ok":accepted,"state":if accepted{"accepted"}else{"ended"},"generation":generation,"request_id":request_id})
                 }
                 Request::Stop { request_id, .. } => {
                     if adapter.lease.as_ref().is_some_and(|lease| lease.request_id == request_id) {
@@ -644,6 +662,8 @@ impl RestoredDashboard {
     }
 
     fn create_mesh_group(&mut self) {
+        #[cfg(unix)]
+        if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
             self.status = "Disconnect current sessions before changing the device network.".into();
             return;
@@ -657,6 +677,8 @@ impl RestoredDashboard {
     }
 
     fn join_mesh_group_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        #[cfg(unix)]
+        if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
             self.status = "Disconnect current sessions before changing the device network.".into();
             return;
@@ -1838,6 +1860,8 @@ impl Render for RestoredDashboard {
                     &self.device_list_state,
                     #[cfg(unix)]
                     self.directed_receive.as_ref().and_then(|a| a.lease.as_ref()).map(|lease| format!("Receiving from {} · {}s remaining", compact_device_id(&lease.source), lease.expires.saturating_duration_since(Instant::now()).as_secs())),
+                    #[cfg(unix)]
+                    self.directed_send.as_ref().map(|sender|format!("To {} · {}",compact_device_id(&sender.target),sender.poll())),
                     #[cfg(target_os = "linux")]
                     &self.local_share_state,
                     #[cfg(target_os = "linux")]
@@ -2815,6 +2839,7 @@ fn slide_over_management_drawer(
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
     #[cfg(unix)] receive_label: Option<String>,
+    #[cfg(unix)] send_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     input_locked: bool,
@@ -2937,6 +2962,7 @@ fn slide_over_management_drawer(
                         role,
                         device_list_state,
                         #[cfg(unix)] receive_label,
+                        #[cfg(unix)] send_label,
                         #[cfg(target_os = "linux")] local_share_state,
                         #[cfg(target_os = "linux")] local_share_active,
                         owner.clone(),
@@ -2998,6 +3024,7 @@ fn drawer_tab_button(
 fn drawer_devices_tab(
     devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
     #[cfg(unix)] receive_label: Option<String>,
+    #[cfg(unix)] send_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
     #[cfg(target_os = "linux")] local_share_active: Vec<String>,
     owner: Arc<OriginalOwner>, cx: &mut Context<RestoredDashboard>,
@@ -3015,6 +3042,14 @@ fn drawer_devices_tab(
                 .on_click(move |_, _, cx| { let _ = stop.update(cx, |this, cx| { this.stop_directed_receive(); cx.notify(); }); })
         ))
     } else { content };
+    #[cfg(unix)]
+    let content = if let Some(label) = send_label {
+        let stop=cx.weak_entity();
+        content.child(div().flex().flex_col().gap_2().child(label).child(
+            command_button("stop_directed_send",ActionVariantKind::Neutral,cx).child("Stop sending")
+                .on_click(move|_,_,cx|{let _=stop.update(cx,|this,cx|{this.directed_send.take();this.status="Stopping directed delivery".into();cx.notify();});})
+        ))
+    } else {content};
     #[cfg(target_os = "linux")]
     let content = {
         let share_view = cx.weak_entity();
@@ -3218,9 +3253,22 @@ impl RestoredDashboard {
                 }).detach();
     }
 
+    #[cfg(unix)]
+    fn send_screen(&mut self,device_id:String)->Result<(),String>{
+        if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){return Err("Stop the current delivery before choosing another target".into());}
+        let instance=self._instance.as_ref().ok_or("Send from the main device window")?;
+        if !instance.is_frontend(){return Err("Automatic delivery requires the installed background service and its attached GUI".into());}
+        let profile=instance.state_directory().parent().ok_or("Missing profile")?.to_owned();
+        let identity=remote_core::mesh::AppPrivateMeshConfigStore::new(&profile).load().map_err(|e|e.to_string())?.ok_or("Missing device identity")?;
+        let generation=self.directed_receive.as_ref().ok_or("GUI generation is unavailable")?.generation.clone();
+        let routes=self.runtime.owner.discovery_snapshot_rx().map(|rx|crate::desktop::model::candidate_routes(&rx.borrow(),&device_id)).unwrap_or_default();
+        if routes.is_empty(){return Err("Target is not currently available".into());}
+        self.directed_send=Some(crate::desktop::directed_send::SendHandle::start(profile,generation,identity.node_id,device_id,routes));
+        self.status="Contacting target to receive this screen".into();Ok(())
+    }
     fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
         #[cfg(unix)]
-        if !matches!(action, DeviceListAction::SelectFilter(_) | DeviceListAction::CopyReceiveCommand(_)) { self.stop_directed_receive(); }
+        if !matches!(action, DeviceListAction::SelectFilter(_) | DeviceListAction::CopyReceiveCommand(_) | DeviceListAction::SendScreen(_)) { self.stop_directed_receive(); }
         let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
         match effect {
             DeviceListEffect::ConnectStream(device_id) => self.start_stream_connection(device_id, None, cx),
@@ -3242,6 +3290,12 @@ impl RestoredDashboard {
                         } cx.notify();
                     });
                 }).detach();
+            }
+            DeviceListEffect::SendScreen(device_id) => {
+                #[cfg(unix)]
+                if let Err(error)=self.send_screen(device_id){self.status=error;}
+                #[cfg(not(unix))]
+                {let _=device_id;self.status="Automatic delivery GUI adapter is currently available on macOS/Linux".into();}
             }
             DeviceListEffect::CopyReceiveCommand(device_id) => {
                 let result = (|| -> Result<String, String> {

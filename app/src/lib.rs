@@ -1,6 +1,8 @@
 pub mod entrypoint;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod background_service;
+#[cfg(all(unix,feature="gpui-restoration"))]
+mod directed_delivery;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod design_system;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1440,6 +1442,8 @@ pub struct UnifiedServiceOwner {
     side_services: UnifiedSideServiceControls,
     #[cfg(target_os = "linux")]
     local_portal_shares: Option<mpsc::Sender<host::service::LocalPortalShareCommand>>,
+    pub(crate) delivery: Arc<host::directed_delivery::Broker>,
+    pub(crate) delivery_incoming: Mutex<Option<mpsc::Receiver<Arc<host::directed_delivery::Incoming>>>>,
     tasks: Vec<AbortOnDropTask>,
 }
 
@@ -1532,16 +1536,17 @@ impl UnifiedServiceOwner {
             None => (None, None),
         };
 
+        let (delivery, delivery_incoming)=host::directed_delivery::Broker::new();
         #[cfg(target_os = "linux")]
         let mut local_portal_shares = None;
         if let Some(host_config) = config.passive_host {
             #[cfg(target_os = "linux")]
             let controls = { let (tx, rx) = mpsc::channel(16); local_portal_shares = Some(tx); rx };
+            let broker=delivery.clone();
             tasks.push(AbortOnDropTask(tokio::spawn(async move {
-                #[cfg(target_os = "linux")]
-                let result = host::service::run_host_service_with_portal_shares(host_config, controls).await;
-                #[cfg(not(target_os = "linux"))]
-                let result = run_host_service(host_config).await;
+                let result = host::service::run_host_service_with_delivery(host_config, broker,
+                    #[cfg(target_os="linux")] controls,
+                ).await;
                 if let Err(err) = result { eprintln!("Unified passive host service stopped: {err}"); }
             })));
         }
@@ -1612,6 +1617,7 @@ impl UnifiedServiceOwner {
             side_services: config.side_services,
             #[cfg(target_os = "linux")]
             local_portal_shares,
+            delivery, delivery_incoming: Mutex::new(Some(delivery_incoming)),
             tasks,
         })
     }

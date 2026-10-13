@@ -2,7 +2,7 @@
 //! No remote listener, credentials, shell execution or new media protocol.
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
@@ -28,7 +28,10 @@ pub(crate) enum Request {
         source_device_id: String,
         deadline_ms: u64,
         lease_ms: u64,
+        #[serde(default)]
+        claim: Option<protocol::session::DeliveryClaimProof>,
     },
+    Renew { generation:String, request_id:String, deadline_ms:u64, revision:u64, lease_ms:u64 },
     Stop {
         generation: String,
         request_id: String,
@@ -86,9 +89,11 @@ pub(crate) struct Adapter {
     path: PathBuf,
     task: tokio::task::JoinHandle<()>,
     pub generation: String,
+    pub executable_sha256: String,
     pub commands: mpsc::Receiver<Command>,
     pub lease: Option<Lease>,
-    seen: HashSet<String>,
+    seen: HashMap<String,u64>,
+    admission_clock: Option<(u64,Instant)>,
 }
 pub(crate) struct Lease {
     pub request_id: String,
@@ -96,6 +101,7 @@ pub(crate) struct Lease {
     pub expires: Instant,
     pub owner: std::sync::Weak<super::original_owner::OriginalOwner>,
     pub watchdog: tokio::task::JoinHandle<()>,
+    pub revision: u64,
 }
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -109,6 +115,7 @@ impl Adapter {
     /// Instance's profile lock must already be held by this GUI.
     pub fn start(directory: &Path) -> Result<Self, Error> {
         crate::background_service::private_directory(directory)?;
+        let executable_sha256=crate::background_service::executable_hash()?;
         let path = directory.join(SOCKET);
         match path.symlink_metadata() {
             Ok(_) => {
@@ -169,13 +176,19 @@ impl Adapter {
         Ok(Self {
             path,
             task,
+            executable_sha256,
             generation,
             commands,
             lease: None,
-            seen: HashSet::new(),
+            seen: HashMap::new(),
+            admission_clock:None,
         })
     }
     pub fn admit(&mut self, request: &Request, now_ms: u64) -> Result<(), &'static str> {
+        let instant=Instant::now();
+        let projected=self.admission_clock.map(|(previous,at)|previous.saturating_add(instant.saturating_duration_since(at).as_millis() as u64));
+        if projected.is_none_or(|value|now_ms>value){self.admission_clock=Some((now_ms,instant));}
+        let now_ms=projected.map_or(now_ms,|value|now_ms.max(value));
         match request {
             Request::Status => Ok(()),
             Request::Receive {
@@ -184,6 +197,7 @@ impl Adapter {
                 source_device_id,
                 deadline_ms,
                 lease_ms,
+                ..
             } => {
                 valid_request(
                     &self.generation,
@@ -201,10 +215,16 @@ impl Adapter {
                 if !(1_000..=MAX_LEASE_MS).contains(lease_ms) {
                     return Err("Receive lease must be between 1 and 120 seconds");
                 }
-                if self.seen.len() >= 256 || !self.seen.insert(request_id.clone()) {
-                    return Err("Request replay or generation request limit reached");
+                self.seen.retain(|_,deadline|*deadline>now_ms);
+                if self.seen.len() >= 256 || self.seen.contains_key(request_id) {
+                    return Err("Request replay or too many requests within five seconds");
                 }
+                self.seen.insert(request_id.clone(),*deadline_ms);
                 Ok(())
+            }
+            Request::Renew { generation, request_id, deadline_ms, lease_ms, .. } => {
+                if !(1_000..=MAX_LEASE_MS).contains(lease_ms) {return Err("Invalid receive renewal duration");}
+                valid_request(&self.generation,generation,request_id,*deadline_ms,now_ms)
             }
             Request::Stop {
                 generation,
@@ -255,7 +275,7 @@ impl Drop for Adapter {
         let _ = fs::remove_file(&self.path);
     }
 }
-fn exchange(directory: &Path, request: &Request) -> Result<serde_json::Value, Error> {
+pub(crate) fn exchange(directory: &Path, request: &Request) -> Result<serde_json::Value, Error> {
     crate::background_service::private_directory(directory)?;
     let path = directory.join(SOCKET);
     crate::background_service::private_socket(&path)?;
@@ -313,7 +333,7 @@ pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Val
             let generation = status["generation"].as_str().ok_or("Missing GUI generation")?.to_string();
             let now = crate::unix_now_ms();
             Request::Receive { generation, request_id: format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos()),
-                source_device_id: source.clone(), deadline_ms: now.saturating_add(ADMISSION_MS), lease_ms: seconds*1000 }
+                source_device_id: source.clone(), deadline_ms: now.saturating_add(ADMISSION_MS), lease_ms: seconds*1000, claim:None }
         }
         [cmd, generation, id] if cmd == "--gui-stop-receive" => Request::Stop { generation: generation.clone(), request_id: id.clone(), deadline_ms: crate::unix_now_ms().saturating_add(ADMISSION_MS) },
         _ => return Err("Usage: --gui-status-json | --gui-receive SOURCE_DEVICE_ID [1..120 seconds] [--receiver RECEIVER_DEVICE_ID] | --gui-stop-receive GENERATION REQUEST_ID".into()),
@@ -360,7 +380,7 @@ mod tests {
             request_id: "request-1".into(),
             source_device_id: "paired-peer".into(),
             deadline_ms: 200,
-            lease_ms: 1_000,
+            lease_ms: 1_000, claim:None,
         };
         assert!(adapter.admit(&receive, 100).is_ok());
         assert!(adapter.admit(&receive, 100).is_err());
@@ -369,7 +389,7 @@ mod tests {
             request_id: "request-2".into(),
             source_device_id: "paired-peer".into(),
             deadline_ms: 200,
-            lease_ms: 120_001,
+            lease_ms: 120_001, claim:None,
         };
         assert!(adapter.admit(&invalid, 100).is_err());
         assert!(Adapter::start(dir.path()).is_err());
@@ -453,4 +473,17 @@ mod tests {
         owner.cancel_directed_receive("written");
         timer.abort();
     }
+    #[tokio::test]
+    async fn replay_window_recovers_capacity_and_clock_rollback_cannot_revive_old_request(){
+        let dir=private_fixture();let mut adapter=Adapter::start(dir.path()).unwrap();
+        for index in 0..1024u64 {
+            let now=100+index*10;
+            let request=Request::Receive{generation:adapter.generation.clone(),request_id:format!("request-{index}"),source_device_id:"source".into(),deadline_ms:now+5,lease_ms:1000,claim:None};
+            adapter.admit(&request,now).unwrap();
+        }
+        assert!(adapter.seen.len()<=2);
+        let old=Request::Receive{generation:adapter.generation.clone(),request_id:"request-0".into(),source_device_id:"source".into(),deadline_ms:105,lease_ms:1000,claim:None};
+        assert!(adapter.admit(&old,100).is_err());
+    }
+
 }

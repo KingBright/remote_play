@@ -91,6 +91,7 @@ struct DirectedReceiveBinding {
     cancel: tokio::sync::watch::Sender<()>,
     attempt: Option<u64>,
     connection: Option<u32>,
+    claim: Option<protocol::session::DeliveryClaimProof>,
 }
 struct Pool {
     sessions: Vec<ViewSession>,
@@ -110,6 +111,10 @@ impl Pool {
             (Some(binding), Some(request)) => binding.request_id == request && binding.source == source && binding.scope == remote_core::shared_files::current_share_scope() && Instant::now() < binding.expires,
             _ => false,
         }
+    }
+    fn receive_failed(&self)->bool {
+        self.directed_receive.as_ref().is_some_and(|binding|binding.scope==remote_core::shared_files::current_share_scope()&&Instant::now()<binding.expires&&binding.attempt.is_some_and(|attempt|
+            self.tabs.failed().is_some_and(|failed|failed.device_id==binding.source&&failed.attempt==attempt)))
     }
     fn cancel_receive(&mut self, request_id: &str) {
         if !self.directed_receive.as_ref().is_some_and(|b| b.request_id == request_id) { return; }
@@ -467,14 +472,29 @@ impl OriginalOwner {
         if pool.directed_receive.is_some() || !pool.tabs.can_change_network(pool.sessions.len()) {
             return Err("Close this window's current sessions before receiving".into());
         }
-        pool.directed_receive = Some(DirectedReceiveBinding { request_id: request_id.into(), scope: remote_core::shared_files::current_share_scope(), source: source.into(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None });
+        pool.directed_receive = Some(DirectedReceiveBinding { request_id: request_id.into(), scope: remote_core::shared_files::current_share_scope(), source: source.into(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None, claim:None });
         drop(pool);
         let owner = Arc::downgrade(self);
         let request = request_id.to_string();
         Ok(tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await;
-            if let Some(owner) = owner.upgrade() { owner.cancel_directed_receive(&request); }
+            let mut deadline=expires;
+            loop {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                let Some(owner)=owner.upgrade() else {break;};
+                let mut p=owner.pool.lock().unwrap();
+                let Some(binding)=p.directed_receive.as_ref().filter(|b|b.request_id==request) else {break;};
+                if Instant::now()<binding.expires {deadline=binding.expires;continue;}
+                p.cancel_receive(&request);break;
+            }
         }))
+    }
+    pub(crate) fn set_receive_claim(&self,request:&str,claim:Option<protocol::session::DeliveryClaimProof>) {
+        if let Some(b)=self.pool.lock().unwrap().directed_receive.as_mut().filter(|b|b.request_id==request){b.claim=claim;}
+    }
+    pub(crate) fn renew_directed_receive(&self,request:&str,duration:std::time::Duration)->bool {
+        let mut p=self.pool.lock().unwrap();
+        let Some(b)=p.directed_receive.as_mut().filter(|b|b.request_id==request&&b.claim.is_some()&&Instant::now()<b.expires) else{return false;};
+        b.expires=Instant::now()+duration;true
     }
     pub(crate) fn cancel_directed_receive(&self, request: &str) {
         self.pool.lock().unwrap().cancel_receive(request);
@@ -562,7 +582,7 @@ impl OriginalOwner {
             return Err(connection_failure(key, attempt, scope, message.into()));
         }
         let device = device.unwrap();
-        let (attempt, receive_dir, mut receive_cancel) = {
+        let (attempt, receive_dir, mut receive_cancel, receive_claim) = {
             let mut p = self.pool.lock().unwrap();
             if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
             let existing = p.sessions.iter().position(|e| e.session.key == key).map(|index| {
@@ -630,19 +650,33 @@ impl OriginalOwner {
             }
             p.message = format!("Connecting to {}", device.display_name);
             let cancel = p.directed_receive.as_ref().map(|binding| (binding.cancel.subscribe(), binding.expires));
-            (attempt, p.receive_dir.clone(), cancel)
+            (attempt, p.receive_dir.clone(), cancel, p.directed_receive.as_ref().and_then(|b|b.claim.clone()))
         };
         let mut failures = Vec::new();
         let mut connected = None;
         for (route, endpoint) in routes {
-            let result = if let Some((cancel, deadline)) = &mut receive_cancel {
-                tokio::select! {
-                    biased;
-                    _ = cancel.changed() => return Err("Receive lease was cancelled".into()),
-                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(*deadline)) => return Err("Receive lease expired".into()),
-                    result = WorkspaceConnection::connect(endpoint, receive_dir.clone()) => result,
+            let connect = async {
+                let (conn,mut events)=WorkspaceConnection::connect(endpoint,receive_dir.clone()).await?;
+                if let Some(proof)=&receive_claim {
+                    crate::desktop::directed_send::claim(&conn,&mut events,proof).await?;
                 }
-            } else { WorkspaceConnection::connect(endpoint, receive_dir.clone()).await };
+                Ok::<_,Error>((conn,events))
+            };
+            let result = if let Some((cancel, deadline)) = &mut receive_cancel {
+                tokio::pin!(connect);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.changed() => return Err("Receive lease was cancelled".into()),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(*deadline)) => {
+                            let p=self.pool.lock().unwrap();
+                            if let Some(binding)=p.directed_receive.as_ref().filter(|b|Some(b.request_id.as_str())==receive&&b.expires>Instant::now()) {*deadline=binding.expires;}
+                            else {return Err("Receive lease expired".into());}
+                        },
+                        result = &mut connect => break result,
+                    }
+                }
+            } else { connect.await };
             match result {
                 Ok(c) => {
                     connected = Some((route, c));
@@ -1159,7 +1193,7 @@ impl OriginalOwner {
     }
     pub fn diagnostic_snapshot(&self) -> serde_json::Value {
         let p = self.pool.lock().unwrap();
-        serde_json::json!({"pending":p.tabs.pending_count(),"sessions":p.sessions.iter().map(|e|{
+        serde_json::json!({"pending":p.tabs.pending_count(),"directed_receive_failed":p.receive_failed(),"sessions":p.sessions.iter().map(|e|{
             let s=&e.session;
             let native=serde_json::Value::Null;
             #[cfg(all(target_os="windows",feature="native-windows-video"))]
@@ -1261,7 +1295,27 @@ mod restoration_regression_tests {
 
     fn bind_receive(pool: &mut Pool, request: &str, expires: Instant) {
         pool.directed_receive = Some(DirectedReceiveBinding { request_id: request.into(), source: "a".into(),
-            scope: remote_core::shared_files::current_share_scope(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None });
+            scope: remote_core::shared_files::current_share_scope(), expires, cancel: tokio::sync::watch::channel(()).0, attempt: None, connection: None, claim:None });
+    }
+    #[test]
+    fn directed_receive_failure_belongs_only_to_its_exact_source_and_attempt(){
+        let mut pool=pending_pool();
+        bind_receive(&mut pool,"request-1",Instant::now()+std::time::Duration::from_secs(10));
+        assert!(!pool.receive_failed());
+        let first=begin(&mut pool,"a",values());pool.directed_receive.as_mut().unwrap().attempt=Some(first);
+        assert!(!pool.receive_failed());
+        pool.tabs.complete("a",first,false,0);assert!(pool.receive_failed());
+        pool.directed_receive.as_mut().unwrap().attempt=Some(first+1);assert!(!pool.receive_failed());
+        pool.directed_receive.as_mut().unwrap().attempt=Some(first);
+        pool.directed_receive.as_mut().unwrap().source="b".into();assert!(!pool.receive_failed());
+        // A new receive has no allocated attempt yet; an earlier failure must
+        // never terminate it before its ordinary connection future starts.
+        bind_receive(&mut pool,"request-2",Instant::now()+std::time::Duration::from_secs(10));
+        assert!(!pool.receive_failed());
+        let rejected=pool.tabs.reject_open("a","A",0).unwrap();pool.directed_receive.as_mut().unwrap().attempt=Some(rejected);
+        assert!(pool.receive_failed());
+        pool.directed_receive.as_mut().unwrap().expires=Instant::now()-std::time::Duration::from_secs(1);assert!(!pool.receive_failed());
+        pool.directed_receive=None;assert!(!pool.receive_failed());
     }
     #[test]
     fn receive_expiry_before_allocation_and_commit_never_admits_late_work() {
