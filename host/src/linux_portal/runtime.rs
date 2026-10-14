@@ -415,6 +415,19 @@ impl PreparedPortalCapture {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    /// Revalidate a worker-held frame against the current restricted stream.
+    pub fn check_input_frame(
+        &self,
+        revision: u64,
+        size: [u32; 2],
+    ) -> std::result::Result<(), PortalInputError> {
+        self.input_status()?;
+        if !self.inner.mailbox.matches_input_epoch(revision, size) {
+            return Err(PortalInputError::FrameBinding);
+        }
+        Ok(())
+    }
+
     pub async fn inject_input(
         &self,
         event: protocol::InputEvent,
@@ -507,6 +520,80 @@ impl PreparedPortalCapture {
             .owner
             .signal_close();
     }
+    /// Consume one validated owned frame from this resource's bounded mailbox.
+    /// A frame is never obtained from a global PipeWire connection or another lease.
+    pub async fn observe_owned_frame(
+        &self,
+        timeout: Duration,
+        max_bytes: usize,
+    ) -> Result<OwnedFrame> {
+        if timeout.is_zero()
+            || timeout > Duration::from_secs(2)
+            || max_bytes == 0
+            || max_bytes > crate::linux_frame::MAX_FRAME_BYTES
+        {
+            return Err(PortalCallError::InvalidSource);
+        }
+        if self.is_revoked() {
+            return Err(PortalCallError::Revoked);
+        }
+        let frame = tokio::time::timeout(timeout, self.inner.mailbox.receive())
+            .await
+            .map_err(|_| PortalCallError::Timeout)?
+            .map_err(|_| PortalCallError::Revoked)?;
+        if self.is_revoked() || frame.stamp.generation != self.generation() {
+            return Err(PortalCallError::Revoked);
+        }
+        frame
+            .validate_owned()
+            .map_err(|_| PortalCallError::InvalidSource)?;
+        let bytes = frame
+            .planes
+            .iter()
+            .try_fold(0usize, |sum, plane| sum.checked_add(plane.len()))
+            .ok_or(PortalCallError::InvalidSource)?;
+        if bytes > max_bytes {
+            return Err(PortalCallError::InvalidSource);
+        }
+        if let Some(input) = self.input() {
+            input.observe_frame(&frame);
+        }
+        Ok(frame)
+    }
+
+    pub fn selected_source(&self) -> SelectedPortalSource {
+        self.inner
+            .lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .selected
+    }
+
+    /// Invalidate first, await the existing bounded release/Close actor, then
+    /// drop this resource's native worker. Success confirms RPC acceptance;
+    /// native compositor effect/FD reclamation requires live acceptance.
+    pub async fn close_owned(&self) -> Result<()> {
+        let done = {
+            let mut lease = self.inner.lease.lock().unwrap_or_else(|e| e.into_inner());
+            lease.remote = None;
+            lease.owner.signal_close();
+            lease.owner.done.take()
+        };
+        self.inner
+            .worker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match done {
+            Some(done) => match tokio::time::timeout(Duration::from_secs(2), done).await {
+                Ok(Ok(true)) => Ok(()),
+                _ => Err(PortalCallError::Transport),
+            },
+            // A previous close has no retained confirmation; never invent success.
+            None => Err(PortalCallError::Revoked),
+        }
+    }
+
     pub(crate) fn mailbox(&self) -> Arc<FrameMailbox> {
         self.inner.mailbox.clone()
     }
@@ -807,6 +894,82 @@ pub async fn request_local_portal_capture_restorable(
 ) -> Result<PortalCaptureLease> {
     request_local_capture_mode(parent_identifier, sources, cancel, control_input, true, restoration).await
 }
+/// A dedicated desktop worker uses exactly this registered, nonpersistent path.
+/// The app ID must correspond to its installed desktop-file basename. It is not
+/// a binary authentication primitive; its caller still needs RH authorization.
+pub async fn request_registered_portal_control_capture(
+    app_id: &str,
+    parent_identifier: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<PortalCaptureLease> {
+    if app_id != "io.github.KingBright.RemoteHosts.DesktopWorker" {
+        return Err(PortalCallError::Parent);
+    }
+    if *cancel.borrow() {
+        return Err(PortalCallError::Cancelled);
+    }
+    let timeouts = Timeouts::default();
+    let connection = tokio::time::timeout(
+        timeouts.operation,
+        zbus::connection::Builder::session()
+            .map_err(|_| PortalCallError::Transport)?
+            .method_timeout(timeouts.operation)
+            .build(),
+    )
+    .await
+    .map_err(|_| PortalCallError::Timeout)?
+    .map_err(|_| PortalCallError::Transport)?;
+    registered_on_connection(connection, app_id, parent_identifier, cancel, timeouts).await
+}
+
+async fn registered_on_connection(
+    connection: Connection,
+    app_id: &str,
+    parent_identifier: &str,
+    cancel: watch::Receiver<bool>,
+    timeouts: Timeouts,
+) -> Result<PortalCaptureLease> {
+    if app_id != "io.github.KingBright.RemoteHosts.DesktopWorker" || *cancel.borrow() {
+        return Err(PortalCallError::Parent);
+    }
+    let bus = proxy(&connection, DBUS, DBUS_PATH, DBUS).await?;
+    let destination: String = bus
+        .call("GetNameOwner", &(DESKTOP,))
+        .await
+        .map_err(|_| PortalCallError::Transport)?;
+    // First portal method on this exact connection. Do not use a second
+    // connection for capture/control; the registration would not follow it.
+    // Raw method avoids Proxy's eager Properties.GetAll before registration.
+    let reply = tokio::time::timeout(
+        timeouts.operation,
+        connection.call_method(
+            Some(destination.as_str()),
+            DESKTOP_PATH,
+            Some("org.freedesktop.host.portal.Registry"),
+            "Register",
+            &(app_id, HashMap::<&str, Value<'_>>::new()),
+        ),
+    )
+    .await
+    .map_err(|_| PortalCallError::Timeout)?
+    .map_err(|_| PortalCallError::Transport)?;
+    reply
+        .body()
+        .deserialize::<()>()
+        .map_err(|_| PortalCallError::Response)?;
+    select_with_restoration_policy(
+        connection,
+        parent_identifier,
+        PickerSources::Monitor,
+        cancel,
+        timeouts,
+        true,
+        (false, None),
+        Some(destination),
+    )
+    .await
+}
+
 async fn request_local_capture(
     parent_identifier: &str, sources: PickerSources, cancel: watch::Receiver<bool>, control_input: bool,
 ) -> Result<PortalCaptureLease> {
@@ -862,9 +1025,22 @@ async fn select_with_control(
 }
 async fn select_with_restoration(
     connection: Connection, parent_identifier: &str, sources: PickerSources,
+    cancel: watch::Receiver<bool>, timeouts: Timeouts, control_input: bool,
+    restoration: (bool, Option<PortalSessionRestore>),
+) -> Result<PortalCaptureLease> {
+    select_with_restoration_policy(connection, parent_identifier, sources, cancel,
+        timeouts, control_input, restoration, None).await
+}
+async fn select_with_restoration_policy(
+    connection: Connection, parent_identifier: &str, sources: PickerSources,
     mut cancel: watch::Receiver<bool>, timeouts: Timeouts, control_input: bool,
     (remember, restoration): (bool, Option<PortalSessionRestore>),
+    registered_owner: Option<String>,
 ) -> Result<PortalCaptureLease> {
+    let managed = registered_owner.is_some();
+    if managed && (remember || restoration.is_some()) {
+        return Err(PortalCallError::Capabilities);
+    }
     if let Some(saved) = &restoration {
         if !remember || saved.sources != sources || saved.control_input != control_input {
             return Err(PortalCallError::Capabilities);
@@ -887,16 +1063,21 @@ async fn select_with_restoration(
     let (initial_tx, mut initial_revoked) = watch::channel(false);
     let (destination, screencast, mut options, screencast_version, restore_supported) = bounded(
         async {
+            if !managed {
             let initial = proxy(&connection, DESKTOP, DESKTOP_PATH, SCREENCAST).await?;
             let _: u32 = initial
                 .get_property("version")
                 .await
                 .map_err(|_| PortalCallError::Transport)?;
+            }
             let bus = proxy(&connection, DBUS, DBUS_PATH, DBUS).await?;
             let destination: String = bus
                 .call("GetNameOwner", &(DESKTOP,))
                 .await
                 .map_err(|_| PortalCallError::Transport)?;
+            if registered_owner.as_ref().is_some_and(|owner| owner != &destination) {
+                return Err(PortalCallError::Revoked);
+            }
             let screencast = proxy(&connection, &destination, DESKTOP_PATH, SCREENCAST).await?;
             let version: u32 = screencast
                 .get_property("version")
@@ -926,7 +1107,7 @@ async fn select_with_restoration(
                     .get_property("AvailableDeviceTypes")
                     .await
                     .map_err(|_| PortalCallError::Capabilities)?;
-                if version == 0 || devices & 3 != 3 {
+                if version == 0 || (managed && version < 2) || devices & 3 != 3 {
                     return Err(PortalCallError::Capabilities);
                 }
                 restore_supported = version >= 2;
@@ -1038,6 +1219,7 @@ async fn select_with_restoration(
             ("handle_token", Value::from(device_token.as_str())),
             ("types", Value::from(3u32)),
         ]);
+        if managed { device_options.insert("persist_mode", Value::from(0u32)); }
         if options.persist_mode == 1 {
             device_options.insert("persist_mode", Value::from(1u32));
             if let Some(saved) = &restoration {
@@ -1125,6 +1307,10 @@ async fn select_with_restoration(
         timeouts.selection,
     )
     .await?;
+    if managed && (response.contains_key("restore_token")
+        || response.get("clipboard_enabled").is_some_and(|value| bool::try_from(value) != Ok(false))) {
+        return Err(PortalCallError::Response);
+    }
     let devices = if control_input {
         let devices = u32::try_from(response.get("devices").ok_or(PortalCallError::Response)?)
             .map_err(|_| PortalCallError::Response)?;

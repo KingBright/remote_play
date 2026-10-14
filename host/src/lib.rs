@@ -41,7 +41,7 @@ pub use linux_portal::{
         PickerSources, PortalCallError, PortalCaptureLease, PortalInputError,
         PreparedPortalCapture, SelectedPortalSource, request_local_portal_capture,
         request_local_portal_control_capture, request_local_portal_capture_restorable,
-        PortalSessionRestore,
+        PortalSessionRestore, request_registered_portal_control_capture,
     },
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
@@ -57,7 +57,7 @@ mod linux_pipewire;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_raw_encode;
 #[cfg(target_os = "linux")]
-pub use linux_pipewire::native::prepare_pipewire_capture;
+pub use linux_pipewire::native::{prepare_pipewire_capture, prepare_pipewire_capture_bounded};
 #[cfg(any(test, target_os = "linux"))]
 pub mod linux_video_encode;
 #[cfg(target_os = "windows")]

@@ -16,12 +16,14 @@ pub(crate) enum WorkerError {
     Buffer,
     Closed,
     Revision,
+    Budget,
 }
 
 pub(crate) struct CopyContract {
     generation: u64,
     revision: u64,
     format: Option<FrameFormat>,
+    budget: Option<Arc<crate::linux_frame::FrameBudget>>,
     mailbox: Arc<FrameMailbox>,
 }
 
@@ -52,8 +54,16 @@ impl CopyContract {
             generation,
             revision: 0,
             format: None,
+            budget: None,
             mailbox,
         }
+    }
+    pub(crate) fn with_budget(
+        mut self,
+        budget: Option<Arc<crate::linux_frame::FrameBudget>>,
+    ) -> Self {
+        self.budget = budget;
+        self
     }
     pub(crate) fn renegotiate(&mut self, format: Option<FrameFormat>) -> Result<u64, WorkerError> {
         self.revision = self.revision.checked_add(1).ok_or(WorkerError::Revision)?;
@@ -111,7 +121,7 @@ impl CopyContract {
         format.crop = crop;
         format.transform = transform;
         let planes = split_planes(format, chunks).map_err(|_| WorkerError::Buffer)?;
-        let frame = OwnedFrame::copy_from(
+        let frame = OwnedFrame::copy_from_budget(
             format,
             &planes,
             FrameStamp {
@@ -121,8 +131,15 @@ impl CopyContract {
                 pipewire_pts_ns: pts,
                 arrival_ts_us: arrival,
             },
+            self.budget.as_ref(),
         )
-        .map_err(|_| WorkerError::Buffer)?;
+        .map_err(|e| {
+            if e == FrameError::Budget {
+                WorkerError::Budget
+            } else {
+                WorkerError::Buffer
+            }
+        })?;
         crate::linux_raw_encode::validate_native_input(&frame).map_err(|_| WorkerError::Format)?;
         Ok(frame)
     }

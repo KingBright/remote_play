@@ -77,11 +77,62 @@ pub struct BorrowedPlane<'a> {
 }
 
 #[derive(Debug)]
+pub struct FrameBudget {
+    per_frame: usize,
+    total: usize,
+    used: std::sync::atomic::AtomicUsize,
+}
+impl FrameBudget {
+    pub fn new(per_frame: usize, total: usize) -> Result<std::sync::Arc<Self>, FrameError> {
+        if per_frame == 0
+            || per_frame > MAX_FRAME_BYTES
+            || total < per_frame
+            || total > 2 * MAX_FRAME_BYTES
+        {
+            return Err(FrameError::Budget);
+        }
+        Ok(std::sync::Arc::new(Self {
+            per_frame,
+            total,
+            used: std::sync::atomic::AtomicUsize::new(0),
+        }))
+    }
+    fn reserve(self: &std::sync::Arc<Self>, bytes: usize) -> Result<FrameMemory, FrameError> {
+        use std::sync::atomic::Ordering;
+        if bytes > self.per_frame {
+            return Err(FrameError::Budget);
+        }
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|n| *n <= self.total)
+            })
+            .map_err(|_| FrameError::Budget)?;
+        Ok(FrameMemory {
+            budget: self.clone(),
+            bytes,
+        })
+    }
+}
+#[derive(Debug)]
+struct FrameMemory {
+    budget: std::sync::Arc<FrameBudget>,
+    bytes: usize,
+}
+impl Drop for FrameMemory {
+    fn drop(&mut self) {
+        self.budget
+            .used
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
 pub struct OwnedFrame {
     pub source_format: FrameFormat,
     pub width: u32,
     pub height: u32,
     pub planes: Vec<Vec<u8>>,
+    _memory: Option<FrameMemory>,
     pub mapping_offsets: Vec<u32>,
     pub stamp: FrameStamp,
     pub(crate) received_at: std::time::Instant,
@@ -223,6 +274,14 @@ impl OwnedFrame {
         planes: &[BorrowedPlane<'_>],
         stamp: FrameStamp,
     ) -> Result<Self, FrameError> {
+        Self::copy_from_budget(format, planes, stamp, None)
+    }
+    pub fn copy_from_budget(
+        format: FrameFormat,
+        planes: &[BorrowedPlane<'_>],
+        stamp: FrameStamp,
+        budget: Option<&std::sync::Arc<FrameBudget>>,
+    ) -> Result<Self, FrameError> {
         if stamp.generation == 0 {
             return Err(FrameError::Generation);
         }
@@ -258,6 +317,9 @@ impl OwnedFrame {
                 return Err(FrameError::Budget);
             }
         }
+        // Reserve checked output size before allocating a plane. The reservation
+        // follows the owned frame through first-frame, mailbox and consumer lifetimes.
+        let memory = budget.map(|b| b.reserve(total)).transpose()?;
         let mut owned = Vec::with_capacity(planes.len());
         for (plane, layout) in planes.iter().zip(&layouts) {
             let stride = plane.stride as usize;
@@ -275,6 +337,7 @@ impl OwnedFrame {
             width: crop.width,
             height: crop.height,
             planes: owned,
+            _memory: memory,
             mapping_offsets: planes.iter().map(|plane| plane.mapping_offset).collect(),
             stamp,
             received_at: std::time::Instant::now(),
@@ -391,6 +454,15 @@ impl FrameMailbox {
             .unwrap_or_else(|error| error.into_inner())
             .paused
     }
+    /// A caller-held frame reference cannot survive renegotiation or pause.
+    pub(crate) fn matches_input_epoch(&self, revision: u64, size: [u32; 2]) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        !state.closed
+            && !state.paused
+            && state.format_revision == revision
+            && state.dimensions == Some((size[0], size[1]))
+    }
+
     pub(crate) fn dimensions(&self) -> Option<(u32, u32)> {
         self.state
             .lock()
@@ -446,6 +518,63 @@ impl FrameMailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_four_k_copy_reserves_before_allocation_and_releases_on_drop() {
+        let format = FrameFormat {
+            width: 3840,
+            height: 2160,
+            pixel_format: PixelFormat::Nv12,
+            color: SourceColor::default(),
+            crop: None,
+            transform: Transform::Identity,
+        };
+        let bytes = vec![0; 12_441_600];
+        let mut planes = vec![
+            BorrowedPlane {
+                data: &bytes,
+                mapping_offset: 0,
+                chunk_offset: 0,
+                chunk_size: 8_294_400,
+                stride: 3840,
+            },
+            BorrowedPlane {
+                data: &bytes,
+                mapping_offset: 0,
+                chunk_offset: 8_294_400,
+                chunk_size: 4_147_200,
+                stride: 3840,
+            },
+        ];
+        let budget = FrameBudget::new(16 * 1024 * 1024, 32 * 1024 * 1024).unwrap();
+        let a = OwnedFrame::copy_from_budget(format, &planes, stamp(1), Some(&budget)).unwrap();
+        let b = OwnedFrame::copy_from_budget(format, &planes, stamp(2), Some(&budget)).unwrap();
+        assert_eq!(
+            budget.used.load(std::sync::atomic::Ordering::Acquire),
+            24_883_200
+        );
+        assert_eq!(
+            OwnedFrame::copy_from_budget(format, &planes, stamp(3), Some(&budget)).unwrap_err(),
+            FrameError::Budget
+        );
+        drop(a);
+        let c = OwnedFrame::copy_from_budget(format, &planes, stamp(4), Some(&budget)).unwrap();
+        drop(b);
+        drop(c);
+        assert_eq!(budget.used.load(std::sync::atomic::Ordering::Acquire), 0);
+        planes[1].stride = 8192;
+        assert_eq!(
+            OwnedFrame::copy_from_budget(format, &planes, stamp(5), Some(&budget)).unwrap_err(),
+            FrameError::Bounds
+        );
+        assert_eq!(budget.used.load(std::sync::atomic::Ordering::Acquire), 0);
+        let small = FrameBudget::new(8 * 1024 * 1024, 16 * 1024 * 1024).unwrap();
+        planes[1].stride = 3840;
+        assert_eq!(
+            OwnedFrame::copy_from_budget(format, &planes, stamp(6), Some(&small)).unwrap_err(),
+            FrameError::Budget
+        );
+    }
 
     fn format(pixel_format: PixelFormat) -> FrameFormat {
         FrameFormat {

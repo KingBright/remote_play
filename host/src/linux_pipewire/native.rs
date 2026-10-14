@@ -64,7 +64,22 @@ async fn revoked(receiver: &mut watch::Receiver<bool>) {
 /// Connect only the portal's restricted FD/node, validate the first actual pixel
 /// format, then return a connection-scoped candidate. No network commit occurs.
 pub async fn prepare_pipewire_capture(
+    lease: PortalCaptureLease,
+) -> Result<PreparedPortalCapture, PortalCallError> {
+    prepare_capture(lease, None).await
+}
+pub async fn prepare_pipewire_capture_bounded(
+    lease: PortalCaptureLease,
+    per_frame: usize,
+    total_owned: usize,
+) -> Result<PreparedPortalCapture, PortalCallError> {
+    let budget = crate::linux_frame::FrameBudget::new(per_frame, total_owned)
+        .map_err(|_| PortalCallError::InvalidSource)?;
+    prepare_capture(lease, Some(budget)).await
+}
+async fn prepare_capture(
     mut lease: PortalCaptureLease,
+    budget: Option<Arc<crate::linux_frame::FrameBudget>>,
 ) -> Result<PreparedPortalCapture, PortalCallError> {
     let generation = lease.selected_source().generation;
     let serial = lease.selected_source().pipewire_serial;
@@ -90,6 +105,7 @@ pub async fn prepare_pipewire_capture(
                 worker_mailbox.clone(),
                 worker_stop,
                 first_tx,
+                budget,
             );
             worker_mailbox.close();
             let _ = done_tx.send(());
@@ -166,6 +182,7 @@ fn run(
     mailbox: Arc<FrameMailbox>,
     stop: Arc<AtomicBool>,
     first: oneshot::Sender<OwnedFrame>,
+    budget: Option<Arc<crate::linux_frame::FrameBudget>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(pw::init);
@@ -191,7 +208,7 @@ fn run(
     let stream = pw::stream::StreamBox::new(&core, "RemotePlay local share", properties)?;
     let _listener = stream
         .add_local_listener_with_user_data(Data {
-            contract: CopyContract::new(generation, mailbox.clone()),
+            contract: CopyContract::new(generation, mailbox.clone()).with_budget(budget),
             first: Some(first),
             loop_: mainloop.clone(),
             mailbox: mailbox.clone(),
@@ -342,6 +359,7 @@ fn run(
                         data.mailbox.publish(frame);
                     }
                 }
+                Err(WorkerError::Budget) => {} // Skip a frame while two owned reservations are busy.
                 Err(_) => data.fail(),
             }
         })

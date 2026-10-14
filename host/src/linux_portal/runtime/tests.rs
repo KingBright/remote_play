@@ -28,6 +28,9 @@ struct Calls {
     geometry: Mutex<Option<(i32, i32)>>,
     fail_key_down: std::sync::atomic::AtomicBool,
     fail_key_up: std::sync::atomic::AtomicBool,
+    registry_sender: Mutex<Option<String>>,
+    bad_start: std::sync::atomic::AtomicU32,
+    close_mode: std::sync::atomic::AtomicU32,
     issue_restores: std::sync::atomic::AtomicBool,
     issued_restores: AtomicU64,
     restore_requests: Mutex<Vec<(bool, u32, Option<String>)>>,
@@ -78,8 +81,16 @@ impl FakeRequest {
 struct FakeSession(Arc<Calls>);
 #[zbus::interface(name = "org.freedesktop.portal.Session")]
 impl FakeSession {
-    fn close(&self) {
+    async fn close(&self) -> zbus::fdo::Result<()> {
         self.0.record("session_close");
+        match self.0.close_mode.load(Ordering::Relaxed) {
+            1 => Err(zbus::fdo::Error::Failed("offline close rejection".into())),
+            2 => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -262,6 +273,18 @@ impl FakePortal {
                 let token = format!("private-bus-unit-token-{serial}");
                 response.insert("restore_token".into(), Value::from(token.as_str()).try_to_owned().unwrap());
             }
+            match self.calls.bad_start.load(Ordering::Relaxed) {
+                1 => {
+                    response.insert(
+                        "restore_token".into(),
+                        Value::from("unexpected").try_to_owned().unwrap(),
+                    );
+                }
+                2 => {
+                    response.insert("clipboard_enabled".into(), true.into());
+                }
+                _ => {}
+            }
             emit_response(connection, &request, &destination, response).await;
         }
         self.calls.record("start");
@@ -427,6 +450,7 @@ impl Fixture {
 }
 
 mod input_tests;
+mod worker_tests;
 
 struct FakeRemoteDesktop {
     calls: Arc<Calls>,
@@ -468,6 +492,11 @@ impl FakeRemoteDesktop {
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         assert_eq!(u32::try_from(options.get("types").unwrap()).unwrap(), 3);
         assert!(options.len() >= 2 && options.len() <= 4);
+        if self.calls.count("register") == 1 {
+            assert_eq!(options.len(), 3);
+            assert_eq!(u32::try_from(options.get("persist_mode").unwrap()).unwrap(), 0);
+            assert!(!options.contains_key("restore_token"));
+        }
         let mode = options.get("persist_mode").map(|v|u32::try_from(v).unwrap()).unwrap_or(0);
         let restored = options.get("restore_token").map(|v|<&str>::try_from(v).unwrap().to_owned());
         assert!(mode <= 1);
