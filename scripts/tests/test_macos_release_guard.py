@@ -133,6 +133,23 @@ class ReleaseGateTests(unittest.TestCase):
         archive.rename(self.root/'candidate-macos.zip')
         with self.assertRaises(guard.ReleaseRejected): guard.verify_stage(self.root,self.policy)
 
+    def test_macos_only_stage_verifies_selected_signature_and_identity(self):
+        package = self.root/'candidate-macos.zip'; package.write_bytes(b'fixture archive')
+        pins = {'commit': 'a'*40, 'identity_sha256': 'b'*64, 'manifest_sha256': 'c'*64}
+        mac = dict(file=package.name, version='2.0.0-alpha.8', sha256=guard.sha256(package),
+                   size_bytes=package.stat().st_size, build_identity_expectations=pins)
+        (self.root/'desktop-releases.json').write_text(json.dumps({'releases': [mac,
+            dict(file='preserved-linux.tar.gz'), dict(file='preserved-windows.zip')]}))
+        with patch.object(guard, 'verified_archive') as verify:
+            verify.return_value.__enter__.return_value = (self.root, {'version': mac['version']})
+            guard.verify_stage(self.root, self.policy, macos_only=True)
+            verify.assert_called_once_with(package, self.policy, identity_expectations=pins)
+
+    def test_macos_only_stage_requires_source_identity_pins(self):
+        (self.root/'desktop-releases.json').write_text(json.dumps({'releases': [dict(file='macos.zip')]}))
+        with self.assertRaisesRegex(guard.ReleaseRejected, 'verified source identity pins'):
+            guard.verify_stage(self.root, self.policy, macos_only=True)
+
     def test_loaded_wrong_service_rejected(self):
         path=self.root/'agent.plist';exe=self.root/'RemotePlay.app/Contents/MacOS/remote_play'
         path.write_bytes(plistlib.dumps({'Label':'com.remoteplay.host','ProgramArguments':['/tmp/other']}))

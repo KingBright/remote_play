@@ -242,13 +242,17 @@ def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None, 
         yield app, report
 
 
-def verify_stage(stage: Path, policy: Policy) -> list[dict]:
+def verify_stage(stage: Path, policy: Policy, *, macos_only: bool = False) -> list[dict]:
     metadata = json.loads((stage / 'desktop-releases.json').read_text())
     verified = []
     for entry in metadata.get('releases', []):
         name = entry['file']
         if Path(name).name != name or not name:
             raise ReleaseRejected('Invalid artifact name')
+        if macos_only and 'macos' not in name.lower():
+            continue
+        if macos_only and not entry.get('build_identity_expectations'):
+            raise ReleaseRejected('macOS update requires verified source identity pins')
         path = stage / name
         if path.is_symlink() or not path.is_file():
             raise ReleaseRejected('Artifact missing or linked')
@@ -354,6 +358,7 @@ def main() -> None:
     sub.add_parser('preflight')
     for name in ['verify-app', 'verify-archive', 'verify-stage']:
         child = sub.add_parser(name); child.add_argument('path', type=Path)
+        if name == 'verify-stage': child.add_argument('--macos-only', action='store_true')
         if name == 'verify-archive':
             child.add_argument('--expected-commit')
             child.add_argument('--expected-identity-sha256')
@@ -374,7 +379,7 @@ def main() -> None:
             raise ReleaseRejected('All independent archive identity expectations are required together')
         pins = dict(zip(('commit', 'identity_sha256', 'manifest_sha256'), values)) if all(values) else None
         with verified_archive(args.path, policy, identity_expectations=pins) as (_, result): pass
-    elif args.command == 'verify-stage': result = verify_stage(args.path, policy)
+    elif args.command == 'verify-stage': result = verify_stage(args.path, policy, macos_only=args.macos_only)
     else:
         preflight(policy)  # Preserve signer refusal before any retention mutation.
         import build_identity_gate as gate
