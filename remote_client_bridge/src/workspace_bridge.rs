@@ -222,6 +222,9 @@ impl MobileWorkspace {
                         state.events.push_back(serde_json::json!({"file":format!("{event:?}"),"detail":detail}));
                     }
                     Some(event) = events.audio.recv() => match event {
+                        AudioIngressEvent::PayloadActivity { stream_id, .. } => {
+                            state.lock().unwrap().audio.remove(&stream_id);
+                        }
                         AudioIngressEvent::StreamConfig(config) => {
                             if configs.len() < 16 || configs.contains_key(&config.stream_id) { configs.insert(config.stream_id, config); }
                         }

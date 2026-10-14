@@ -492,6 +492,8 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     ) -> Option<oneshot::Receiver<usize>>;
     fn activate(&self);
     fn is_active(&self) -> bool;
+    /// None means the platform does not report reliable presentation visibility.
+    fn is_visible(&self) -> Option<bool> { None }
     fn is_hovered(&self) -> bool;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);

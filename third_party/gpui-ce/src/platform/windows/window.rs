@@ -760,6 +760,11 @@ impl PlatformWindow for WindowsWindow {
         self.0.hwnd == unsafe { GetActiveWindow() }
     }
 
+    fn is_visible(&self) -> Option<bool> {
+        use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+        Some(unsafe { IsWindowVisible(self.0.hwnd).as_bool() && !IsIconic(self.0.hwnd).as_bool() })
+    }
+
     fn is_hovered(&self) -> bool {
         self.state.hovered.get()
     }

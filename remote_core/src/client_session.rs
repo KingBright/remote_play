@@ -19,6 +19,8 @@ pub trait EnvelopeIngress: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioIngressEvent {
+    /// Local payload boundary for this connection's playback consumers.
+    PayloadActivity { stream_id: u32, active: bool },
     StreamConfig(AudioStreamConfig),
     Packet(RtpPacket),
 }

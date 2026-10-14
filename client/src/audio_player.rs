@@ -8,12 +8,32 @@ use std::error::Error;
 use std::sync::{Arc, atomic::Ordering::Relaxed};
 use tokio::sync::mpsc;
 
+/// Runs on the existing Tokio worker, never while holding GUI state.
+/// PCM/media may be dropped under pressure; activity and configuration are ordered.
+pub async fn forward_audio_event(
+    output: &mpsc::Sender<AudioPlayerEvent>,
+    event: remote_core::AudioIngressEvent,
+) {
+    match event {
+        remote_core::AudioIngressEvent::Packet(packet) => {
+            let _ = output.try_send(AudioPlayerEvent::Packet(packet));
+        }
+        remote_core::AudioIngressEvent::PayloadActivity { stream_id, active } => {
+            let _ = output.send(AudioPlayerEvent::PayloadActivity { stream_id, active }).await;
+        }
+        remote_core::AudioIngressEvent::StreamConfig(config) => {
+            let _ = output.send(AudioPlayerEvent::StreamConfig(config)).await;
+        }
+    }
+}
+
 pub struct AudioPlayer {
     _stream: Option<cpal::Stream>,
 }
 
 #[derive(Debug)]
 pub enum AudioPlayerEvent {
+    PayloadActivity { stream_id: u32, active: bool },
     StreamConfig(AudioStreamConfig),
     Settings(AudioPlayerSettings),
     Packet(RtpPacket),
@@ -74,6 +94,9 @@ impl AudioPlayer {
 
             let (sample_tx, sample_rx) = crossbeam_channel::bounded::<PlaybackChunk>(32);
             let mut mixer = AudioMixer::new(output_channels, output_rate as usize * 60 / 1000, 16);
+            let playback_epoch = Arc::new(PlaybackEpochs::default());
+            let output_epoch = playback_epoch.clone();
+            let mut observed_epoch = [1; 16];
 
             let error_stats = stats.clone();
             let err_fn = move |err| {
@@ -85,7 +108,7 @@ impl AudioPlayer {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     &output_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        fill_audio_buffer(data, &sample_rx, &mut mixer, |s| s);
+                        fill_audio_buffer(data, &sample_rx, &mut mixer, &output_epoch, &mut observed_epoch, |s| s);
                         record_output(
                             &stats,
                             data.iter()
@@ -99,7 +122,7 @@ impl AudioPlayer {
                 cpal::SampleFormat::I16 => device.build_output_stream(
                     &output_config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                        fill_audio_buffer(data, &sample_rx, &mut mixer, |s| {
+                        fill_audio_buffer(data, &sample_rx, &mut mixer, &output_epoch, &mut observed_epoch, |s| {
                             (s * i16::MAX as f32) as i16
                         });
                         record_output(
@@ -119,6 +142,7 @@ impl AudioPlayer {
                 let mut streams = HashMap::<u32, AudioDecodeStream>::new();
                 let mut volumes = HashMap::<u32, f32>::new();
                 let mut settings = AudioPlayerSettings::default();
+                let mut payload_activity = HashMap::<u32, bool>::new();
 
                 loop {
                     let wait = streams
@@ -143,6 +167,14 @@ impl AudioPlayer {
                         }
                     };
                     match event {
+                        AudioPlayerEvent::PayloadActivity { stream_id, active } => {
+                            if payload_activity.len() < 16 || payload_activity.contains_key(&stream_id) {
+                                payload_activity.insert(stream_id, active);
+                            }
+                            if let Some(stream) = streams.get_mut(&stream_id) {
+                                stream.reset_payload(playback_epoch.change(stream.lane, active));
+                            }
+                        }
                         AudioPlayerEvent::StreamVolume {
                             stream_id,
                             volume_percent,
@@ -164,6 +196,7 @@ impl AudioPlayer {
                                 };
                                 let _ = sample_tx.try_send(PlaybackChunk {
                                     stream_id,
+                                    epoch: stream.payload_epoch,
                                     lane: stream.lane,
                                     samples: Vec::new(),
                                 });
@@ -171,9 +204,12 @@ impl AudioPlayer {
                         }
                         AudioPlayerEvent::RemoveStream(stream_id) => {
                             volumes.remove(&stream_id);
+                            payload_activity.remove(&stream_id);
                             if let Some(stream) = streams.remove(&stream_id) {
+                                playback_epoch.change(stream.lane, false);
                                 let _ = sample_tx.try_send(PlaybackChunk {
                                     stream_id,
+                                    epoch: stream.payload_epoch,
                                     lane: stream.lane,
                                     samples: Vec::new(),
                                 });
@@ -183,9 +219,16 @@ impl AudioPlayer {
                             settings = new_settings;
                         }
                         AudioPlayerEvent::StreamConfig(config) => {
+                            let stream_id = config.stream_id;
+                            let changed = streams.get(&stream_id).is_none_or(|s| s.config != config);
                             apply_audio_stream_config(&mut streams, &volumes, config, output_rate);
+                            if changed && let Some(stream) = streams.get_mut(&stream_id) {
+                                let active = payload_activity.get(&stream_id).copied().unwrap_or(true);
+                                stream.reset_payload(playback_epoch.change(stream.lane, active));
+                            }
                         }
                         AudioPlayerEvent::Packet(packet) => {
+                            if payload_activity.get(&packet.header.ssrc) == Some(&false) { continue; }
                             let stream_id = packet.header.ssrc;
                             let next_lane =
                                 (0..16).find(|lane| streams.values().all(|s| s.lane != *lane));
@@ -199,6 +242,7 @@ impl AudioPlayer {
                                 match AudioDecodeStream::new(config, output_rate) {
                                     Ok(mut stream) => {
                                         stream.lane = lane;
+                                        stream.reset_payload(playback_epoch.change(lane, true));
                                         entry.insert(stream);
                                     }
                                     Err(err) => {
@@ -212,6 +256,7 @@ impl AudioPlayer {
                             }
 
                             if let Some(stream) = streams.get_mut(&stream_id) {
+                                stream.payload_epoch = playback_epoch.current(stream.lane);
                                 stream.push_packet(packet, output_channels, &sample_tx, settings);
                             }
                         }
@@ -267,6 +312,7 @@ struct AudioDecodeStream {
     decoder: Decoder,
     jitter_buffer: JitterBuffer,
     expected_seq_init: bool,
+    payload_epoch: u64,
     decode_buffer: Vec<f32>,
 }
 
@@ -291,8 +337,17 @@ impl AudioDecodeStream {
             decoder,
             jitter_buffer: JitterBuffer::new(0),
             expected_seq_init: false,
+            payload_epoch: 1,
             decode_buffer,
         })
+    }
+
+    fn reset_payload(&mut self, epoch: u64) {
+        self.payload_epoch = epoch;
+        self.jitter_buffer = JitterBuffer::new(0);
+        self.expected_seq_init = false;
+        self.decode_buffer.fill(0.0);
+        if let Err(error) = self.decoder.reset_state() { eprintln!("Opus payload reset failed: {error}"); }
     }
 
     fn push_packet(
@@ -337,6 +392,7 @@ impl AudioDecodeStream {
                     );
                     let _ = sample_tx.try_send(PlaybackChunk {
                         stream_id: self.config.stream_id,
+                        epoch: self.payload_epoch,
                         lane: self.lane,
                         samples: chunk,
                     });
@@ -359,8 +415,22 @@ fn opus_channels(channels: u16) -> Result<opus::Channels, Box<dyn Error + Send +
     }
 }
 
+struct PlaybackEpochs([std::sync::atomic::AtomicU64; 16]);
+impl Default for PlaybackEpochs {
+    fn default() -> Self { Self(std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(1))) }
+}
+impl PlaybackEpochs {
+    fn current(&self, lane: usize) -> u64 { self.0[lane].load(std::sync::atomic::Ordering::Acquire) }
+    fn change(&self, lane: usize, active: bool) -> u64 {
+        let next = (self.current(lane).wrapping_add(2) & !1) | u64::from(active);
+        self.0[lane].store(next, std::sync::atomic::Ordering::Release);
+        next
+    }
+}
+
 struct PlaybackChunk {
     stream_id: u32,
+    epoch: u64,
     lane: usize,
     samples: Vec<f32>,
 }
@@ -409,18 +479,30 @@ fn fill_audio_buffer<T>(
     data: &mut [T],
     sample_rx: &crossbeam_channel::Receiver<PlaybackChunk>,
     mixer: &mut AudioMixer,
+    playback_epoch: &PlaybackEpochs,
+    observed_epoch: &mut [u64; 16],
     map: impl Fn(f32) -> T,
 ) {
+    for lane in 0..16 {
+        let epoch = playback_epoch.current(lane);
+        if epoch != observed_epoch[lane] { mixer.clear_lane(lane); observed_epoch[lane] = epoch; }
+    }
     // Limit callback work even if the producer is continuously feeding it.
     for _ in 0..8 {
         let Ok(chunk) = sample_rx.try_recv() else {
             break;
         };
+        let epoch = playback_epoch.current(chunk.lane);
+        if chunk.epoch != epoch || epoch & 1 == 0 { continue; }
         if chunk.samples.is_empty() {
             mixer.clear_stream(chunk.stream_id);
         } else {
             mixer.push(chunk.lane, chunk.stream_id, &chunk.samples);
         }
+    }
+    for lane in 0..16 {
+        let epoch = playback_epoch.current(lane);
+        if epoch != observed_epoch[lane] || epoch & 1 == 0 { mixer.clear_lane(lane); observed_epoch[lane] = epoch; }
     }
     mixer.render(data, map);
 }
@@ -512,19 +594,21 @@ mod tests {
         assert_eq!(chunk.lane, 1);
         tx.send(PlaybackChunk {
             stream_id: 8,
+            epoch: 1,
             lane: 0,
             samples: vec![0.2; 1920],
         })
         .unwrap();
         tx.send(PlaybackChunk {
             stream_id: 7,
+            epoch: 1,
             lane: 1,
             samples: vec![0.3; 1920],
         })
         .unwrap();
-        let mut mixer = AudioMixer::new(2, 2880, 2);
+        let mut mixer = AudioMixer::new(2, 2880, 16);
         let mut out = [0.0; 1920];
-        fill_audio_buffer(&mut out, &rx, &mut mixer, |v| v);
+        fill_audio_buffer(&mut out, &rx, &mut mixer, &PlaybackEpochs::default(), &mut [1; 16], |v| v);
         assert!(out.iter().all(|v| (*v - 0.5).abs() < 1e-6));
     }
 
@@ -633,5 +717,58 @@ mod tests {
 
         assert_eq!(settings.gain_for_source(AudioSource::RemoteMicrophone), 0.0);
         assert_eq!(settings.gain_for_source(AudioSource::RemoteSystem), 2.0);
+    }
+    #[test]
+    fn payload_resume_drops_old_pcm_in_both_mixer_and_full_playback_queue() {
+        let (tx, rx) = crossbeam_channel::bounded(32);
+        let epoch = PlaybackEpochs::default();
+        let mut observed = [1; 16];
+        let mut mixer = AudioMixer::new(1, 64, 16);
+        mixer.push(0, 7, &[0.9; 32]);
+        for _ in 0..32 { tx.send(PlaybackChunk { stream_id: 7, epoch: 1, lane: 0, samples: vec![0.8; 8] }).unwrap(); }
+        let mut out = [1.0; 8];
+        epoch.change(0, false);
+        fill_audio_buffer(&mut out, &rx, &mut mixer, &epoch, &mut observed, |v| v);
+        assert_eq!(out, [0.0; 8]);
+        epoch.change(0, true);
+        for _ in 0..3 {
+            fill_audio_buffer(&mut out, &rx, &mut mixer, &epoch, &mut observed, |v| v);
+            assert_eq!(out, [0.0; 8]);
+        }
+        tx.send(PlaybackChunk { stream_id: 7, epoch: 5, lane: 0, samples: vec![0.2; 8] }).unwrap();
+        fill_audio_buffer(&mut out, &rx, &mut mixer, &epoch, &mut observed, |v| v);
+        assert_eq!(out, [0.2; 8]);
+    }
+
+}
+
+#[cfg(test)]
+mod payload_boundary_tests {
+    use super::*;
+    use std::time::Duration;
+    #[tokio::test]
+    async fn payload_boundary_full_audio_queue_retains_pause_and_resume() {
+        let (output, mut player) = mpsc::channel(1);
+        for active in [false, true] {
+            output.send(AudioPlayerEvent::Settings(Default::default())).await.unwrap();
+            let sender = output.clone();
+            let boundary = tokio::spawn(async move {
+                forward_audio_event(&sender, remote_core::AudioIngressEvent::PayloadActivity { stream_id: 7, active }).await;
+            });
+            tokio::task::yield_now().await;
+            assert!(!boundary.is_finished(), "the full queue must retain the boundary");
+            let packet = protocol::RtpPacket {
+                header: protocol::RtpHeader { version: 2, payload_type: 97, sequence_number: 1, timestamp: 1, ssrc: 7 },
+                payload: vec![1],
+            };
+            // Lossy media forwarding must finish even while the reliable
+            // boundary is waiting; the Tokio/UI executor remains responsive.
+            tokio::time::timeout(Duration::from_secs(1), forward_audio_event(&output, remote_core::AudioIngressEvent::Packet(packet))).await.unwrap();
+            assert!(matches!(player.recv().await, Some(AudioPlayerEvent::Settings(_))));
+            tokio::time::timeout(Duration::from_secs(1), boundary).await.unwrap().unwrap();
+            assert!(matches!(player.recv().await,
+                Some(AudioPlayerEvent::PayloadActivity { stream_id: 7, active: observed }) if observed == active));
+            assert!(player.try_recv().is_err(), "the media packet should be dropped, not reordered after the boundary");
+        }
     }
 }

@@ -15,6 +15,7 @@ pub mod shared_files;
 pub mod frame_pacer;
 pub mod jitter_buffer;
 pub mod latest_frame;
+pub mod media_demand;
 pub mod media_pause;
 pub mod media_plane;
 pub mod mesh;

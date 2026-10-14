@@ -1,5 +1,5 @@
 use client::TransferCenterState;
-use client::audio_player::{AudioPlayer, AudioPlayerEvent};
+use client::audio_player::{AudioPlayer, AudioPlayerEvent, forward_audio_event};
 use client::{ClientMediaRuntime, ClipboardRuntimeControl};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -198,8 +198,7 @@ impl WorkspaceView {
                             }
                             event = audio.recv() => {
                                 let Some(event) = event else { break; };
-                                let event = match event { remote_core::AudioIngressEvent::StreamConfig(config) => AudioPlayerEvent::StreamConfig(config), remote_core::AudioIngressEvent::Packet(packet) => AudioPlayerEvent::Packet(packet) };
-                                let _ = audio_events.try_send(event);
+                                forward_audio_event(&audio_events, event).await;
                             }
                             event = files.recv() => {
                                 let Some(event) = event else { break; };

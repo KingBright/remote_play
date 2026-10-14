@@ -18,6 +18,13 @@ LINUX_TARGET = "x86_64-unknown-linux-gnu"
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "media-lifecycle-boundaries":
+        return [cargo, "test", *shared, "-p", "client",
+                "--lib", "payload_boundary", "--", "--nocapture"]
+    if mode in ("media-lifecycle", "media-lifecycle-check"):
+        return [cargo, "check" if mode.endswith("check") else "test", *shared,
+                "-p", "remote_core", "-p", "client", "-p", "host", "-p", "remote_play_app",
+                "--tests" if mode.endswith("check") else "--lib"]
     if mode == "linux-x11-check":
         return [cargo, "check", *shared, "-p", "gpui-ce", "--lib", "--tests",
                 "--target", LINUX_TARGET]
@@ -47,7 +54,7 @@ def validation_environment(mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check"),
+    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries"),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -89,6 +96,10 @@ def main():
             "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
+    if args.mode.startswith("media-lifecycle"):
+        paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
+        paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
+        sources = [root / path for path in sorted(set(paths))]
     hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in sources]
     print(f"Using existing target: {target}", flush=True)
     with tempfile.TemporaryFile(mode="w+") as log:

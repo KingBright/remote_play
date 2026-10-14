@@ -66,7 +66,12 @@ pub struct SessionState<Texture, Pan: Default> {
     pub request: SubscriptionRequest,
     reader_task: Option<JoinHandle<()>>,
     audio_task: Option<JoinHandle<()>>,
-    pub background_paused: bool,
+    pub presentation_hidden: bool,
+    view_selected: bool,
+    pub input_focused: bool,
+    consumers: remote_core::media_demand::MediaConsumers,
+    view_consumer: remote_core::media_demand::ConsumerToken,
+    last_activity: Option<remote_core::media_demand::MediaDemand>,
     activity_pending: Option<u64>,
     pub first_frame_after: Instant,
     file_requests: FileRequests,
@@ -119,6 +124,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                 }
             }
         });
+        let mut consumers = remote_core::media_demand::MediaConsumers::default();
+        let view_consumer = consumers.attach(0, remote_core::media_demand::MediaDemand::BOTH).unwrap();
         Self {
             key,
             name,
@@ -175,7 +182,12 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             },
             reader_task: None,
             audio_task: None,
-            background_paused: false,
+            presentation_hidden: false,
+            view_selected: true,
+            input_focused: true,
+            consumers,
+            view_consumer,
+            last_activity: Some(remote_core::media_demand::MediaDemand::BOTH),
             activity_pending: None,
             first_frame_after: Instant::now(),
             file_requests: FileRequests::default(),
@@ -233,6 +245,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             self.audio_task = Some(tokio::spawn(async move {
                 while let Some(event) = audio.recv().await {
                     let event = match event {
+                        remote_core::client_session::AudioIngressEvent::PayloadActivity { stream_id, active } => client::audio_player::AudioPlayerEvent::PayloadActivity { stream_id, active },
                         remote_core::client_session::AudioIngressEvent::Packet(p) => {
                             client::audio_player::AudioPlayerEvent::Packet(p)
                         }
@@ -289,35 +302,80 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         }
     }
     pub fn set_paused(&mut self, paused: bool) {
-        self.release_input();
+        if self.paused != paused { self.release_input(); }
         self.paused = paused;
         self.send_activity();
     }
-    pub fn set_background(&mut self, hidden: bool) {
-        if self.background_paused != hidden {
-            self.release_input();
-            self.background_paused = hidden;
-            if self.confirmed {
-                self.send_activity();
+    pub fn set_view_selected(&mut self, selected: bool) {
+        self.view_selected = selected;
+        self.send_activity();
+    }
+    pub fn set_input_focused(&mut self, focused: bool) {
+        if self.input_focused && !focused { self.release_input(); }
+        self.input_focused = focused;
+    }
+    pub fn set_presentation_hidden(&mut self, hidden: bool) {
+        if self.presentation_hidden != hidden { self.release_input(); }
+        self.presentation_hidden = hidden;
+        self.send_activity();
+    }
+    pub fn attach_consumer(&mut self, slot: u64, demand: remote_core::media_demand::MediaDemand)
+        -> Option<remote_core::media_demand::ConsumerToken> {
+        if slot == 0 { return None; }
+        let token = self.consumers.attach(slot, demand)?;
+        self.send_activity();
+        Some(token)
+    }
+    pub fn update_consumer(&mut self, token: remote_core::media_demand::ConsumerToken,
+        demand: remote_core::media_demand::MediaDemand) -> bool {
+        let changed = self.consumers.update(token, demand);
+        if changed { self.send_activity(); }
+        changed
+    }
+    pub fn detach_consumer(&mut self, token: remote_core::media_demand::ConsumerToken) -> bool {
+        let changed = self.consumers.detach(token);
+        if changed { self.send_activity(); }
+        changed
+    }
+    pub fn payload_demand(&self) -> remote_core::media_demand::MediaDemand { self.consumers.demand() }
+    fn send_activity(&mut self) {
+        // An unfocused visible picture is still consumed. Audio playback has
+        // its own demand, independent of whether the picture is visible.
+        let local = remote_core::media_demand::MediaDemand {
+            video: self.view_selected && !self.paused && !self.presentation_hidden,
+            audio: self.view_selected && !self.paused && self.request.audio && !self.muted && self.volume > 0,
+        };
+        self.consumers.update(self.view_consumer, local);
+        let active = self.consumers.demand();
+        if !self.confirmed || self.last_activity == Some(active) { return; }
+        let revision = self.activity_revision.wrapping_add(1);
+        #[cfg(target_os = "macos")]
+        if let Some(media) = &self.media { media.set_video_payload_active(active.video); }
+        if self.control(SessionCommand::SetActivity {
+            id: self.video_id, revision, video: active.video, audio: active.audio,
+        }) {
+            if self.last_activity.is_some_and(|previous| previous.video != active.video) {
+                self.release_input();
+                self.first_frame_after = Instant::now();
+                self.uploaded_at = None;
+                self.texture = None;
+            }
+            self.activity_revision = revision;
+            self.activity_pending = Some(revision);
+            self.last_activity = Some(active);
+        } else {
+            #[cfg(target_os = "macos")]
+            if let Some(media) = &self.media {
+                media.set_video_payload_active(self.last_activity.is_none_or(|previous| previous.video));
             }
         }
-    }
-    fn send_activity(&mut self) {
-        self.activity_revision = self.activity_revision.wrapping_add(1);
-        self.activity_pending = Some(self.activity_revision);
-        let active = !self.paused && !self.background_paused;
-        self.control(SessionCommand::SetActivity {
-            id: self.video_id,
-            revision: self.activity_revision,
-            video: active,
-            audio: active && !self.muted,
-        });
     }
     pub fn media_activity_pending(&self) -> bool {
         self.activity_pending.is_some()
     }
 
     pub fn audio_settings(&mut self) {
+        self.send_activity();
         if let Some(media) = &self.media {
             media
                 .audio_playback
@@ -386,7 +444,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             }
         } else if !self.conn.input_ready(self.video_id,self.source_revision) {
             "Waiting for this host to bind safe input to the current source"
-        } else if self.paused || self.background_paused || self.activity_pending.is_some() {
+        } else if !self.input_focused {
+            "Window is not focused: remote input released"
+        } else if self.paused || self.presentation_hidden || self.activity_pending.is_some() {
             "Remote control paused. Resume video and wait for a frame from this source"
         } else if self
             .stats
@@ -416,8 +476,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             && self.supports_input
             && self.conn.input_ready(self.video_id,self.source_revision)
             && !self.locked
+            && self.input_focused
             && !self.paused
-            && !self.background_paused
+            && !self.presentation_hidden
             && self.activity_pending.is_none()
             && current_input_frame(
                 self.uploaded_at,
@@ -521,9 +582,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.pending = None;
                     self.first_frame_after = Instant::now();
                     self.status = "Video accepted; waiting for its first decoded frame".into();
-                    if self.paused || self.background_paused {
-                        self.send_activity();
-                    }
+                    self.last_activity = Some(remote_core::media_demand::MediaDemand { video: true, audio: self.request.audio });
+                    self.send_activity();
                 }
                 SessionCommand::SourceSwitched {
                     id,
@@ -569,7 +629,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.activity_pending = None;
                     if video {
                         self.first_frame_after = Instant::now();
-                    } else if !self.paused && !self.background_paused {
+                    } else if self.payload_demand().video {
                         self.locked = true;
                         self.error =
                             "The host did not resume video; retry before enabling input".into();
@@ -623,7 +683,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             };
             if let Some(media) = &self.media {
                 let e = match event {
-                    remote_core::client_session::AudioIngressEvent::Packet(p) => {
+                    remote_core::client_session::AudioIngressEvent::PayloadActivity { stream_id, active } => client::audio_player::AudioPlayerEvent::PayloadActivity { stream_id, active },
+                        remote_core::client_session::AudioIngressEvent::Packet(p) => {
                         client::audio_player::AudioPlayerEvent::Packet(p)
                     }
                     remote_core::client_session::AudioIngressEvent::StreamConfig(c) => {

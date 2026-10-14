@@ -195,7 +195,7 @@ async fn run_sequence(run: &str, report: &mut serde_json::Value) -> Result<(), E
                 if let Some(e) = p.active() {
                     let session = &e.session;
                     report["last_media_state"] = serde_json::json!({
-                        "connected":session.connected,"paused":session.paused,"background_paused":session.background_paused,
+                        "connected":session.connected,"paused":session.paused,"presentation_hidden":session.presentation_hidden,
                         "pending_activity":session.media_activity_pending(),"correct_frames_seen":correct_frames,
                         "neutral_frames_seen":neutral_frames,"udp_packets_received":session.stats.udp_packets_recv.load(std::sync::atomic::Ordering::Relaxed),
                         "jitter_push":session.stats.video_jitter_buffer_push.load(std::sync::atomic::Ordering::Relaxed),

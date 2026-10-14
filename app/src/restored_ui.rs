@@ -201,6 +201,8 @@ fn open_restored_window(
                     #[cfg(any(unix, windows))]
                     view.poll_directed_receive(cx);
                     owned_gui_stage(1);
+                    view.window_visible = view.window_handle.update(cx, |_, window, _| window.is_window_visible()).ok().flatten();
+                    view.sync_media_pause();
                     view.owner.poll();
                     owned_gui_stage(2);
                     if view.acceptance_tick(cx) {
@@ -342,6 +344,7 @@ struct RestoredDashboard {
     manual_media_paused: bool,
     pause_when_inactive: bool,
     window_active: bool,
+    window_visible: Option<bool>,
     telemetry_engine: remote_core::PipelineTelemetryEngine,
 
     show_apps_menu: bool,
@@ -361,6 +364,7 @@ impl RestoredDashboard {
     ) -> Self {
         cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            this.window_visible = window.is_window_visible();
             if !this.window_active {
                 this.owner.release_input();
                 this.pointer_input = PointerInputTracker::default();
@@ -442,6 +446,7 @@ impl RestoredDashboard {
             manual_media_paused: false,
             pause_when_inactive: prefs.ui.pause_when_inactive,
             window_active: window.is_window_active(),
+            window_visible: window.is_window_visible(),
             telemetry_engine: remote_core::PipelineTelemetryEngine::new(0, 300),
             show_apps_menu: false,
             toolbar_revealed: true,
@@ -1001,7 +1006,9 @@ impl RestoredDashboard {
     }
 
     fn sync_media_pause(&mut self) {
-        let paused = self.manual_media_paused || (self.pause_when_inactive && !self.window_active);
+        let paused = self.manual_media_paused;
+        let visible = !self.pause_when_inactive || self.window_visible.unwrap_or(true);
+        self.owner.set_view_demand(visible, self.window_active);
         if paused || self.drawer_open {
             for event in self.pointer_input.release_events() {
                 self.owner.queue_viewing_input(event);
@@ -1067,9 +1074,9 @@ impl RestoredDashboard {
             .child(
                 command_button("pause_in_background", ActionVariantKind::Neutral, cx)
                     .child(if self.pause_when_inactive {
-                        "Background pause: on"
+                        "Pause hidden video: on"
                     } else {
-                        "Background pause: off"
+                        "Pause hidden video: off"
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.pause_when_inactive = !this.pause_when_inactive;
@@ -1714,6 +1721,7 @@ impl Render for RestoredDashboard {
             self.manual_media_paused = false;
         }
         self.window_active = window.is_window_active();
+        self.window_visible = window.is_window_visible();
         self.sync_media_pause();
         owned_gui_stage(7);
         let media_controls = self.media_controls(cx);

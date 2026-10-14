@@ -884,6 +884,9 @@ async fn start_live_session(
         let mut channels = 2u16;
         while let Some(event) = audio_rx.recv().await {
             match event {
+                AudioIngressEvent::PayloadActivity { .. } => {
+                    audio_queue.lock().unwrap().clear();
+                }
                 AudioIngressEvent::StreamConfig(config) => {
                     sample_rate = config.sample_rate_hz;
                     channels = config.channels;

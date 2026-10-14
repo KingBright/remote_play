@@ -197,6 +197,8 @@ pub(crate) struct OriginalOwner {
     observed_service_epoch: std::sync::atomic::AtomicU64,
     pool: Mutex<Pool>,
     updates: tokio::sync::watch::Sender<u64>,
+    presentation_visible: std::sync::atomic::AtomicBool,
+    input_focused: std::sync::atomic::AtomicBool,
 }
 #[derive(Clone)]
 pub(crate) struct ViewSnapshot {
@@ -227,6 +229,8 @@ impl OriginalOwner {
             observed_service_epoch: std::sync::atomic::AtomicU64::new(backend.frontend_epoch().map(|e| e.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0)),
             backend,
             updates,
+            presentation_visible: std::sync::atomic::AtomicBool::new(true),
+            input_focused: std::sync::atomic::AtomicBool::new(true),
             pool: Mutex::new(Pool {
                 sessions: Vec::new(),
                 tabs: SessionTabsState::default(),
@@ -256,9 +260,13 @@ impl OriginalOwner {
         let mut retired: [Option<Arc<MacDecodedVideoFrame>>; 8] = std::array::from_fn(|_| None);
         let transitioning = pool.tabs.connecting().is_some();
         for (index, entry) in pool.sessions.iter_mut().enumerate() {
+            entry.session.set_view_selected(!transitioning && index == selected);
             entry
                 .session
-                .set_background(transitioning || index != selected);
+                .set_presentation_hidden(transitioning || index != selected
+                    || !self.presentation_visible.load(std::sync::atomic::Ordering::Acquire));
+            entry.session.set_input_focused(!transitioning && index == selected
+                && self.input_focused.load(std::sync::atomic::Ordering::Acquire));
             entry.session.poll();
             let s = &mut entry.session;
             if entry.sources.as_ref() != &s.sources {
@@ -293,7 +301,7 @@ impl OriginalOwner {
             }
             if s.confirmed
                 && !s.paused
-                && !s.background_paused
+                && !s.presentation_hidden
                 && s.video_error.is_none()
                 && let Some(media) = &s.media
             {
@@ -315,7 +323,7 @@ impl OriginalOwner {
         }
         let selected = pool.tabs.selected_index();
         if pool.sessions.get(selected).is_some_and(|s| {
-            !s.session.connected || s.session.paused || s.session.background_paused
+            !s.session.connected || s.session.paused || s.session.presentation_hidden
         }) && let Some((_, control)) = pool.talkback.take()
         {
             control.stop();
@@ -569,7 +577,7 @@ impl OriginalOwner {
             let mut p = self.pool.lock().unwrap();
             if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
             if let Some(e) = p.active_mut() {
-                e.session.release_input(); e.session.set_background(true);
+                e.session.release_input(); e.session.set_presentation_hidden(true);
             }
             if let Some((_, control)) = p.talkback.take() { control.stop(); }
             if let Some(old) = p.tabs.pending_attempt(key) { p.pending_settings.take(key, old); }
@@ -631,7 +639,7 @@ impl OriginalOwner {
                     let previous = p.tabs.selected_index();
                     if let Some(e) = p.sessions.get_mut(previous) {
                         e.session.release_input();
-                        e.session.set_background(true);
+                        e.session.set_presentation_hidden(true);
                     }
                     p.message = format!("Connecting to {}", device.display_name);
                     return Ok(());
@@ -646,7 +654,7 @@ impl OriginalOwner {
             let previous = p.tabs.selected_index();
             if let Some(e) = p.sessions.get_mut(previous) {
                 e.session.release_input();
-                e.session.set_background(true);
+                e.session.set_presentation_hidden(true);
             }
             p.message = format!("Connecting to {}", device.display_name);
             let cancel = p.directed_receive.as_ref().map(|binding| (binding.cancel.subscribe(), binding.expires));
@@ -727,6 +735,9 @@ impl OriginalOwner {
         session.request.fps = settings.fps;
         session.request.bitrate_kbps = settings.bitrate_kbps;
         session.set_clipboard(p.clipboard_preference);
+        if receive.is_some() {
+            session.attach_consumer(1, remote_core::media_demand::MediaDemand { video, audio });
+        }
         if video {
             session.start_video();
         } else {
@@ -971,6 +982,15 @@ impl OriginalOwner {
             e.session.release_input();
         }
     }
+    pub fn set_view_demand(&self, visible: bool, focused: bool) {
+        self.presentation_visible.store(visible, std::sync::atomic::Ordering::Release);
+        self.input_focused.store(focused, std::sync::atomic::Ordering::Release);
+        let mut p = self.pool.lock().unwrap();
+        if let Some(e) = p.active_mut() {
+            e.session.set_presentation_hidden(!visible);
+            e.session.set_input_focused(focused);
+        }
+    }
     pub fn set_media_paused(&self, paused: bool) {
         let mut p = self.pool.lock().unwrap();
 
@@ -1050,7 +1070,7 @@ impl OriginalOwner {
         p.active()
             .map(|e| {
                 (
-                    e.session.paused || e.session.background_paused,
+                    e.session.paused || e.session.presentation_hidden,
                     e.session.media_activity_pending(),
                 )
             })
@@ -1218,7 +1238,7 @@ impl OriginalOwner {
                     "nonzero_samples":s.stats.audio_output_nonzero_samples.load(std::sync::atomic::Ordering::Relaxed),
                     "errors":s.stats.audio_output_errors.load(std::sync::atomic::Ordering::Relaxed),
                 },
-                "paused":s.paused,"background_paused":s.background_paused,
+                "paused":s.paused,"presentation_hidden":s.presentation_hidden,
                 "activity_pending":s.media_activity_pending(),
                 "decoder_status":s.media.as_ref().and_then(|m|m.decode_status.try_lock().ok().map(|v|v.clone())),
                 "decoder_needs_keyframe":s.stats.video_decoder_needs_keyframe.load(std::sync::atomic::Ordering::Acquire),

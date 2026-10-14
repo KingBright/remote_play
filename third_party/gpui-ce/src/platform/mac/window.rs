@@ -1225,6 +1225,11 @@ impl PlatformWindow for MacWindow {
         unsafe { self.0.lock().native_window.isKeyWindow() == YES }
     }
 
+    fn is_visible(&self) -> Option<bool> {
+        Some(unsafe { self.0.lock().native_window.occlusionState()
+            .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible) })
+    }
+
     // is_hovered is unused on macOS. See Window::is_window_hovered.
     fn is_hovered(&self) -> bool {
         false

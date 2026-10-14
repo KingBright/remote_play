@@ -1797,6 +1797,12 @@ impl Window {
         self.active.get()
     }
 
+    /// Presentation visibility, independently of keyboard focus. Unknown
+    /// visibility must not be interpreted as an invisible consumer.
+    pub fn is_window_visible(&self) -> Option<bool> {
+        self.platform_window.is_visible()
+    }
+
     /// Returns whether this window is considered to be the window
     /// that currently owns the mouse cursor.
     /// On mac, this is equivalent to `is_window_active`.

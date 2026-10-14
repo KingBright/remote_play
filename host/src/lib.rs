@@ -528,6 +528,7 @@ where
         let mut audio_capturer = audio_capturer;
         // Keep the group's stream identity and RTP sequence through device loss.
         let mut seq_num: u16 = 0;
+        let mut audio_timestamp: u32 = 0;
         let mut retry_delay = Duration::from_millis(250);
         'recover: loop {
         macro_rules! restart_capture {
@@ -659,7 +660,7 @@ where
             }
         };
         for encoded in first_packets {
-            if let Err(err) = audio_send_context.send(&mut seq_num, encoded).await {
+            if let Err(err) = audio_send_context.send(&mut seq_num, &mut audio_timestamp, encoded).await {
                 eprintln!("Failed to send first {label} audio media packet: {}", err);
             }
         }
@@ -700,8 +701,9 @@ where
                             break;
                         }
                         // Discard a partial pre-pause packet, preserving stream/sequence IDs.
-                        if let Ok(encoder) = OpusAudioEncoder::new(sample_rate, channels) {
-                            audio_encoder = encoder;
+                        if let Err(error) = audio_encoder.reset_payload() {
+                            eprintln!("{label} audio reset failed: {error}");
+                            break;
                         }
                         paused = next_paused;
                     }
@@ -720,7 +722,7 @@ where
                             }
                             for encoded in packets {
                                 if let Err(err) =
-                                    audio_send_context.send(&mut seq_num, encoded).await
+                                    audio_send_context.send(&mut seq_num, &mut audio_timestamp, encoded).await
                                 {
                                     eprintln!("Failed to send {label} audio media packet: {}", err);
                                 }
@@ -751,6 +753,7 @@ impl AudioSendContext<'_> {
     async fn send(
         &self,
         seq_num: &mut u16,
+        timestamp: &mut u32,
         encoded: Vec<u8>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.stats.audio_frames_encoded.fetch_add(1, Relaxed);
@@ -763,12 +766,13 @@ impl AudioSendContext<'_> {
                 version: 2,
                 payload_type: 97,
                 sequence_number: *seq_num,
-                timestamp: (*seq_num as u32) * self.timestamp_step,
+                timestamp: *timestamp,
                 ssrc: self.stream_id,
             },
             payload: encoded,
         };
         *seq_num = (*seq_num).wrapping_add(1);
+        *timestamp = timestamp.wrapping_add(self.timestamp_step);
 
         let packet_size = send_media_packet(
             self.udp_sender,
@@ -1136,6 +1140,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
 
     let telemetry_udp_sender = udp_sender.clone();
     let mut paused = false;
+    let mut resume_capture_after_us = 0_u64;
+    let mut awaiting_resume_keyframe = false;
     let mut paused_telemetry = tokio::time::interval(Duration::from_secs(5));
     paused_telemetry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -1174,6 +1180,8 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                     if new_settings.paused != paused {
                         if new_settings.paused { video_capturer.pause().await?; }
                         else {
+                            resume_capture_after_us = remote_core::timing::quanta_now_us();
+                            awaiting_resume_keyframe = true;
                             video_capturer.resume().await?;
                             video_encoder.request_keyframe();
                         }
@@ -1214,6 +1222,9 @@ async fn run_streaming(config: StreamingRunConfig) -> Result<(), Box<dyn Error +
                 if paused || chunk.nalu.is_empty() {
                     continue;
                 }
+                if chunk.timing.capture_ts_us < resume_capture_after_us
+                    || (awaiting_resume_keyframe && !chunk.is_keyframe) { continue; }
+                awaiting_resume_keyframe = false;
                 stats_video.video_frames_encoded.fetch_add(1, Relaxed);
                 resources.encoded_frames.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 stats_video.video_bytes_encoded.fetch_add(chunk.nalu.len() as u64, Relaxed);

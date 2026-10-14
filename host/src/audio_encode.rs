@@ -37,6 +37,13 @@ impl OpusAudioEncoder {
         })
     }
 
+    pub fn reset_payload(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.chunker.clear();
+        self.pending_packets.clear();
+        self.encoder.reset_state()?;
+        Ok(())
+    }
+
     pub fn samples_per_packet_per_channel(&self) -> usize {
         self.chunker.samples_per_channel_per_frame()
     }

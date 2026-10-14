@@ -162,13 +162,14 @@ impl Default for MacAudioCapturer {
 }
 
 pub struct MacSystemAudioCapturer {
-    rx: mpsc::Receiver<MacAudioFrame>,
+    rx: mpsc::Receiver<(u64, MacAudioFrame)>,
     stream: Option<SCStream>,
     stream_running: bool,
     pending_stop: Option<crate::lifecycle::NativeStopReceipt>,
     resources: Option<std::sync::Arc<crate::lifecycle::Resources>>,
     source: protocol::session::CaptureSource,
-    tx_output: Option<mpsc::Sender<MacAudioFrame>>,
+    tx_output: Option<mpsc::Sender<(u64, MacAudioFrame)>>,
+    payload_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl MacSystemAudioCapturer {
@@ -182,6 +183,7 @@ impl MacSystemAudioCapturer {
             resources: None,
             source: protocol::session::CaptureSource::MainDisplay,
             tx_output: Some(tx),
+            payload_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         }
     }
     pub(crate) fn with_resources(
@@ -222,7 +224,8 @@ impl Default for MacSystemAudioCapturer {
 }
 
 struct SystemAudioOutput {
-    tx: mpsc::Sender<MacAudioFrame>,
+    tx: mpsc::Sender<(u64, MacAudioFrame)>,
+    payload_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl SCStreamOutputTrait for SystemAudioOutput {
@@ -235,8 +238,10 @@ impl SCStreamOutputTrait for SystemAudioOutput {
             return;
         }
 
+        let epoch = self.payload_epoch.load(std::sync::atomic::Ordering::Acquire);
+        if epoch & 1 == 0 { return; }
         if let Some(frame) = sample_buffer_to_audio_frame(&sample, AudioSource::RemoteSystem) {
-            let _ = self.tx.try_send(frame);
+            let _ = self.tx.try_send((epoch, frame));
         }
     }
 }
@@ -285,6 +290,7 @@ impl AudioCapturer for MacSystemAudioCapturer {
         }
         let output = SystemAudioOutput {
             tx: self.tx_output.take().unwrap(),
+            payload_epoch: self.payload_epoch.clone(),
         };
         let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(output, SCStreamOutputType::Audio);
@@ -305,25 +311,24 @@ impl AudioCapturer for MacSystemAudioCapturer {
     }
 
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.stop_owned_stream();
+        self.payload_epoch.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire,
+            |value| Some(value.wrapping_add(2) & !1)).unwrap();
         while self.rx.try_recv().is_ok() {}
-        self.await_owned_stop().await
+        Ok(())
     }
     async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.await_owned_stop().await?;
+        if self.stream.is_none() { return Err("system audio capture owner has ended".into()); }
         while self.rx.try_recv().is_ok() {}
-        if self.stream.is_none() {
-            self.start().await?;
-        }
+        self.payload_epoch.fetch_update(std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire,
+            |value| Some(value.wrapping_add(2) | 1)).unwrap();
         Ok(())
     }
 
     async fn capture_frame(&mut self) -> Result<Self::Frame, Box<dyn Error + Send + Sync>> {
-        if let Some(frame) = self.rx.recv().await {
-            Ok(frame)
-        } else {
-            Err("System audio capture channel closed".into())
+        while let Some((epoch, frame)) = self.rx.recv().await {
+            if epoch & 1 != 0 && epoch == self.payload_epoch.load(std::sync::atomic::Ordering::Acquire) { return Ok(frame); }
         }
+        Err("System audio capture channel closed".into())
     }
 }
 

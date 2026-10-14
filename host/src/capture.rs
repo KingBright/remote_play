@@ -64,6 +64,7 @@ pub struct MacVideoCapturer {
     stream_running: bool,
     pending_stop: Option<crate::lifecycle::NativeStopReceipt>,
     resources: Option<Arc<crate::lifecycle::Resources>>,
+    minimum_capture_ts_us: u64,
     target_width: u32,
     source: protocol::session::CaptureSource,
     source_size: (u32, u32),
@@ -81,6 +82,7 @@ impl MacVideoCapturer {
             stream_running: false,
             pending_stop: None,
             resources: None,
+            minimum_capture_ts_us: 0,
             target_width,
             source: protocol::session::CaptureSource::MainDisplay,
             source_size: (0, 0),
@@ -207,20 +209,16 @@ impl VideoCapturer for MacVideoCapturer {
     }
 
     async fn pause(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Recreate only after confirmed stop; a withheld native callback cannot
-        // block the runtime or permit a replacement owner.
-        self.stop_owned_stream();
+        self.minimum_capture_ts_us = u64::MAX;
         drop(self.slot.take());
-        self.await_owned_stop().await
+        Ok(())
     }
 
     async fn resume(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.await_owned_stop().await?;
+        if self.stream.is_none() { return Err("capture owner has ended".into()); }
+        self.minimum_capture_ts_us = remote_core::timing::quanta_now_us();
         drop(self.slot.take());
         self.pacer.reset(self.target_fps);
-        if self.stream.is_none() {
-            self.start().await?;
-        }
         Ok(())
     }
 
@@ -233,7 +231,8 @@ impl VideoCapturer for MacVideoCapturer {
             )
             .await
             {
-                Ok(frame) if self.pacer.admit(frame.timing.capture_ts_us) => return Ok(frame),
+                Ok(frame) if frame.timing.capture_ts_us >= self.minimum_capture_ts_us
+                    && self.pacer.admit(frame.timing.capture_ts_us) => return Ok(frame),
                 Ok(_) => continue,
                 Err(_) => {
                     // Check if stream is still active

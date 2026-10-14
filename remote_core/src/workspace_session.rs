@@ -147,7 +147,7 @@ impl WorkspaceConnection {
             files_tx,
             subscriptions: HashMap::new(),
             pending: HashMap::new(),
-            clipboard: None,
+            clipboard: None, audio_groups: HashMap::new(), pending_audio_activity: std::collections::BTreeMap::new(),
         };
         let shutdown = cancel.subscribe();
         let task = tokio::spawn(async move {
@@ -267,6 +267,10 @@ struct View {
     host_stats: Arc<SharedHostStats>,
     handler: MediaPacketHandler,
     active: bool,
+    audio_active: bool,
+    audio_owner: Option<u32>,
+    wanted: crate::media_demand::MediaDemand,
+    activity_revision: u64,
 }
 struct Pending {
     command: SessionCommand,
@@ -287,6 +291,8 @@ struct Actor {
     subscriptions: HashMap<u32, View>,
     pending: HashMap<(u8, u32), Pending>,
     clipboard: Option<Arc<dyn EnvelopeIngress>>,
+    audio_groups: HashMap<u32, bool>,
+    pending_audio_activity: std::collections::BTreeMap<u32, bool>,
 }
 
 #[cfg(test)]
@@ -395,11 +401,54 @@ impl Actor {
                 self.pending.retain(|_, pending|
                     !matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == *id));
             }
-            SessionCommand::SetActivity { id, video, .. } => {
-                if let Some(view) = self.subscriptions.get_mut(id) { view.active = *video; }
+            SessionCommand::SetActivity { id, revision, video, audio } => {
+                if let Some(view) = self.subscriptions.get_mut(id)
+                    && *revision > view.activity_revision {
+                    view.activity_revision = *revision;
+                    view.wanted = crate::media_demand::MediaDemand { video: *video, audio: *audio };
+                    // Stop ingress immediately; reopening waits for this exact
+                    // activity revision to be acknowledged by the host.
+                    if !video { view.active = false; view.handler.reset_video_source(); }
+                    if !audio { view.audio_active = false; }
+                }
             }
             _ => {}
         }
+    }
+    fn refresh_audio_activity(&mut self) {
+        let mut groups = HashMap::<u32, bool>::new();
+        for view in self.subscriptions.values() {
+            if let Some(owner) = view.audio_owner {
+                *groups.entry(owner).or_default() |= view.audio_active;
+            }
+        }
+        for (owner, previous) in &self.audio_groups {
+            if *previous && !groups.contains_key(owner) {
+                for stream_id in [protocol::remote_system_audio_stream_id(*owner), protocol::remote_microphone_audio_stream_id(*owner)] {
+                    self.pending_audio_activity.insert(stream_id, false);
+                }
+            }
+        }
+        for (owner, active) in &groups {
+            if self.audio_groups.get(owner).copied().unwrap_or(false) != *active {
+                for stream_id in [protocol::remote_system_audio_stream_id(*owner), protocol::remote_microphone_audio_stream_id(*owner)] {
+                    self.pending_audio_activity.insert(stream_id, *active);
+                }
+            }
+        }
+        self.audio_groups = groups;
+        self.flush_audio_activity();
+    }
+    fn audio_payload_active(&self, stream_id: u32) -> bool {
+        self.audio_groups.iter().any(|(owner, active)| *active &&
+            [protocol::remote_system_audio_stream_id(*owner), protocol::remote_microphone_audio_stream_id(*owner)].contains(&stream_id))
+    }
+    fn flush_audio_activity(&mut self) -> bool {
+        while let Some((&stream_id, &active)) = self.pending_audio_activity.first_key_value() {
+            if self.audio_tx.try_send(AudioIngressEvent::PayloadActivity { stream_id, active }).is_err() { return false; }
+            self.pending_audio_activity.remove(&stream_id);
+        }
+        true
     }
     fn reject_request(&mut self, request_id: u32) {
         let video: Vec<_> = self.pending.values().filter_map(|pending| match pending.command {
@@ -435,6 +484,19 @@ impl Actor {
                 view.handler.reset_video_source();
             }
             self.pending.remove(&key);
+        }
+        if let SessionCommand::Subscribed { id, audio_owner, .. } = command {
+            if let Some(view) = self.subscriptions.get_mut(id) { view.audio_owner = *audio_owner; }
+            self.refresh_audio_activity();
+        }
+        if let SessionCommand::Activity { id, revision, video, audio } = command {
+            if let Some(view) = self.subscriptions.get_mut(id) {
+                if *revision < view.activity_revision { return false; }
+                if *video && view.wanted.video && !view.active { view.handler.reset_video_source(); }
+                view.active = *video && view.wanted.video;
+                view.audio_active = *audio && view.wanted.audio;
+            }
+            self.refresh_audio_activity();
         }
         if let SessionCommand::Error { request_id, .. } = command {
             self.reject_request(*request_id);
@@ -498,7 +560,8 @@ impl Actor {
                     let snapshots=self.input.lock().unwrap().snapshots();
                     for packet in snapshots { self.send(&SessionCommand::RealtimeInput(packet)).await; }
                 }
-                _ = media.tick(), if self.subscriptions.values().any(|s| s.active) => {
+                _ = media.tick(), if self.subscriptions.values().any(|s| s.active) || !self.pending_audio_activity.is_empty() => {
+                    self.flush_audio_activity();
                     for (id, view) in &mut self.subscriptions {
                         if !view.active || self.pending.values().any(|pending|
                             matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == *id)) { continue; }
@@ -515,7 +578,8 @@ impl Actor {
                             let _ = self.control_tx.send(SessionCommand::Error { request_id: request.id, reason: "decoder subscription limit reached".into() }); continue;
                         }
                         let handler = MediaPacketHandler::new(stats, Arc::new(AtomicU32::new(request.id)), host_stats.clone(), self.audio_tx.clone(), video, None);
-                        self.subscriptions.insert(request.id, View { handler, host_stats, active: true });
+                        self.subscriptions.insert(request.id, View { handler, host_stats, active: true, audio_active: request.audio, audio_owner: None, wanted: crate::media_demand::MediaDemand { video: true, audio: request.audio }, activity_revision: 0 });
+                        self.refresh_audio_activity();
                         self.request(SessionCommand::Subscribe(request)).await;
                     }
                     Some(Command::Realtime(packet, queued)) => {
@@ -528,6 +592,7 @@ impl Actor {
                     Some(Command::Clipboard(ingress)) => self.clipboard = ingress,
                     Some(Command::Control(command)) => {
                         self.prepare_control(&command);
+                        self.refresh_audio_activity();
                         self.request(command).await;
                     }
                 },
@@ -604,7 +669,8 @@ impl Actor {
                 }
             }
             ContentKind::AudioStreamConfig => {
-                if let Ok(config) = audio_stream_config_from_envelope(&envelope) {
+                if self.flush_audio_activity()
+                    && let Ok(config) = audio_stream_config_from_envelope(&envelope) {
                     let _ = self
                         .audio_tx
                         .try_send(AudioIngressEvent::StreamConfig(config));
@@ -621,7 +687,9 @@ impl Actor {
     }
     async fn packet(&mut self, packet: RtpPacket, timing: FrameTimingCheckpoints) {
         if packet.header.payload_type == protocol::PayloadType::AudioOpus as u8 {
-            let _ = self.audio_tx.try_send(AudioIngressEvent::Packet(packet));
+            if self.flush_audio_activity() && self.audio_payload_active(packet.header.ssrc) {
+                let _ = self.audio_tx.try_send(AudioIngressEvent::Packet(packet));
+            }
         } else if !self.source_switch_pending(packet.header.ssrc)
             && let Some(view) = self.subscriptions.get_mut(&packet.header.ssrc)
             && view.active
@@ -767,13 +835,14 @@ mod tests {
         let (audio_tx, audio_rx) = mpsc::channel(8);
         let (files_tx, _) = mpsc::channel(1);
         (Actor {input:Arc::new(std::sync::Mutex::new(InputState::default())),last_response_tx,id:90108,target,sender,receiver,commands,
-            control_tx,audio_tx,files_tx,subscriptions:HashMap::new(),pending:HashMap::new(),clipboard:None},audio_rx)
+            control_tx,audio_tx,files_tx,subscriptions:HashMap::new(),pending:HashMap::new(),clipboard:None,audio_groups:HashMap::new(),pending_audio_activity:std::collections::BTreeMap::new()},audio_rx)
     }
     fn source_switch_view(actor: &mut Actor, id: u32) -> mpsc::Receiver<(RtpPacket,FrameTimingCheckpoints)> {
         let (decode_tx, decode_rx) = mpsc::channel(8);
         let handler = MediaPacketHandler::new(Statistics::new(), Arc::new(AtomicU32::new(id)),
             Arc::new(SharedHostStats::default()),actor.audio_tx.clone(),decode_tx,None);
-        actor.subscriptions.insert(id, View {host_stats:Arc::new(SharedHostStats::default()),handler,active:true});
+        actor.audio_groups.insert(id, true);
+        actor.subscriptions.insert(id, View {host_stats:Arc::new(SharedHostStats::default()),handler,active:true,audio_active:true,audio_owner:Some(id),wanted:crate::media_demand::MediaDemand::BOTH,activity_revision:0});
         decode_rx
     }
     fn source_video(id:u32, seq:u16) -> RtpPacket {
@@ -795,7 +864,7 @@ mod tests {
         actor.packet(source_video(8,1),FrameTimingCheckpoints::default()).await;
         assert_eq!(other.try_recv().unwrap().0.header.ssrc,8);
         assert!(ours.try_recv().is_err());
-        let mut sound=source_video(7,1);
+        let mut sound=source_video(protocol::remote_system_audio_stream_id(7),1);
         sound.header.payload_type=protocol::PayloadType::AudioOpus as u8;
         actor.packet(sound.clone(),FrameTimingCheckpoints::default()).await;
         assert_eq!(audio.try_recv().unwrap(),AudioIngressEvent::Packet(sound));
@@ -976,6 +1045,10 @@ mod tests {
         let view = View {
             host_stats: Arc::new(SharedHostStats::default()),
             active: true,
+            audio_active: true,
+            audio_owner: Some(7),
+            wanted: crate::media_demand::MediaDemand::BOTH,
+            activity_revision: 0,
             handler: MediaPacketHandler::new(
                 stats.clone(),
                 Arc::new(AtomicU32::new(7)),
@@ -998,7 +1071,7 @@ mod tests {
             files_tx,
             subscriptions: HashMap::from([(7, view)]),
             pending: HashMap::new(),
-            clipboard: None,
+            clipboard: None, audio_groups: HashMap::new(), pending_audio_activity: std::collections::BTreeMap::new(),
         };
         let (cancel, _) = broadcast::channel(2);
         let cancel_rx = cancel.subscribe();
@@ -1123,7 +1196,7 @@ mod tests {
             files_tx,
             subscriptions: HashMap::new(),
             pending: HashMap::new(),
-            clipboard: None,
+            clipboard: None, audio_groups: HashMap::new(), pending_audio_activity: std::collections::BTreeMap::new(),
         };
         let (cancel, cancel_rx) = broadcast::channel(1);
         let task = tokio::spawn(async move {
@@ -1283,7 +1356,7 @@ mod rejected_datagram_tests {
             files_tx,
             subscriptions: HashMap::new(),
             pending: HashMap::new(),
-            clipboard: None,
+            clipboard: None, audio_groups: HashMap::new(), pending_audio_activity: std::collections::BTreeMap::new(),
         };
         let (cancel, _) = broadcast::channel(1);
         let cancel_rx = cancel.subscribe();
