@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,14 +31,19 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
-fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
+fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, deviceId: String = "", onClose: () -> Unit) {
     val context = LocalContext.current
+    val sessionKey = remember(endpoint, deviceId) { java.util.UUID.randomUUID().toString() }
+    var requestedFilePicker by rememberSaveable(endpoint, deviceId) { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val state by WorkspaceClient.state.collectAsState()
     var foreground by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) }
     var localError by remember { mutableStateOf<String?>(null) }
     var receivedFiles by remember { mutableStateOf(false) }
     var backgroundSettings by remember { mutableStateOf(false) }
+    var shareSelection by rememberSaveable(endpoint, deviceId) { mutableStateOf(false) }
+    var pickerSessionKey by rememberSaveable(endpoint, deviceId) { mutableStateOf("") }
+    var sharedFilesOpen by remember { mutableStateOf(false) }
     val preferences = remember { context.getSharedPreferences("stream", android.content.Context.MODE_PRIVATE) }
     var keepAlive by remember { mutableStateOf(preferences.getInt("background_keepalive_seconds", 300).toString()) }
     var adaptive by remember { mutableStateOf(preferences.getBoolean("adaptive_background", true)) }
@@ -60,13 +66,15 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 backgroundSettings = false
             }
         }) { Text("Save") } })
-    DisposableEffect(endpoint) {
-        WorkspaceClient.open(context, endpoint)
+    DisposableEffect(endpoint, deviceId) {
+        WorkspaceClient.open(context, endpoint, sessionKey, deviceId)
         val observer = LifecycleEventObserver { _, _ -> foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer); WorkspaceClient.close() }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val publishSelection = shareSelection
+        val selectedSessionKey = pickerSessionKey
         if (uri != null) scope.launch(Dispatchers.IO) {
             runCatching {
                 val name = context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
@@ -75,8 +83,17 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 val directory = File(context.cacheDir, "outgoing/${java.util.UUID.randomUUID()}").apply { mkdirs() }
                 val file = File(directory, name)
                 checkNotNull(context.contentResolver.openInputStream(uri)).use { input -> file.outputStream().use { output -> input.copyTo(output, 64 * 1024) } }
-                WorkspaceClient.sendFile(file)
+                if (publishSelection) WorkspaceClient.publishSharedFile(file, selectedSessionKey) else WorkspaceClient.sendFile(file, selectedSessionKey)
             }.onFailure { withContext(Dispatchers.Main) { localError = it.message } }
+        }
+    }
+    LaunchedEffect(state.sessionKey, state.connected, state.files, sendFileOnConnect) {
+        // Wait for this connection's capability response, not a previous device's state.
+        if (sendFileOnConnect && !requestedFilePicker && state.sessionKey == sessionKey && state.connected && state.files) {
+            requestedFilePicker = true
+            pickerSessionKey = sessionKey
+            shareSelection = false
+            filePicker.launch(arrayOf("*/*"))
         }
     }
     MaterialTheme {
@@ -85,7 +102,10 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                 TextButton(onClick = onClose) { Text("Disconnect") }
                 if (!state.connected) TextButton(onClick = { WorkspaceClient.reconnect() }) { Text("Reconnect") }
                 TextButton(onClick = { WorkspaceClient.layout(!state.grid) }) { Text(if (state.grid) "Use tabs" else "Show together") }
-                TextButton(onClick = { filePicker.launch(arrayOf("*/*")) }, enabled = state.connected && state.files) { Text("Send file") }
+                TextButton(onClick = { pickerSessionKey = sessionKey; shareSelection = false; filePicker.launch(arrayOf("*/*")) }, enabled = state.connected && state.files) { Text("Send file") }
+                TextButton(onClick = { pickerSessionKey = sessionKey; shareSelection = true; filePicker.launch(arrayOf("*/*")) }, enabled = state.connected) { Text("Share file with network") }
+                TextButton(onClick = { WorkspaceClient.clearSharedFiles() }, enabled = state.connected) { Text("Clear my shared list") }
+                TextButton(onClick = { sharedFilesOpen = true; WorkspaceClient.listSharedFiles() }, enabled = state.connected && state.files && !state.sharedBusy) { Text("Retrieve shared files") }
                 TextButton(onClick = { receivedFiles = true }) { Text("Received files") }
                 TextButton(onClick = { backgroundSettings = true }) { Text("Background") }
                 TextButton(onClick = { WorkspaceClient.enableClipboard(!state.clipboard) }, enabled = state.connected && state.clipboardAvailable) { Text(if (state.clipboard) "Clipboard ✓" else "Clipboard") }
@@ -138,7 +158,7 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
             rows.forEach { row ->
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     row.forEach { pane ->
-                        key(pane.id) {
+                        key(pane.id, state.connectionGeneration) {
                             Column(Modifier.weight(1f).fillMaxHeight().padding(3.dp)) {
                                 Row(Modifier.fillMaxWidth()) {
                                     TextButton(onClick = { selectedSettings = pane }, modifier = Modifier.weight(1f)) { Text("${pane.source.title} · ${pane.fps} fps", maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
@@ -148,14 +168,17 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                                     Slider(value = volumes[owner] ?: 1f, onValueChange = { volumes[owner] = it }, modifier = Modifier.height(24.dp))
                                 }
                                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                    if (foreground && state.connected) WorkspaceVideo(pane, onError = { localError = it })
+                                    if (foreground && state.connected) WorkspaceVideo(pane, state.sessionKey, state.connectionGeneration, onError = { localError = it })
                                 }
                             }
                         }
                     }
                 }
             }
-            if (state.panes.isEmpty()) Text("Choose a display or application window above. Files work without opening a video.", color = Color.LightGray)
+            if (state.panes.isEmpty()) Text(
+                if (state.sources.isEmpty()) "No screen is currently shared by this device. File transfers work independently."
+                else "Choose a display or application window above. Files work without opening a video.",
+                color = Color.LightGray)
             if (foreground && state.connected) visible.mapNotNull { it.audioOwner }.distinct().forEach { owner ->
                 key(owner) { WorkspaceAudio(owner, volumes[owner] ?: 1f, onError = { localError = it }) }
             }
@@ -170,6 +193,18 @@ fun WorkspaceScreen(endpoint: String, onClose: () -> Unit) {
                     if (f != null && k != null && f > 0 && k > 0) { WorkspaceClient.settings(pane.id, fps = f, kbps = k); selectedSettings = null }
                 }) { Text("Apply") } })
         }
+        if (sharedFilesOpen) AlertDialog(onDismissRequest = { sharedFilesOpen = false }, title = { Text("Remote shared files") },
+            text = { Column {
+                Text(state.status)
+                Text("Only explicitly shared files are listed. No remote filesystem paths are accepted.")
+                state.remoteFiles.forEach { file ->
+                    TextButton(onClick = { WorkspaceClient.fetchSharedFile(file.id, sessionKey) }, enabled = state.connected && !state.sharedBusy) { Text("Get ${file.name} (${file.sizeBytes} bytes)") }
+                }
+                Row {
+                    TextButton(onClick = { WorkspaceClient.listSharedFiles() }, enabled = state.connected && !state.sharedBusy) { Text("Refresh") }
+                    state.sharedNext?.let { next -> TextButton(onClick = { WorkspaceClient.listSharedFiles(next) }, enabled = state.connected && !state.sharedBusy) { Text("Next page") } }
+                }
+            } }, confirmButton = { TextButton(onClick = { sharedFilesOpen = false }) { Text("Close") } })
         if (receivedFiles) ReceivedFilesDialog { receivedFiles = false }
     }
 }
@@ -193,7 +228,7 @@ private fun WorkspaceAudio(owner: Int, volume: Float, onError: (String) -> Unit)
 }
 
 @Composable
-private fun WorkspaceVideo(pane: WorkspacePane, onError: (String) -> Unit) {
+private fun WorkspaceVideo(pane: WorkspacePane, sessionKey: String, generation: Long, onError: (String) -> Unit) {
     var ratio by remember(pane.id) { mutableFloatStateOf(if (pane.source.height > 0) pane.source.width.toFloat() / pane.source.height else 16f / 9f) }
     var measured by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     val currentError by rememberUpdatedState(onError)
@@ -207,11 +242,26 @@ private fun WorkspaceVideo(pane: WorkspacePane, onError: (String) -> Unit) {
         val fit = if (maxWidth / maxHeight > ratio) Modifier.fillMaxHeight().aspectRatio(ratio, true) else Modifier.fillMaxWidth().aspectRatio(ratio)
         AndroidView(modifier = fit, factory = { context ->
             SurfaceView(context).apply {
+                var surfaceToken = 0L
+                val touchedPointers = mutableSetOf<Int>()
+                val inputAlive = object : Runnable {
+                    override fun run() {
+                        if (surfaceToken == 0L || touchedPointers.isEmpty()) return
+                        WorkspaceClient.surface(pane.id, sessionKey, generation, surfaceToken, "alive")
+                        postDelayed(this, 100)
+                    }
+                }
+                fun clearTouches() { touchedPointers.clear(); removeCallbacks(inputAlive) }
                 holder.addCallback(object : SurfaceHolder.Callback {
-                    private val active = AtomicBoolean(false)
+                    private var active = AtomicBoolean(false)
                     private var worker: Thread? = null
                     override fun surfaceCreated(holder: SurfaceHolder) {
-                        active.set(true)
+                        val token = WorkspaceClient.nextSurfaceToken()
+                        surfaceToken = token
+                        clearTouches()
+                        WorkspaceClient.surface(pane.id, sessionKey, generation, token, "begin")
+                        val running = AtomicBoolean(true)
+                        active = running
                         worker = Thread({
                             val codec = MediaCodecPlayer(holder.surface) { dimensions -> post { ratio = dimensions.width.toFloat() / dimensions.height } }
                             try {
@@ -222,7 +272,8 @@ private fun WorkspaceVideo(pane: WorkspacePane, onError: (String) -> Unit) {
                                 var pendingSince = 0L
                                 var lastRequest = System.nanoTime()
                                 var reportedFirstFrame = false
-                                while (active.get()) {
+                                var framesBeforeReset = 0L
+                                while (running.get()) {
                                     if (pending == null) {
                                         pending = WorkspaceClient.nativeMedia(pane.id, false)
                                         pendingSince = System.nanoTime()
@@ -236,30 +287,68 @@ private fun WorkspaceVideo(pane: WorkspacePane, onError: (String) -> Unit) {
                                     }
                                     if (pending != null && System.nanoTime() - pendingSince > 250_000_000) {
                                         pending = null; waiting = true
+                                        WorkspaceClient.surface(pane.id, sessionKey, generation, token, "reset")
                                         codec.flush()
+                                        framesBeforeReset = codec.outputFrames
+                                        reportedFirstFrame = false
                                         WorkspaceClient.keyframe(pane.id)
                                         lastRequest = System.nanoTime()
                                     }
                                     codec.drain()
-                                    if (!reportedFirstFrame && codec.outputFrames > 0) {
+                                    if (!reportedFirstFrame && codec.outputFrames > framesBeforeReset) {
+                                        WorkspaceClient.surface(pane.id, sessionKey, generation, token, "ready")
                                         android.util.Log.i("RemotePlayWorkspace", "First decoded frame for subscription ${pane.id}")
                                         reportedFirstFrame = true
                                     }
                                     if (waiting && System.nanoTime() - lastRequest > 1_000_000_000) { WorkspaceClient.keyframe(pane.id); lastRequest = System.nanoTime() }
                                     Thread.sleep(4)
                                 }
-                            } catch (e: Exception) { if (active.get()) post { currentError(e.message ?: "Video decoder failed") } }
-                            finally { codec.stop() }
+                            } catch (e: Exception) { if (running.get()) post { currentError(e.message ?: "Video decoder failed") } }
+                            finally {
+                                WorkspaceClient.surface(pane.id, sessionKey, generation, token, "end")
+                                codec.stop()
+                            }
                         }, "workspace-video-${pane.id}").apply { start() }
                     }
                     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                    override fun surfaceDestroyed(holder: SurfaceHolder) { active.set(false); worker?.interrupt(); worker?.join(500); worker = null }
+                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                        val token = surfaceToken
+                        surfaceToken = 0L
+                        clearTouches()
+                        WorkspaceClient.surface(pane.id, sessionKey, generation, token, "end")
+                        active.set(false); worker?.interrupt(); worker?.join(500); worker = null
+                    }
                 })
                 setOnTouchListener { view, event ->
-                    if (!supportsInput) false else {
-                        val action = when (event.actionMasked) { MotionEvent.ACTION_DOWN -> "Down"; MotionEvent.ACTION_UP -> "Up"; MotionEvent.ACTION_CANCEL -> "Cancel"; else -> "Move" }
-                        WorkspaceClient.touch(pane.id, JSONObject().put("action", action).put("pointer_id", 0)
-                            .put("normalized_x", (event.x / view.width).coerceIn(0f, 1f)).put("normalized_y", (event.y / view.height).coerceIn(0f, 1f)).put("pressure", event.pressure))
+                    if (!supportsInput || surfaceToken == 0L || view.width == 0 || view.height == 0) {
+                        clearTouches()
+                        WorkspaceClient.surface(pane.id, sessionKey, generation, surfaceToken, "cancel")
+                        false
+                    } else {
+                        fun send(action: String, index: Int) {
+                            WorkspaceClient.touch(pane.id, sessionKey, generation, surfaceToken, event.eventTime,
+                                JSONObject().put("action", action).put("pointer_id", event.getPointerId(index))
+                                    .put("normalized_x", (event.getX(index) / view.width).coerceIn(0f, 1f))
+                                    .put("normalized_y", (event.getY(index) / view.height).coerceIn(0f, 1f))
+                                    .put("pressure", event.getPressure(index)))
+                        }
+                        when (event.actionMasked) {
+                            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                                send("Down", event.actionIndex)
+                                if (touchedPointers.isEmpty()) post(inputAlive)
+                                touchedPointers.add(event.getPointerId(event.actionIndex))
+                            }
+                            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                                send("Up", event.actionIndex)
+                                touchedPointers.remove(event.getPointerId(event.actionIndex))
+                                if (touchedPointers.isEmpty()) removeCallbacks(inputAlive)
+                            }
+                            MotionEvent.ACTION_MOVE -> for (index in 0 until event.pointerCount) send("Move", index)
+                            MotionEvent.ACTION_CANCEL -> {
+                                clearTouches()
+                                WorkspaceClient.surface(pane.id, sessionKey, generation, surfaceToken, "cancel")
+                            }
+                        }
                         if (event.actionMasked == MotionEvent.ACTION_UP) view.performClick()
                         true
                     }

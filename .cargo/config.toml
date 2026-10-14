@@ -5,8 +5,5 @@
 # do not need to downgrade CMake manually.
 CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 
-[target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
-
-[target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+# host/build.rs and app/build.rs add the macOS Swift runtime rpath to their
+# final link targets without changing flags for every shared dependency.

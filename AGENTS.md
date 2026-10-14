@@ -13,7 +13,7 @@
 
 ## Regression checks
 
-Run `python3 -m unittest discover -s scripts/tests -v` for release tests. On the existing signing Mac, `RP_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
+Run `./scripts/test_release.sh` from the primary `main` checkout for release tests. On the existing signing Mac, `RP_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
 
 ## Desktop visual quality and migration invariants
 
@@ -68,3 +68,14 @@ copies were archived; their retained artifact stores are not build entrypoints.
 Use `docs/testing/MAIN-WORKSPACE-VALIDATION.md` for the environment reconciliation.
 Keep lifecycle ownership checks and protected user changes. An incomplete build
 storage contract must be integrated here, not bypassed by cloning the source.
+
+Keep one verified current artifact per platform in the established default output
+and retain necessary shared compilation caches. The existing public authority owns
+atomic output replacement and exact temporary cleanup; do not create generations,
+archive directories or APK snapshots. Production macOS uses `~/rust-target` and
+`package/macos/RemotePlay-macos-arm64.zip`; Android uses its default `app-release.apk`.
+Use the formal packaging scripts; bare release Gradle packaging requires their
+active public transaction. Debug/native incremental builds do not publish artifacts.
+Wait for failed producers before cleaning their temporary files; recover interrupted
+transactions before producing again. Preserve unknown historical files and installed
+rollback identity tuples. A packaging signature is never a source-build receipt. Use `python3 scripts/build_identity_gate.py build` for identity builds: it uses the primary `main` checkout, existing `~/rust-target`, fixed temporary identity inputs and the release producer lock. New receipts identify shared incremental storage; historical fresh-target receipts retain their original checks. The acceptance entry verifies the compiler output directly and keeps only its small evidence files. This shared identity producer supports native macOS/Linux; existing Windows receipt verification remains available.

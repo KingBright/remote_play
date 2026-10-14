@@ -250,6 +250,21 @@ impl LinuxUinputInjector {
         } else {
             held.remove(&key);
         }
+        // Native ownership is recorded only after the corresponding write.
+        let modifiers = held.iter().fold(0, |mask, key| mask | match key {
+            42 | 54 => 1, 29 | 97 => 2, 56 | 100 => 4, 125 | 126 => 8, _ => 0,
+        });
+        self.active_modifiers.store(modifiers, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn set_modifiers(&self, modifiers: u8, deadline: Option<Instant>) -> InputResult {
+        for (bit, key) in [(1, 42), (2, 29), (4, 56), (8, 125)] {
+            let down = modifiers & bit != 0;
+            if (self.active_modifiers.load(Ordering::Relaxed) & bit != 0) != down {
+                self.key(key, down, deadline)?;
+            }
+        }
         Ok(())
     }
 }
@@ -331,11 +346,17 @@ impl LinuxUinputInjector {
                 modifiers,
             } => {
                 let key = map_gpui_or_mac_to_linux_key(key_code).ok_or("unsupported key code")?;
+                if pressed {
+                    self.set_modifiers(modifiers, deadline)?;
+                }
                 self.key(key, pressed, deadline)?;
-                self.active_modifiers.store(modifiers, Ordering::Relaxed);
+                if !pressed {
+                    // A release may remove owned modifiers, never introduce one.
+                    self.set_modifiers(modifiers & self.active_modifiers.load(Ordering::Relaxed), deadline)?;
+                }
             }
             InputEvent::ModifiersChanged(modifiers) => {
-                self.active_modifiers.store(modifiers, Ordering::Relaxed);
+                self.set_modifiers(modifiers, deadline)?;
             }
             InputEvent::Touch { .. } => {}
         }
@@ -470,6 +491,52 @@ mod deadline_tests {
         };
         (Arc::new(input), calls)
     }
+    #[test]
+    fn modifier_chord_posts_control_before_c_and_cleans_accepted_keys() {
+        let (input, calls) = fixture(None);
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
+        input.inject_input_before(InputEvent::ModifiersChanged(2), deadline).unwrap();
+        input.inject_input_before(InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 2,
+        }, deadline).unwrap();
+        input.release_all_input();
+        assert_eq!(*calls.lock().unwrap(), vec![
+            (EV_KEY, 29, 1), (EV_SYN, 0, 0), (EV_KEY, 46, 1), (EV_SYN, 0, 0),
+            (EV_KEY, 29, 0), (EV_SYN, 0, 0), (EV_KEY, 46, 0), (EV_SYN, 0, 0),
+        ]);
+    }
+
+    #[test]
+    fn modifier_chord_expiry_after_control_never_posts_bare_c() {
+        let until = Instant::now() + std::time::Duration::from_millis(40);
+        let (input, calls) = fixture(Some(until + std::time::Duration::from_millis(2)));
+        assert!(input.inject_input_before(InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 2,
+        }, until).is_err());
+        input.release_all_input();
+        assert_eq!(*calls.lock().unwrap(), vec![
+            (EV_KEY, 29, 1), (EV_SYN, 0, 0), (EV_KEY, 29, 0), (EV_SYN, 0, 0),
+        ]);
+    }
+
+    #[test]
+    fn modifier_chord_failed_control_never_posts_c_or_synthetic_cleanup() {
+        let (input, calls) = fixture(None);
+        let mut input = Arc::try_unwrap(input).ok().unwrap();
+        let sink = calls.clone();
+        input.record = Some(Arc::new(move |events| {
+            sink.lock().unwrap().extend(events.iter().map(|e| (e.r#type, e.code, e.value)));
+            -1
+        }));
+        assert!(input.inject_input_before(InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 2,
+        }, Instant::now() + std::time::Duration::from_secs(1)).is_err());
+        let before = calls.lock().unwrap().clone();
+        assert_eq!(before, vec![(EV_KEY, 29, 1), (EV_SYN, 0, 0)]);
+        input.release_all_input();
+        assert_eq!(*calls.lock().unwrap(), before);
+    }
+
     #[test]
     fn fresh_deadline_posts_and_cleans_only_the_accepted_key() {
         let (input, calls) = fixture(None);

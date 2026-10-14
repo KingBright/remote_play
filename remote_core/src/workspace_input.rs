@@ -9,6 +9,7 @@ pub(crate) struct InputState {
     next_request: u64,
 }
 struct Slot {
+    enabled: bool,
     revision: u32,
     request: u64,
     lease: Option<Lease>,
@@ -20,8 +21,16 @@ struct Lease {
     sequence: u64,
     held: HeldState,
     release: Option<u64>,
+    frontend_intent: Option<Instant>,
+    frontend_expired: bool,
 }
 impl Lease {
+    fn expire_frontend(&mut self,now:Instant)->bool {
+        if self.frontend_intent.is_some_and(|at|now.saturating_duration_since(at).as_millis()>=protocol::realtime_input::HOLD_TIMEOUT_MS as u128) {
+            self.held=HeldState::default();self.frontend_intent=None;self.frontend_expired=true;return true;
+        }false
+    }
+
     fn packet(&mut self, payload: InputPayload) -> Option<RealtimeInput> {
         self.sequence = self.sequence.checked_add(1)?;
         Some(RealtimeInput {
@@ -39,6 +48,7 @@ impl InputState {
         self.slots.insert(
             id,
             Slot {
+                enabled: true,
                 revision,
                 request: 0,
                 lease: None,
@@ -50,11 +60,32 @@ impl InputState {
     }
     pub(crate) fn ready(&self, id: u32, revision: u32) -> bool {
         self.slots.get(&id).is_some_and(|slot| {
-            slot.revision == revision
+            slot.enabled
+                && slot.revision == revision
                 && slot
                     .lease
                     .as_ref()
                     .is_some_and(|lease| lease.received.elapsed().as_millis() <= 750)
+        })
+    }
+    pub(crate) fn binding(&self, id: u32, revision: u32) -> Option<InputBinding> {
+        self.ready(id, revision).then(|| self.slots[&id].lease.as_ref().unwrap().binding)
+    }
+    pub(crate) fn seal_bound(
+        &mut self,
+        binding: InputBinding,
+        event: Option<protocol::InputEvent>,
+    ) -> Result<SessionCommand, String> {
+        if self.binding(binding.subscription_id, binding.source_revision) != Some(binding) {
+            return Err("input binding changed".into());
+        }
+        self.seal(match event {
+            Some(event) => SessionCommand::SourceInput {
+                id: binding.subscription_id,
+                source_revision: binding.source_revision,
+                event,
+            },
+            None => SessionCommand::ReleaseInput { id: binding.subscription_id },
         })
     }
     pub(crate) fn grant(
@@ -67,7 +98,8 @@ impl InputState {
         let Some(slot) = self.slots.get_mut(&binding.subscription_id) else {
             return;
         };
-        if binding.connection_id != connection
+        if !slot.enabled
+            || binding.connection_id != connection
             || slot.revision != binding.source_revision
             || slot.request != request
             || request == 0
@@ -90,12 +122,17 @@ impl InputState {
             sequence: 0,
             held: HeldState::default(),
             release: None,
+            frontend_intent:None,
+            frontend_expired:false,
         });
     }
     pub(crate) fn requests(&mut self, connection: u32) -> Vec<SessionCommand> {
         self.slots
             .iter_mut()
             .filter_map(|(id, slot)| {
+                if !slot.enabled {
+                    return None;
+                }
                 self.next_request = self.next_request.checked_add(1)?;
                 slot.request = self.next_request;
                 Some(SessionCommand::RequestInputBinding {
@@ -107,6 +144,15 @@ impl InputState {
             })
             .collect()
     }
+    /// Only a healthy input frontend can extend its current held assertion.
+    /// Grants/transport snapshots never call this and cannot revive expired keys.
+    pub(crate) fn refresh_bound(&mut self,binding:InputBinding)->bool {
+        if self.binding(binding.subscription_id,binding.source_revision)!=Some(binding){return false;}
+        let lease=self.slots.get_mut(&binding.subscription_id).unwrap().lease.as_mut().unwrap();
+        let now=Instant::now();if lease.expire_frontend(now)||lease.frontend_expired{return false;}
+        if !lease.held.snapshot().is_empty(){lease.frontend_intent=Some(now);}
+        true
+    }
     pub(crate) fn snapshots(&mut self) -> Vec<RealtimeInput> {
         self.slots
             .values_mut()
@@ -117,7 +163,12 @@ impl InputState {
                     slot.lease = None;
                     return None;
                 }
-                lease.packet(InputPayload::Held(lease.held.snapshot()))
+                lease.expire_frontend(Instant::now());
+                let held=lease.held.snapshot();
+                let age=if held.is_empty(){0}else{lease.frontend_intent.map_or(0,|at|at.elapsed().as_millis() as u64)};
+                let mut packet=lease.packet(InputPayload::Held(held))?;
+                // The actor must not stamp cached UI intent with a newer time.
+                packet.created_host_ms=packet.created_host_ms.saturating_sub(age);Some(packet)
             })
             .collect()
     }
@@ -148,9 +199,11 @@ impl InputState {
                 video,
                 audio,
             } => {
-                if !video {
-                    if let Some(slot) = self.slots.get_mut(&id) {
+                if let Some(slot) = self.slots.get_mut(&id) {
+                    slot.enabled = video;
+                    if !video {
                         slot.lease = None;
+                        slot.request = 0;
                     }
                 }
                 return Ok(SessionCommand::SetActivity {
@@ -178,14 +231,37 @@ impl InputState {
             slot.lease = None;
             return Err("input binding expired".into());
         }
+        lease.expire_frontend(Instant::now());
+        let was_empty=lease.held.snapshot().is_empty();
         let payload = if release {
             lease.held = HeldState::default();
+            lease.frontend_intent=None;lease.frontend_expired=false;
             InputPayload::Release
         } else {
             let seq = lease
                 .sequence
                 .checked_add(1)
                 .ok_or("input sequence exhausted")?;
+            // Preserve the caller's chord. A changed lease must reject stale
+            // modifier intent, not silently turn Ctrl+C into a bare C.
+            if let Some(protocol::InputEvent::Key {
+                pressed: true,
+                modifiers,
+                ..
+            }) = &event
+            {
+                let owned = lease
+                    .held
+                    .snapshot()
+                    .iter()
+                    .fold(0, |mask, (press, _)| match press {
+                        protocol::realtime_input::Press::Modifier(bit) => mask | bit,
+                        _ => mask,
+                    });
+                if *modifiers != owned {
+                    return Err("input modifier ownership changed".into());
+                }
+            }
             InputPayload::Event(
                 lease
                     .held
@@ -193,6 +269,8 @@ impl InputState {
                     .ok_or("duplicate or unowned input transition")?,
             )
         };
+        if !release && was_empty && !lease.held.snapshot().is_empty(){lease.frontend_intent=Some(Instant::now());lease.frontend_expired=false;}
+        if lease.held.snapshot().is_empty(){lease.frontend_intent=None;}
         let packet = lease.packet(payload).ok_or("input sequence exhausted")?;
         if release {
             lease.release = Some(packet.sequence);
@@ -235,6 +313,28 @@ mod tests {
             request,
             1000,
         );
+    }
+    #[test]
+    fn exact_grant_rejects_changed_epoch_without_mutating_new_holds() {
+        let mut state = InputState::default();
+        state.source(7, 0); grant(&mut state, 1);
+        let old = state.binding(7, 0).unwrap();
+        state.seal_bound(old, Some(protocol::InputEvent::MouseDown(0))).unwrap();
+        grant(&mut state, 2);
+        let current = state.binding(7, 0).unwrap();
+        assert_ne!(old, current);
+        assert!(state.seal_bound(old, Some(protocol::InputEvent::MouseUp(0))).is_err());
+        assert!(state.seal_bound(old, Some(protocol::InputEvent::MouseDown(0))).is_err());
+        assert!(state.seal_bound(old, None).is_err());
+        assert!(matches!(state.snapshots().remove(0).payload, InputPayload::Held(held) if held.is_empty()));
+        assert!(state.seal_bound(current, Some(protocol::InputEvent::Touch {
+            action: protocol::TouchAction::Down, pointer_id: 0,
+            normalized_x: 0.5, normalized_y: 0.5, pressure: 1.0,
+        })).is_err(), "raw touch must still fail closed");
+        state.seal_bound(current, Some(protocol::InputEvent::MouseDown(0))).unwrap();
+        let SessionCommand::RealtimeInput(release) = state.seal_bound(current, None).unwrap() else { panic!() };
+        assert_eq!(release.binding, current);
+        assert!(matches!(release.payload, InputPayload::Release));
     }
     #[test]
     fn queued_input_is_stamped_before_switch_and_never_rebound() {
@@ -317,6 +417,135 @@ mod tests {
                 Some(vec![protocol::InputEvent::MouseDown(0)])
             );
         }
+    }
+
+    #[test]
+    fn paused_input_cannot_be_regranted_or_replay_held_intent() {
+        let mut state = InputState::default();
+        state.source(7, 0);
+        grant(&mut state, 1);
+        state
+            .seal(SessionCommand::Input {
+                id: 7,
+                event: protocol::InputEvent::ModifiersChanged(2),
+            })
+            .unwrap();
+        let SessionCommand::RequestInputBinding { request, .. } = state.requests(1).remove(0)
+        else {
+            panic!()
+        };
+        state
+            .seal(SessionCommand::SetActivity {
+                id: 7,
+                revision: 1,
+                video: false,
+                audio: false,
+            })
+            .unwrap();
+        state.grant(
+            1,
+            InputBinding {
+                connection_id: 1,
+                subscription_id: 7,
+                source_revision: 0,
+                epoch: [1; 16],
+            },
+            request,
+            1000,
+        );
+        assert!(!state.ready(7, 0));
+        assert!(state.requests(1).is_empty());
+        assert!(state.snapshots().is_empty());
+        state
+            .seal(SessionCommand::SetActivity {
+                id: 7,
+                revision: 2,
+                video: true,
+                audio: true,
+            })
+            .unwrap();
+        grant(&mut state, 2);
+        assert!(
+            state
+                .seal(SessionCommand::Input {
+                    id: 7,
+                    event: protocol::InputEvent::Key {
+                        key_code: 8,
+                        pressed: true,
+                        modifiers: 2
+                    }
+                })
+                .is_err()
+        );
+        assert!(
+            matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty())
+        );
+    }
+
+    #[test]
+    fn lost_grants_expire_and_late_grants_cannot_revive_a_paused_hold() {
+        let mut state = InputState::default();
+        state.source(7, 0);
+        grant(&mut state, 1);
+        state
+            .seal(SessionCommand::Input {
+                id: 7,
+                event: protocol::InputEvent::MouseDown(0),
+            })
+            .unwrap();
+        state
+            .slots
+            .get_mut(&7)
+            .unwrap()
+            .lease
+            .as_mut()
+            .unwrap()
+            .received = Instant::now() - std::time::Duration::from_millis(751);
+        assert!(!state.ready(7, 0));
+        assert!(state.snapshots().is_empty());
+        assert!(
+            state
+                .seal(SessionCommand::Input {
+                    id: 7,
+                    event: protocol::InputEvent::MouseUp(0)
+                })
+                .is_err()
+        );
+        grant(&mut state, 2);
+        assert!(
+            matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty())
+        );
+    }
+    #[test]
+    fn network_grants_cannot_keep_a_frozen_frontends_cached_hold_alive() {
+        let mut state=InputState::default();state.source(7,0);grant(&mut state,1);
+        state.seal(SessionCommand::Input{id:7,event:protocol::InputEvent::MouseDown(0)}).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(330));
+        grant(&mut state,1); // Network actor/grant is healthy; frontend did nothing.
+        assert!(matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty()),"a transport grant must not renew stale UI hold intent");
+    }
+
+    #[test]
+    fn healthy_frontend_keeps_long_hold_but_late_refresh_and_old_epoch_cannot_revive_it(){
+        let mut state=InputState::default();state.source(7,0);grant(&mut state,1);let binding=state.binding(7,0).unwrap();
+        state.seal_bound(binding,Some(protocol::InputEvent::MouseDown(0))).unwrap();
+        for _ in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(100));grant(&mut state,1);
+            assert!(state.refresh_bound(binding));assert!(matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if !held.is_empty()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(330));grant(&mut state,1);
+        assert!(matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty()));
+        assert!(!state.refresh_bound(binding));assert!(!state.refresh_bound(binding));
+        assert!(state.seal_bound(binding,Some(protocol::InputEvent::MouseUp(0))).is_err());
+        state.seal_bound(binding,Some(protocol::InputEvent::MouseDown(0))).unwrap();assert!(state.refresh_bound(binding));
+        grant(&mut state,2);assert!(!state.refresh_bound(binding));assert!(matches!(&state.snapshots()[0].payload,InputPayload::Held(held) if held.is_empty()));
+    }
+    #[test]
+    fn transport_snapshot_does_not_refresh_the_frontends_timestamp(){
+        let mut state=InputState::default();state.source(7,0);grant(&mut state,1);
+        let SessionCommand::RealtimeInput(down)=state.seal(SessionCommand::Input{id:7,event:protocol::InputEvent::MouseDown(0)}).unwrap()else{panic!()};
+        std::thread::sleep(std::time::Duration::from_millis(100));let snapshot=state.snapshots().remove(0);
+        assert!(snapshot.created_host_ms<=down.created_host_ms+2,"network snapshot made frontend intent younger");
     }
 
 }

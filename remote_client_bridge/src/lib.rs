@@ -1,6 +1,7 @@
 pub mod publisher_bridge;
 pub mod touch_mapper;
 pub mod workspace_bridge;
+mod workspace_touch;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;
@@ -8,18 +9,17 @@ pub mod jni_bridge;
 #[cfg(feature = "wasm")]
 pub mod wasm_bridge;
 
+use protocol::session::{CaptureSource, SessionCommand, SubscriptionRequest};
 use protocol::{ControlMessage, TouchAction};
-use remote_core::client_session::{
-    AudioIngressEvent, ClientSessionEvent, ClientSessionReceiverConfig, SharedHostStats,
-    spawn_client_session_receiver,
-};
+use remote_core::client_session::{AudioIngressEvent, SharedHostStats};
 use remote_core::discovery::{
     DEFAULT_DISCOVERY_PORT, DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities,
     DiscoveryPeerSnapshot, DiscoveryRouteOverride, DiscoveryRuntimeConfig, DiscoveryScope,
     run_discovery_runtime,
 };
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshConfig, default_app_private_mesh_dir};
-use remote_core::net::{UdpMultiplexer, UdpSender};
+#[cfg(test)]
+use remote_core::net::UdpMultiplexer;
 use remote_core::p2p::{
     BoundP2pTunnel, P2pTunnelConfig, derive_p2p_group_id, resolve_p2p_rendezvous_addrs,
 };
@@ -27,15 +27,14 @@ use remote_core::pairing_qr::parse_pairing_qr;
 use remote_core::relay::{
     BoundWebSocketRelayTunnel, WebSocketRelayTunnelConfig, derive_relay_group_id,
 };
-use remote_core::session_crypto::{
-    SessionCrypto, load_session_psk, mac_session_hello, now_unix_ms, random_bytes_16,
-};
+use remote_core::workspace_session::WorkspaceConnection;
+
 use remote_core::stats::Statistics;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -47,6 +46,22 @@ const DEFAULT_RELAY_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
 static BRIDGE_DEVICE_GROUP_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub(crate) static PUBLISHING_PORT: std::sync::atomic::AtomicU16 =
     std::sync::atomic::AtomicU16::new(0);
+static PUBLISHER_CAPABILITIES: Mutex<Option<watch::Receiver<DiscoveryCapabilities>>> = Mutex::new(None);
+
+fn inbound_capabilities(port: u16, capture_authorized: bool) -> DiscoveryCapabilities {
+    DiscoveryCapabilities {
+        can_view: true,
+        can_stream: port != 0 && capture_authorized,
+        file_transfer: port != 0,
+        clipboard_sync: false,
+        talkback: false,
+    }
+}
+
+fn publisher_capabilities() -> watch::Receiver<DiscoveryCapabilities> {
+    PUBLISHER_CAPABILITIES.lock().unwrap().clone()
+        .unwrap_or_else(|| watch::channel(inbound_capabilities(0, false)).1)
+}
 
 pub fn configure_device_group_dir(path: impl Into<PathBuf>) -> Result<(), PathBuf> {
     BRIDGE_DEVICE_GROUP_DIR.set(path.into())
@@ -131,44 +146,65 @@ pub struct EncodedAudioPacket {
 }
 
 struct LiveSession {
-    control_tx: mpsc::UnboundedSender<ControlMessage>,
-    target: SocketAddr,
-    udp_sender: UdpSender,
+    connection: Arc<WorkspaceConnection>,
+    session_id: u32,
+    activity_revision: std::sync::atomic::AtomicU64,
+    supports_input: Arc<AtomicBool>,
     video_activity: Arc<Mutex<Option<Instant>>>,
-    _receiver: tokio::task::JoinHandle<()>,
-    _egress: tokio::task::JoinHandle<()>,
     _decode_pump: tokio::task::JoinHandle<()>,
     _audio_pump: tokio::task::JoinHandle<()>,
-    _heartbeat: tokio::task::JoinHandle<()>,
     _telemetry: tokio::task::JoinHandle<()>,
     _events: tokio::task::JoinHandle<()>,
 }
 
 impl LiveSession {
+    fn input_ready(&self) -> bool {
+        self.supports_input.load(Relaxed)
+            && self.video_activity.lock().unwrap().is_some()
+            && self.connection.input_ready(self.session_id, 0)
+    }
+    fn input(&self, event: protocol::InputEvent) {
+        let _ = self.connection.try_control(SessionCommand::SourceInput {
+            id: self.session_id,
+            source_revision: 0,
+            event,
+        });
+    }
     async fn stop(self) {
+        self.supports_input.store(false, Relaxed);
         let tasks = [
-            self._receiver,
-            self._egress,
             self._decode_pump,
             self._audio_pump,
-            self._heartbeat,
             self._telemetry,
             self._events,
         ];
         for task in &tasks {
             task.abort();
         }
-        // Wait for in-flight queue/stat writes before another session can start.
         for task in tasks {
             let _ = task.await;
         }
-        // Send directly after egress has stopped; enqueue-then-abort can lose StopStream.
-        let _ = tokio::time::timeout(
-            Duration::from_millis(250),
-            self.udp_sender
-                .send_control(&ControlMessage::StopStream, self.target),
-        )
-        .await;
+        // Media stops immediately; the shared connection actor stays alive to
+        // deliver release and retry Close until its matching acknowledgement.
+        let _ = self
+            .connection
+            .control(SessionCommand::ReleaseInput {
+                id: self.session_id,
+            })
+            .await;
+        self.connection.close().await;
+    }
+}
+
+fn manual_subscription(id: u32, rates: (u32, u32)) -> SubscriptionRequest {
+    SubscriptionRequest {
+        id,
+        source: CaptureSource::MainDisplay,
+        width: 1920,
+        height: 1080,
+        fps: rates.0,
+        bitrate_kbps: rates.1,
+        audio: true,
     }
 }
 
@@ -188,6 +224,11 @@ pub struct RemoteBridgeClient {
     audio_queue: Arc<Mutex<VecDeque<EncodedAudioPacket>>>,
     live: Mutex<Option<LiveSession>>,
     virtual_keys: Mutex<touch_mapper::VirtualKeyboard>,
+    manual_input_intent: Mutex<Option<(protocol::realtime_input::InputBinding, Instant, u64)>>,
+    manual_token_binding: Mutex<Option<(protocol::realtime_input::InputBinding, u64)>>,
+    manual_token_sequence: AtomicU64,
+    manual_input_owner: AtomicU64,
+    manual_input_revoked: AtomicU64,
     lifecycle: Mutex<()>,
     last_connect: Mutex<Option<(String, String)>>,
     connected_at: Mutex<Option<Instant>>,
@@ -235,6 +276,11 @@ impl RemoteBridgeClient {
             audio_queue: Arc::new(Mutex::new(VecDeque::with_capacity(16))),
             live: Mutex::new(None),
             virtual_keys: Mutex::new(touch_mapper::VirtualKeyboard::default()),
+            manual_input_intent: Mutex::new(None),
+            manual_token_binding: Mutex::new(None),
+            manual_token_sequence: AtomicU64::new(0),
+            manual_input_owner: AtomicU64::new(0),
+            manual_input_revoked: AtomicU64::new(0),
             lifecycle: Mutex::new(()),
             last_connect: Mutex::new(None),
             connected_at: Mutex::new(None),
@@ -261,6 +307,7 @@ impl RemoteBridgeClient {
     }
 
     pub fn set_touch_mode(&self, mode: TouchMode) {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let releases = self
             .touch_tracker
             .lock()
@@ -268,7 +315,7 @@ impl RemoteBridgeClient {
             .unwrap_or_default();
         if let Some(live) = self.live.lock().unwrap().as_ref() {
             for event in releases {
-                let _ = live.control_tx.send(ControlMessage::Input(event));
+                live.input(event);
             }
         }
     }
@@ -279,36 +326,114 @@ impl RemoteBridgeClient {
         }
     }
 
-    pub fn handle_touch_input(
-        &self,
-        action: TouchAction,
-        pointer_id: u32,
-        norm_x: f32,
-        norm_y: f32,
-        pressure: f32,
-    ) {
-        let events = if let Ok(mut tracker) = self.touch_tracker.lock() {
-            tracker.process_touch(action, pointer_id, norm_x, norm_y, pressure, Instant::now())
-        } else {
-            Vec::new()
-        };
-
-        if let Some(live) = self.live.lock().unwrap().as_ref() {
-            for ev in events {
-                let _ = live.control_tx.send(ControlMessage::Input(ev));
-            }
+    /// A viewport captures this local session token once. It cannot refresh a
+    /// replacement connection; telemetry/background keepalives never call this.
+    // Local opaque tokens include the complete grant, including its epoch.
+    // Called under lifecycle; issuing a token neither renews nor revokes input.
+    fn manual_token(&self, binding: protocol::realtime_input::InputBinding) -> u64 {
+        let mut current = self.manual_token_binding.lock().unwrap();
+        if let Some((old, token)) = *current && old == binding { return token; }
+        let token = self.manual_token_sequence.fetch_update(Relaxed, Relaxed, |v| v.checked_add(1))
+            .expect("manual input token exhausted") + 1;
+        *current = Some((binding, token));
+        token
+    }
+    fn revoke_manual_token(&self, token: u64) {
+        if token != 0 && self.manual_input_owner.load(Relaxed) == token {
+            self.manual_input_revoked.fetch_max(token, Relaxed);
         }
+    }
+    pub fn input_intent_token(&self) -> u64 {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { return 0; };
+        let Ok(live) = self.live.try_lock() else { return 0; };
+        live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready())
+            .and_then(|live| live.connection.input_binding(live.session_id, 0))
+            .map_or(0, |binding| self.manual_token(binding))
+    }
+    // Called under lifecycle + live locks, before any gesture tail or health
+    // renewal. DirectTouch Down has no core held button yet, so its local
+    // tracker needs the same deadline and exact epoch independently.
+    fn expire_manual_input(&self, live: &LiveSession, binding: protocol::realtime_input::InputBinding, now: Instant) -> bool {
+        let mut intent = self.manual_input_intent.lock().unwrap();
+        // A failed nonblocking UI call may have dropped a gesture's Cancel.
+        // Consume that invalidation before another heartbeat can renew it.
+        let revoked = intent.is_some_and(|(_, _, token)| self.manual_input_revoked.compare_exchange(token, 0, Relaxed, Relaxed).is_ok());
+        if revoked || intent.is_some_and(|(old, last, _)| old != binding || now.saturating_duration_since(last).as_millis() >= protocol::realtime_input::HOLD_TIMEOUT_MS as u128) {
+            self.touch_tracker.lock().unwrap().cancel_all();
+            *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            if let Some((old, _, _)) = intent.take() { live.connection.try_bound_input(old, None); }
+            self.manual_input_owner.store(0, Relaxed);
+            return true;
+        }
+        false
+    }
+    pub fn refresh_input_intent(&self, token: u64) -> bool {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(token); return false; };
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(token); return false; };
+        let Some(live) = live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready()) else { self.revoke_manual_token(token); return false; };
+        let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return false; };
+        if token == 0 || token != self.manual_token(binding) { return false; }
+        let now = Instant::now();
+        if self.expire_manual_input(live, binding, now) { return false; }
+        if !live.connection.refresh_bound_input(binding) {
+            self.touch_tracker.lock().unwrap().cancel_all();
+            *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
+            live.connection.try_bound_input(binding, None);
+            return false;
+        }
+        if let Some((_, last, _)) = self.manual_input_intent.lock().unwrap().as_mut() { *last = now; }
+        true
+    }
+
+    pub fn handle_touch_input(
+        &self, action: TouchAction, pointer_id: u32, norm_x: f32, norm_y: f32, pressure: f32,
+    ) {
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        let Some(live) = live.as_ref().filter(|live| !self.desired_media_paused.load(Relaxed) && live.input_ready()) else {
+            self.touch_tracker.lock().unwrap().cancel_all();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
+            return;
+        };
+        let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return; };
+        let now = Instant::now();
+        self.expire_manual_input(live, binding, now);
+        {
+            let mut intent = self.manual_input_intent.lock().unwrap();
+            if !matches!(action, TouchAction::Down) && intent.is_none() { return; }
+            let token = self.manual_token(binding);
+            *intent = Some((binding, now, token));
+            self.manual_input_owner.store(token, Relaxed);
+        }
+        let events = self.touch_tracker.lock().unwrap().process_touch(action, pointer_id, norm_x, norm_y, pressure, now);
+        for event in events { live.connection.try_bound_input(binding, Some(event)); }
     }
 
     pub fn send_virtual_key(&self, key_name: &str, pressed: bool) {
-        if pressed && self.desired_media_paused.load(Relaxed) {
-            return;
-        }
-        let live = self.live.lock().unwrap();
-        if let Some(live) = live.as_ref() {
-            for event in self.virtual_keys.lock().unwrap().event(key_name, pressed) {
-                let _ = live.control_tx.send(ControlMessage::Input(event));
+        let Ok(_lifecycle) = self.lifecycle.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        if pressed && self.desired_media_paused.load(Relaxed) { return; }
+        let Ok(live) = self.live.try_lock() else { self.revoke_manual_token(self.manual_input_owner.load(Relaxed)); return; };
+        if let Some(live) = live.as_ref().filter(|live| live.input_ready()) {
+            let Some(binding) = live.connection.input_binding(live.session_id, 0) else { return; };
+            let now = Instant::now();
+            self.expire_manual_input(live, binding, now);
+            {
+                let mut intent = self.manual_input_intent.lock().unwrap();
+                if !pressed && intent.is_none() { return; }
+                let token = self.manual_token(binding);
+            *intent = Some((binding, now, token));
+            self.manual_input_owner.store(token, Relaxed);
             }
+            for event in self.virtual_keys.lock().unwrap().event(key_name, pressed) {
+                live.connection.try_bound_input(binding, Some(event));
+            }
+        } else {
+            *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+            *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
         }
     }
 
@@ -475,11 +600,15 @@ impl RemoteBridgeClient {
     }
 
     fn stop_live(&self) {
+        *self.manual_token_binding.lock().unwrap() = None;
+        *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
         self.host_stats.media_pause.end_session();
         if let Some(live) = self.live.lock().unwrap().take() {
             self.runtime().block_on(live.stop());
         }
         *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+        self.touch_tracker.lock().unwrap().cancel_all();
         self.active_session_id.store(0, Relaxed);
         self.nalu_queue.lock().unwrap().clear();
         self.audio_queue.lock().unwrap().clear();
@@ -494,15 +623,10 @@ impl RemoteBridgeClient {
         let _lifecycle = self.lifecycle.lock().unwrap();
         *self.stream_rates.lock().unwrap() = (fps, bitrate_kbps);
         if let Some(live) = self.live.lock().unwrap().as_ref() {
-            live.control_tx
-                .send(ControlMessage::UpdateStreamSettings {
-                    width: 1920,
-                    height: 1080,
-                    fps,
-                    bitrate_kbps,
-                    session_id: self.active_session_id.load(Relaxed),
-                })
-                .map_err(|err| err.to_string())?;
+            self.runtime().block_on(
+                live.connection
+                    .update_settings(&manual_subscription(live.session_id, (fps, bitrate_kbps))),
+            )?;
         }
         Ok(())
     }
@@ -515,6 +639,21 @@ impl RemoteBridgeClient {
         }
         if !self.host_stats.media_pause.set_paused(paused) {
             return;
+        }
+        self.touch_tracker.lock().unwrap().cancel_all();
+        *self.virtual_keys.lock().unwrap() = touch_mapper::VirtualKeyboard::default();
+        *self.manual_input_intent.lock().unwrap() = None;
+            self.manual_input_owner.store(0, Relaxed);
+        if let Some(live) = self.live.lock().unwrap().as_ref() {
+            let revision = live.activity_revision.fetch_add(1, Relaxed) + 1;
+            let _ = self
+                .runtime()
+                .block_on(live.connection.control(SessionCommand::SetActivity {
+                    id: live.session_id,
+                    revision,
+                    video: !paused,
+                    audio: !paused,
+                }));
         }
         self.nalu_queue.lock().unwrap().clear();
         self.audio_queue.lock().unwrap().clear();
@@ -581,9 +720,12 @@ impl RemoteBridgeClient {
             return;
         }
         if let Some(live) = self.live.lock().unwrap().as_ref() {
-            let _ = live.control_tx.send(ControlMessage::RequestKeyframe {
-                session_id: self.active_session_id.load(Relaxed),
-            });
+            let _ = self.runtime().block_on(live.connection.sender.send_control(
+                &ControlMessage::RequestKeyframe {
+                    session_id: live.session_id,
+                },
+                live.connection.target,
+            ));
         }
     }
 
@@ -625,83 +767,72 @@ async fn start_live_session(
     host_stats: Arc<SharedHostStats>,
     nalu_queue: Arc<Mutex<VecDeque<EncodedVideoNalu>>>,
     audio_queue: Arc<Mutex<VecDeque<EncodedAudioPacket>>>,
-    active_session_id: Arc<AtomicU32>,
+    _active_session_id: Arc<AtomicU32>,
     telemetry_tx: watch::Sender<BridgeTelemetry>,
     state_tx: watch::Sender<BridgeSessionState>,
     last_error_tx: watch::Sender<String>,
 ) -> Result<LiveSession, Box<dyn std::error::Error + Send + Sync>> {
-    let bind_addr = if target.is_ipv6() {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let multiplexer = UdpMultiplexer::bind(bind_addr).await?;
-    let (udp_sender, udp_receiver) = multiplexer.split();
-    maybe_authenticate(&udp_sender, &udp_receiver, target).await?;
+    let (connection, events) = WorkspaceConnection::connect_media(target)
+        .await
+        .map_err(std::io::Error::other)?;
+    let connection = Arc::new(connection);
+    let mut audio_rx = events.audio;
+    let mut session_event_rx = events.control;
     host_stats.media_pause.begin_session(target, session_id);
     host_stats.media_pause.set_paused(paused);
-
-    udp_sender
-        .send_control(
-            &ControlMessage::StartStream {
-                width: 1920,
-                height: 1080,
-                fps: stream_rates.0,
-                bitrate_kbps: stream_rates.1,
-                session_id,
-            },
-            target,
-        )
-        .await?;
-    let _ = udp_sender
-        .send_control(&ControlMessage::RequestKeyframe { session_id }, target)
-        .await;
-
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel();
-    let (audio_tx, mut audio_rx) = mpsc::channel(64);
     let (decode_tx, mut decode_rx) = mpsc::channel(64);
-    let stats = Statistics::new();
-    let (session_event_tx, mut session_event_rx) = mpsc::unbounded_channel();
-
-    let receiver = spawn_client_session_receiver(ClientSessionReceiverConfig {
-        bind_addr: multiplexer.local_addr()?,
-        udp_receiver,
-        stats,
-        active_session_id,
-        host_stats: host_stats.clone(),
-        audio_tx,
-        decode_tx,
-        clipboard_control: None,
-        file_transfer_control: None,
-        session_event_tx: Some(session_event_tx),
-    });
-
+    connection
+        .subscribe(
+            manual_subscription(session_id, stream_rates),
+            decode_tx,
+            Statistics::new(),
+            host_stats.clone(),
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+    if paused {
+        connection
+            .control(SessionCommand::SetActivity {
+                id: session_id,
+                revision: 1,
+                video: false,
+                audio: false,
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+    }
+    let supports_input = Arc::new(AtomicBool::new(false));
+    let event_input = supports_input.clone();
     let event_state_tx = state_tx.clone();
     let event_error_tx = last_error_tx.clone();
-    let event_control_tx = control_tx.clone();
+    let event_connection = connection.clone();
     let events = tokio::spawn(async move {
         while let Some(event) = session_event_rx.recv().await {
-            if let ClientSessionEvent::HostError { request_id, reason } = event
-                && request_id == session_id
-            {
-                event_error_tx.send_replace(reason);
-                let _ = event_state_tx.send(BridgeSessionState::Error);
-                let _ = event_control_tx.send(ControlMessage::StopStream);
-                break;
+            match event {
+                SessionCommand::Subscribed {
+                    id, supports_input, ..
+                } if id == session_id => {
+                    event_input.store(supports_input, Relaxed);
+                }
+                SessionCommand::Error { request_id, reason } if request_id == session_id => {
+                    event_input.store(false, Relaxed);
+                    event_error_tx.send_replace(reason);
+                    let _ = event_state_tx.send(BridgeSessionState::Error);
+                    let _ = event_connection
+                        .control(SessionCommand::Unsubscribe { id: session_id })
+                        .await;
+                    break;
+                }
+                SessionCommand::Closed { .. } => {
+                    event_input.store(false, Relaxed);
+                    break;
+                }
+                _ => {}
             }
         }
     });
 
-    let egress_sender = udp_sender.clone();
-    let egress = tokio::spawn(async move {
-        while let Some(msg) = control_rx.recv().await {
-            if egress_sender.send_control(&msg, target).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    let recovery_tx = control_tx.clone();
+    let recovery_connection = connection.clone();
     let video_activity = Arc::new(Mutex::new(None));
     let activity = video_activity.clone();
     let media_stats = host_stats.clone();
@@ -713,7 +844,9 @@ async fn start_live_session(
                 waiting_for_keyframe = true;
                 continue;
             }
-            *activity.lock().unwrap() = Some(Instant::now());
+            if activity.lock().unwrap().is_none() {
+                waiting_for_keyframe = true;
+            }
             let keyframe = hevc_keyframe(&packet.payload);
             let nalu = EncodedVideoNalu {
                 data: packet.payload,
@@ -724,12 +857,18 @@ async fn start_live_session(
                 if queue.len() >= 8 {
                     queue.clear();
                     waiting_for_keyframe = true;
-                    let _ = recovery_tx.send(ControlMessage::RequestKeyframe { session_id });
+                    let sender = recovery_connection.sender.clone();
+                    tokio::spawn(async move {
+                        let _ = sender
+                            .send_control(&ControlMessage::RequestKeyframe { session_id }, target)
+                            .await;
+                    });
                 }
                 if waiting_for_keyframe && !keyframe {
                     continue;
                 }
                 waiting_for_keyframe = false;
+                *activity.lock().unwrap() = Some(Instant::now());
                 queue.push_back(nalu);
                 if !received_video {
                     received_video = true;
@@ -770,34 +909,6 @@ async fn start_live_session(
         }
     });
 
-    let heartbeat_tx = control_tx.clone();
-    let heartbeat_stats = host_stats.clone();
-    let heartbeat = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(if heartbeat_stats.media_pause.is_paused() {
-                Duration::from_secs(5)
-            } else {
-                Duration::from_millis(500)
-            })
-            .await;
-            if heartbeat_tx.send(ControlMessage::Heartbeat).is_err() {
-                break;
-            }
-            if heartbeat_stats.media_pause.is_paused() {
-                continue;
-            }
-            let now_ms = now_unix_ms();
-            if heartbeat_tx
-                .send(ControlMessage::Ping {
-                    client_send_ts: now_ms,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
     let telemetry = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -819,17 +930,14 @@ async fn start_live_session(
         }
     });
 
-    let _ = control_tx.send(ControlMessage::Heartbeat);
     Ok(LiveSession {
-        control_tx,
-        target,
-        udp_sender,
+        connection,
+        session_id,
+        activity_revision: std::sync::atomic::AtomicU64::new(u64::from(paused)),
+        supports_input,
         video_activity,
-        _receiver: receiver,
-        _egress: egress,
         _decode_pump: decode_pump,
         _audio_pump: audio_pump,
-        _heartbeat: heartbeat,
         _telemetry: telemetry,
         _events: events,
     })
@@ -904,25 +1012,21 @@ async fn run_bridge_network(
     let mut cancel_rx = cancel_tx.subscribe();
     let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
     let identity = store.load_or_generate("RemotePlay Android")?;
+    let live_capabilities = publisher_capabilities();
     let announcement = DiscoveryAnnouncement {
         network_name: identity.network_name.clone(),
         device_id: identity.node_id.clone(),
         display_name: identity.display_name.clone(),
         control_port: PUBLISHING_PORT.load(Relaxed),
         virtual_ip: None,
-        capabilities: DiscoveryCapabilities {
-            can_view: true,
-            can_stream: PUBLISHING_PORT.load(Relaxed) != 0,
-            file_transfer: PUBLISHING_PORT.load(Relaxed) != 0,
-            clipboard_sync: false,
-            talkback: false,
-        },
+        capabilities: *live_capabilities.borrow(),
         scope: DiscoveryScope::Lan,
         ttl: DEFAULT_PEER_TTL,
     };
     let discovery_target = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DISCOVERY_PORT));
     let mut discovery_config = DiscoveryRuntimeConfig::lan_default(announcement.clone());
     discovery_config.accept_any_network = false;
+    discovery_config.live_capabilities = Some(live_capabilities.clone());
     let mut network_tasks = Vec::new();
 
     // Unit tests stay hermetic. Android/native builds use the same public P2P + relay
@@ -931,6 +1035,7 @@ async fn run_bridge_network(
         match start_bridge_p2p(
             &identity,
             &announcement,
+            live_capabilities.clone(),
             discovery_target,
             cancel_tx.clone(),
         )
@@ -940,7 +1045,9 @@ async fn run_bridge_network(
             Err(err) => eprintln!("Bridge P2P unavailable; relay fallback remains active: {err}"),
         }
 
-        match start_bridge_relay(&identity, discovery_target, cancel_tx.clone()).await {
+        let host_target = (announcement.control_port != 0)
+            .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
+        match start_bridge_relay(&identity, host_target, discovery_target, cancel_tx.clone()).await {
             Ok((control_endpoint, discovery_endpoint, routes, tasks)) => {
                 discovery_config
                     .relay_routes
@@ -1003,6 +1110,7 @@ async fn run_bridge_network(
 async fn start_bridge_p2p(
     identity: &MeshConfig,
     announcement: &DiscoveryAnnouncement,
+    live_capabilities: watch::Receiver<DiscoveryCapabilities>,
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1014,18 +1122,22 @@ async fn start_bridge_p2p(
         &identity.network_name,
         identity.network_secret.expose_secret(),
     )?;
-    let tunnel = BoundP2pTunnel::bind(
-        P2pTunnelConfig::new(
-            bind_addr,
-            rendezvous_addrs[0],
-            group_id,
-            identity.node_id.clone(),
-            announcement.encode()?,
-        )?
-        .with_rendezvous_addrs(rendezvous_addrs)
-        .with_discovery_target_addr(discovery_target),
-    )
-    .await?;
+    let mut config = P2pTunnelConfig::new(
+        bind_addr,
+        rendezvous_addrs[0],
+        group_id,
+        identity.node_id.clone(),
+        announcement.encode()?,
+    )?
+    .with_rendezvous_addrs(rendezvous_addrs)
+    .with_live_capabilities(live_capabilities)
+    .with_routing_key(remote_core::routed_relay::derive_routing_key(
+        identity.network_secret.expose_secret().as_bytes(),
+    ))
+    .with_discovery_target_addr(discovery_target);
+    config.local_target_addr = (announcement.control_port != 0)
+        .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
+    let tunnel = BoundP2pTunnel::bind(config).await?;
     let (snapshot_tx, _snapshot_rx) = watch::channel(Default::default());
     Ok(tokio::spawn(async move {
         if let Err(err) = tunnel.run(cancel_tx.subscribe(), snapshot_tx).await {
@@ -1036,6 +1148,7 @@ async fn start_bridge_p2p(
 
 async fn start_bridge_relay(
     identity: &MeshConfig,
+    host_target: Option<SocketAddr>,
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<
@@ -1064,7 +1177,7 @@ async fn start_bridge_relay(
         remote_core::routed_relay::derive_routing_key(
             identity.network_secret.expose_secret().as_bytes(),
         ),
-        None,
+        host_target,
     )
     .await?;
     let router_target = router.local_addr()?;
@@ -1154,63 +1267,20 @@ fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscover
     selected.into_values().map(|(_, device)| device).collect()
 }
 
-async fn maybe_authenticate(
-    udp_sender: &UdpSender,
-    udp_receiver: &remote_core::net::UdpReceiver,
-    target: SocketAddr,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(psk) = load_session_psk() else {
-        return Ok(());
-    };
-    let nonce = random_bytes_16();
-    let timestamp_ms = now_unix_ms();
-    let mac = mac_session_hello(&psk, &nonce, timestamp_ms);
-    udp_sender
-        .send_control(
-            &ControlMessage::SessionHello {
-                nonce,
-                timestamp_ms,
-                mac,
-            },
-            target,
-        )
-        .await?;
-
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        match tokio::time::timeout_at(deadline, udp_receiver.recv()).await {
-            Ok(Ok(remote_core::net::MultiplexedPacket::Control(
-                ControlMessage::SessionAccept {
-                    salt,
-                    timestamp_ms,
-                    mac,
-                },
-                _,
-            ))) => {
-                let expected = remote_core::mac_session_accept(&psk, &salt, timestamp_ms);
-                remote_core::verify_session_mac(&expected, &mac, timestamp_ms, now_unix_ms())?;
-                let send_crypto = SessionCrypto::from_psk(&psk, &salt)?;
-                let recv_crypto = SessionCrypto::from_psk(&psk, &salt)?;
-                let _ = udp_sender.install_crypto(send_crypto);
-                let _ = udp_receiver.install_crypto(recv_crypto);
-                return Ok(());
-            }
-            Ok(Ok(remote_core::net::MultiplexedPacket::Control(
-                ControlMessage::SessionReject { reason },
-                _,
-            ))) => {
-                return Err(format!("session rejected: {reason}").into());
-            }
-            Ok(Ok(_)) => continue,
-            Ok(Err(err)) => return Err(err),
-            Err(_) => return Err("session hello timed out".into()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_receiver_does_not_advertise_screen_capture_authorization() {
+        let files = inbound_capabilities(5001, false);
+        assert!(files.can_view && files.file_transfer);
+        assert!(!files.can_stream);
+        let capture = inbound_capabilities(5001, true);
+        assert!(capture.can_stream && capture.file_transfer);
+        assert_eq!(inbound_capabilities(0, true), inbound_capabilities(0, false));
+        assert!(!inbound_capabilities(0, false).file_transfer);
+    }
 
     #[test]
     fn bridge_client_starts_disconnected() {
@@ -1224,11 +1294,8 @@ mod tests {
         let client = RemoteBridgeClient::new();
         client.update_stream_rates(37, 3500).unwrap();
         assert!(client.update_stream_rates(0, 3500).is_err());
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        client.connect("host".into(), host.local_addr().unwrap().to_string());
+        let (_sender, _receiver, address) = test_host(&client);
+        client.connect("host".into(), address.to_string());
         client.set_media_paused(true);
         let original = client.active_session_id.load(Relaxed);
         *client.connected_at.lock().unwrap() = Some(Instant::now() - Duration::from_secs(13));
@@ -1384,72 +1451,122 @@ mod tests {
         assert_eq!(client.next_session(), 2);
     }
 
-    async fn next_control(
-        receiver: &remote_core::net::UdpReceiver,
-    ) -> (ControlMessage, SocketAddr) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let remote_core::net::MultiplexedPacket::Control(message, source) =
-                    receiver.recv().await.unwrap()
-                {
-                    return (message, source);
-                }
-            }
-        })
-        .await
-        .expect("control packet deadline")
-    }
-
-    #[test]
-    fn paused_session_reduces_keepalives_without_sending_latency_probes() {
-        let client = RemoteBridgeClient::new();
+    fn test_host(
+        client: &RemoteBridgeClient,
+    ) -> (
+        remote_core::net::UdpSender,
+        mpsc::UnboundedReceiver<(ControlMessage, SocketAddr)>,
+        SocketAddr,
+    ) {
         let host = client
             .runtime()
             .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
             .unwrap();
+        let address = host.local_addr().unwrap();
         let (sender, receiver) = host.split();
-        client.connect("idle".into(), host.local_addr().unwrap().to_string());
-        client.set_media_paused(true);
-        client.runtime().block_on(async {
-            loop {
-                let (message, peer) = next_control(&receiver).await;
-                if let ControlMessage::SetMediaPaused {
-                    session_id,
-                    revision,
-                    paused,
-                } = message
-                {
-                    sender
-                        .send_control(
-                            &ControlMessage::MediaPauseState {
-                                session_id,
-                                revision,
-                                paused,
-                            },
-                            peer,
-                        )
+        let reply = sender.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        client.runtime().spawn(async move {
+            let mut close_seen = std::collections::HashSet::new();
+            while let Ok(remote_core::net::MultiplexedPacket::Control(message, peer)) =
+                receiver.recv().await
+            {
+                let response = match &message {
+                    ControlMessage::Session(command) => match **command {
+                        SessionCommand::Open {
+                            connection_id,
+                            version,
+                        } => Some(SessionCommand::Opened {
+                            connection_id,
+                            version,
+                            max_subscriptions: 8,
+                            files: false,
+                            clipboard: false,
+                            window_capture: true,
+                        }),
+                        SessionCommand::Subscribe(ref request) => {
+                            Some(SessionCommand::Subscribed {
+                                id: request.id,
+                                audio_owner: Some(request.id),
+                                supports_input: true,
+                            })
+                        }
+                        SessionCommand::SetActivity {
+                            id,
+                            revision,
+                            video,
+                            audio,
+                        } => Some(SessionCommand::Activity {
+                            id,
+                            revision,
+                            video,
+                            audio,
+                        }),
+                        SessionCommand::Close { connection_id }
+                            if !close_seen.insert(connection_id) =>
+                        {
+                            Some(SessionCommand::Closed {
+                                connection_id,
+                                reason: String::new(),
+                            })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(response) = response {
+                    reply
+                        .send_control(&ControlMessage::Session(Box::new(response)), peer)
                         .await
                         .unwrap();
-                    break;
+                }
+                let _ = tx.send((message, peer));
+            }
+        });
+        (sender, rx, address)
+    }
+
+    async fn next_control(
+        receiver: &mut mpsc::UnboundedReceiver<(ControlMessage, SocketAddr)>,
+    ) -> (ControlMessage, SocketAddr) {
+        tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("control deadline")
+            .unwrap()
+    }
+    async fn next_subscribe(
+        receiver: &mut mpsc::UnboundedReceiver<(ControlMessage, SocketAddr)>,
+    ) -> (SubscriptionRequest, SocketAddr) {
+        loop {
+            let (message, peer) = next_control(receiver).await;
+            if let ControlMessage::Session(command) = message {
+                if let SessionCommand::Subscribe(request) = *command {
+                    return (request, peer);
                 }
             }
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-            let mut heartbeats = 0;
-            while let Ok(packet) = tokio::time::timeout_at(deadline, receiver.recv()).await {
-                if let remote_core::net::MultiplexedPacket::Control(message, _) = packet.unwrap() {
-                    match message {
-                        ControlMessage::Heartbeat => heartbeats += 1,
-                        ControlMessage::Ping { .. } => {
-                            panic!("paused sessions must not send latency probes")
-                        }
-                        _ => {}
-                    }
+        }
+    }
+
+    #[test]
+    fn paused_session_uses_sparse_shared_keepalive_and_stops_input_grants() {
+        let client = RemoteBridgeClient::new();
+        let (_, mut receiver, address) = test_host(&client);
+        client.connect("idle".into(), address.to_string());
+        client.set_media_paused(true);
+        client.runtime().block_on(async {
+            loop { let (message,_)=next_control(&mut receiver).await;
+                if matches!(message,ControlMessage::Session(ref c) if matches!(**c,SessionCommand::SetActivity{video:false,..})) {break;}
+            }
+            let deadline=tokio::time::Instant::now()+Duration::from_millis(1100);
+            let mut pings=0;
+            while let Ok(Some((message,_)))=tokio::time::timeout_at(deadline,receiver.recv()).await {
+                match message {
+                    ControlMessage::Ping{..}=>pings+=1,
+                    ControlMessage::Session(c)=>assert!(!matches!(*c,SessionCommand::RequestInputBinding{..}|SessionCommand::RealtimeInput(_))),
+                    _=>{}
                 }
             }
-            assert!(
-                (1..=3).contains(&heartbeats),
-                "six seconds must retain sparse keepalives: {heartbeats}"
-            );
+            assert!(pings<=1,"shared session has a five-second keepalive");
         });
         assert!(!client.host_stats.media_pause.is_pending());
         client.disconnect();
@@ -1458,24 +1575,16 @@ mod tests {
     #[test]
     fn replacing_session_stops_old_tasks_and_disconnect_reaches_host() {
         let client = RemoteBridgeClient::new();
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        let (_, receiver) = host.split();
-        let endpoint = host.local_addr().unwrap().to_string();
+        let (_sender, mut receiver, address) = test_host(&client);
+        let endpoint = address.to_string();
         client.connect("first".into(), endpoint.clone());
-        let (message, old_address) = client.runtime().block_on(next_control(&receiver));
-        assert!(matches!(message, ControlMessage::StartStream { .. }));
+        let (_, old_address) = client.runtime().block_on(next_subscribe(&mut receiver));
         let old_tasks = {
             let live = client.live.lock().unwrap();
             let live = live.as_ref().unwrap();
             [
-                live._receiver.abort_handle(),
-                live._egress.abort_handle(),
                 live._decode_pump.abort_handle(),
                 live._audio_pump.abort_handle(),
-                live._heartbeat.abort_handle(),
                 live._telemetry.abort_handle(),
             ]
         };
@@ -1496,34 +1605,40 @@ mod tests {
         let new_address = client.runtime().block_on(async {
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    let (message, source) = next_control(&receiver).await;
+                    let (message, source) = next_control(&mut receiver).await;
                     match message {
-                        ControlMessage::StopStream => {
+                        ControlMessage::Session(ref c)
+                            if matches!(**c, SessionCommand::Close { .. }) =>
+                        {
                             assert_eq!(source, old_address);
                             saw_stop = true;
                         }
-                        ControlMessage::StartStream { .. } => break source,
+                        ControlMessage::Session(ref c)
+                            if matches!(**c, SessionCommand::Subscribe(_)) =>
+                        {
+                            break source;
+                        }
                         _ => {}
                     }
                 }
             })
             .await
-            .expect("old StopStream followed by new StartStream")
+            .expect("old Close followed by new Subscribe")
         });
         assert!(saw_stop);
         client.disconnect();
         client.runtime().block_on(async {
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    let (message, source) = next_control(&receiver).await;
-                    if matches!(message, ControlMessage::StopStream) {
+                    let (message, source) = next_control(&mut receiver).await;
+                    if matches!(message, ControlMessage::Session(ref c) if matches!(**c,SessionCommand::Close{..})) {
                         assert_eq!(source, new_address);
                         break;
                     }
                 }
             })
             .await
-            .expect("disconnect StopStream")
+            .expect("disconnect Close")
         });
         assert_eq!(*client.state_rx.borrow(), BridgeSessionState::Disconnected);
         assert!(client.last_connect.lock().unwrap().is_none());
@@ -1536,16 +1651,10 @@ mod tests {
     #[test]
     fn streaming_waits_for_video_and_overflow_recovers_at_keyframe() {
         let client = RemoteBridgeClient::new();
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        let (sender, receiver) = host.split();
-        client.connect("test-host".into(), host.local_addr().unwrap().to_string());
-        let (start, target) = client.runtime().block_on(next_control(&receiver));
-        let ControlMessage::StartStream { session_id, .. } = start else {
-            panic!("start expected")
-        };
+        let (sender, mut receiver, address) = test_host(&client);
+        client.connect("test-host".into(), address.to_string());
+        let (request, target) = client.runtime().block_on(next_subscribe(&mut receiver));
+        let session_id = request.id;
         assert_eq!(*client.state_rx.borrow(), BridgeSessionState::Connecting);
         let send_video = |sequence_number, keyframe| {
             let packet = protocol::RtpPacket {
@@ -1590,7 +1699,7 @@ mod tests {
                     // initial IDR. Wait for the overflow state as well as a
                     // request, rather than assuming exactly one startup request.
                     if matches!(
-                        next_control(&receiver).await.0,
+                        next_control(&mut receiver).await.0,
                         ControlMessage::RequestKeyframe { .. }
                     ) && client.nalu_queue.lock().unwrap().is_empty()
                     {
@@ -1624,11 +1733,8 @@ mod tests {
     #[test]
     fn fresh_telemetry_does_not_hide_video_timeout_and_disconnect_cancels_retry() {
         let client = RemoteBridgeClient::new();
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        client.connect("silent-host".into(), host.local_addr().unwrap().to_string());
+        let (_sender, _receiver, address) = test_host(&client);
+        client.connect("silent-host".into(), address.to_string());
         let original = client.active_session_id.load(Relaxed);
         client
             .host_stats
@@ -1646,11 +1752,8 @@ mod tests {
     #[test]
     fn invalid_connection_replaces_live_session_without_stale_media() {
         let client = RemoteBridgeClient::new();
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        client.connect("host".into(), host.local_addr().unwrap().to_string());
+        let (_sender, _receiver, address) = test_host(&client);
+        client.connect("host".into(), address.to_string());
         client.connect("invalid".into(), "not-an-endpoint".into());
         assert_eq!(*client.state_rx.borrow(), BridgeSessionState::Error);
         assert!(client.live.lock().unwrap().is_none());
@@ -1662,11 +1765,8 @@ mod tests {
     #[test]
     fn idle_desktop_with_fresh_zero_fps_telemetry_does_not_reconnect() {
         let client = RemoteBridgeClient::new();
-        let host = client
-            .runtime()
-            .block_on(UdpMultiplexer::bind("127.0.0.1:0"))
-            .unwrap();
-        client.connect("idle-host".into(), host.local_addr().unwrap().to_string());
+        let (_sender, _receiver, address) = test_host(&client);
+        client.connect("idle-host".into(), address.to_string());
         let original = client.active_session_id.load(Relaxed);
         *client
             .live
@@ -1682,6 +1782,522 @@ mod tests {
         client.maybe_reconnect();
         assert_eq!(client.active_session_id.load(Relaxed), original);
         assert_eq!(*client.state_rx.borrow(), BridgeSessionState::Streaming);
+        client.disconnect();
+    }
+    async fn next_input(
+        rx: &mut mpsc::UnboundedReceiver<(ControlMessage, SocketAddr)>,
+        event: bool,
+    ) -> protocol::realtime_input::RealtimeInput {
+        loop {
+            let (message, _) = next_control(rx).await;
+            assert!(!matches!(
+                message,
+                ControlMessage::Input(_)
+                    | ControlMessage::StartStream { .. }
+                    | ControlMessage::StopStream
+            ));
+            if let ControlMessage::Session(c) = message {
+                if let SessionCommand::RealtimeInput(packet) = *c {
+                    if matches!(
+                        packet.payload,
+                        protocol::realtime_input::InputPayload::Event(_)
+                    ) == event
+                    {
+                        return packet;
+                    }
+                }
+            }
+        }
+    }
+
+    fn grant_manual(
+        client: &RemoteBridgeClient,
+        sender: &remote_core::net::UdpSender,
+        rx: &mut mpsc::UnboundedReceiver<(ControlMessage, SocketAddr)>,
+        epoch: u8,
+    ) -> protocol::realtime_input::InputBinding {
+        client.runtime().block_on(async {
+            let (binding, request, peer) = loop {
+                let (message, peer) = next_control(rx).await;
+                if let ControlMessage::Session(c) = message {
+                    if let SessionCommand::RequestInputBinding {
+                        connection_id,
+                        id,
+                        source_revision,
+                        request,
+                    } = *c
+                    {
+                        if connection_id
+                            != client.live.lock().unwrap().as_ref().unwrap().connection.id
+                        {
+                            continue;
+                        }
+                        break (
+                            protocol::realtime_input::InputBinding {
+                                connection_id,
+                                subscription_id: id,
+                                source_revision,
+                                epoch: [epoch; 16],
+                            },
+                            request,
+                            peer,
+                        );
+                    }
+                }
+            };
+            sender
+                .send_control(
+                    &ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                        binding,
+                        request,
+                        host_time_ms: remote_core::session_crypto::now_unix_ms(),
+                    })),
+                    peer,
+                )
+                .await
+                .unwrap();
+            // An existing epoch can remain ready while this reply is still
+            // in flight. Do not deliver the next gesture until the exact
+            // replacement binding has been committed by the actor.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if client
+                        .live
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .connection
+                        .input_binding(binding.subscription_id, binding.source_revision)
+                        == Some(binding)
+                    {
+                        break;
+                    }
+                    // The first queued request may have been superseded by
+                    // the actor's periodic request. Serve subsequent requests
+                    // within the same deadline, keeping the exact epoch check.
+                    if let Ok(Some((ControlMessage::Session(command), target))) =
+                        tokio::time::timeout(Duration::from_millis(1), rx.recv()).await
+                        && let SessionCommand::RequestInputBinding { connection_id, id, source_revision, request } = *command
+                        && connection_id == binding.connection_id
+                        && id == binding.subscription_id
+                        && source_revision == binding.source_revision
+                    {
+                        sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                            binding, request, host_time_ms: remote_core::session_crypto::now_unix_ms(),
+                        })), target).await.unwrap();
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            binding
+        })
+    }
+
+    #[test]
+    fn workspace_touch_uses_shared_grant_and_releases_cancelled_drag() {
+        use protocol::realtime_input::{InputBinding, InputPayload};
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        let directory = std::env::temp_dir().join(format!("rp-workspace-touch-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&directory).unwrap();
+        client.runtime().block_on(async {
+            let workspace = workspace_bridge::MobileWorkspace::connect(address, directory.clone()).await.unwrap();
+            workspace.command(&serde_json::to_string(&SessionCommand::Subscribe(SubscriptionRequest {
+                id: 256, source: CaptureSource::Display(1), width: 1280, height: 720,
+                fps: 60, bitrate_kbps: 20_000, audio: false,
+            })).unwrap()).await.unwrap();
+            let (binding, request, peer) = loop {
+                let (message, peer) = next_control(&mut rx).await;
+                if let ControlMessage::Session(command) = message
+                    && let SessionCommand::RequestInputBinding { connection_id, id, source_revision, request } = *command {
+                    break (InputBinding { connection_id, subscription_id: id, source_revision, epoch: [9; 16] }, request, peer);
+                }
+            };
+            sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
+                binding, request, host_time_ms: remote_core::session_crypto::now_unix_ms(),
+            })), peer).await.unwrap();
+            let held = next_input(&mut rx, false).await;
+            assert_eq!(held.binding, binding);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !workspace.events().contains("Subscribed") { tokio::time::sleep(Duration::from_millis(1)).await; }
+            }).await.unwrap();
+            let surface = |phase| serde_json::json!({"id":256,"token":1,"phase":phase}).to_string();
+            let gesture = |action, x| serde_json::json!({"id":256,"token":1,"event":{"Touch":{
+                "action":action,"pointer_id":7,"normalized_x":x,"normalized_y":0.5,"pressure":1.0}}}).to_string();
+            workspace.surface(&surface("begin")).unwrap();
+            workspace.touch(&gesture("Down", 0.1)).unwrap(); // No frame: cannot accumulate a press.
+            workspace.surface(&surface("ready")).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            workspace.touch(&gesture("Down", 0.1)).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            let first = next_input(&mut rx, true).await;
+            assert!(matches!(first.payload, InputPayload::Event(protocol::InputEvent::MouseMoveAbsolute { x, .. }) if x < 10000));
+            let drag = next_input(&mut rx, true).await;
+            assert_eq!(drag.binding, binding);
+            assert!(matches!(drag.payload, InputPayload::Event(protocol::InputEvent::MouseDown(0))));
+            workspace.surface(&surface("cancel")).unwrap();
+            workspace.touch(&gesture("Up", 0.8)).unwrap();
+            loop {
+                let packet = next_input(&mut rx, false).await;
+                if matches!(packet.payload, InputPayload::Release) { assert_eq!(packet.binding, binding); break; }
+            }
+            let held = next_input(&mut rx, false).await;
+            assert!(matches!(held.payload, InputPayload::Held(held) if held.is_empty()));
+            // The UI producer now goes silent while the native transport keeps running.
+            workspace.touch(&gesture("Down", 0.1)).unwrap();
+            workspace.touch(&gesture("Move", 0.8)).unwrap();
+            tokio::time::timeout(Duration::from_millis(650), async {
+                loop {
+                    let packet = next_input(&mut rx, false).await;
+                    if matches!(packet.payload, InputPayload::Release) {
+                        assert_eq!(packet.binding, binding); break;
+                    }
+                }
+            }).await.expect("native watchdog must release a silent UI producer");
+            workspace.surface(&surface("alive")).unwrap();
+            workspace.touch(&gesture("Up", 0.8)).unwrap();
+            let held = next_input(&mut rx, false).await;
+            assert!(matches!(held.payload, InputPayload::Held(held) if held.is_empty()));
+            let raw = serde_json::json!({"Input":{"id":256,"event":{"Touch":{
+                "action":"Down","pointer_id":7,"normalized_x":0.5,"normalized_y":0.5,"pressure":1.0}}}});
+            assert!(workspace.command(&raw.to_string()).await.is_err());
+            drop(workspace);
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn manual_entry_requires_binding_and_video_then_preserves_chords_and_recovers_lost_up() {
+        use protocol::realtime_input::{InputLease, InputPayload};
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("manual".into(), address.to_string());
+        client.send_virtual_key("ctrl", true); // no grant: must not accumulate Ctrl.
+        let (request, peer) = client.runtime().block_on(next_subscribe(&mut rx));
+        let binding = grant_manual(&client, &sender, &mut rx, 1);
+        client.send_virtual_key("alt", true); // no video: must not accumulate Alt.
+        let packet = protocol::RtpPacket {
+            header: protocol::RtpHeader {
+                version: 2,
+                payload_type: 96,
+                sequence_number: 0,
+                timestamp: 1,
+                ssrc: request.id,
+            },
+            payload: vec![0, 0, 1, 38, 1, 42],
+        };
+        client
+            .runtime()
+            .block_on(sender.send_data(
+                &remote_core::media_plane::rtp_to_realtime_data(&packet).unwrap(),
+                peer,
+            ))
+            .unwrap();
+        client.runtime().block_on(async {
+            let mut state = client.state_rx.clone();
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                state.wait_for(|s| *s == BridgeSessionState::Streaming),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        });
+        client.send_virtual_key("A", true);
+        let modifier = client.runtime().block_on(next_input(&mut rx, true));
+        assert!(matches!(
+            modifier.payload,
+            InputPayload::Event(protocol::InputEvent::ModifiersChanged(1))
+        ));
+        let key = client.runtime().block_on(next_input(&mut rx, true));
+        assert!(matches!(
+            key.payload,
+            InputPayload::Event(protocol::InputEvent::Key {
+                pressed: true,
+                modifiers: 1,
+                ..
+            })
+        ));
+        assert_eq!(key.binding, binding);
+        let mut host = InputLease::new(binding, modifier.created_host_ms);
+        assert!(host.accept(&modifier, modifier.created_host_ms).is_some());
+        assert!(host.accept(&key, key.created_host_ms).is_some());
+        assert!(
+            host.accept(&key, key.created_host_ms).is_none(),
+            "duplicate cannot repeat"
+        );
+        let held_down = loop {
+            let p = client.runtime().block_on(next_input(&mut rx, false));
+            if matches!(&p.payload,InputPayload::Held(h) if !h.is_empty()) {
+                break p;
+            }
+        };
+        let mut lost_down = InputLease::new(binding, held_down.created_host_ms);
+        assert!(
+            lost_down
+                .accept(&held_down, held_down.created_host_ms)
+                .unwrap()
+                .is_empty(),
+            "snapshots cannot recreate a lost down"
+        );
+        host.accept(&held_down, held_down.created_host_ms).unwrap();
+        client.send_virtual_key("A", false);
+        // Drop both key-up and temporary modifier-up; an empty matching snapshot releases them.
+        let held = loop {
+            let p = client.runtime().block_on(next_input(&mut rx, false));
+            if matches!(&p.payload,InputPayload::Held(h) if h.is_empty()) {
+                break p;
+            }
+        };
+        let effects = host.accept(&held, held.created_host_ms).unwrap();
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, protocol::InputEvent::Key { pressed: false, .. }))
+        );
+        assert!(effects.contains(&protocol::InputEvent::ModifiersChanged(0)));
+        // A missing key-down is never recreated by its matching held snapshot.
+        let mut lost_down = InputLease::new(binding, held.created_host_ms);
+        assert!(
+            lost_down
+                .accept(&held, held.created_host_ms)
+                .unwrap()
+                .is_empty()
+        );
+        client.disconnect();
+    }
+
+    #[test]
+    fn reconnect_and_stop_do_not_replay_old_holds_and_close_retries_loss() {
+        use protocol::realtime_input::{InputLease, InputPayload};
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("manual".into(), address.to_string());
+        let old = grant_manual(&client, &sender, &mut rx, 1);
+        *client
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .video_activity
+            .lock()
+            .unwrap() = Some(Instant::now());
+        client.send_virtual_key("ctrl", true);
+        let down = client.runtime().block_on(next_input(&mut rx, true));
+        client.connect("manual".into(), address.to_string());
+        let new = grant_manual(&client, &sender, &mut rx, 2);
+        assert_ne!(old.connection_id, new.connection_id);
+        *client
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .video_activity
+            .lock()
+            .unwrap() = Some(Instant::now());
+        client.send_virtual_key("c", true);
+        let key = client.runtime().block_on(next_input(&mut rx, true));
+        assert_eq!(key.binding, new);
+        assert!(matches!(
+            key.payload,
+            InputPayload::Event(protocol::InputEvent::Key { modifiers: 0, .. })
+        ));
+        let mut host = InputLease::new(new, key.created_host_ms);
+        assert!(host.accept(&down, key.created_host_ms).is_none());
+        assert!(host.accept(&key, key.created_host_ms).is_some());
+        client.disconnect();
+        let mut closes = 0;
+        while let Ok((message, _)) = rx.try_recv() {
+            if matches!(message,ControlMessage::Session(ref c) if matches!(**c,SessionCommand::Close{connection_id} if connection_id==new.connection_id))
+            {
+                closes += 1;
+            }
+        }
+        assert!(
+            closes >= 2,
+            "first Close was lost; actor must retry before stopping"
+        );
+    }
+
+    #[test]
+    fn manual_ui_input_never_waits_for_connection_lifecycle_or_live_lock() {
+        for hold_lifecycle in [true, false] {
+            let client = Arc::new(RemoteBridgeClient::new());
+            let lifecycle = hold_lifecycle.then(|| client.lifecycle.lock().unwrap());
+            let live = (!hold_lifecycle).then(|| client.live.lock().unwrap());
+            let worker_client = client.clone();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let token = worker_client.input_intent_token();
+                let refreshed = worker_client.refresh_input_intent(1);
+                worker_client.handle_touch_input(TouchAction::Cancel, 1, 0.0, 0.0, 0.0);
+                worker_client.send_virtual_key("ctrl", false);
+                done_tx.send((token, refreshed)).unwrap();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let result = done_rx.recv_timeout(Duration::from_millis(200));
+            // Always unblock and join even on failure, so a regression cannot
+            // strand the test worker holding a client runtime.
+            drop(live);
+            drop(lifecycle);
+            worker.join().unwrap();
+            assert_eq!(result.unwrap(), (0, false));
+            assert_eq!(client.manual_input_owner.load(Relaxed), 0);
+        }
+    }
+
+    #[test]
+    fn stale_busy_heartbeat_cannot_revoke_a_new_session_or_epoch() {
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("scope".into(), address.to_string());
+        grant_manual(&client, &sender, &mut rx, 1);
+        *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+        let mut old = client.input_intent_token();
+        assert_eq!(client.manual_input_owner.load(Relaxed), 0);
+        {
+            let _busy = client.lifecycle.lock().unwrap();
+            assert!(!client.refresh_input_intent(old));
+        }
+        assert_eq!(client.manual_input_revoked.load(Relaxed), 0, "idle failure must not poison a future gesture");
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        assert!(client.refresh_input_intent(old), "a fresh Down after idle contention stays healthy");
+        for reconnect in [false, true] {
+            if reconnect { client.connect("scope".into(), address.to_string()); }
+            grant_manual(&client, &sender, &mut rx, 2);
+            *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+            client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+            let current = client.input_intent_token();
+            assert_ne!(current, old);
+            {
+                let _busy = client.lifecycle.lock().unwrap();
+                assert_eq!(client.input_intent_token(), 0); // query is read-only
+                assert!(!client.refresh_input_intent(old));
+            }
+            assert!(client.refresh_input_intent(current));
+            assert!(client.touch_tracker.lock().unwrap().has_active_pointers());
+            assert_eq!(client.manual_input_intent.lock().unwrap().as_ref().unwrap().2, current);
+            old = current;
+        }
+        client.disconnect();
+    }
+
+    #[test]
+    fn manual_direct_touch_expiry_and_epoch_change_discard_unheld_tail() {
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("touch-expiry".into(), address.to_string());
+        grant_manual(&client, &sender, &mut rx, 1);
+        *client.live.lock().unwrap().as_ref().unwrap().video_activity.lock().unwrap() = Some(Instant::now());
+        for heartbeat_first in [false, true] {
+            client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+            assert!(client.touch_tracker.lock().unwrap().has_active_pointers());
+            // Simulate a stalled frontend without delaying unrelated actor IO.
+            client.manual_input_intent.lock().unwrap().as_mut().unwrap().1 = Instant::now() - Duration::from_millis(400);
+            if heartbeat_first { assert!(!client.refresh_input_intent(client.input_intent_token())); }
+            client.handle_touch_input(TouchAction::Up, 1, 0.1, 0.1, 0.0);
+            assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+            assert!(client.manual_input_intent.lock().unwrap().is_none());
+        }
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        let token = client.input_intent_token();
+        {
+            let _busy = client.lifecycle.lock().unwrap();
+            client.handle_touch_input(TouchAction::Cancel, 1, 0.0, 0.0, 0.0);
+        }
+        assert!(!client.refresh_input_intent(token), "a dropped Cancel must invalidate the old gesture");
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        grant_manual(&client, &sender, &mut rx, 2);
+        client.handle_touch_input(TouchAction::Up, 1, 0.1, 0.1, 0.0);
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+        assert!(client.manual_input_intent.lock().unwrap().is_none());
+        // Inspect the real outbound input stream: no delayed left/right click.
+        client.runtime().block_on(async {
+            let until = tokio::time::Instant::now() + Duration::from_millis(120);
+            while let Ok(packet) = tokio::time::timeout_at(until, next_input(&mut rx, true)).await {
+                assert!(!matches!(packet.payload, protocol::realtime_input::InputPayload::Event(protocol::InputEvent::MouseDown(_) | protocol::InputEvent::MouseUp(_))));
+            }
+        });
+        client.disconnect();
+    }
+
+    #[test]
+    fn manual_touch_binds_drag_and_pause_discards_cancelled_tail() {
+        use protocol::realtime_input::InputPayload;
+        let client = RemoteBridgeClient::new();
+        let (sender, mut rx, address) = test_host(&client);
+        client.connect("touch".into(), address.to_string());
+        let binding = grant_manual(&client, &sender, &mut rx, 1);
+        *client
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .video_activity
+            .lock()
+            .unwrap() = Some(Instant::now());
+        client.handle_touch_input(TouchAction::Down, 1, 0.1, 0.1, 1.0);
+        client.handle_touch_input(TouchAction::Move, 1, 0.8, 0.8, 1.0);
+        let drag = loop {
+            let p = client.runtime().block_on(next_input(&mut rx, true));
+            if matches!(
+                p.payload,
+                InputPayload::Event(protocol::InputEvent::MouseDown(0))
+            ) {
+                break p;
+            }
+        };
+        assert_eq!(drag.binding, binding);
+        let intent=client.input_intent_token();assert_ne!(intent,0);
+        assert!(!client.refresh_input_intent(intent^1),"wrong session cannot renew a gesture");
+        for index in 0..5 {
+            std::thread::sleep(Duration::from_millis(90));
+            assert!(client.refresh_input_intent(intent),"a healthy manual viewport must preserve long drag");
+            if index==2 {grant_manual(&client,&sender,&mut rx,1);}
+        }
+        std::thread::sleep(Duration::from_millis(330));
+        grant_manual(&client,&sender,&mut rx,1);
+        assert!(!client.refresh_input_intent(intent),"late UI wake must clear its old drag");
+        assert!(!client.touch_tracker.lock().unwrap().has_active_pointers());
+        client.set_media_paused(true);
+        assert!(
+            !client
+                .live
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .connection
+                .input_ready(binding.subscription_id, 0)
+        );
+        client.set_media_paused(false);
+        let resumed = grant_manual(&client, &sender, &mut rx, 2);
+        *client
+            .live
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .video_activity
+            .lock()
+            .unwrap() = Some(Instant::now());
+        client.handle_touch_input(TouchAction::Up, 1, 0.8, 0.8, 0.0);
+        let held = loop {
+            let p = client.runtime().block_on(next_input(&mut rx, false));
+            if p.binding == resumed {
+                break p;
+            }
+        };
+        assert!(matches!(held.payload,InputPayload::Held(h) if h.is_empty()));
         client.disconnect();
     }
 }

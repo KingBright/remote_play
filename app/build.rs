@@ -43,6 +43,11 @@ fn generated_module(raw: &[u8]) -> String {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // ScreenCaptureKit's Swift bridge needs this on app, test and example
+    // executables. Keep it local to final links so dependencies share caches.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
     for key in [
         "REMOTEPLAY_BUILD_IDENTITY_FILE",
         "REMOTEPLAY_BUILD_IDENTITY_RS",

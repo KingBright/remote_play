@@ -80,6 +80,13 @@ pub(crate) type OriginalGuiSession =
     SessionState<Arc<client::MacDecodedVideoFrame>, gpui::Point<f32>>;
 
 impl<Texture, Pan: Default> SessionState<Texture, Pan> {
+    fn clear_transient_error(&mut self) {
+        self.error = match self.media.as_ref().map(|media| &media.status) {
+            Some(client::ClientMediaRuntimeStatus::AudioUnavailable { reason }) =>
+                format!("Audio unavailable: {reason}"),
+            _ => String::new(),
+        };
+    }
     pub fn new(
         key: String,
         name: String,
@@ -129,7 +136,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             source_revision: 0,
             confirmed: false,
             supports_input: false,
-            locked: true,
+            // The authenticated connection authorizes control. Source, lease,
+            // frame and foreground checks still decide whether an event can flow.
+            locked: false,
             paused: false,
             pending: None,
             activity_revision: 0,
@@ -237,12 +246,11 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                 }
             }));
             if let client::ClientMediaRuntimeStatus::AudioUnavailable { reason } = &media.status {
-                self.error = format!("Video ready; audio unavailable: {reason}");
+                self.error = format!("Audio unavailable: {reason}");
             }
         }
         self.confirmed = false;
-        self.locked = true;
-        self.error.clear();
+        self.clear_transient_error();
         self.status = "Requesting video; waiting for the first decoded frame".into();
         self.request.source = self.source;
         self.request.id = self.video_id;
@@ -277,7 +285,6 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         }) {
             self.pending = Some((request, Instant::now()));
             self.confirmed = false;
-            self.locked = true;
             self.status = "Switching source".into();
         }
     }
@@ -474,6 +481,10 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         );
     }
     pub fn poll(&mut self) {
+        if self.can_input() && (!self.keys.is_empty()||!self.mouse.is_empty()||self.modifiers!=0) {
+            let healthy=self.conn.input_binding(self.video_id,self.source_revision).is_some_and(|binding|self.conn.refresh_bound_input(binding));
+            if !healthy {self.release_input();self.locked=true;self.status="Input paused after the window stopped responding; enable control to continue".into();}
+        }
         let decoder_waiting = self
             .stats
             .video_decoder_needs_keyframe
@@ -524,7 +535,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.source_revision = request_id;
                     self.request.source = source;
                     self.supports_input = supports_input;
-                    self.error.clear();
+                    self.clear_transient_error();
                     self.pending = None;
                     self.confirmed = true;
                     self.uploaded_at = None;
@@ -652,7 +663,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                             }
                             self.files = entries;
                             self.next_file_page = next_after_id;
-                            self.error.clear();
+                            self.clear_transient_error();
                         }
                         SharedFileResponse::Queued { .. } => {
                             self.status = "Pull accepted; awaiting verified file delivery".into()
@@ -846,10 +857,14 @@ mod static_input_tests {
             conn,
             events,
         );
+        // Connection intent needs no extra Enable click, but cannot bypass
+        // the source confirmation, presented frame or bound input grant.
+        assert!(!session.locked);
+        assert!(!session.can_input());
         // Synthetic presentation eligibility only; no native frame is decoded.
         session.confirmed = true;
         session.supports_input = true;
-        session.locked = false;
+        assert!(!session.can_input());
         session.first_frame_after = Instant::now() - Duration::from_secs(1);
         session.uploaded_at = Some(Instant::now());
         let inputs = [

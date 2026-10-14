@@ -80,6 +80,10 @@ impl TouchStateTracker {
         releases
     }
 
+    pub(crate) fn has_active_pointers(&self) -> bool {
+        !self.active_pointers.is_empty()
+    }
+
     pub fn cancel_all(&mut self) -> Vec<InputEvent> {
         let releases = if self.is_left_down {
             vec![InputEvent::MouseUp(0)]
@@ -1253,11 +1257,17 @@ impl VirtualKeyboard {
             }
             return vec![InputEvent::ModifiersChanged(self.held_modifiers)];
         }
-        let mut events = vec![InputEvent::Key {
+        let mut events = Vec::new();
+        if pressed && modifiers & !self.held_modifiers != 0 {
+            events.push(InputEvent::ModifiersChanged(
+                modifiers | self.held_modifiers,
+            ));
+        }
+        events.push(InputEvent::Key {
             key_code,
             pressed,
             modifiers: modifiers | self.held_modifiers,
-        }];
+        });
         if !pressed && modifiers & !self.held_modifiers != 0 {
             events.push(InputEvent::ModifiersChanged(self.held_modifiers));
         }

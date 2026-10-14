@@ -19,7 +19,7 @@
     "Cargo.toml": "49d897d57809b21aec8c1c03a7828d36d63e100ee4d1c9cc855ceb0a316a8cfd",
     "Cargo.lock": "9d56fba21e5bb3db6206fe0a4d1b8f6f0f743358fe04a34c5003c83dc46e7be5",
     ".cargo/config": null,
-    ".cargo/config.toml": "bb7011ead82f0683a19adac39a216cd1ffb1712dc22f03d1e5848ffbc2fe6a1c"
+    ".cargo/config.toml": "556630aae827357d2370630dd312c911d815dbe5513bf96caa08b5dcf2768568"
   },
   "budgets": null,
   "coverage": {

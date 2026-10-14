@@ -40,15 +40,6 @@ data class TelemetrySnapshot(
     val transportHealthScore: Float = 0.0f
 )
 
-data class HostDevice(
-    val id: String,
-    val name: String,
-    val endpoint: String,
-    val scope: String,
-    val canStream: Boolean,
-    val online: Boolean
-)
-
 object RemotePlayClient {
     private val _sessionState = MutableStateFlow(SessionState.DISCONNECTED)
     val sessionState: StateFlow<SessionState> = _sessionState.asStateFlow()
@@ -56,8 +47,14 @@ object RemotePlayClient {
     private val _telemetry = MutableStateFlow(TelemetrySnapshot())
     val telemetry: StateFlow<TelemetrySnapshot> = _telemetry.asStateFlow()
 
+    private val _sessionError = MutableStateFlow("")
+    val sessionError: StateFlow<String> = _sessionError.asStateFlow()
+
     private val _devices = MutableStateFlow<List<HostDevice>>(emptyList())
     val devices: StateFlow<List<HostDevice>> = _devices.asStateFlow()
+
+    private val _networkName = MutableStateFlow("")
+    val networkName: StateFlow<String> = _networkName.asStateFlow()
 
     private var isNativeLoaded = false
     private var appContext: Context? = null
@@ -105,6 +102,7 @@ object RemotePlayClient {
             streamBitrateKbps = prefs.getInt("bitrate_kbps", 20_000)
             backgroundKeepAliveSeconds = prefs.getInt("background_keepalive_seconds", 300).coerceIn(0, 86400)
             nativeUpdateStreamRates(streamFps, streamBitrateKbps)
+            refreshNetworkIdentity()
         }
         return initialized
     }
@@ -115,6 +113,7 @@ object RemotePlayClient {
         resumeAfterIdle = null
         lastConnection = deviceId to endpoint
         val generation = ++connectionGeneration
+        _sessionError.value = ""
         _sessionState.value = SessionState.CONNECTING
         pauseExecutor.execute {
             if (synchronized(this) { generation == connectionGeneration }) connectNow(deviceId, endpoint)
@@ -155,6 +154,7 @@ object RemotePlayClient {
             nativeDisconnect()
             if (backgrounded) nativeSetNetworkEnabled(false)
         }
+        _sessionError.value = ""
         _sessionState.value = SessionState.DISCONNECTED
         appContext?.let { it.stopService(Intent(it, SessionConnectionService::class.java)) }
     }
@@ -237,6 +237,16 @@ object RemotePlayClient {
         return error
     }
 
+    data class InputIntentToken(val generation: Long, val session: Long)
+    @Synchronized fun inputIntentToken(): InputIntentToken? {
+        if (!isNativeLoaded || backgrounded || _mediaPaused.value || _mediaPausePending.value) return null
+        val session = nativeInputIntentToken()
+        return if (session == 0L) null else InputIntentToken(connectionGeneration, session)
+    }
+    @Synchronized fun refreshInputIntent(token: InputIntentToken): Boolean =
+        isNativeLoaded && !backgrounded && !_mediaPaused.value && !_mediaPausePending.value &&
+            token.generation == connectionGeneration && nativeRefreshInputIntent(token.session)
+
     fun sendTouchEvent(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float) {
         if (isNativeLoaded) {
             nativeSendTouch(actionCode, pointerId, normX, normY, pressure)
@@ -280,7 +290,17 @@ object RemotePlayClient {
 
     fun joinPairingPayload(raw: String): String {
         if (!isNativeLoaded) return "error:native library not loaded"
-        return nativeJoinPairingPayload(raw) ?: "error:empty"
+        val result = nativeJoinPairingPayload(raw.trim()) ?: "error:No join result returned"
+        if (!result.startsWith("error:")) {
+            refreshNetworkIdentity()
+            refreshDevices()
+        }
+        return result
+    }
+
+    private fun refreshNetworkIdentity() {
+        val raw = nativeGetNetworkIdentityJson() ?: return
+        runCatching { _networkName.value = JSONObject(raw).optString("network_name") }
     }
 
     fun refreshDevices() {
@@ -297,8 +317,12 @@ object RemotePlayClient {
                             name = obj.optString("display_name"),
                             endpoint = obj.optString("endpoint"),
                             scope = obj.optString("scope", "LAN"),
-                            canStream = obj.optBoolean("can_stream", true),
-                            online = obj.optBoolean("online", true)
+                            canStream = obj.optBoolean("can_stream", false),
+                            online = obj.optBoolean("online", false),
+                            canView = obj.optBoolean("can_view", false),
+                            fileTransfer = obj.optBoolean("file_transfer", false),
+                            clipboardSync = obj.optBoolean("clipboard_sync", false),
+                            hasService = obj.optBoolean("has_service", false)
                         )
                     )
                 }
@@ -318,6 +342,7 @@ object RemotePlayClient {
                 3 -> SessionState.RECONNECTING
                 else -> SessionState.ERROR
             }
+            _sessionError.value = nativeGetSessionError().orEmpty()
             val jsonStr = nativeGetTelemetryJson()
             if (!jsonStr.isNullOrEmpty()) {
                 try {
@@ -348,6 +373,8 @@ object RemotePlayClient {
     private external fun nativeSetMediaPaused(paused: Boolean)
     private external fun nativeMediaPausePending(): Boolean
     private external fun nativeUpdateStreamRates(fps: Int, bitrateKbps: Int): String?
+    private external fun nativeInputIntentToken(): Long
+    private external fun nativeRefreshInputIntent(token: Long): Boolean
     private external fun nativeSendTouch(actionCode: Int, pointerId: Int, normX: Float, normY: Float, pressure: Float)
     private external fun nativeSendVirtualKey(keyName: String, pressed: Boolean)
     private external fun nativeSetTouchMode(modeCode: Int)
@@ -357,6 +384,8 @@ object RemotePlayClient {
     private external fun nativeRequestKeyframe()
     private external fun nativePollAudioPacket(): ByteArray?
     private external fun nativeGetDevicesJson(): String?
+    private external fun nativeGetNetworkIdentityJson(): String?
     private external fun nativeJoinPairingPayload(payload: String): String?
     private external fun nativeGetSessionState(): Int
+    private external fun nativeGetSessionError(): String?
 }

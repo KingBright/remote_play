@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -331,51 +332,176 @@ def compiled_module(expected: dict) -> bytes:
     return text.encode()
 
 
-def observed_build(repo: Path, expected: dict, target: Path) -> dict:
+def shared_target(repo: Path, requested: Path | None = None) -> Path:
+    target = (Path.home() / 'rust-target').resolve(strict=True)
+    require(target.is_dir(), 'The existing ~/rust-target cache is required')
+    require(requested is None or requested.resolve() == target, 'Only the existing ~/rust-target is supported')
+    result = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps', '--locked', '--offline'],
+                            cwd=repo, env=build_environment(), capture_output=True, text=True, timeout=30)
+    require(result.returncode == 0, 'Cannot resolve the existing Cargo output configuration')
+    metadata = json.loads(result.stdout)
+    require(Path(metadata['target_directory']).resolve() == target
+            and Path(metadata.get('build_directory') or metadata['target_directory']).resolve() == target,
+            'Cargo target and intermediate build directory must already use ~/rust-target; remove conflicting overrides')
+    return target
+
+
+def group_alive(pgid: int) -> bool:
+    result = subprocess.run(['ps', '-ax', '-o', 'pgid=,stat='], capture_output=True, text=True, timeout=15)
+    require(result.returncode == 0, 'Cannot establish whether compiler children have exited')
+    return any(len(parts := row.split()) >= 2 and parts[0] == str(pgid) and not parts[1].startswith('Z')
+               for row in result.stdout.splitlines())
+
+
+class BuildInputs:
+    """Fixed small compiler inputs, protected by the existing producer lock.
+
+    No release authority is opened here. Unknown or active leftovers stay intact.
+    """
+    def __init__(self, repo: Path, target: Path, expected: dict):
+        self.repo, self.target, self.expected = repo, target, expected
+        self.document = target / '.remoteplay-build-identity.json'
+        self.module = target / '.remoteplay-build-identity.rs'
+        self.paths = (self.document, self.module)
+        self.fd = self.release_fd = None
+        self.state = None
+        self.settled = True
+
+    def save(self):
+        raw = canonical(self.state)
+        os.ftruncate(self.fd, 0); os.pwrite(self.fd, raw, 0); os.fsync(self.fd)
+
+    def cleanup(self):
+        require(self.state.get('project') == str(self.repo) and self.state.get('schema') == 1,
+                'Unknown generated identity owner; preserving inputs')
+        values = self.state.get('sha256')
+        require(type(values) is list and len(values) == 2, 'Incomplete generated identity ownership')
+        for path, value in zip(self.paths, values):
+            if path.exists() or path.is_symlink():
+                regular(path); info = path.stat()
+                require(info.st_uid == os.getuid() and info.st_nlink == 1 and hash_file(path) == sha(value),
+                        'Generated identity changed; preserving it')
+        for path in self.paths:
+            if path.exists(): path.unlink()
+        self.state = {}; self.save()
+
+    def __enter__(self):
+        require(sys.platform == 'darwin' or sys.platform.startswith('linux'),
+                'Shared identity builds currently support native macOS/Linux; historical Windows receipts remain readable')
+        import fcntl
+        from release_artifact_lifecycle import regular as owned_regular
+        folder = self.repo / '.rust-storage'
+        require(not folder.is_symlink(), 'Linked producer metadata rejected')
+        folder.mkdir(mode=0o700, exist_ok=True)
+        try:
+            # Same finite operation lock as formal packaging; do not call its authority setup.
+            for name in (folder / 'release-producer.lock', self.target / '.remoteplay-build-identity.lock'):
+                fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                if self.release_fd is None: self.release_fd = fd
+                else: self.fd = fd
+                info = os.fstat(fd); owned_regular(name)
+                require(stat.S_IMODE(info.st_mode) == 0o600 and info.st_ino == name.stat().st_ino,
+                        'Unsafe build producer lock')
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            require(os.fstat(self.fd).st_size <= 65536, 'Identity producer metadata exceeds bound')
+            raw = os.pread(self.fd, 65536, 0)
+            previous = json_bytes(raw) if raw else {}
+            if previous:
+                require(previous.get('phase') != 'starting', 'Interrupted compiler start is unconfirmed; preserving inputs')
+                pgid = previous.get('pgid')
+                require(pgid is None or (type(pgid) is int and pgid > 1 and not group_alive(pgid)),
+                        'Previous compiler children remain active; preserving inputs')
+                self.state = previous; self.cleanup()
+            require(not any(p.exists() or p.is_symlink() for p in self.paths),
+                    'Unowned fixed identity input exists; preserving it')
+            payloads = (json.dumps(self.expected, sort_keys=True, indent=2).encode() + b'\n', compiled_module(self.expected))
+            self.state = {'schema': 1, 'project': str(self.repo), 'phase': 'ready',
+                          'sha256': [digest(raw) for raw in payloads], 'pgid': None}
+            self.save()
+            for path, raw in zip(self.paths, payloads):
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'wb') as output:
+                    output.write(raw); output.flush(); os.fsync(output.fileno())
+            return self
+        except BaseException:
+            self.__exit__(*sys.exc_info()); raise
+
+    def run(self, command, *, env, **kwargs):
+        self.state['phase'] = 'starting'; self.save(); self.settled = False
+        child = None
+        try:
+            child = subprocess.Popen(command, cwd=self.repo, env=env,
+                                     pass_fds=(self.fd, self.release_fd), start_new_session=True, **kwargs)
+            self.state.update(phase='running', pgid=child.pid); self.save()
+            return child.wait()
+        finally:
+            if child is not None:
+                try:
+                    from release_artifact_lifecycle import stop_child_group
+                    if child.poll() is None or group_alive(child.pid): stop_child_group(child)
+                    self.settled = not group_alive(child.pid)
+                except (OSError, IdentityRejected, subprocess.SubprocessError):
+                    self.settled = False
+            else:
+                self.settled = True  # Popen did not create a child.
+            if not self.settled:
+                print('IDENTITY_INPUT_CLEANUP_DEFERRED: compiler exit is unconfirmed', file=sys.stderr)
+
+    def __exit__(self, *exc):
+        try:
+            if self.state and self.settled:
+                try: self.cleanup()
+                except (OSError, IdentityRejected):
+                    print('IDENTITY_INPUT_CLEANUP_DEFERRED: fixed inputs changed or are incomplete', file=sys.stderr)
+        finally:
+            for fd in (self.fd, self.release_fd):
+                if fd is not None: os.close(fd)
+            self.fd = self.release_fd = None
+
+    def environment(self):
+        return dict(build_environment(), REMOTEPLAY_BUILD_IDENTITY_FILE=str(self.document),
+                    REMOTEPLAY_BUILD_IDENTITY_RS=str(self.module))
+
+
+def observed_build(repo: Path, expected: dict, target: Path | None = None) -> dict:
     """Only this fixed build path may mint a build receipt; no loose-binary import.
 
-    The app must compile REMOTEPLAY_BUILD_IDENTITY_FILE into ProductInfo. Until
-    coordinated source integration exists, the build is rejected after linkage.
+    The app must embed the exact generated identity in ProductInfo. Shared-cache
+    receipts do not claim that dependencies came from a fresh target.
     """
     validate_identity(expected, expected['source']['commit'], expected['identity_sha256'])
     source = source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256'])
     require(identity(source, expected['configuration']) == expected, 'Source differs from reviewed snapshot')
     require(toolchain_digest() == expected['configuration']['toolchain_sha256'], 'Toolchain changed')
     require(environment_digest() == expected['configuration']['environment_sha256'], 'Build environment changed')
-    target = target.absolute()
-    require(not target.exists() and not target.is_symlink() and target.parent.is_dir(),
-            'Build target must be fresh; never clean/reuse an unproven cache or signed build')
-    require(not target.is_relative_to(repo.absolute()), 'Isolated target must be outside source')
-    require(shutil.disk_usage(target.parent).free >= 4 * 1024 ** 3, 'Four GiB free-space reserve required')
-    target.mkdir(mode=0o700)
-    source_file = target / 'compiled-build-identity.json'
-    write_new(source_file, expected)
-    module = target / 'compiled-build-identity.rs'
-    module.write_bytes(compiled_module(expected))
-    module_hash = hash_file(module)
+    repo = repo.absolute()
+    target = shared_target(repo, target)
+    require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Four GiB free-space reserve required')
     config = expected['configuration']
     command = ['cargo', 'build', '-p', 'remote_play_app', '--bin', 'remote_play',
                '--no-default-features', '--features', ','.join(config['features']),
                '--profile', config['profile'], '--target', config['target'], '--locked', '--offline', '-j', '2']
-    env = build_environment()
-    env.update(CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0',
-               REMOTEPLAY_BUILD_IDENTITY_FILE=str(source_file), REMOTEPLAY_BUILD_IDENTITY_RS=str(module))
-    process = subprocess.run(command, cwd=repo, env=env)
-    require(process.returncode == 0, 'Build failed; no receipt minted')
-    after = source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256'])
-    require(after == source and read_json(source_file) == expected and hash_file(module) == module_hash,
-            'Source/identity changed during build')
-    require(environment_digest() == config['environment_sha256'] and
-            toolchain_digest() == config['toolchain_sha256'], 'Compiler environment/toolchain changed during build')
-    require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Build exhausted required disk reserve')
-    profile = 'debug' if config['profile'] == 'dev' else 'release'
-    binary = target / config['target'] / profile / ('remote_play.exe' if config['platform'] == 'windows' else 'remote_play')
-    value = hash_file(binary)
-    info = product_info(binary, expected, value)
-    return {'schema': 1, 'kind': 'observed-build', 'build_identity': expected,
-            'compiler_binary_sha256': value, 'compiler_binary_bytes': binary.stat().st_size,
-            'product_info': info, 'build_command': command, 'fresh_target': True,
-            'visual_acceptance': 'not_evaluated', 'stream_acceptance': 'not_evaluated'}
+    with BuildInputs(repo, target, expected) as inputs:
+        module_hash = hash_file(inputs.module)
+        result = inputs.run(command, env=inputs.environment())
+        require(result == 0, 'Build failed; no receipt minted')
+        require(inputs.settled, 'Compiler exit is unconfirmed; no receipt minted')
+        after = source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256'])
+        require(after == source and read_json(inputs.document) == expected and hash_file(inputs.module) == module_hash,
+                'Source/identity changed during build')
+        require(environment_digest() == config['environment_sha256'] and
+                toolchain_digest() == config['toolchain_sha256'], 'Compiler environment/toolchain changed during build')
+        require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Build exhausted required disk reserve')
+        profile = 'debug' if config['profile'] == 'dev' else 'release'
+        binary = target / config['target'] / profile / ('remote_play.exe' if config['platform'] == 'windows' else 'remote_play')
+        value = hash_file(binary)
+        info = product_info(binary, expected, value)
+        return {'schema': 2, 'kind': 'observed-build', 'build_identity': expected,
+                'compiler_binary_sha256': value, 'compiler_binary_bytes': binary.stat().st_size,
+                'product_info': info, 'build_command': command, 'fresh_target': False,
+                'build_storage': {'mode': 'shared-incremental', 'target_directory': str(target),
+                                  'source_directory': str(repo)},
+                'visual_acceptance': 'not_evaluated', 'stream_acceptance': 'not_evaluated'}
 
 
 def files_in(root: Path) -> list[dict]:
@@ -397,9 +523,20 @@ def files_in(root: Path) -> list[dict]:
 
 def seal_tree(stage: Path, build_receipt: dict, expected_commit: str, expected_identity: str,
               *, compiler_binary: Path | None = None) -> dict:
-    require(build_receipt.get('kind') == 'observed-build' and build_receipt.get('fresh_target') is True,
+    require(build_receipt.get('kind') == 'observed-build' and type(build_receipt.get('schema')) is int,
             'An independently pinned observed-build receipt is required')
+    if build_receipt['schema'] == 1:
+        require(build_receipt.get('fresh_target') is True, 'Legacy receipt must retain its fresh-target proof')
+    else:
+        storage = build_receipt.get('build_storage', {})
+        require(build_receipt['schema'] == 2 and build_receipt.get('fresh_target') is False
+                and storage.get('mode') == 'shared-incremental'
+                and type(storage.get('source_directory')) is str
+                and Path(storage['source_directory']).is_absolute()
+                and type(storage.get('target_directory')) is str
+                and Path(storage['target_directory']).is_absolute(), 'Missing shared-cache build evidence')
     expected = validate_identity(build_receipt.get('build_identity'), expected_commit, expected_identity)
+    validate_product_info(build_receipt['product_info'], expected)
     platform = expected['configuration']['platform']
     top, executable = LAYOUTS[platform]
     require({p.name for p in stage.iterdir()} == {top}, 'Unexpected staging content or existing manifest')
@@ -656,7 +793,7 @@ def main() -> None:
     build.add_argument('--repo', type=Path, required=True)
     build.add_argument('--identity', type=Path, required=True)
     build.add_argument('--identity-sha256', required=True, help='SHA-256 of the prepared JSON file from independent handoff')
-    build.add_argument('--target', type=Path, required=True)
+    build.add_argument('--target', type=Path, help='Compatibility argument; must resolve to the existing ~/rust-target')
     build.add_argument('--output', type=Path, required=True)
     candidate = commands.add_parser('verify-candidate')
     candidate.add_argument('--repo', type=Path, required=True)
@@ -743,4 +880,5 @@ def main() -> None:
 
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     main()

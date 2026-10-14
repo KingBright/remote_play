@@ -5,6 +5,7 @@ use remote_core::audio::AudioMixer;
 use remote_core::jitter_buffer::JitterBuffer;
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, atomic::Ordering::Relaxed};
 use tokio::sync::mpsc;
 
 pub struct AudioPlayer {
@@ -52,8 +53,13 @@ impl AudioPlayerSettings {
 }
 
 impl AudioPlayer {
-    pub fn new(
+    pub fn new(rx: mpsc::Receiver<AudioPlayerEvent>) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::with_statistics(rx, remote_core::Statistics::new())
+    }
+
+    pub fn with_statistics(
         mut rx: mpsc::Receiver<AudioPlayerEvent>,
+        stats: Arc<remote_core::Statistics>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         {
             let host = cpal::default_host();
@@ -69,13 +75,23 @@ impl AudioPlayer {
             let (sample_tx, sample_rx) = crossbeam_channel::bounded::<PlaybackChunk>(32);
             let mut mixer = AudioMixer::new(output_channels, output_rate as usize * 60 / 1000, 16);
 
-            let err_fn = |err| eprintln!("an error occurred on audio output stream: {}", err);
+            let error_stats = stats.clone();
+            let err_fn = move |err| {
+                error_stats.audio_output_errors.fetch_add(1, Relaxed);
+                eprintln!("an error occurred on audio output stream: {}", err);
+            };
 
             let stream = match default_config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_output_stream(
                     &output_config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         fill_audio_buffer(data, &sample_rx, &mut mixer, |s| s);
+                        record_output(
+                            &stats,
+                            data.iter()
+                                .filter(|s| s.is_finite() && s.abs() > 0.0001)
+                                .count(),
+                        );
                     },
                     err_fn,
                     None,
@@ -86,6 +102,10 @@ impl AudioPlayer {
                         fill_audio_buffer(data, &sample_rx, &mut mixer, |s| {
                             (s * i16::MAX as f32) as i16
                         });
+                        record_output(
+                            &stats,
+                            data.iter().filter(|s| i32::from(**s).abs() > 3).count(),
+                        );
                     },
                     err_fn,
                     None,
@@ -163,37 +183,7 @@ impl AudioPlayer {
                             settings = new_settings;
                         }
                         AudioPlayerEvent::StreamConfig(config) => {
-                            if config.direction != AudioDirection::HostToClient {
-                                continue;
-                            }
-                            if streams
-                                .get(&config.stream_id)
-                                .is_some_and(|s| s.config == config)
-                            {
-                                continue;
-                            }
-                            match AudioDecodeStream::new(config.clone(), output_rate) {
-                                Ok(mut stream) => {
-                                    let lane = streams
-                                        .get(&config.stream_id)
-                                        .map(|s| s.lane)
-                                        .or_else(|| {
-                                            (0..16).find(|lane| {
-                                                streams.values().all(|s| s.lane != *lane)
-                                            })
-                                        });
-                                    let Some(lane) = lane else {
-                                        continue;
-                                    };
-                                    stream.lane = lane;
-                                    stream.local_gain =
-                                        volumes.get(&config.stream_id).copied().unwrap_or(1.0);
-                                    streams.insert(config.stream_id, stream);
-                                }
-                                Err(err) => {
-                                    eprintln!("Ignoring unsupported audio stream config: {}", err);
-                                }
-                            }
+                            apply_audio_stream_config(&mut streams, &volumes, config, output_rate);
                         }
                         AudioPlayerEvent::Packet(packet) => {
                             let stream_id = packet.header.ssrc;
@@ -232,6 +222,40 @@ impl AudioPlayer {
             Ok(Self {
                 _stream: Some(stream),
             })
+        }
+    }
+}
+
+fn apply_audio_stream_config(
+    streams: &mut HashMap<u32, AudioDecodeStream>,
+    volumes: &HashMap<u32, f32>,
+    config: AudioStreamConfig,
+    output_rate: u32,
+) {
+    if config.direction != AudioDirection::HostToClient {
+        return;
+    }
+    if streams
+        .get(&config.stream_id)
+        .is_some_and(|s| s.config == config)
+    {
+        return;
+    }
+    match AudioDecodeStream::new(config.clone(), output_rate) {
+        Ok(mut stream) => {
+            let lane = streams
+                .get(&config.stream_id)
+                .map(|s| s.lane)
+                .or_else(|| (0..16).find(|lane| streams.values().all(|s| s.lane != *lane)));
+            let Some(lane) = lane else {
+                return;
+            };
+            stream.lane = lane;
+            stream.local_gain = volumes.get(&config.stream_id).copied().unwrap_or(1.0);
+            streams.insert(config.stream_id, stream);
+        }
+        Err(err) => {
+            eprintln!("Ignoring unsupported audio stream config: {}", err);
         }
     }
 }
@@ -374,6 +398,13 @@ fn select_output_config(
     Err("Audio output has no Opus-compatible sample rate; a platform resampler is required".into())
 }
 
+fn record_output(stats: &remote_core::Statistics, nonzero_samples: usize) {
+    stats
+        .audio_output_nonzero_samples
+        .fetch_add(nonzero_samples, Relaxed);
+    stats.audio_output_callbacks.fetch_add(1, Relaxed);
+}
+
 fn fill_audio_buffer<T>(
     data: &mut [T],
     sample_rx: &crossbeam_channel::Receiver<PlaybackChunk>,
@@ -495,6 +526,63 @@ mod tests {
         let mut out = [0.0; 1920];
         fill_audio_buffer(&mut out, &rx, &mut mixer, |v| v);
         assert!(out.iter().all(|v| (*v - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn repeated_config_repairs_lost_first_config_after_local_mute_and_volume_change() {
+        let id = 71;
+        let mut streams = HashMap::new();
+        streams.insert(
+            id,
+            AudioDecodeStream::new(legacy_audio_stream_config(id), 48000).unwrap(),
+        );
+        let volumes = HashMap::from([(id, 0.5)]);
+        let settings = AudioPlayerSettings {
+            remote_system_muted: false,
+            remote_microphone_muted: true,
+            volume_percent: 100,
+        };
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        let mut encoder =
+            opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::LowDelay).unwrap();
+        let mut payload = vec![0; 4000];
+        let n = encoder
+            .encode_float(&vec![0.2; 1920], &mut payload)
+            .unwrap();
+        payload.truncate(n);
+        let packet = |sequence_number| RtpPacket {
+            header: protocol::RtpHeader {
+                version: 2,
+                payload_type: 97,
+                sequence_number,
+                timestamp: u32::from(sequence_number) * 960,
+                ssrc: id,
+            },
+            payload: payload.clone(),
+        };
+        streams
+            .get_mut(&id)
+            .unwrap()
+            .push_packet(packet(0), 2, &tx, settings);
+        assert!(
+            rx.try_recv().is_err(),
+            "unconfigured audio is still gated as microphone"
+        );
+        let config = AudioStreamConfig::remote_system(id, 48000, 2, 20);
+        apply_audio_stream_config(&mut streams, &volumes, config.clone(), 48000);
+        streams
+            .get_mut(&id)
+            .unwrap()
+            .push_packet(packet(1), 2, &tx, settings);
+        let output = rx.try_recv().unwrap();
+        assert!(output.samples.iter().any(|v| v.abs() > 0.001));
+        assert_eq!(streams[&id].local_gain, 0.5);
+        assert!(streams[&id].expected_seq_init);
+        apply_audio_stream_config(&mut streams, &volumes, config, 48000);
+        assert!(
+            streams[&id].expected_seq_init,
+            "identical repeat must retain decoder/jitter state"
+        );
     }
 
     #[test]

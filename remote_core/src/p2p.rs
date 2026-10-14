@@ -415,6 +415,7 @@ pub struct P2pTunnelConfig {
     pub group_id: String,
     pub peer_id: String,
     pub announcement: Vec<u8>,
+    pub live_capabilities: Option<watch::Receiver<crate::discovery::DiscoveryCapabilities>>,
     pub local_target_addr: Option<SocketAddr>,
     pub routing_key: Option<crate::routed_relay::RoutingKey>,
     pub discovery_target_addr: Option<SocketAddr>,
@@ -447,6 +448,7 @@ impl P2pTunnelConfig {
             group_id,
             peer_id,
             announcement,
+            live_capabilities: None,
             local_target_addr: None,
             routing_key: None,
             discovery_target_addr: None,
@@ -472,6 +474,29 @@ impl P2pTunnelConfig {
             self.rendezvous_addrs = unique;
         }
         self
+    }
+
+    pub fn with_live_capabilities(
+        mut self,
+        capabilities: watch::Receiver<crate::discovery::DiscoveryCapabilities>,
+    ) -> Self {
+        self.live_capabilities = Some(capabilities);
+        self
+    }
+
+    fn registration_packet(&self) -> Result<Vec<u8>, P2pError> {
+        let announcement = if self.live_capabilities.is_some() {
+            crate::discovery::DiscoveryAnnouncement::decode(&self.announcement)
+                .and_then(|announcement| announcement.encode_with_capabilities(self.live_capabilities.as_ref()))
+                .map_err(|_| P2pError::InvalidPacket)?
+        } else {
+            self.announcement.clone()
+        };
+        P2pPacket::Register {
+            group_id: self.group_id.clone(),
+            peer_id: self.peer_id.clone(),
+            announcement,
+        }.encode()
     }
 
     pub fn with_local_target_addr(mut self, addr: SocketAddr) -> Self {
@@ -576,13 +601,7 @@ impl BoundP2pTunnel {
             ));
         }
         let public_socket = Arc::new(self.socket);
-        let register = P2pPacket::Register {
-            group_id: self.config.group_id.clone(),
-            peer_id: self.config.peer_id.clone(),
-            announcement: self.config.announcement.clone(),
-        }
-        .encode()
-        .map_err(p2p_io_error)?;
+        let register = self.config.registration_packet().map_err(p2p_io_error)?;
         let mut register_interval = tokio::time::interval(self.config.register_interval);
         register_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut punch_interval = tokio::time::interval(self.config.punch_interval);
@@ -630,6 +649,7 @@ impl BoundP2pTunnel {
                     return Ok(());
                 }
                 _ = register_interval.tick() => {
+                    let register = self.config.registration_packet().map_err(p2p_io_error)?;
                     for rendezvous in &self.config.rendezvous_addrs {
                         let _ = public_socket.send_to(&register, rendezvous).await;
                     }
@@ -1929,6 +1949,46 @@ mod tests {
         confirm_candidate(&mut route, second, Some(Duration::from_millis(8)), &config);
         assert_eq!(route.active_candidate, second);
         assert!(route.direct_ready);
+    }
+
+    #[tokio::test]
+    async fn live_capture_capabilities_refresh_registration_without_rebinding() {
+        let rendezvous = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let initial = crate::discovery::DiscoveryAnnouncement::decode(&announcement("mobile", 5001)).unwrap();
+        let mut caps = initial.capabilities;
+        caps.can_stream = false;
+        caps.file_transfer = true;
+        let (caps_tx, caps_rx) = watch::channel(caps);
+        let mut config = P2pTunnelConfig::new(
+            "127.0.0.1:0".parse().unwrap(), rendezvous.local_addr().unwrap(),
+            "fixture-group", "mobile", initial.encode().unwrap(),
+        ).unwrap().with_live_capabilities(caps_rx);
+        config.register_interval = Duration::from_millis(15);
+        let tunnel = BoundP2pTunnel::bind(config).await.unwrap();
+        let original_address = tunnel.local_addr().unwrap();
+        let (cancel, cancel_rx) = broadcast::channel(1);
+        let (snapshot_tx, _snapshot_rx) = watch::channel(P2pTunnelSnapshot::default());
+        let task = tokio::spawn(tunnel.run(cancel_rx, snapshot_tx));
+        for capture in [false, true, false] {
+            caps.can_stream = capture;
+            caps_tx.send_replace(caps);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                let mut buf = [0; 2048];
+                loop {
+                    let (len, source) = rendezvous.recv_from(&mut buf).await.unwrap();
+                    assert_eq!(source, original_address);
+                    let P2pPacket::Register { group_id, peer_id, announcement } = P2pPacket::decode(&buf[..len]).unwrap() else { panic!("expected registration"); };
+                    assert_eq!(group_id, "fixture-group");
+                    assert_eq!(peer_id, "mobile");
+                    let received = crate::discovery::DiscoveryAnnouncement::decode(&announcement).unwrap();
+                    assert_eq!(received.control_port, 5001);
+                    assert!(received.capabilities.file_transfer);
+                    if received.capabilities.can_stream == capture { break; }
+                }
+            }).await.expect("P2P registration refreshes media authorization");
+        }
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

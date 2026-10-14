@@ -1,6 +1,10 @@
 pub mod entrypoint;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(unix,windows))]
 pub mod background_service;
+#[cfg(any(unix,windows))]
+pub(crate) mod private_ipc;
+#[cfg(all(any(unix,windows),feature="gpui-restoration"))]
+mod directed_delivery;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod design_system;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1427,7 +1431,7 @@ impl Drop for UnifiedDiscoveryRuntime {
 
 pub struct UnifiedServiceOwner {
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     frontend_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
@@ -1440,6 +1444,8 @@ pub struct UnifiedServiceOwner {
     side_services: UnifiedSideServiceControls,
     #[cfg(target_os = "linux")]
     local_portal_shares: Option<mpsc::Sender<host::service::LocalPortalShareCommand>>,
+    pub(crate) delivery: Arc<host::directed_delivery::Broker>,
+    pub(crate) delivery_incoming: Mutex<Option<mpsc::Receiver<Arc<host::directed_delivery::Incoming>>>>,
     tasks: Vec<AbortOnDropTask>,
 }
 
@@ -1532,16 +1538,17 @@ impl UnifiedServiceOwner {
             None => (None, None),
         };
 
+        let (delivery, delivery_incoming)=host::directed_delivery::Broker::new();
         #[cfg(target_os = "linux")]
         let mut local_portal_shares = None;
         if let Some(host_config) = config.passive_host {
             #[cfg(target_os = "linux")]
             let controls = { let (tx, rx) = mpsc::channel(16); local_portal_shares = Some(tx); rx };
+            let broker=delivery.clone();
             tasks.push(AbortOnDropTask(tokio::spawn(async move {
-                #[cfg(target_os = "linux")]
-                let result = host::service::run_host_service_with_portal_shares(host_config, controls).await;
-                #[cfg(not(target_os = "linux"))]
-                let result = run_host_service(host_config).await;
+                let result = host::service::run_host_service_with_delivery(host_config, broker,
+                    #[cfg(target_os="linux")] controls,
+                ).await;
                 if let Err(err) = result { eprintln!("Unified passive host service stopped: {err}"); }
             })));
         }
@@ -1599,7 +1606,7 @@ impl UnifiedServiceOwner {
 
         Ok(Self {
             runtime,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             frontend_epoch: None,
             p2p_runtime,
             relay_runtime,
@@ -1612,6 +1619,7 @@ impl UnifiedServiceOwner {
             side_services: config.side_services,
             #[cfg(target_os = "linux")]
             local_portal_shares,
+            delivery, delivery_incoming: Mutex::new(Some(delivery_incoming)),
             tasks,
         })
     }
@@ -1625,7 +1633,7 @@ impl UnifiedServiceOwner {
 
     /// Frontend adapter: consume service-owned routes without binding discovery,
     /// registering a relay/P2P node, starting a host, or writing a profile.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub async fn from_background_snapshot(rx: watch::Receiver<DiscoveryPeerSnapshot>) -> Result<Self, UnifiedServiceOwnerError> {
         let mut owner = Self::start(UnifiedServiceOwnerConfig::default()).await?;
         owner.tasks.push(spawn_discovery_snapshot_bridge(owner.runtime.clone(), rx.clone()));
@@ -1634,7 +1642,7 @@ impl UnifiedServiceOwner {
         Ok(owner)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn frontend_epoch(&self) -> Option<Arc<std::sync::atomic::AtomicU64>> { self.frontend_epoch.clone() }
 
     pub fn discovery_snapshot_rx(&self) -> Option<watch::Receiver<DiscoveryPeerSnapshot>> {
@@ -3746,6 +3754,7 @@ mod tests {
                 scope: DiscoveryScope::Lan,
                 ttl: DEFAULT_PEER_TTL,
             },
+            live_capabilities: None,
             announce_interval: Duration::from_millis(50),
             prune_interval: Duration::from_millis(50),
             accept_any_network: false,
@@ -3792,6 +3801,7 @@ mod tests {
                 scope: DiscoveryScope::Lan,
                 ttl: DEFAULT_PEER_TTL,
             },
+            live_capabilities: None,
             announce_interval: Duration::from_millis(50),
             prune_interval: Duration::from_millis(50),
             accept_any_network: false,

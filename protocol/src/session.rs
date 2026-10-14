@@ -142,7 +142,19 @@ pub enum SessionCommand {
     InputBinding { binding: crate::realtime_input::InputBinding, request: u64, host_time_ms: u64 },
     RealtimeInput(crate::realtime_input::RealtimeInput),
     InputHandled { binding: crate::realtime_input::InputBinding, sequence: u64 },
+    // Directed delivery uses this same authenticated control connection. The
+    // opaque ticket is an intent capability, never a new device identity.
+    DeliveryOffer { request_id: u64, source_device_id: String, target_device_id: String, ticket: [u8; 32], revision: u64 },
+    DeliveryClaim { request_id: u64, target_device_id: String, ticket: [u8; 32] },
+    DeliveryCancel { request_id: u64 },
+    DeliveryReceipt { request_id: u64, revision: u64, state: DeliveryState, reason: String },
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryClaimProof { pub ticket:[u8;32], pub target_device_id:String, pub request_id:u64 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DeliveryState { Pending, Accepted, Claimed, Cancelled, Rejected, Receiving }
 
 /// Fit inside both requested dimensions, preserve source aspect and align 4:2:0
 /// output. Rounding is bounded to one pixel per dimension, never stretch to 16:9.
@@ -167,4 +179,19 @@ mod tests {
         assert_eq!(fit_capture_size((913, 913), (1920, 1080)), (912, 912));
         assert_eq!(fit_capture_size((0, 0), (0, 0)), (2, 2));
     }
+    #[test]
+    fn delivery_commands_round_trip_without_changing_existing_wire_indices(){
+        let existing=[(SessionCommand::ReleaseInput{id:7},0u32),(SessionCommand::Open{connection_id:9,version:SESSION_VERSION},7),
+            (SessionCommand::Close{connection_id:9},18),(SessionCommand::RequestInputBinding{connection_id:9,id:7,source_revision:0,request:1},23)];
+        for(command,index)in existing {let bytes=bincode::serialize(&command).unwrap();assert_eq!(&bytes[..4],&index.to_le_bytes());}
+        let commands=[SessionCommand::DeliveryOffer{request_id:17,source_device_id:"source".into(),target_device_id:"target".into(),ticket:[3;32],revision:1},
+            SessionCommand::DeliveryClaim{request_id:17,target_device_id:"target".into(),ticket:[3;32]},
+            SessionCommand::DeliveryCancel{request_id:17},
+            SessionCommand::DeliveryReceipt{request_id:17,revision:2,state:DeliveryState::Receiving,reason:String::new()}];
+        for(index,command)in commands.into_iter().enumerate(){
+            let bytes=bincode::serialize(&command).unwrap();assert_eq!(&bytes[..4],&(27u32+index as u32).to_le_bytes());
+            let decoded:SessionCommand=bincode::deserialize(&bytes).unwrap();assert_eq!(bincode::serialize(&decoded).unwrap(),bytes);
+        }
+    }
+
 }

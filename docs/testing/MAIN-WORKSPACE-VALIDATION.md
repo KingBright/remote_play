@@ -44,3 +44,21 @@ For release-script checks in the primary checkout, use
 `python3 -B -m unittest discover -s scripts/tests -v`; `-B` preserves existing
 user bytecode files. A focused Rust run verifies the primary source entry. Earlier compiled evidence
 remains tied to its recorded source hashes, profiles and original build location.
+
+## Linux X11 test compilation on the existing Mac
+
+`python3 -B scripts/test_stream_settings_model.py --mode linux-x11-check`
+uses the same lifecycle check, existing Cargo target, locked offline resolution,
+4 GiB reserve monitor and source-change guard. The default invocation continues
+running only `stream_settings::tests`.
+
+The X11 mode runs `cargo check -p gpui-ce --lib --tests` for
+`x86_64-unknown-linux-gnu`; the dependency's default features include X11.
+It uses installed Zig and cargo-zigbuild's compiler argument adapter through
+process-local, target-specific CC/CXX/AR settings, with the existing `~/.cache/zig`.
+It does not invoke cargo-zigbuild as an alternate build entry, install a compiler,
+change global Cargo configuration, create a new target root, or skip lifecycle
+validation. Linux native libraries and a suitable cross sysroot may still be
+needed; do not substitute macOS libraries or suppress their detection to force
+success. A successful check compiles test code but does not execute Linux tests
+or establish native GUI/input acceptance.

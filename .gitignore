@@ -10,3 +10,17 @@
 /android/local.properties
 
 /.remote-play-provision/
+
+# Python bytecode is regenerated from source.
+__pycache__/
+
+# Generated release-only state; the tracked adoption contract remains authoritative.
+/.rust-storage/release-binding.json
+/.rust-storage/release-deliveries.json
+/.rust-storage/release-snapshots/
+/.rust-storage/recovery/
+/.rust-storage/retiring/
+/.rust-storage/release-retention-transaction.json
+/.rust-storage/release-setup-transaction.json
+/.rust-storage/lock
+/.rust-storage/release-producer.lock

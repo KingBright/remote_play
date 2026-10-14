@@ -78,6 +78,15 @@ impl WorkspaceConnection {
         target: SocketAddr,
         receive_dir: std::path::PathBuf,
     ) -> Result<(Self, WorkspaceEvents), String> {
+        Self::connect_inner(target, Some(receive_dir)).await
+    }
+
+    /// The single-viewport client does not opt into receiving files.
+    pub async fn connect_media(target: SocketAddr) -> Result<(Self, WorkspaceEvents), String> {
+        Self::connect_inner(target, None).await
+    }
+
+    async fn connect_inner(target: SocketAddr, receive_dir: Option<std::path::PathBuf>) -> Result<(Self, WorkspaceEvents), String> {
         let mux = UdpMultiplexer::bind(if target.is_ipv4() {
             "0.0.0.0:0"
         } else {
@@ -116,23 +125,14 @@ impl WorkspaceConnection {
         let (files_tx, files_rx) = mpsc::channel(128);
         let (file_events, files) = mpsc::unbounded_channel();
         let (cancel, _) = broadcast::channel(4);
-        let (scheduled, worker) = ScheduledDataSender::spawn(
-            sender.clone(),
-            target,
-            ScheduledDataSenderConfig::default(),
-        );
-        let runtime = tokio::spawn(run_file_transfer_runtime(
-            scheduled,
-            command_files,
-            files_rx,
-            file_events,
-            cancel.subscribe(),
-            FileTransferRuntimeConfig {
-                receive_dir,
-                active: file_activity.clone(),
-                ..Default::default()
-            },
-        ));
+        let allow_files = receive_dir.is_some();
+        let workers = receive_dir.map(|receive_dir| {
+            let (scheduled, worker) = ScheduledDataSender::spawn(sender.clone(), target, ScheduledDataSenderConfig::default());
+            let runtime = tokio::spawn(run_file_transfer_runtime(scheduled, command_files, files_rx, file_events, cancel.subscribe(), FileTransferRuntimeConfig {
+                receive_dir, active: file_activity.clone(), ..Default::default()
+            }));
+            (runtime, worker)
+        });
         let input = Arc::new(std::sync::Mutex::new(InputState::default()));
         let mut actor = Actor {
             last_response_tx,
@@ -152,15 +152,14 @@ impl WorkspaceConnection {
         let shutdown = cancel.subscribe();
         let task = tokio::spawn(async move {
             actor.run(shutdown).await;
-            runtime.abort();
-            worker.abort();
+            if let Some((runtime, worker)) = workers { runtime.abort(); worker.abort(); }
         });
         Ok((
             Self {
                 last_response_rx,
                 input,
                 max_subscriptions,
-                files_available,
+                files_available: files_available && allow_files,
                 clipboard_available,
                 settings_revision: std::sync::atomic::AtomicU64::new(0),
                 id,
@@ -180,6 +179,16 @@ impl WorkspaceConnection {
         ))
     }
 
+    /// Retry Close while the receiver is alive; a lost first datagram must not
+    /// strand a capture. Bounded shutdown still relies on host lease expiry if offline.
+    pub async fn close(&self) {
+        let _ = self.control(SessionCommand::Close { connection_id: self.id }).await;
+        let _ = tokio::time::timeout(Duration::from_millis(1600), async {
+            while !self.task.is_finished() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        }).await;
+        let _ = self.cancel.send(());
+    }
+
     fn prepare_command(&self, command: SessionCommand) -> Result<Command, String> {
         let command = self.input.lock().unwrap().seal(command)?;
         Ok(match command {
@@ -189,6 +198,21 @@ impl WorkspaceConnection {
     }
     pub fn input_ready(&self, id:u32, source_revision:u32) -> bool {
         self.input.lock().unwrap().ready(id,source_revision)
+    }
+    pub fn input_binding(&self, id: u32, source_revision: u32) -> Option<protocol::realtime_input::InputBinding> {
+        self.input.lock().unwrap().binding(id, source_revision)
+    }
+    /// Local frontend liveness for this exact grant. Call only from a healthy,
+    /// visible input UI (or its validated surface heartbeat), never an actor timer.
+    pub fn refresh_bound_input(&self,binding:protocol::realtime_input::InputBinding)->bool {
+        self.input.lock().unwrap().refresh_bound(binding)
+    }
+    /// Bind a gesture to the exact grant observed before translation, including its epoch.
+    /// None releases that grant's held state; a newer grant is never substituted.
+    pub fn try_bound_input(&self, binding: protocol::realtime_input::InputBinding, event: Option<protocol::InputEvent>) -> bool {
+        let mut input = self.input.lock().unwrap();
+        let Ok(SessionCommand::RealtimeInput(packet)) = input.seal_bound(binding, event) else { return false; };
+        self.commands.try_send(Command::Realtime(packet, Instant::now())).is_ok()
     }
     pub fn control(&self, command: SessionCommand) -> impl std::future::Future<Output=Result<(),String>> + Send + '_ {
         // async fn bodies are lazy: seal at API invocation, before the returned
@@ -240,6 +264,7 @@ impl WorkspaceConnection {
 }
 
 struct View {
+    host_stats: Arc<SharedHostStats>,
     handler: MediaPacketHandler,
     active: bool,
 }
@@ -359,6 +384,10 @@ impl Actor {
     }
     fn prepare_control(&mut self, command: &SessionCommand) {
         match command {
+            SessionCommand::Close { .. } => {
+                *self.input.lock().unwrap() = InputState::default();
+                self.pending.clear();
+            }
             SessionCommand::Unsubscribe { id } => {
                 self.subscriptions.remove(id);
                 self.pending.remove(&(2, *id));
@@ -432,7 +461,7 @@ impl Actor {
         let mut rejection_log_at: Option<Instant> = None;
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
         let mut retry = tokio::time::interval(Duration::from_millis(250));
-        let mut input_tick = tokio::time::interval(Duration::from_millis(100));
+        let mut input_tick = tokio::time::interval(Duration::from_millis(protocol::realtime_input::INPUT_REFRESH_INTERVAL_MS));
         input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut input_requests_at = Instant::now() - Duration::from_secs(1);
         let mut media = tokio::time::interval(Duration::from_millis(10));
@@ -485,8 +514,8 @@ impl Actor {
                         if self.subscriptions.len() >= protocol::session::MAX_SUBSCRIPTIONS && !self.subscriptions.contains_key(&request.id) {
                             let _ = self.control_tx.send(SessionCommand::Error { request_id: request.id, reason: "decoder subscription limit reached".into() }); continue;
                         }
-                        let handler = MediaPacketHandler::new(stats, Arc::new(AtomicU32::new(request.id)), host_stats, self.audio_tx.clone(), video, None);
-                        self.subscriptions.insert(request.id, View { handler, active: true });
+                        let handler = MediaPacketHandler::new(stats, Arc::new(AtomicU32::new(request.id)), host_stats.clone(), self.audio_tx.clone(), video, None);
+                        self.subscriptions.insert(request.id, View { handler, host_stats, active: true });
                         self.request(SessionCommand::Subscribe(request)).await;
                     }
                     Some(Command::Realtime(packet, queued)) => {
@@ -519,10 +548,28 @@ impl Actor {
                                 }
                                 _=>{}
                             }
+                            if matches!(command, SessionCommand::Closed { connection_id, .. } if connection_id != self.id) { continue; }
                             if !self.accept_control(&command) { continue; }
+                            let closed = matches!(command, SessionCommand::Closed { connection_id, .. } if connection_id == self.id);
+                            if let SessionCommand::Activity { id, revision, video, .. } = &command {
+                                if let Some(view) = self.subscriptions.get(id) { view.host_stats.media_pause.acknowledge(self.target, *id, *revision, !video); }
+                            }
                             let _ = self.control_tx.send(command);
+                            if closed { return; }
                         }
-                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { .. }, addr)) if addr == self.target => { last_pong = Instant::now(); self.last_response_tx.send_replace(last_pong); },
+                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { client_send_ts, host_recv_ts, host_send_ts }, addr)) if addr == self.target => {
+                            last_pong = Instant::now(); self.last_response_tx.send_replace(last_pong);
+                            let now = now_unix_ms();
+                            let rtt = (now.saturating_sub(client_send_ts) as f32).clamp(0.1,1000.0);
+                            let offset = ((host_recv_ts as f64-client_send_ts as f64)+(host_send_ts as f64-now as f64))/2.0;
+                            for view in self.subscriptions.values_mut() { view.handler.update_clock_sync(rtt,offset); }
+                        },
+                        Ok(MultiplexedPacket::Control(ControlMessage::HostTelemetry { fps, encode_latency_ms, jitter_ms, bitrate_kbps }, addr)) if addr == self.target => {
+                            for view in self.subscriptions.values() { view.host_stats.apply_host_telemetry(fps,encode_latency_ms,jitter_ms,bitrate_kbps); }
+                        },
+                        Ok(MultiplexedPacket::Control(ControlMessage::PipelineTelemetry(report), addr)) if addr == self.target => {
+                            for view in self.subscriptions.values() { view.host_stats.set_pipeline_report((*report).clone()); }
+                        },
                         Ok(MultiplexedPacket::Data(envelope, addr)) if addr == self.target => self.envelope(envelope).await,
                         Ok(MultiplexedPacket::DataWithTiming(mut envelope, timing, addr)) if addr == self.target => { envelope.transport_timing = timing.or(envelope.transport_timing); self.envelope(envelope).await; },
                         Ok(MultiplexedPacket::Rtp(packet, addr)) if addr == self.target => self.packet(packet, FrameTimingCheckpoints::default()).await,
@@ -726,7 +773,7 @@ mod tests {
         let (decode_tx, decode_rx) = mpsc::channel(8);
         let handler = MediaPacketHandler::new(Statistics::new(), Arc::new(AtomicU32::new(id)),
             Arc::new(SharedHostStats::default()),actor.audio_tx.clone(),decode_tx,None);
-        actor.subscriptions.insert(id, View {handler,active:true});
+        actor.subscriptions.insert(id, View {host_stats:Arc::new(SharedHostStats::default()),handler,active:true});
         decode_rx
     }
     fn source_video(id:u32, seq:u16) -> RtpPacket {
@@ -927,6 +974,7 @@ mod tests {
         let (video_tx, mut video_rx) = mpsc::channel(2);
         let stats = Statistics::new();
         let view = View {
+            host_stats: Arc::new(SharedHostStats::default()),
             active: true,
             handler: MediaPacketHandler::new(
                 stats.clone(),

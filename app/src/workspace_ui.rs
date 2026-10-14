@@ -597,6 +597,13 @@ impl Render for WorkspaceView {
             control.stop();
         }
         self.update_activity(window_visible(window), window.scale_factor());
+        if window_visible(window)&&window.is_window_active() {
+            if let Some(connection)=self.connection(){
+                let ids=self.shared.lock().unwrap().input_sources.iter().copied().collect::<Vec<_>>();
+                for id in ids {if let Some(binding)=connection.input_binding(id,0){if !connection.refresh_bound_input(binding){self.release_input_id(id);}}}
+            }
+        }
+
         let state = self.shared.lock().unwrap();
         let sources = state.sources.clone();
         let status = state.status.clone();
@@ -793,8 +800,8 @@ impl Render for WorkspaceView {
                             ))
                             .capture_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, _, _| {
-                                    if let Some(event) =
-                                        crate::restored_ui::protocol_key_event(&event.keystroke, true)
+                                    if let Some(event) = crate::restored_ui::fresh_key_down(event)
+                                        .and_then(|key| crate::restored_ui::protocol_key_event(key, true))
                                     {
                                         this.input(id, event);
                                     }

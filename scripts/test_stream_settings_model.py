@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small form-state regressions against the real protocol validator; no GUI/network."""
+"""Fixed local regressions and Linux X11 test compilation; no GUI/network."""
 import argparse
 import hashlib
 import json
@@ -13,11 +13,42 @@ import tempfile
 import time
 
 RESERVE = 4 * 1024**3
+LINUX_TARGET = "x86_64-unknown-linux-gnu"
+
+
+def validation_command(cargo, target, mode):
+    shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "linux-x11-check":
+        return [cargo, "check", *shared, "-p", "gpui-ce", "--lib", "--tests",
+                "--target", LINUX_TARGET]
+    return [cargo, "test", *shared, "-p", "remote_core", "--lib",
+            "stream_settings::tests", "--", "--nocapture"]
+
+
+def validation_environment(mode):
+    env = os.environ.copy()
+    env.pop("RUST_LOG", None)
+    if mode == "linux-x11-check":
+        zig = shutil.which("zig")
+        wrapper = shutil.which("cargo-zigbuild")
+        cache = Path.home() / ".cache/zig"
+        if not zig or not wrapper or not cache.is_dir():
+            raise ValueError("Linux X11 check requires installed Zig, cargo-zigbuild and existing ~/.cache/zig")
+        # Existing adapter translates cc-rs Rust triples to Zig triples.
+        # Target-specific settings leave native build-script compilers unchanged.
+        env["CC_x86_64_unknown_linux_gnu"] = f"{wrapper} zig cc -- -target x86_64-linux-gnu"
+        env["CXX_x86_64_unknown_linux_gnu"] = f"{wrapper} zig c++ -- -target x86_64-linux-gnu"
+        env["AR_x86_64_unknown_linux_gnu"] = f"{wrapper} zig ar --"
+        env["ZIG_GLOBAL_CACHE_DIR"] = str(cache)
+        env["ZIG_LOCAL_CACHE_DIR"] = str(cache)
+    return env
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
+    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check"),
+                        default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     # Refresh stale evidence explicitly with the existing adoption tool; never
@@ -47,13 +78,21 @@ def main():
         parser.error("use an existing target; this script does not create a new target")
     if shutil.disk_usage(target).free < RESERVE:
         parser.error("less than 4 GiB free; no build started")
-    command = [cargo, "test", "--offline", "--locked", "--target-dir", str(target),
-               "-p", "remote_core", "--lib", "stream_settings::tests", "--", "--nocapture"]
+    command = validation_command(cargo, target, args.mode)
+    try:
+        env = validation_environment(args.mode)
+    except ValueError as error:
+        parser.error(str(error))
     sources = [root / "remote_core/src/stream_settings.rs", root / "protocol/src/lib.rs"]
+    if args.mode == "linux-x11-check":
+        sources = [root / path for path in (
+            "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
+            "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
+        print("Linux X11 tests: compile check only; no native execution", flush=True)
     hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in sources]
     print(f"Using existing target: {target}", flush=True)
     with tempfile.TemporaryFile(mode="w+") as log:
-        process = subprocess.Popen(command, cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         while process.poll() is None:
             if shutil.disk_usage(target).free < RESERVE:
                 os.killpg(process.pid, signal.SIGTERM)  # Only this script's owned build group.

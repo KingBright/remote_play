@@ -119,7 +119,7 @@ impl MacInputInjector {
         }
         current_pointer_location(&self.source)
     }
-    fn prepare_window_event(&self, event: &InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn prepare_window_event(&self, event: &InputEvent, deadline: Option<Instant>) -> Result<(), Box<dyn Error + Send + Sync>> {
         let Some(window) = &self.window else {
             display_bounds(self.display_id.ok_or("Input display is not bound")?)?;
             if matches!(
@@ -170,7 +170,7 @@ impl MacInputInjector {
                     ..
                 }
         ) {
-            window.focus_for_click()?;
+            window.focus_for_click(deadline)?;
             let point = match event {
                 InputEvent::Touch {
                     normalized_x,
@@ -676,7 +676,7 @@ impl InputInjector for MacInputInjector {
         // real error through INPUT_UNAVAILABLE before changing held state or
         // posting events; CGEvent::post itself has no success return value.
         require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
-        self.prepare_window_event(&event)?;
+        self.prepare_window_event(&event, None)?;
         self.inject(event, None);
         Ok(())
     }
@@ -690,7 +690,7 @@ impl InputInjector for MacInputInjector {
             return Err("input expired before target validation".into());
         }
         require_post_event_access(unsafe { CGPreflightPostEventAccess() })?;
-        self.prepare_window_event(&event)?;
+        self.prepare_window_event(&event, Some(deadline))?;
         // AX focus/identity validation may have waited; check after it as well.
         if std::time::Instant::now() >= deadline {
             return Err("input expired after target validation".into());

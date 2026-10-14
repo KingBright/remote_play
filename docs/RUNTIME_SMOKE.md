@@ -60,8 +60,10 @@ platform, are mandatory:
   actual intended OS input, and resume/disconnect behavior independently. Collect
   sufficient negative evidence for locked, paused, stale-revision and closed sources.
 
-Use existing `app/examples/window_scoped_acceptance.rs` with
-`scripts/acceptance/WindowControlFixture.swift` for controlled real macOS windows;
+Use `app/examples/window_scoped_acceptance_guarded.rs` with
+`scripts/acceptance/GuardedWindowControlFixture.swift` for authorized controlled
+macOS input, following [the nonce-bound fixture and cleanup contract](testing/CONTROLLED-WINDOW-INPUT.md).
+The older broad window diagnostic is retained as historical source;
 the current shared `scripts/tests/run_gui_slice_regressions.py` and production
 owner/component tests cover state/dispatch invariants only. Existing real-capture
 fixtures require an explicit owned source/profile and existing OS consent; their

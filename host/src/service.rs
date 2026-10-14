@@ -4,7 +4,7 @@ use crate::{
     StreamingRunConfig, SubscriptionAudioConfig, env_flag_enabled, run_streaming,
     start_subscription_audio,
 };
-use protocol::realtime_input::{InputBinding, InputLease, InputPayload, RealtimeInput};
+use protocol::realtime_input::{InputBinding, InputLease, InputLeaseRevocation, InputPayload, RealtimeInput};
 use protocol::session::{
     CaptureSource, MAX_SUBSCRIPTIONS, SESSION_VERSION, SessionCommand, SubscriptionRequest,
 };
@@ -219,7 +219,24 @@ fn mac_input_status(target: InputTarget) -> Result<(), String> {
     }.map_err(|e| e.to_string())
 }
 
+/// Resource-local bridge: source revocation reaches existing capture workers
+/// even while the host control loop is awaiting another connection's startup.
+struct DeliveryCancellation(tokio::task::JoinHandle<()>);
+impl Drop for DeliveryCancellation {fn drop(&mut self){self.0.abort();}}
+fn forward_delivery_cancel(lease:Option<watch::Receiver<bool>>,cancel:broadcast::Sender<()>,tasks:Vec<tokio::task::AbortHandle>)->Option<DeliveryCancellation>{
+    let mut lease=lease?;
+    // Match Subscription/AudioGroup Drop: signal graceful shutdown and also
+    // cancel a worker stuck awaiting capture startup/pause/submit. Native stop
+    // remains owned by the existing RAII guards and lifecycle receipts.
+    let revoke=move||{let _=cancel.send(());for task in &tasks {task.abort();}};
+    if *lease.borrow() || lease.has_changed().is_err(){revoke();return None;}
+    Some(DeliveryCancellation(tokio::spawn(async move{
+        loop {if lease.changed().await.is_err()||*lease.borrow(){revoke();break;}}
+    })))
+}
+
 struct Subscription {
+    _delivery_cancel: Option<DeliveryCancellation>,
     settings_revision: u64,
     request: SubscriptionRequest,
     settings: watch::Sender<crate::StreamSettings>,
@@ -270,6 +287,7 @@ impl Drop for Subscription {
     }
 }
 struct AudioGroup {
+    _delivery_cancel: Option<DeliveryCancellation>,
     owner: u32,
     settings: watch::Sender<crate::StreamSettings>,
     cancel: broadcast::Sender<()>,
@@ -294,6 +312,8 @@ struct InputLeaseSlot {
 
 struct Connection {
     versioned_control: bool,
+    delivery_owner: Option<(crate::directed_delivery::Peer,[u8;32])>,
+    delivery_cancel: Option<watch::Receiver<bool>>,
     id: u32,
     last_seen: Instant,
     cancel: broadcast::Sender<()>,
@@ -756,14 +776,23 @@ impl Connection {
         self.refresh_audio();
     }
 
-    fn capture_sources(
+    async fn capture_sources(
         &self,
     ) -> Result<Vec<protocol::session::CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
         #[cfg(test)]
         if let Some(catalog) = TEST_CAPTURE_CATALOG.with(|value| value.borrow().clone()) {
             return Ok(catalog);
         }
-        let legacy = crate::capture_sources::list();
+        self.capture_sources_with(crate::capture_sources::list).await
+    }
+
+    async fn capture_sources_with(
+        &self,
+        enumerate: impl FnOnce() -> Result<Vec<protocol::session::CaptureSourceInfo>, Box<dyn Error + Send + Sync>> + Send + 'static,
+    ) -> Result<Vec<protocol::session::CaptureSourceInfo>, Box<dyn Error + Send + Sync>> {
+        // ScreenCaptureKit/AX and FFmpeg capability probes can block. Keep the
+        // host control future yielding so another owner's input can expire.
+        let legacy = tokio::task::spawn_blocking(enumerate).await?;
         #[cfg(not(all(unix, any(test, target_os = "linux"))))]
         let mut sources = legacy?;
         #[cfg(all(unix, any(test, target_os = "linux")))]
@@ -849,6 +878,8 @@ impl Connection {
         crate::lifecycle::publish(id, &resources, "open");
         Self {
             versioned_control: false,
+            delivery_owner: None,
+            delivery_cancel: None,
             id,
             last_seen: Instant::now(),
             cancel,
@@ -945,7 +976,7 @@ impl Connection {
         udp: UdpSender,
         stats: Arc<Statistics>,
         legacy: bool,
-        preflight: impl FnOnce() -> Result<(), String>,
+        preflight: impl FnOnce() -> Result<(), String> + Send + 'static,
     ) -> Result<SessionCommand, String> {
         validate_host_video_settings(
             request.width,
@@ -1014,7 +1045,7 @@ impl Connection {
         }
         // Check the capture dependency before acquiring microphones, audio groups,
         // or subscription tasks. A permanent packaging failure must remain inert.
-        if let Err(reason) = preflight() {
+        if let Err(reason) = tokio::task::spawn_blocking(preflight).await.map_err(|error| error.to_string())? {
             eprintln!(
                 "Capture preflight rejected subscription {}: {reason}",
                 request.id
@@ -1032,10 +1063,10 @@ impl Connection {
             {
                 vec![capture.source_info()]
             } else {
-                self.capture_sources().map_err(|e| e.to_string())?
+                self.capture_sources().await.map_err(|e| e.to_string())?
             }
             #[cfg(not(all(unix, any(test, target_os = "linux"))))]
-            self.capture_sources().map_err(|e| e.to_string())?
+            self.capture_sources().await.map_err(|e| e.to_string())?
         };
         #[cfg(all(unix, any(test, target_os = "linux")))]
         let native_capture = self
@@ -1143,6 +1174,9 @@ impl Connection {
             }
         }
         self.subscriptions.remove(&request.id);
+        if self.delivery_owner.is_some() && self.delivery_cancel.as_ref().is_none_or(|lease|*lease.borrow()||lease.has_changed().is_err()) {
+            return Err("Sending intent ended before capture allocation".into());
+        }
         // Replacement subscriptions must release the previous Windows capture
         // reservation before acquiring the next one. Otherwise same-session
         // display/source switches fail against their own reservation.
@@ -1150,10 +1184,8 @@ impl Connection {
         let capture_reservation = Arc::new(WindowsVideoCaptureReservation::acquire()?);
         #[cfg(target_os = "windows")]
         let task_reservation = capture_reservation.clone();
-        #[cfg(target_os = "windows")]
-        let wants_audio_group = legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE");
-        #[cfg(not(target_os = "windows"))]
-        let wants_audio_group = request.audio || legacy;
+        let wants_audio_group = request.audio
+            || (legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"));
         let audio_key = if wants_audio_group {
             Some(
                 selected
@@ -1182,7 +1214,9 @@ impl Connection {
                     include_microphone: legacy
                         && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"),
                 });
+                let bridge=forward_delivery_cancel(self.delivery_cancel.clone(),cancel.clone(),tasks.iter().map(tokio::task::JoinHandle::abort_handle).collect());
                 AudioGroup {
+                    _delivery_cancel:bridge,
                     owner: request.id,
                     settings,
                     cancel,
@@ -1231,10 +1265,12 @@ impl Connection {
                 .await;
             }
         });
+        let bridge=forward_delivery_cancel(self.delivery_cancel.clone(),cancel.clone(),vec![task.abort_handle()]);
         let audio_owner = audio_key.and_then(|key| self.audio_groups.get(&key).map(|g| g.owner));
         self.subscriptions.insert(
             id,
             Subscription {
+                _delivery_cancel:bridge,
                 request,
                 settings,
                 revision: activity_revision,
@@ -1364,16 +1400,33 @@ impl Connection {
 struct ActiveInput {
     owner: Option<(SocketAddr, u32)>,
     binding: Option<InputBinding>,
+    lease_revocation: Option<InputLeaseRevocation>,
+    deadline:Option<std::time::Instant>,
     #[cfg(all(unix, any(test, target_os = "linux")))]
     capture: Option<PreparedPortalCapture>,
 }
 impl ActiveInput {
+    /// Keep the same native input owner serialized while a different control
+    /// operation waits. Expiry releases only this owner, then resumes the same
+    /// pinned operation; no replacement capture or ownership is synthesized.
+    async fn during_control<F:std::future::Future>(&mut self,injector:&LazyInputInjector,future:F)->F::Output {
+        let Some(deadline)=self.deadline else{return future.await;};
+        tokio::pin!(future);
+        tokio::select!{biased;
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>{let _=self.release(injector).await;future.await},
+            result=&mut future=>result,
+        }
+    }
     async fn release(
         &mut self,
         injector: &LazyInputInjector,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Revoke before any native cleanup/await, even if its outcome is unknown.
+        // The displaced sender must obtain a fresh empty lease before resuming.
+        if let Some(lease) = self.lease_revocation.take() { lease.revoke(); }
         self.owner = None;
         self.binding = None;
+        self.deadline=None;
         injector.release_all_input();
         #[cfg(all(unix, any(test, target_os = "linux")))]
         if let Some(capture) = self.capture.take()
@@ -1419,36 +1472,57 @@ async fn dispatch_realtime_input(
         host_input_time_ms(),
         std::time::Instant::now(),
     );
+    let id = packet.binding.subscription_id;
+    let previous_modifiers = peer.input_leases.get(&id)
+        .map_or(0, |slot| slot.lease.held_modifiers());
+    // Cleanup acknowledges the sender's old state; it is never new intent to
+    // take control. A nonzero modifier mask may still only remove old bits.
+    let active_intent = match &packet.payload {
+        InputPayload::Event(InputEvent::MouseDown(_) | InputEvent::KeyDown(_)
+            | InputEvent::Key { pressed: true, .. }
+            | InputEvent::MouseMove { .. } | InputEvent::MouseMoveAbsolute { .. }
+            | InputEvent::MouseScroll { .. }) => true,
+        InputPayload::Event(InputEvent::ModifiersChanged(mask)) =>
+            mask & !previous_modifiers & 0x0f != 0,
+        _ => false,
+    };
     let Some(events) = peer.accept_input(&packet) else {
         return;
     };
     let Some(deadline) = deadline else {
         return;
     };
-    let id = packet.binding.subscription_id;
-    if owner.owner == Some((addr, id)) && owner.binding != Some(packet.binding) {
-        if owner.release(injector).await.is_err() {
-            peer.input_leases.remove(&id);
-            return;
+    let owns_input = owner.owner == Some((addr, id)) && owner.binding == Some(packet.binding);
+    // accept_input still consumes sequence/held state for suppressed cleanup;
+    // Release acknowledgements below remain available to the old sender.
+    if owns_input || active_intent {
+        if owner.owner == Some((addr, id)) && owner.binding != Some(packet.binding) {
+            if owner.release(injector).await.is_err() {
+                peer.input_leases.remove(&id);
+                return;
+            }
+        }
+        for event in events {
+            if !inject_fresh(injector, owner, peer, udp, addr, id, event, Some(deadline)).await {
+                peer.input_leases.remove(&id);
+                return;
+            }
+            owner.binding = Some(packet.binding);
+            owner.lease_revocation = peer.input_leases.get(&id).map(|slot| slot.lease.revocation());
         }
     }
-    for event in events {
-        if !inject_fresh(injector, owner, peer, udp, addr, id, event, Some(deadline)).await {
-            peer.input_leases.remove(&id);
-            return;
-        }
-        owner.binding = Some(packet.binding);
+    if owner.owner==Some((addr,id))&&owner.binding==Some(packet.binding){
+        owner.deadline=peer.input_leases.get(&id).map(|slot|slot.lease.deadline());
     }
     if matches!(packet.payload, InputPayload::Release) {
-        send_session(
+        owner.during_control(injector, send_session(
             udp,
             addr,
             SessionCommand::InputHandled {
                 binding: packet.binding,
                 sequence: packet.sequence,
             },
-        )
-        .await;
+        )).await;
     }
 }
 
@@ -1514,7 +1588,7 @@ async fn inject_fresh(
             .unwrap_or_else(|| {
                 "Selected source is inactive; resume its video before enabling control".into()
             });
-        input_error(peer, udp, addr, id, &reason).await;
+        owner.during_control(injector, input_error(peer, udp, addr, id, &reason)).await;
         return false;
     }
     let Some(target) = peer.subscriptions.get(&id).and_then(|s| s.input_target) else {
@@ -1536,7 +1610,7 @@ async fn inject_fresh(
     }
     if changed {
         if let Err(error) = owner.release(injector).await {
-            input_error(peer, udp, addr, id, &error.to_string()).await;
+            owner.during_control(injector, input_error(peer, udp, addr, id, &error.to_string())).await;
             return false;
         }
         owner.owner = Some((addr, id));
@@ -1563,7 +1637,7 @@ async fn inject_fresh(
     let result = injector.inject_target_before(target, event,deadline);
     if let Err(error) = result {
         let _ = owner.release(injector).await;
-        input_error(peer, udp, addr, id, &error.to_string()).await;
+        owner.during_control(injector, input_error(peer, udp, addr, id, &error.to_string())).await;
         return false;
     }
     true
@@ -1688,7 +1762,7 @@ pub async fn run_host_service(
     config: HostServiceConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     run_host_service_inner(
-        config,
+        config, None,
         #[cfg(all(unix, any(test, target_os = "linux")))]
         None,
     )
@@ -1702,11 +1776,23 @@ pub async fn run_host_service_with_portal_shares(
     config: HostServiceConfig,
     controls: mpsc::Receiver<LocalPortalShareCommand>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    run_host_service_inner(config, Some(controls)).await
+    run_host_service_inner(config, None, Some(controls)).await
+}
+
+pub async fn run_host_service_with_delivery(
+    config: HostServiceConfig,
+    delivery: Arc<crate::directed_delivery::Broker>,
+    #[cfg(target_os="linux")] controls: mpsc::Receiver<LocalPortalShareCommand>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    run_host_service_inner(config, Some(delivery),
+        #[cfg(target_os="linux")] Some(controls),
+        #[cfg(all(unix,test,not(target_os="linux")))] None,
+    ).await
 }
 
 async fn run_host_service_inner(
     config: HostServiceConfig,
+    delivery: Option<Arc<crate::directed_delivery::Broker>>,
     #[cfg(all(unix, any(test, target_os = "linux")))] mut local_shares: Option<
         mpsc::Receiver<LocalPortalShareCommand>,
     >,
@@ -1722,6 +1808,9 @@ async fn run_host_service_inner(
     let mut psk = load_session_psk();
     let mut require_auth = require_session_auth() || psk.is_some();
     let mut input_owner = ActiveInput::default();
+    let mut input_watchdog = tokio::time::interval(Duration::from_millis(
+        protocol::realtime_input::INPUT_WATCHDOG_INTERVAL_MS));
+    input_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -1762,8 +1851,10 @@ async fn run_host_service_inner(
                 #[cfg(not(all(unix, any(test, target_os = "linux"))))]
                 let _ = local;
             }
-            _ = tick.tick() => {
+            _ = input_watchdog.tick() => {
                 expire_input_owners(&mut peers,&mut input_owner,&injector).await;
+            }
+            _ = tick.tick() => {
                 let current_key = load_session_psk();
                 if current_key != psk {
                     for addr in authenticated.keys() { udp_sender.remove_peer_crypto(*addr); }
@@ -1771,13 +1862,20 @@ async fn run_host_service_inner(
                     closed.retain(|_,receipt|receipt.resources_live());authenticated.clear(); psk = current_key;
                     require_auth = require_session_auth() || psk.is_some();
                 }
+                if let Some(broker)=&delivery {
+                    broker.reconcile(|owner| peers.get(&owner.addr).is_some_and(|p|p.id==owner.connection)
+                        && authenticated.get(&owner.addr).is_some_and(|(n,_,_)|*n==owner.nonce)
+                        && owner.scope==remote_core::shared_files::current_share_scope());
+                    let revoked=peers.iter().filter(|(_,p)|p.delivery_owner.is_some_and(|(o,t)|!broker.claim_alive(o,t))).map(|(a,_)|*a).collect::<Vec<_>>();
+                    for addr in revoked {begin_close(&mut peers,&mut closing,addr,true);}
+                }
                 let expired: Vec<_> = peers.iter().filter(|(_, peer)| peer.last_seen.elapsed() > Duration::from_secs(15)).map(|(addr, _)| *addr).collect();
                 for addr in expired {begin_close(&mut peers,&mut closing,addr,true);}
                 let finished=closing.iter().filter(|(_,c)|c.task.is_finished()).map(|(addr,_)|*addr).collect::<Vec<_>>();
                 for addr in finished {
                     let mut ending=closing.remove(&addr).unwrap();
                     let result=(&mut ending.task).await.unwrap_or_else(|_|Err("connection teardown task failed".into()));
-                    if ending.notify&&authenticated.contains_key(&addr){send_session(&udp_sender,addr,terminal_reply(ending.id,&result)).await;}
+                    if ending.notify&&authenticated.contains_key(&addr){input_owner.during_control(&injector,send_session(&udp_sender,addr,terminal_reply(ending.id,&result))).await;}
                     closed.insert(addr,ClosedReceipt{resources:ending.resources.clone(),id:ending.id,result,at:Instant::now()});
                 }
                 closed.retain(|_,receipt|receipt.resources_live() || receipt.at.elapsed()<Duration::from_secs(30));
@@ -1806,18 +1904,18 @@ async fn run_host_service_inner(
                         );
                         eprintln!("RP_SESSION_AUTH t_ms={} stage={} local_peer_port={}",now_unix_ms(),if result.is_ok(){"accepted"}else{"rejected"},addr.port());
                         let reply = match result { Ok((salt, timestamp_ms)) => ControlMessage::SessionAccept { salt, timestamp_ms, mac: mac_session_accept(psk.as_ref().unwrap(), &salt, timestamp_ms) }, Err(reason) => ControlMessage::SessionReject { reason } };
-                        let _ = udp_sender.send_control(&reply, addr).await;
+                        let _ = input_owner.during_control(&injector,udp_sender.send_control(&reply, addr)).await;
                     }
                     MultiplexedPacket::Control(message, addr) => {
                         if require_auth && !authenticated.contains_key(&addr) {
-                            let _ = udp_sender.send_control(&ControlMessage::SessionReject { reason: "authenticate before opening a connection".into() }, addr).await;
+                            let _ = input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject { reason: "authenticate before opening a connection".into() }, addr)).await;
                             continue;
                         }
                         if let Some(peer) = peers.get_mut(&addr) { peer.last_seen = Instant::now(); }
                         if closing.contains_key(&addr){
                             if let ControlMessage::Session(command)=message {
                                 if let SessionCommand::Close{connection_id}=*command {
-                                    if let Some(reply)=request_close(&mut peers,&mut closing,&closed,addr,connection_id){send_session(&udp_sender,addr,reply).await;}
+                                    if let Some(reply)=request_close(&mut peers,&mut closing,&closed,addr,connection_id){input_owner.during_control(&injector,send_session(&udp_sender,addr,reply)).await;}
                                 }
                             }
                             // Closing revokes all other command ingress.
@@ -1834,18 +1932,18 @@ async fn run_host_service_inner(
                                     if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
                                     peer.subscriptions.clear(); peer.refresh_audio();
                                 }
-                                if let Err(reason) = peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true).await {
-                                    send_session(&udp_sender, addr, SessionCommand::Error { request_id: session_id, reason }).await;
+                                if let Err(reason) = input_owner.during_control(&injector,peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true)).await {
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, SessionCommand::Error { request_id: session_id, reason })).await;
                                 }
                             }
                             ControlMessage::Session(command) => match *command {
                                 SessionCommand::ReleaseInput { id } => {
                                     // Old unsequenced release cannot release a newer owner.
-                                    send_session(&udp_sender,addr,SessionCommand::Error{request_id:id,reason:"INPUT_UNAVAILABLE: protected input binding required".into()}).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender,addr,SessionCommand::Error{request_id:id,reason:"INPUT_UNAVAILABLE: protected input binding required".into()})).await;
                                 }
                                 SessionCommand::RequestInputBinding{connection_id,id,source_revision,request} => {
                                     if let Some(reply)=peers.get_mut(&addr).and_then(|peer|peer.input_binding(connection_id,id,source_revision,request)) {
-                                        send_session(&udp_sender,addr,reply).await;
+                                        input_owner.during_control(&injector,send_session(&udp_sender,addr,reply)).await;
                                     }
                                 }
                                 SessionCommand::RealtimeInput(packet) => {
@@ -1864,13 +1962,13 @@ async fn run_host_service_inner(
                                         }
                                         SessionCommand::Configured { id, revision:s.settings_revision }
                                     } else { SessionCommand::Error { request_id:id, reason:"subscription is unavailable".into() } };
-                                    send_session(&udp_sender, addr, reply).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
                                 }
                                 SessionCommand::SetClipboard { enabled } if peers.contains_key(&addr) => {
                                     let enabled = enabled && config.enable_clipboard_sync;
                                     if enabled { for (other, peer) in &mut peers { if *other != addr { peer.set_clipboard(false); } } }
                                     peers.get_mut(&addr).unwrap().set_clipboard(enabled);
-                                    send_session(&udp_sender, addr, SessionCommand::ClipboardState { enabled }).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, SessionCommand::ClipboardState { enabled })).await;
                                 }
                                 SessionCommand::Open { connection_id, version } => {
                                     #[cfg(target_os = "linux")]
@@ -1881,30 +1979,74 @@ async fn run_host_service_inner(
                                     else if let Some(reason) = connection_admission_error(addr, &peers, &closing, &closed) { SessionCommand::Error { request_id: connection_id, reason: reason.into() } }
                                     else if peers.get(&addr).is_some_and(|p| p.id != connection_id) { SessionCommand::Error { request_id: connection_id, reason: "close the existing connection first".into() } }
                                     else { closed.remove(&addr); let peer = peers.entry(addr).or_insert_with(|| Connection::new(connection_id, addr, udp_sender.clone(), &config)); peer.versioned_control=true; SessionCommand::Opened { connection_id, version: SESSION_VERSION, max_subscriptions: MAX_SUBSCRIPTIONS as u32, files: peer.files.is_some(), clipboard: config.enable_clipboard_sync, window_capture } };
-                                    send_session(&udp_sender, addr, reply).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
+                                }
+                                SessionCommand::DeliveryOffer{request_id,source_device_id,target_device_id,ticket,revision} => {
+                                    let owner=peers.get(&addr).and_then(|p|authenticated.get(&addr).map(|(nonce,_,_)|crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()}));
+                                    let reply=match (&delivery,owner) {
+                                        (Some(broker),Some(owner)) if load_session_psk()==psk => broker.offer(owner,request_id,source_device_id,target_device_id,ticket,revision),
+                                        _=>SessionCommand::DeliveryReceipt{request_id,revision,state:protocol::session::DeliveryState::Rejected,reason:"Directed delivery unavailable".into()},
+                                    };
+                                    input_owner.during_control(&injector,send_session(&udp_sender,addr,reply)).await;
+                                }
+                                SessionCommand::DeliveryClaim{request_id,target_device_id,ticket} => {
+                                    let owner=peers.get(&addr).and_then(|p|authenticated.get(&addr).map(|(nonce,_,_)|crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()}));
+                                    let reply=match (&delivery,owner) {
+                                        (Some(broker),Some(owner)) if load_session_psk()==psk => {
+                                            let reply=if peers.get(&addr).is_some_and(|p|p.delivery_owner.is_some_and(|binding|binding!=(owner,ticket)) || (p.delivery_owner.is_none()&&!p.subscriptions.is_empty())) {
+                                                SessionCommand::DeliveryReceipt{request_id,revision:0,state:protocol::session::DeliveryState::Rejected,reason:"Connection already belongs to another activity".into()}
+                                            } else {broker.claim(owner,request_id,&target_device_id,ticket)};
+                                            if matches!(reply,SessionCommand::DeliveryReceipt{state:protocol::session::DeliveryState::Claimed,..}) {
+                                                let p=peers.get_mut(&addr).unwrap();p.delivery_owner=Some((owner,ticket));p.delivery_cancel=broker.claim_cancel(owner,ticket);
+                                            }
+                                            reply
+                                        },
+                                        _=>SessionCommand::DeliveryReceipt{request_id,revision:0,state:protocol::session::DeliveryState::Rejected,reason:"Sending intent unavailable".into()},
+                                    };
+                                    input_owner.during_control(&injector,send_session(&udp_sender,addr,reply)).await;
+                                }
+                                SessionCommand::DeliveryCancel{request_id} => {
+                                    if let (Some(broker),Some(p),Some((nonce,_,_)))=(&delivery,peers.get(&addr),authenticated.get(&addr)) {
+                                        let owner=crate::directed_delivery::Peer{addr,connection:p.id,nonce:*nonce,scope:remote_core::shared_files::current_share_scope()};
+                                        input_owner.during_control(&injector,send_session(&udp_sender,addr,broker.cancel(owner,request_id))).await;
+                                    }
                                 }
                                 SessionCommand::ListSources { request_id } if peers.contains_key(&addr) => {
-                                    let reply = match peers.get(&addr).unwrap().capture_sources() { Ok(sources) => SessionCommand::Sources { request_id, sources }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
-                                    send_session(&udp_sender, addr, reply).await;
+                                    let reply = match input_owner.during_control(&injector,peers.get(&addr).unwrap().capture_sources()).await { Ok(sources) => SessionCommand::Sources { request_id, sources }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
                                 }
                                 SessionCommand::Subscribe(request) => {
                                     let id = request.id;
                                     if let Some(peer)=peers.get_mut(&addr) {
                                         if !peer.accepts_initial_subscribe(&request) {
-                                            send_session(&udp_sender,addr,SessionCommand::Error{request_id:id,reason:"use SwitchSource or a new subscription ID to replace a capture".into()}).await;
+                                            input_owner.during_control(&injector,send_session(&udp_sender,addr,SessionCommand::Error{request_id:id,reason:"use SwitchSource or a new subscription ID to replace a capture".into()})).await;
                                             continue;
                                         }
                                         retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::Subscribe(request.clone())).await;
                                     }
                                     let result = match peers.get_mut(&addr) {
-                                        Some(p) => p.subscribe(request, addr, udp_sender.clone(), config.stats.clone(), false).await,
+                                        Some(p) => {
+                                            if let Some((owner,ticket))=p.delivery_owner {
+                                                if !delivery.as_ref().is_some_and(|b|b.claim_alive(owner,ticket)) {Err("Sending intent ended".into())}
+                                                else if let Some(mut cancelled)=p.delivery_cancel.clone() {
+                                                    if *cancelled.borrow() {Err("Sending intent ended".into())}
+                                                    else {input_owner.during_control(&injector,async {tokio::select!{biased;
+                                                        _=cancelled.changed()=>Err("Sending intent ended during capture startup".into()),
+                                                        result=p.subscribe(request,addr,udp_sender.clone(),config.stats.clone(),false) =>result,
+                                                    }}).await}
+                                                } else {Err("Sending intent ended".into())}
+                                            } else {input_owner.during_control(&injector,p.subscribe(request,addr,udp_sender.clone(),config.stats.clone(),false)).await}
+                                        },
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let result=if peers.get(&addr).and_then(|p|p.delivery_owner).is_some_and(|(o,t)|!delivery.as_ref().is_some_and(|b|b.claim_alive(o,t))) {
+                                        begin_close(&mut peers,&mut closing,addr,true);Err("Sending intent ended before subscription commit".into())
+                                    } else {result};
                                     let accepted = result.is_ok();
                                     let reply = result.unwrap_or_else(|reason| SessionCommand::Error { request_id: id, reason });
-                                    send_session(&udp_sender, addr, reply).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
                                     if accepted && let Some(peer) = peers.get_mut(&addr) {
-                                        report_input_readiness(peer, &udp_sender, addr, id).await;
+                                        input_owner.during_control(&injector,report_input_readiness(peer, &udp_sender, addr, id)).await;
                                     }
                                 }
                                 SessionCommand::SwitchSource { id, request_id, source } => {
@@ -1912,24 +2054,38 @@ async fn run_host_service_inner(
                                         retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::SwitchSource{id,request_id,source}).await;
                                     }
                                     let result = match peers.get_mut(&addr) {
-                                        Some(p) => p.switch_source(id, request_id, source, addr, udp_sender.clone(), config.stats.clone()).await,
+                                        Some(p) => {
+                                            if let Some((owner,ticket))=p.delivery_owner {
+                                                if !delivery.as_ref().is_some_and(|b|b.claim_alive(owner,ticket)){Err("Sending intent ended".into())}
+                                                else if let Some(mut cancelled)=p.delivery_cancel.clone() {
+                                                    if *cancelled.borrow(){Err("Sending intent ended".into())}
+                                                    else {input_owner.during_control(&injector,async {tokio::select!{biased;
+                                                        _=cancelled.changed()=>Err("Sending intent ended during source switch".into()),
+                                                        result=p.switch_source(id,request_id,source,addr,udp_sender.clone(),config.stats.clone()) =>result,
+                                                    }}).await}
+                                                } else {Err("Sending intent ended".into())}
+                                            } else {input_owner.during_control(&injector,p.switch_source(id,request_id,source,addr,udp_sender.clone(),config.stats.clone())).await}
+                                        },
                                         None => Err("open a connection first".to_owned()),
                                     };
+                                    let result=if peers.get(&addr).and_then(|p|p.delivery_owner).is_some_and(|(o,t)|!delivery.as_ref().is_some_and(|b|b.claim_alive(o,t))) {
+                                        begin_close(&mut peers,&mut closing,addr,true);Err("Sending intent ended before source switch commit".into())
+                                    } else {result};
                                     let accepted = result.is_ok();
-                                    send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason })).await;
+                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, result.unwrap_or_else(|reason| SessionCommand::Error { request_id, reason }))).await;
                                     if accepted && let Some(peer) = peers.get_mut(&addr) {
-                                        report_input_readiness(peer, &udp_sender, addr, id).await;
+                                        input_owner.during_control(&injector,report_input_readiness(peer, &udp_sender, addr, id)).await;
                                     }
                                 }
                                 SessionCommand::Unsubscribe { id } => {
                                     if let Some(peer)=peers.get_mut(&addr) {peer.input_leases.remove(&id);}
                                     if input_owner.owner == Some((addr,id)) { let _ = input_owner.release(&injector).await; }
-                                    let result=match peers.get_mut(&addr){Some(peer)=>peer.unsubscribe(id).await,None=>Err("connection is unavailable".into())};
-                                    send_session(&udp_sender,addr,match result{Ok(())=>SessionCommand::Unsubscribed{id},Err(reason)=>SessionCommand::Error{request_id:id,reason}}).await;
+                                    let result=match peers.get_mut(&addr){Some(peer)=>input_owner.during_control(&injector,peer.unsubscribe(id)).await,None=>Err("connection is unavailable".into())};
+                                    input_owner.during_control(&injector,send_session(&udp_sender,addr,match result{Ok(())=>SessionCommand::Unsubscribed{id},Err(reason)=>SessionCommand::Error{request_id:id,reason}})).await;
                                 }
                                 SessionCommand::Close { connection_id } => {
                                     if peers.get(&addr).is_some_and(|p|p.id==connection_id)&&input_owner.owner.is_some_and(|(owner,_)|owner==addr){let _=input_owner.release(&injector).await;}
-                                    if let Some(reply)=request_close(&mut peers,&mut closing,&closed,addr,connection_id){send_session(&udp_sender,addr,reply).await;}
+                                    if let Some(reply)=request_close(&mut peers,&mut closing,&closed,addr,connection_id){input_owner.during_control(&injector,send_session(&udp_sender,addr,reply)).await;}
                                 }
                                 SessionCommand::Input { .. } | SessionCommand::SourceInput { .. } => {
                                     // No fallback: these packets cannot prove epoch, order or age.
@@ -1938,7 +2094,7 @@ async fn run_host_service_inner(
                                     if let Some(peer)=peers.get_mut(&addr) {
                                         retire_input_before_control(peer,&mut input_owner,&injector,addr,&SessionCommand::SetActivity{id,revision,video,audio}).await;
                                     }
-                                    if let Some(reply) = peers.get_mut(&addr).and_then(|p| p.set_activity(id, revision, video, audio)) { send_session(&udp_sender, addr, reply).await; }
+                                    if let Some(reply) = peers.get_mut(&addr).and_then(|p| p.set_activity(id, revision, video, audio)) { input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await; }
                                 }
                                 _ => {}
                             },
@@ -1948,14 +2104,14 @@ async fn run_host_service_inner(
                                 begin_close(&mut peers,&mut closing,addr,false);
                             }
                             ControlMessage::Input(_) => {},
-                            ControlMessage::Ping { client_send_ts } if peers.contains_key(&addr) => { let now = now_unix_ms(); let _ = udp_sender.send_control(&ControlMessage::Pong { client_send_ts, host_recv_ts: now, host_send_ts: now }, addr).await; }
+                            ControlMessage::Ping { client_send_ts } if peers.contains_key(&addr) => { let now = now_unix_ms(); let _ = input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::Pong { client_send_ts, host_recv_ts: now, host_send_ts: now }, addr)).await; }
                             ControlMessage::SetMediaPaused { session_id, revision, paused } => {
                                 if peers.get(&addr).is_some_and(|peer|!peer.accepts_legacy_control()) {continue;}
                                 if let Some(peer) = peers.get_mut(&addr) { peer.set_activity(session_id, revision, !paused, !paused);
                                     if let Some(s) = peer.subscriptions.get(&session_id) {
                                         let paused = s.settings.borrow().paused;
                                         let reply = ControlMessage::MediaPauseState { session_id, revision: s.revision, paused };
-                                        let _ = udp_sender.send_control(&reply, addr).await;
+                                        let _ = input_owner.during_control(&injector,udp_sender.send_control(&reply, addr)).await;
                                     }
                                 }
                             }
@@ -2108,8 +2264,10 @@ mod failure_admission_tests {
     }
     impl InputInjector for OwnershipProbe {
         fn inject_input(&self, event: InputEvent) -> Result<(), Box<dyn Error + Send + Sync>> {
-            if matches!(event, InputEvent::MouseDown(0)) {
-                self.held.store(true, std::sync::atomic::Ordering::SeqCst);
+            match event {
+                InputEvent::MouseDown(0) => self.held.store(true, std::sync::atomic::Ordering::SeqCst),
+                InputEvent::MouseUp(0) => self.held.store(false, std::sync::atomic::Ordering::SeqCst),
+                _ => {}
             }
             Ok(())
         }
@@ -2217,7 +2375,7 @@ mod failure_admission_tests {
         assert_eq!(owner.binding, Some(binding_b));
         // These are the same dispatch and timer bodies called by the production
         // event loop. Refresh only B while A's original held lease times out.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         dispatch_realtime_input(
             &mut b,
             &mut owner,
@@ -2228,11 +2386,11 @@ mod failure_admission_tests {
                 binding: binding_b,
                 sequence: 2,
                 created_host_ms: host_input_time_ms(),
-                payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
+                payload: InputPayload::Held(vec![(protocol::realtime_input::Press::Button(0), 1)]),
             },
         )
         .await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(220)).await;
         let mut peers = HashMap::from([(addr_a, a), (addr_b, b)]);
         expire_input_owners(&mut peers, &mut owner, &injector).await;
         assert!(!peers[&addr_a].input_leases.contains_key(&100));
@@ -2241,6 +2399,167 @@ mod failure_admission_tests {
         assert_eq!(releases.load(SeqCst), 1);
         assert_eq!(owner.owner, Some((addr_b, 100)));
         assert_eq!(owner.binding, Some(binding_b));
+    }
+
+    #[tokio::test]
+    async fn event_loop_missing_held_refresh_stops_drag_and_requires_new_intent() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut peer, addr) = fixture_peer(31).await;
+        let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+        sub.settings.send_modify(|s| s.paused = false);
+        peer.subscriptions.insert(100, sub);
+        let SessionCommand::InputBinding { binding, .. } =
+            peer.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,
+            Box::new(OwnershipProbe { held: held.clone(), releases: releases.clone(), delay: Duration::ZERO })) )));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        dispatch_realtime_input(&mut peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding, sequence: 1, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Neither the grant/connection path nor ongoing pointer motion is a
+        // replacement for the missing periodic assertion that the button is held.
+        assert!(peer.input_binding(31, 100, 10, 2).is_some());
+        dispatch_realtime_input(&mut peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding, sequence: 2, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }) }).await;
+        tokio::time::sleep(Duration::from_millis(160)).await;
+        let mut peers = HashMap::from([(addr, peer)]);
+        expire_input_owners(&mut peers, &mut owner, &injector).await;
+        assert!(!held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        assert!(owner.owner.is_none());
+        let peer = peers.get_mut(&addr).unwrap();
+        let SessionCommand::InputBinding { binding: fresh, .. } =
+            peer.input_binding(31, 100, 10, 3).unwrap() else { panic!() };
+        assert_ne!(fresh, binding);
+        for (binding, sequence) in [(binding, 3), (fresh, 1)] {
+            dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+                RealtimeInput { binding, sequence, created_host_ms: host_input_time_ms(),
+                    payload: InputPayload::Held(vec![(protocol::realtime_input::Press::Button(0), 1)]) }).await;
+            assert!(!held.load(SeqCst));
+            assert!(owner.owner.is_none());
+        }
+        dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding: fresh, sequence: 2, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst)); // A fresh press can deliberately resume.
+        dispatch_realtime_input(peer, &mut owner, &injector, &udp, addr,
+            RealtimeInput { binding: fresh, sequence: 3, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Release }).await;
+        assert!(!held.load(SeqCst)); // Current-owner cleanup still works.
+    }
+
+    async fn check_takeover_packet(payload: InputPayload, takes_over: bool) {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut a, addr_a) = fixture_peer(31).await;
+        let (mut b, _) = fixture_peer(32).await;
+        let addr_b = "127.0.0.1:39982".parse().unwrap();
+        for peer in [&mut a, &mut b] {
+            let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+            sub.settings.send_modify(|s| s.paused = false);
+            peer.subscriptions.insert(100, sub);
+        }
+        let SessionCommand::InputBinding { binding: binding_a, .. } =
+            a.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+        let SessionCommand::InputBinding { binding: binding_b, .. } =
+            b.input_binding(32, 100, 10, 1).unwrap() else { panic!() };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((
+            InputTarget::Desktop,
+            Box::new(OwnershipProbe {
+                held: held.clone(), releases: releases.clone(), delay: Duration::ZERO,
+            }),
+        ))));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        // A owns button, key and two modifiers before B actively takes over.
+        for (index, event) in [InputEvent::MouseDown(0), InputEvent::KeyDown(0),
+                              InputEvent::ModifiersChanged(3)].into_iter().enumerate() {
+            dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
+                RealtimeInput { binding: binding_a, sequence: index as u64 + 1,
+                    created_host_ms: host_input_time_ms(), payload: InputPayload::Event(event) }).await;
+        }
+        dispatch_realtime_input(&mut b, &mut owner, &injector, &udp, addr_b,
+            RealtimeInput { binding: binding_b, sequence: 1,
+                created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        assert!(held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        let binding_a = if takes_over {
+            let SessionCommand::InputBinding { binding, .. } =
+                a.input_binding(31, 100, 10, 2).unwrap() else { panic!() };
+            assert_ne!(binding, binding_a);
+            binding
+        } else { binding_a };
+        let description = format!("{payload:?}");
+        let packet = RealtimeInput { binding: binding_a, sequence: 4,
+            created_host_ms: host_input_time_ms(), payload };
+        // This is the production loop's dispatch, while A's old lease is live.
+        dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a, packet.clone()).await;
+        if takes_over {
+            assert_eq!(owner.owner, Some((addr_a, 100)), "{description}");
+            assert_eq!(owner.binding, Some(binding_a), "{description}");
+            assert_eq!(releases.load(SeqCst), 2, "{description}");
+        } else {
+            assert!(held.load(SeqCst), "{description} released B");
+            assert_eq!(releases.load(SeqCst), 1, "{description}");
+            assert_eq!(owner.owner, Some((addr_b, 100)), "{description}");
+            assert_eq!(owner.binding, Some(binding_b), "{description}");
+            // Revocation is irreversible. A changed-payload duplicate cannot
+            // turn the retired epoch into a new takeover.
+            dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
+                RealtimeInput { payload: InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }),
+                    ..packet }).await;
+            assert_eq!(owner.binding, Some(binding_b));
+            assert!(held.load(SeqCst));
+            assert_eq!(releases.load(SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_late_old_owner_release_and_snapshots_preserve_current_owner() {
+        use protocol::realtime_input::Press;
+        for payload in [InputPayload::Release, InputPayload::Held(vec![]),
+            InputPayload::Held(vec![(Press::Button(0), 1)])] {
+            check_takeover_packet(payload, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_late_old_owner_up_and_modifier_reductions_preserve_current_owner() {
+        for event in [InputEvent::MouseUp(0), InputEvent::KeyUp(0),
+            InputEvent::Key { key_code: 0, pressed: false, modifiers: 3 },
+            InputEvent::KeyUp(0x3b), InputEvent::ModifiersChanged(0),
+            InputEvent::ModifiersChanged(1), InputEvent::ModifiersChanged(3)] {
+            check_takeover_packet(InputPayload::Event(event), false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn event_loop_retired_owner_cannot_resurrect_an_old_chord() {
+        check_takeover_packet(InputPayload::Event(InputEvent::Key {
+            key_code: 1, pressed: true, modifiers: 3,
+        }), false).await;
+    }
+
+    #[tokio::test]
+    async fn event_loop_new_active_input_still_takes_over() {
+        for event in [InputEvent::MouseDown(1), InputEvent::KeyDown(1),
+            InputEvent::Key { key_code: 1, pressed: true, modifiers: 0 },
+            InputEvent::MouseMove { dx: 1, dy: 0 },
+            InputEvent::MouseMoveAbsolute { x: 10, y: 20 },
+            InputEvent::MouseScroll { delta_x: 0, delta_y: 1 },
+            InputEvent::ModifiersChanged(7)] {
+            check_takeover_packet(InputPayload::Event(event), true).await;
+        }
     }
 
     struct HeldButtonProbe(Arc<std::sync::atomic::AtomicUsize>);
@@ -2455,6 +2774,107 @@ mod failure_admission_tests {
         peer.subscriptions.insert(100, sub);
         (release, owner_dropped)
     }
+    #[tokio::test]
+    async fn another_peers_release_ack_observes_the_active_input_deadline() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let (mut a, addr_a) = fixture_peer(31).await;
+        let (mut b, _) = fixture_peer(32).await;
+        let addr_b = "127.0.0.1:39982".parse().unwrap();
+        for peer in [&mut a, &mut b] {
+            let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+            sub.settings.send_modify(|s| s.paused = false);
+            peer.subscriptions.insert(100, sub);
+        }
+        let SessionCommand::InputBinding { binding, .. } =
+            a.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+        let held = Arc::new(AtomicBool::new(false));
+        let releases = Arc::new(AtomicUsize::new(0));
+        let injector = LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,
+            Box::new(OwnershipProbe { held: held.clone(), releases: releases.clone(), delay: Duration::ZERO })))));
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (udp, _) = mux.split();
+        let mut owner = ActiveInput::default();
+        dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr_a,
+            RealtimeInput { binding, sequence: 1, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Event(InputEvent::MouseDown(0)) }).await;
+        tokio::time::sleep(Duration::from_millis(330)).await;
+        let SessionCommand::InputBinding { binding: binding_b, .. } =
+            b.input_binding(32, 100, 10, 1).unwrap() else { panic!() };
+        // No main-loop watchdog poll: B's cleanup must neither take ownership
+        // nor bypass A's expired deadline while acknowledging that cleanup.
+        dispatch_realtime_input(&mut b, &mut owner, &injector, &udp, addr_b,
+            RealtimeInput { binding: binding_b, sequence: 1, created_host_ms: host_input_time_ms(),
+                payload: InputPayload::Release }).await;
+        assert!(!held.load(SeqCst));
+        assert_eq!(releases.load(SeqCst), 1);
+        assert!(owner.owner.is_none());
+    }
+
+    #[tokio::test]
+    async fn another_peers_native_stop_cannot_delay_the_active_input_deadline() {
+        use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering::SeqCst};
+        let(mut a,addr)=fixture_peer(31).await;let(mut b,_)=fixture_peer(32).await;
+        let(sub,_)=mock_subscription(CaptureSource::MainDisplay);sub.settings.send_modify(|s|s.paused=false);a.subscriptions.insert(100,sub);
+        let SessionCommand::InputBinding{binding,..}=a.input_binding(31,100,10,1).unwrap()else{panic!()};
+        let held=Arc::new(AtomicBool::new(false));let releases=Arc::new(AtomicUsize::new(0));
+        let injector=LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,Box::new(OwnershipProbe{held:held.clone(),releases:releases.clone(),delay:Duration::ZERO})))));
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let(udp,_)=mux.split();let mut owner=ActiveInput::default();
+        dispatch_realtime_input(&mut a,&mut owner,&injector,&udp,addr,RealtimeInput{binding,sequence:1,created_host_ms:host_input_time_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))}).await;
+        owner.during_control(&injector,tokio::time::sleep(Duration::from_millis(5))).await;
+        assert!(held.load(SeqCst),"a different peer's quick operation must not release active input");
+        let(release,_)=install_withheld_stop_fixture(&mut b).await;
+        let(operation,still_held)=tokio::join!(owner.during_control(&injector,b.unsubscribe(100)),async{
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let still_held=held.load(SeqCst);release.send(Ok(())).unwrap();still_held
+        });
+        operation.unwrap();assert!(!still_held,"peer B native shutdown must not suspend peer A's 300ms input lease");
+        assert_eq!(releases.load(SeqCst),1);
+    }
+    #[tokio::test]
+    async fn blocking_catalog_and_preflight_cannot_suspend_another_input_owner() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        for catalog in [true, false] {
+            let (mut a, addr) = fixture_peer(31).await;
+            let (mut b, _) = fixture_peer(32).await;
+            let (sub, _) = mock_subscription(CaptureSource::MainDisplay);
+            sub.settings.send_modify(|s| s.paused = false);
+            a.subscriptions.insert(100, sub);
+            let SessionCommand::InputBinding { binding, .. } = a.input_binding(31, 100, 10, 1).unwrap() else { panic!() };
+            let held = Arc::new(AtomicBool::new(false));
+            let releases = Arc::new(AtomicUsize::new(0));
+            let injector = LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop, Box::new(OwnershipProbe {
+                held: held.clone(), releases: releases.clone(), delay: Duration::ZERO,
+            })))));
+            let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+            let (udp, _) = mux.split();
+            let mut owner = ActiveInput::default();
+            dispatch_realtime_input(&mut a, &mut owner, &injector, &udp, addr, RealtimeInput {
+                binding, sequence: 1, created_host_ms: host_input_time_ms(), payload: InputPayload::Event(InputEvent::MouseDown(0)),
+            }).await;
+            assert!(held.load(SeqCst));
+            let was_held = Arc::new(AtomicBool::new(true));
+            let observed = was_held.clone();
+            // Observe inside the blocking call: a timer checked only after the
+            // call returns would release too late and must fail this test.
+            let blocked = move || {
+                std::thread::sleep(Duration::from_millis(350));
+                observed.store(held.load(SeqCst), SeqCst);
+            };
+            if catalog {
+                owner.during_control(&injector, b.capture_sources_with(move || { blocked(); Ok(Vec::new()) })).await.unwrap();
+            } else {
+                let request = SubscriptionRequest { id: 200, source: CaptureSource::MainDisplay, width: 1280, height: 720, fps: 30, bitrate_kbps: 4000, audio: false };
+                let result = owner.during_control(&injector, b.subscribe_with_preflight(request, addr, udp, Statistics::new(), false, move || {
+                    blocked(); Err("fixture capability unavailable".into())
+                })).await;
+                assert_eq!(result.unwrap_err(), "fixture capability unavailable");
+                assert!(b.subscriptions.is_empty());
+            }
+            assert!(!was_held.load(SeqCst), "blocking native query suspended input expiry");
+            assert_eq!(releases.load(SeqCst), 1);
+        }
+    }
+
     #[tokio::test]
     async fn key_rotation_same_address_hello_keeps_pending_native_budget_until_release() {
         use std::sync::atomic::Ordering::SeqCst;
@@ -3231,6 +3651,7 @@ mod failure_admission_tests {
         });
         (
             Subscription {
+                _delivery_cancel:None,
                 request,
                 settings,
                 revision: 7,
@@ -3970,4 +4391,42 @@ mod input_target_tests {
             None
         );
     }
+    #[tokio::test]
+    async fn directed_capture_cancellation_does_not_need_host_loop_polling(){
+        let(ticket,lease)=watch::channel(false);let(video,mut video_rx)=broadcast::channel(2);let(audio,mut audio_rx)=broadcast::channel(2);
+        let _video_bridge=forward_delivery_cancel(Some(lease.clone()),video,vec![]);
+        let _audio_bridge=forward_delivery_cancel(Some(lease),audio,vec![]);
+        // No host service/tick is running in this test.
+        ticket.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1),video_rx.recv()).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1),audio_rx.recv()).await.unwrap().unwrap();
+        let(late,mut late_rx)=broadcast::channel(2);forward_delivery_cancel(Some(ticket.subscribe()),late,vec![]);
+        late_rx.try_recv().unwrap();
+    }
+    #[tokio::test]
+    async fn dropping_old_capture_bridge_never_cancels_replacement_resource(){
+        let(old,lease)=watch::channel(false);let(resource,mut resource_rx)=broadcast::channel(2);
+        let bridge=forward_delivery_cancel(Some(lease),resource,vec![]);drop(bridge);
+        let(_next,next_lease)=watch::channel(false);let(next_resource,mut next_rx)=broadcast::channel(2);
+        let _next_bridge=forward_delivery_cancel(Some(next_lease),next_resource,vec![]);
+        old.send_replace(true);tokio::task::yield_now().await;
+        assert!(matches!(resource_rx.try_recv(),Err(broadcast::error::TryRecvError::Closed)));
+        assert!(matches!(next_rx.try_recv(),Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn directed_revocation_aborts_native_start_that_does_not_poll_broadcast(){
+        let(ticket,lease)=watch::channel(false);let(cancel,_ignored)=broadcast::channel(2);
+        let(started,ready)=tokio::sync::oneshot::channel();
+        let worker=tokio::spawn(async move {let _=started.send(());std::future::pending::<()>().await;});
+        let _bridge=forward_delivery_cancel(Some(lease),cancel,vec![worker.abort_handle()]);
+        ready.await.unwrap();ticket.send_replace(true);
+        let error=tokio::time::timeout(Duration::from_secs(1),worker).await.unwrap().unwrap_err();assert!(error.is_cancelled());
+        // A resource allocated just as the ticket expires is cancelled even if
+        // no later watch change occurs.
+        let late=tokio::spawn(std::future::pending::<()>());let(cancel,_ignored)=broadcast::channel(2);
+        forward_delivery_cancel(Some(ticket.subscribe()),cancel,vec![late.abort_handle()]);
+        assert!(tokio::time::timeout(Duration::from_secs(1),late).await.unwrap().unwrap_err().is_cancelled());
+    }
+
 }

@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import build_identity_gate as identity_gate
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_FILE = ROOT / 'deploy/macos/signing-policy.json'
@@ -159,10 +160,44 @@ def check_upgrade(previous: dict, candidate: dict) -> str:
 
 
 @contextmanager
-def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None):
+def archive_workspace(owned: Path | None):
+    if owned is None:
+        # Standalone read-only verification keeps its existing temporary lifetime.
+        with tempfile.TemporaryDirectory(prefix='rp-release-check-') as directory:
+            yield Path(directory)
+        return
+    owned = Path(owned)
+    if (not owned.is_dir() or any(path.is_symlink() for path in [owned, *owned.parents]) or
+            owned.stat().st_uid != os.getuid()):
+        raise ReleaseRejected('Archive verification requires the public-owned packaging workspace')
+    root = owned / '.archive-check'
+    try:
+        root.mkdir(mode=0o700)  # Existing work is recovered by the original public aux transaction.
+    except FileExistsError as error:
+        raise ReleaseRejected('Archive verification workspace already exists; recover the current transaction first') from error
+    identity = root.stat()
+    try:
+        yield root
+    finally:
+        current = root.lstat()
+        if (not stat.S_ISDIR(current.st_mode) or
+                (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino)):
+            raise ReleaseRejected('Archive verification workspace changed; preserve it for recovery')
+        shutil.rmtree(root)
+
+
+@contextmanager
+def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None, owned_workspace=None,
+                     identity_expectations=None):
+    manifest_name = None
+    pinned_archive_sha = None
+    if identity_expectations is not None:
+        import build_identity_gate as gate
+        pinned_archive_sha = gate.verify_package(archive, identity_expectations['manifest_sha256'],
+                            identity_expectations['commit'], identity_expectations['identity_sha256'])['archive_sha256']
+        manifest_name = gate.MANIFEST
     # Preflight the whole archive before extracting; no path traversal, links, or zip bombs.
-    with zipfile.ZipFile(archive) as source, tempfile.TemporaryDirectory(prefix='rp-release-check-') as directory:
-        root = Path(directory)
+    with zipfile.ZipFile(archive) as source, archive_workspace(owned_workspace) as root:
         entries = source.infolist()
         if len(entries) > 20000 or sum(entry.file_size for entry in entries) > 1024 ** 3:
             raise ReleaseRejected('Archive exceeds release size limits')
@@ -181,12 +216,12 @@ def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None):
                 raise ReleaseRejected('Symlink or special file in release archive')
             if entry.flag_bits & 1:
                 raise ReleaseRejected('Encrypted release archives are not supported')
-            if path.parts[0] not in (policy.app_name + '.app', '__MACOSX'):
+            if str(path) != manifest_name and path.parts[0] not in (policy.app_name + '.app', '__MACOSX'):
                 raise ReleaseRejected('Unexpected top-level archive content')
         for entry in entries:
             if check: check()
             path = PurePosixPath(entry.filename)
-            if path.parts[0] == '__MACOSX':
+            if path.parts[0] == '__MACOSX' or str(path) == manifest_name:
                 continue
             target = root.joinpath(*path.parts)
             if entry.is_dir():
@@ -202,6 +237,8 @@ def verified_archive(archive: Path, policy: Policy, *, runner=None, check=None):
         app = root / (policy.app_name + '.app')
         report = verify_app(app, policy, runner=runner, check=check)
         report.update(archive_sha256=sha256(archive, check=check), size_bytes=archive.stat().st_size)
+        if pinned_archive_sha is not None and report['archive_sha256'] != pinned_archive_sha:
+            raise ReleaseRejected('Identity-bound archive changed during signature verification')
         yield app, report
 
 
@@ -218,7 +255,8 @@ def verify_stage(stage: Path, policy: Policy) -> list[dict]:
         if sha256(path) != entry['sha256'] or path.stat().st_size != entry['size_bytes']:
             raise ReleaseRejected('Artifact bytes do not match release metadata')
         if 'macos' in name.lower():
-            with verified_archive(path, policy) as (_, report):
+            with verified_archive(path, policy,
+                                  identity_expectations=entry.get('build_identity_expectations')) as (_, report):
                 if report['version'] != entry['version']:
                     raise ReleaseRejected('macOS artifact version disagrees with publication metadata')
                 verified.append(report)
@@ -227,17 +265,38 @@ def verify_stage(stage: Path, policy: Policy) -> list[dict]:
     return verified
 
 
-def package(binary: Path, output: Path, version: str, build: str, policy: Policy) -> dict:
+@contextmanager
+def packaging_workspace(output: Path, owned: Path | None):
+    if owned is not None:
+        if owned.is_symlink() or not owned.is_dir() or any(owned.iterdir()):
+            raise ReleaseRejected('Expected the empty public-owned packaging workspace')
+        yield owned  # The shared transaction owns its cleanup, including crash recovery.
+        return
+    # Direct function callers are isolated acceptance fixtures, not the production CLI.
+    stage = output / '.remoteplay-macos-package.pending'
+    stage.mkdir(mode=0o700)
+    try:
+        yield stage
+    finally:
+        shutil.rmtree(stage)
+
+
+def package(binary: Path, output: Path, version: str, build: str, policy: Policy, *,
+            archive: Path | None = None, receipt: Path | None = None,
+            workspace: Path | None = None, current_archive: Path | None = None,
+            observed_build: dict | None = None, expected_commit: str | None = None,
+            expected_identity: str | None = None) -> dict:
     signer = preflight(policy)  # Check before altering any existing output.
     version_key(version); build_key(build)
     if not binary.is_file() or binary.is_symlink():
         raise ReleaseRejected('Missing build output')
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / f'RemotePlay-macos-arm64-{version}-{build}.zip'
-    if archive.exists():
-        raise ReleaseRejected('Versioned artifact already exists; not overwriting it')
-    with tempfile.TemporaryDirectory(prefix='.rp-package-', dir=output) as directory:
-        stage = Path(directory); app = stage / 'RemotePlay.app'
+    archive = archive or output / 'RemotePlay-macos-arm64.zip'
+    receipt = receipt or archive.with_suffix('.verification.json')
+    if archive.exists() or archive.is_symlink() or receipt.exists() or receipt.is_symlink():
+        raise ReleaseRejected('Output already exists; update current through the production entrypoint')
+    with packaging_workspace(output, workspace) as stage:
+        app = stage / 'RemotePlay.app'
         macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
         macos.mkdir(parents=True); resources.mkdir(parents=True)
         shutil.copy2(binary, macos / policy.executable); os.chmod(macos / policy.executable, 0o755)
@@ -258,14 +317,34 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
         run(['/usr/bin/codesign', '--force', '--sign', signer, '--timestamp=none',
              '--identifier', policy.bundle_id, '-r', '=designated => ' + policy.requirement, str(app)])
         report = verify_app(app, policy)
+        identity_expectations = None
+        if observed_build is not None:
+            import build_identity_gate as gate
+            sealed = gate.seal_tree(stage, observed_build, expected_commit, expected_identity,
+                                    compiler_binary=binary)
+            identity_expectations = {'commit': expected_commit, 'identity_sha256': expected_identity,
+                                     'manifest_sha256': sealed['manifest_sha256']}
         candidate = stage / 'candidate.zip'
-        run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(candidate)], 120)
-        with verified_archive(candidate, policy) as (_, extracted):
+        if identity_expectations is not None:
+            # The identity inventory includes exact regular payload files;
+            # Finder/resource sidecars are not unlisted release payloads.
+            with zipfile.ZipFile(candidate, 'x', compression=zipfile.ZIP_DEFLATED) as output_zip:
+                for payload in sorted(app.rglob('*')):
+                    if payload.is_file():
+                        output_zip.write(payload, payload.relative_to(stage).as_posix())
+                output_zip.write(stage / gate.MANIFEST, gate.MANIFEST)
+        else:
+            run(['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(candidate)], 120)
+        with verified_archive(candidate, policy, owned_workspace=stage,
+                              identity_expectations=identity_expectations) as (_, extracted):
             check_upgrade(report, extracted)
-        # Atomic no-clobber publication on the same filesystem.
-        os.link(candidate, archive)
-        report.update(archive=str(archive), archive_sha256=sha256(archive), size_bytes=archive.stat().st_size)
-        archive.with_suffix('.verification.json').write_text(json.dumps(report, indent=2) + '\n')
+        if identity_expectations is not None:
+            report['build_identity_expectations'] = identity_expectations
+        # This is the transaction's private stage; shared publish atomically updates current.
+        os.replace(candidate, archive)
+        report.update(archive=str(current_archive or archive), archive_sha256=sha256(archive), size_bytes=archive.stat().st_size)
+        with receipt.open('x') as outgoing:
+            json.dump(report, outgoing, indent=2); outgoing.write('\n'); outgoing.flush(); os.fsync(outgoing.fileno())
     return report
 
 
@@ -275,21 +354,67 @@ def main() -> None:
     sub.add_parser('preflight')
     for name in ['verify-app', 'verify-archive', 'verify-stage']:
         child = sub.add_parser(name); child.add_argument('path', type=Path)
+        if name == 'verify-archive':
+            child.add_argument('--expected-commit')
+            child.add_argument('--expected-identity-sha256')
+            child.add_argument('--expected-manifest-sha256')
     child = sub.add_parser('package')
     child.add_argument('--binary', type=Path, required=True); child.add_argument('--output', type=Path, required=True)
     child.add_argument('--version', required=True); child.add_argument('--build', required=True)
+    child.add_argument('--build-receipt', type=Path)
+    child.add_argument('--build-receipt-sha256')
+    child.add_argument('--expected-commit')
+    child.add_argument('--expected-identity-sha256')
     args = parser.parse_args(); policy = load_policy()
     if args.command == 'preflight': result = {'signing_identity': preflight(policy), 'ad_hoc_fallback': False}
     elif args.command == 'verify-app': result = verify_app(args.path, policy)
     elif args.command == 'verify-archive':
-        with verified_archive(args.path, policy) as (_, result): pass
+        values = (args.expected_commit, args.expected_identity_sha256, args.expected_manifest_sha256)
+        if any(values) and not all(values):
+            raise ReleaseRejected('All independent archive identity expectations are required together')
+        pins = dict(zip(('commit', 'identity_sha256', 'manifest_sha256'), values)) if all(values) else None
+        with verified_archive(args.path, policy, identity_expectations=pins) as (_, result): pass
     elif args.command == 'verify-stage': result = verify_stage(args.path, policy)
-    else: result = package(args.binary, args.output, args.version, args.build, policy)
+    else:
+        preflight(policy)  # Preserve signer refusal before any retention mutation.
+        import build_identity_gate as gate
+        identity_args = (args.build_receipt, args.build_receipt_sha256,
+                         args.expected_commit, args.expected_identity_sha256)
+        if not all(identity_args):
+            raise ReleaseRejected('Production packaging requires an independently pinned observed build receipt')
+        observed = gate.read_json(args.build_receipt, args.build_receipt_sha256)
+        gate.validate_identity(observed.get('build_identity'), args.expected_commit, args.expected_identity_sha256)
+        import release_artifact_lifecycle as lifecycle
+        with lifecycle.producer('macos') as (_, delivery):
+            version_key(args.version); build_key(args.build)
+            if not args.binary.is_file() or args.binary.is_symlink():
+                raise ReleaseRejected('Missing build output')
+            output = args.output.resolve()
+            lifecycle.require(output == lifecycle.macos_output_root(), 'Use the configured default macOS package directory')
+            archive = output / 'RemotePlay-macos-arm64.zip'
+            files = [archive, archive.with_suffix('.verification.json')]
+            current = None
+            if any(path.exists() or path.is_symlink() for path in files):
+                recorded, current = lifecycle.macos_evidence(*files, archive)
+                with verified_archive(archive, policy,
+                                      identity_expectations=recorded.get('build_identity_expectations')) as (_, checked):
+                    lifecycle.require(all(recorded.get(key) == value for key, value in checked.items()),
+                                      'Existing current archive differs from its original verified receipt')
+            admission = lifecycle.admit(delivery, 'macos-arm64-release', files, current=current,
+                                        aux_stage=output / '.remoteplay-macos-package.pending')
+            staged_archive, staged_receipt = map(Path, admission['staged_files'])
+            result = package(args.binary, output, args.version, args.build, policy,
+                             archive=staged_archive, receipt=staged_receipt,
+                             workspace=Path(admission['owned_aux_stages'][0]), current_archive=archive,
+                             observed_build=observed, expected_commit=args.expected_commit,
+                             expected_identity=args.expected_identity_sha256)
+            current_output = lifecycle.publish_macos(delivery, admission, result)
+            result = dict(result, current_output=current_output)
     print('MACOS_RELEASE_VERIFIED ' + json.dumps(result), flush=True)
 
 
 if __name__ == '__main__':
     try:
         main()
-    except (ReleaseRejected, ValueError, KeyError, OSError, zipfile.BadZipFile) as error:
+    except (ReleaseRejected, identity_gate.IdentityRejected, ValueError, KeyError, OSError, zipfile.BadZipFile) as error:
         print(f'MACOS_RELEASE_REJECTED: {error}', file=sys.stderr); sys.exit(1)

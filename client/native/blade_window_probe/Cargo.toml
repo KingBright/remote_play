@@ -1,0 +1,15 @@
+[package]
+name="remoteplay-native-blade-window-validation"
+version="0.1.0"
+edition="2024"
+publish=false
+build="../vulkan_probe/build.rs"
+[workspace]
+[dependencies]
+gpui={package="gpui-ce",path="../../../third_party/gpui-ce",features=["native-video-validation"]}
+yororen_ui="=0.2.0"
+serde_json="1"
+libc="0.2"
+[patch.crates-io]
+gpui-ce={path="../../../third_party/gpui-ce"}
+blade-graphics={path="../../../third_party/blade-graphics"}

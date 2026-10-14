@@ -43,12 +43,39 @@ class MainActivity : ComponentActivity() {
             val scope = rememberCoroutineScope()
             val sessionState by RemotePlayClient.sessionState.collectAsState()
             val telemetry by RemotePlayClient.telemetry.collectAsState()
+            val sessionError by RemotePlayClient.sessionError.collectAsState()
             val devices by RemotePlayClient.devices.collectAsState()
+            val networkName by RemotePlayClient.networkName.collectAsState()
+            var joiningNetwork by remember { mutableStateOf(false) }
+            var sendFileOnConnect by remember { mutableStateOf(false) }
+            var workspaceDeviceId by remember { mutableStateOf("") }
             var scanningQr by remember { mutableStateOf(false) }
             var workspaceEndpoint by remember { mutableStateOf<String?>(null) }
             var receivedFiles by remember { mutableStateOf(false) }
             var pairingMessage by remember { mutableStateOf<String?>(null) }
             val publisherStatus by PublisherClient.status.collectAsState()
+            val receiverState by FileReceiverClient.state.collectAsState()
+            fun joinNetwork(raw: String) {
+                if (joiningNetwork) return
+                if (WorkspaceClient.active || PublisherClient.active || FileReceiverClient.ownsNetwork ||
+                    sessionState in listOf(SessionState.CONNECTING, SessionState.STREAMING, SessionState.RECONNECTING)) {
+                    pairingMessage = "error:Disconnect active sessions and stop file reception and screen sharing before changing networks."
+                    return
+                }
+                joiningNetwork = true
+                pairingMessage = "Joining device network..."
+                scope.launch {
+                    try {
+                        pairingMessage = withContext(Dispatchers.IO) { RemotePlayClient.joinPairingPayload(raw) }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        pairingMessage = "error:${error.message ?: "Could not join network"}"
+                    } finally {
+                        joiningNetwork = false
+                    }
+                }
+            }
             var publishAudio by remember { mutableStateOf(false) }
             val projection = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
                 if (result.resultCode == RESULT_OK && result.data != null) PublisherClient.start(this, result.resultCode, result.data!!, publishAudio)
@@ -73,13 +100,13 @@ class MainActivity : ComponentActivity() {
 
             when {
                 workspaceEndpoint != null -> {
-                    com.remoteplay.client.ui.WorkspaceScreen(workspaceEndpoint!!) { workspaceEndpoint = null }
+                    com.remoteplay.client.ui.WorkspaceScreen(workspaceEndpoint!!, sendFileOnConnect, workspaceDeviceId) { workspaceEndpoint = null }
                 }
                 scanningQr -> {
                     QrScanScreen(
                         onResult = { raw ->
                             scanningQr = false
-                            pairingMessage = RemotePlayClient.joinPairingPayload(raw)
+                            joinNetwork(raw)
                         },
                         onCancel = { scanningQr = false }
                     )
@@ -95,8 +122,11 @@ class MainActivity : ComponentActivity() {
                     MobileConsoleScreen(
                         telemetry = telemetry,
                         devices = devices,
-                        nativeAvailable = RemotePlayClient.nativeAvailable,
-                        pairingMessage = publisherStatus.ifBlank { pairingMessage },
+                        nativeAvailable = RemotePlayClient.nativeAvailable && !joiningNetwork,
+                        networkName = networkName,
+                        joiningNetwork = joiningNetwork,
+                        pairingMessage = listOfNotNull(pairingMessage, publisherStatus.takeIf { it.isNotBlank() }, receiverState.message.takeIf { it.isNotBlank() }).distinct().joinToString("\n"),
+                        sessionError = sessionError,
                         sessionState = sessionState,
                         onCancelConnect = {
                             scope.launch(Dispatchers.IO) { RemotePlayClient.disconnect() }
@@ -104,15 +134,20 @@ class MainActivity : ComponentActivity() {
                         onConnectHost = { deviceId, endpoint ->
                             scope.launch(Dispatchers.IO) { RemotePlayClient.connect(deviceId, endpoint) }
                         },
-                        onConnectWorkspace = { endpoint -> workspaceEndpoint = endpoint },
+                        onConnectWorkspace = { deviceId, endpoint -> sendFileOnConnect = false; workspaceDeviceId = deviceId; workspaceEndpoint = endpoint },
+                        onSendFiles = { deviceId, endpoint -> sendFileOnConnect = true; workspaceDeviceId = deviceId; workspaceEndpoint = endpoint },
                         publishing = PublisherClient.active,
+                        receivingFiles = receiverState.active || receiverState.starting,
+                        receiverStarting = receiverState.starting,
+                        onStartReceiving = { FileReceiverClient.start(this) },
+                        onStopReceiving = { FileReceiverClient.stop(this) },
                         onShareScreen = { audio ->
                             if (audio && checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) audioPermission.launch(android.Manifest.permission.RECORD_AUDIO)
                             else requestProjection(audio)
                         },
                         onStopSharing = { PublisherClient.stop(this) },
                         onBrowseFiles = { receivedFiles = true },
-                        onJoinCode = { code -> scope.launch { pairingMessage = withContext(Dispatchers.IO) { RemotePlayClient.joinPairingPayload(code) } } },
+                        onJoinCode = ::joinNetwork,
                         onScanQr = { scanningQr = true }
                     )
                 }

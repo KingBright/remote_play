@@ -186,6 +186,29 @@ fn front_of_app(windows: &[WindowDescription], pid: i32) -> Option<u32> {
         })
         .map(|w| w.id)
 }
+// The callbacks are the existing WindowServer/AX operations. Keep the deadline
+// check adjacent to the focus write, after every potentially blocking read.
+fn focus_for_click_with(
+    deadline: Option<std::time::Instant>,
+    bounds: impl FnOnce() -> Result<(), String>,
+    mut frontmost: impl FnMut() -> bool,
+    activate: impl FnOnce() -> i32,
+) -> Result<(), String> {
+    bounds()?;
+    if !frontmost() {
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Err("input expired before application activation".into());
+        }
+        let status = activate();
+        if status != 0 {
+            return Err(format!("The selected application could not be activated ({status}); input was not redirected"));
+        }
+    }
+    if frontmost() { Ok(()) } else {
+        Err("Wait for the selected application to become active, then click again".into())
+    }
+}
+
 pub struct WindowTarget {
     pub id: u32,
     pub pid: i32,
@@ -234,29 +257,19 @@ impl WindowTarget {
         self.app_frontmost()
             && windows(1 | 16, 0).is_ok_and(|list| front_of_app(&list, self.pid) == Some(self.id))
     }
-    pub fn focus_for_click(&self) -> Result<(), String> {
-        self.bounds()?;
-        if !self.app_frontmost() {
-            let name = CFString::new("AXFrontmost");
-            let yes = CFBoolean::true_value();
-            let status = unsafe {
+    pub fn focus_for_click(&self, deadline: Option<std::time::Instant>) -> Result<(), String> {
+        let name = CFString::new("AXFrontmost");
+        let yes = CFBoolean::true_value();
+        focus_for_click_with(
+            deadline,
+            || self.bounds().map(|_| ()),
+            || self.app_frontmost(),
+            || unsafe {
                 AXUIElementSetAttributeValue(
-                    self.application.as_CFTypeRef(),
-                    name.as_CFTypeRef(),
-                    yes.as_CFTypeRef(),
+                    self.application.as_CFTypeRef(), name.as_CFTypeRef(), yes.as_CFTypeRef(),
                 )
-            };
-            if status != 0 {
-                return Err(format!(
-                    "The selected application could not be activated ({status}); input was not redirected"
-                ));
-            }
-        }
-        if self.app_frontmost() {
-            Ok(())
-        } else {
-            Err("Wait for the selected application to become active, then click again".into())
-        }
+            },
+        )
     }
     pub fn check_pointer(&self, x: u16, y: u16) -> Result<(), String> {
         let r = self.bounds()?;
@@ -311,6 +324,33 @@ impl WindowTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn focus_deadline_read_delay_prevents_activation_and_following_input() {
+        use std::{cell::Cell, time::{Duration, Instant}};
+        for delay_in_bounds in [false, true] {
+            let deadline = Instant::now() + Duration::from_millis(20);
+            let focus = Cell::new(0);
+            let input = Cell::new(0);
+            let wait = || std::thread::sleep(deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(2));
+            let result = focus_for_click_with(Some(deadline),
+                || { if delay_in_bounds { wait(); } Ok(()) },
+                || { if !delay_in_bounds { wait(); } false },
+                || { focus.set(focus.get() + 1); 0 });
+            if result.is_ok() { input.set(input.get() + 1); }
+            assert!(result.unwrap_err().contains("expired"));
+            assert_eq!(focus.get(), 0);
+            assert_eq!(input.get(), 0);
+        }
+    }
+    #[test]
+    fn focus_deadline_fresh_click_can_still_activate() {
+        use std::{cell::Cell, time::{Duration, Instant}};
+        let active = Cell::new(false);
+        let writes = Cell::new(0);
+        focus_for_click_with(Some(Instant::now() + Duration::from_secs(1)), || Ok(()),
+            || active.get(), || { writes.set(writes.get() + 1); active.set(true); 0 }).unwrap();
+        assert_eq!(writes.get(), 1);
+    }
     fn w(id: u32, pid: i32, x: f64) -> WindowDescription {
         WindowDescription {
             id,

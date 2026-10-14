@@ -14,11 +14,12 @@ struct RendererIdentity {
 
 pub struct Instance {
     pub visible: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    _lock: File,
+    _lock: std::sync::Arc<File>,
     socket: Option<UdpSocket>,
     info: PathBuf,
     renderer_info: PathBuf,
     task: Option<tokio::task::JoinHandle<()>>,
+    frontend: bool,
 }
 impl Instance {
     pub fn acquire(directory: &Path) -> Result<Option<Self>, String> {
@@ -50,7 +51,12 @@ impl Instance {
                 return Err("Frontend process-state directory is unsafe".into());
             }
         }
-        Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)
+        #[cfg(windows)] {std::fs::create_dir_all(&directory).map_err(|e|e.to_string())?;crate::private_ipc::private_directory(&directory).map_err(|e|e.to_string())?;}
+        Ok(Self::acquire_for_renderer(&directory, crate::gui_backend::ORIGINAL_RENDERER)?
+            .map(|mut instance| {
+                instance.frontend = true;
+                instance
+            }))
     }
     pub fn acquire_headless(directory: &Path) -> Result<Option<Self>, String> {
         Self::acquire_mode(directory, None)
@@ -58,6 +64,7 @@ impl Instance {
     fn acquire_mode(directory: &Path, renderer: Option<&str>) -> Result<Option<Self>, String> {
         let graphical = renderer.is_some();
         std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        #[cfg(windows)] crate::private_ipc::private_directory(directory).map_err(|e|e.to_string())?;
         let lock_path = directory.join("desktop-instance.lock");
         let info = directory.join("desktop-instance.addr");
         let renderer_info = directory.join("desktop-instance.renderer.json");
@@ -67,6 +74,9 @@ impl Instance {
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
+        }
+        #[cfg(windows)] for path in [&lock_path,&info,&renderer_info] {
+            match path.symlink_metadata(){Ok(_)=>crate::private_ipc::private_file(path).map_err(|e|e.to_string())?,Err(e)if e.kind()==io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.to_string())}
         }
         let file = options.open(lock_path).map_err(|e| e.to_string())?;
         if file.try_lock().is_err() {
@@ -140,14 +150,36 @@ impl Instance {
             .map_err(|e| e.to_string())?;
         Ok(Some(Self {
             visible: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            _lock: file,
+            _lock: std::sync::Arc::new(file),
             socket: Some(socket),
             info,
             renderer_info,
             task: None,
+            frontend: false,
         }))
     }
-    pub(crate) fn is_frontend(&self) -> bool { self.info.parent().is_some_and(|p| p.ends_with("gui-state")) }
+    /// A verified standalone service may only activate its existing window.
+    /// If its owner vanished, do not acquire the profile or start a runtime.
+    pub(crate) fn activate_existing(directory: &Path) -> Result<(), String> {
+        crate::private_ipc::private_directory(directory).map_err(|e|e.to_string())?;
+        let info=directory.join("desktop-instance.addr");
+        let renderer=directory.join("desktop-instance.renderer.json");
+        crate::private_ipc::private_file(&info).map_err(|e|e.to_string())?;
+        crate::private_ipc::private_file(&renderer).map_err(|e|e.to_string())?;
+        let identity:RendererIdentity=serde_json::from_slice(&std::fs::read(renderer).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        if identity.schema!=1||identity.renderer!=crate::gui_backend::ORIGINAL_RENDERER{return Err("Existing owner has no compatible GUI".into());}
+        let endpoint:SocketAddr=std::fs::read_to_string(info).map_err(|e|e.to_string())?.trim().parse().map_err(|_|"Existing GUI activation address is unavailable")?;
+        if !endpoint.ip().is_loopback(){return Err("Refusing a nonlocal activation address".into());}
+        UdpSocket::bind("127.0.0.1:0").and_then(|s|s.send_to(b"show",endpoint)).map_err(|e|e.to_string())?;
+        Ok(())
+    }
+    pub(crate) fn service_lock(&self)->Result<std::sync::Arc<File>,String>{
+        if self.is_frontend(){return Err("A frontend cannot own another background runtime".into());}
+        Ok(self._lock.clone())
+    }
+    pub(crate) fn state_directory(&self) -> &Path { self.info.parent().expect("instance state directory") }
+
+    pub(crate) fn is_frontend(&self) -> bool { self.frontend }
 
     /// Same lock/activation protocol for every renderer. The callback only signals
     /// its own GUI; it must not start another network or capture runtime.
@@ -181,6 +213,34 @@ impl Drop for Instance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_named_gui_state_still_owns_runtime_and_its_actual_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("gui-state");
+        std::fs::create_dir(&profile).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let owner = Instance::acquire(&profile).unwrap().unwrap();
+        assert!(!owner.is_frontend());
+        let service_lock = owner.service_lock().unwrap();
+        assert!(Instance::acquire(&profile).unwrap().is_none());
+        let frontend = Instance::acquire_frontend(&profile).unwrap().unwrap();
+        assert!(frontend.is_frontend());
+        assert_eq!(frontend.state_directory(), profile.join("gui-state"));
+        assert!(frontend.service_lock().is_err());
+        assert!(Instance::acquire_frontend(&profile).unwrap().is_none());
+
+        // Service ownership keeps the original lock alive after its window
+        // instance drops; the separate frontend lock cannot replace it.
+        let contender = OpenOptions::new().read(true).write(true)
+            .open(profile.join("desktop-instance.lock")).unwrap();
+        drop(owner);
+        assert!(contender.try_lock().is_err());
+        drop(service_lock);
+        assert!(contender.try_lock().is_ok());
+    }
     #[test]
     fn headless_runtime_also_owns_the_profile_and_rejects_a_second_gui() {
         let dir = tempfile::tempdir().unwrap();

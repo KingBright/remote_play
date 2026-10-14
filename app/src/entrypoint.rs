@@ -16,15 +16,15 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     if arguments == ["--background-service"] {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(unix, windows))]
         return remote_play_app::background_service::run(config).await;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(unix, windows)))]
         return Err("Separated background/GUI lifecycle is currently validated on macOS only".into());
     }
     if arguments == ["--gui"] {
-        #[cfg(all(target_os = "macos", feature = "gpui-restoration"))]
+        #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
         return remote_play_app::restored_ui::run_attached_gui(config).await;
-        #[cfg(not(all(target_os = "macos", feature = "gpui-restoration")))]
+        #[cfg(not(all(any(unix, windows), feature = "gpui-restoration")))]
         return Err("Attached GPUI frontend is currently available on macOS only".into());
     }
     if !arguments.is_empty() {
@@ -32,9 +32,8 @@ pub async fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     // A migrated user installation manually opens the same app. Fail closed if
     // its service endpoint is stale; never fall back to a second standalone host.
-    #[cfg(all(target_os = "macos", feature = "gpui-restoration"))]
-    if !headless_enabled() && (config.mesh_dir.join("background.sock").symlink_metadata().is_ok()
-        || config.mesh_dir.join(remote_play_app::background_service::ROLE_MARKER).symlink_metadata().is_ok()) {
+    #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
+    if !headless_enabled() && crate::background_service::attachment_required(&config.mesh_dir)? {
         return remote_play_app::restored_ui::run_attached_gui(config).await;
     }
     let identity =
@@ -80,16 +79,27 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
     };
 
     match command.as_str() {
+        "--gui-status-json" | "--gui-receive" | "--gui-stop-receive" => {
+            #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
+            {
+                let config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
+                let arguments = std::iter::once(command).chain(args).collect::<Vec<_>>();
+                println!("{}", crate::desktop::directed_receive::command(&config.mesh_dir, &arguments)?);
+                Ok(true)
+            }
+            #[cfg(not(all(any(unix, windows), feature = "gpui-restoration")))]
+            { Err("The private GUI receive adapter is available on macOS/Linux".into()) }
+        }
         "--background-status-json" => {
             if args.next().is_some() { return Err("--background-status-json takes no extra arguments".into()); }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(unix, windows))]
             {
                 let config = remote_play_app::UnifiedRuntimeConfig::from_env()?;
                 let client = remote_play_app::background_service::Client::connect(&config.mesh_dir)?;
                 println!("{}", client.status());
                 Ok(true)
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(unix, windows)))]
             { Err("Separated lifecycle is currently available on macOS only".into()) }
         }
         "--product-info-json" => {

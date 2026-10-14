@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const MAX_INPUT_AGE_MS: u64 = 250;
-pub const HOLD_TIMEOUT_MS: u64 = 750;
+pub const INPUT_REFRESH_INTERVAL_MS: u64 = 100;
+pub const HOLD_TIMEOUT_MS: u64 = 300;
+pub const INPUT_WATCHDOG_INTERVAL_MS: u64 = 50;
 pub const MAX_HELD: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,27 +187,63 @@ impl HeldState {
     }
 }
 
+/// Native ownership and protocol admission share one irreversible lifetime.
+/// Dropping control never allows an old held snapshot to recreate that lifetime.
+#[derive(Clone, Debug, Default)]
+pub struct InputLeaseRevocation(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl InputLeaseRevocation {
+    pub fn revoke(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    fn is_revoked(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[derive(Debug)]
 pub struct InputLease {
     pub binding: InputBinding,
+    revocation: InputLeaseRevocation,
     high_water: u64,
     last_valid_ms: u64,
     held: HeldState,
     last_valid: std::time::Instant,
+    last_held_ms: u64,
+    last_held: std::time::Instant,
 }
 impl InputLease {
     pub fn new(binding: InputBinding, now_ms: u64) -> Self {
         Self {
             binding,
+            revocation: InputLeaseRevocation::default(),
             high_water: 0,
             last_valid_ms: now_ms,
             held: HeldState::default(),
             last_valid: std::time::Instant::now(),
+            last_held_ms: now_ms,
+            last_held: std::time::Instant::now(),
         }
     }
+    pub fn revocation(&self) -> InputLeaseRevocation {
+        self.revocation.clone()
+    }
+    pub fn held_modifiers(&self) -> u8 {
+        self.held.modifiers()
+    }
+    /// Local monotonic limit used while the host awaits another peer's capture
+    /// teardown. The wire clock cannot extend this deadline.
+    pub fn deadline(&self)->std::time::Instant {
+        if self.revocation.is_revoked(){return std::time::Instant::now();}
+        let valid=self.last_valid+std::time::Duration::from_millis(HOLD_TIMEOUT_MS);
+        if self.held.0.is_empty(){valid}else{valid.min(self.last_held+std::time::Duration::from_millis(HOLD_TIMEOUT_MS))}
+    }
     pub fn expired(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_valid_ms) > HOLD_TIMEOUT_MS
-            || self.last_valid.elapsed().as_millis() > HOLD_TIMEOUT_MS as u128
+        self.revocation.is_revoked()
+            || now_ms.saturating_sub(self.last_valid_ms) >= HOLD_TIMEOUT_MS
+            || self.last_valid.elapsed().as_millis() >= HOLD_TIMEOUT_MS as u128
+            || (!self.held.0.is_empty()
+                && (now_ms.saturating_sub(self.last_held_ms) >= HOLD_TIMEOUT_MS
+                    || self.last_held.elapsed().as_millis() >= HOLD_TIMEOUT_MS as u128))
     }
     pub fn accept(&mut self, packet: &RealtimeInput, now_ms: u64) -> Option<Vec<InputEvent>> {
         if packet.binding != self.binding
@@ -220,6 +258,15 @@ impl InputLease {
         if packet.created_host_ms > now_ms || now_ms - packet.created_host_ms > MAX_INPUT_AGE_MS {
             return None;
         }
+        // An explicit chord must not become a different (possibly bare) key
+        // when its modifier-down was lost/reordered. Consume the sequence but
+        // reject before changing held state. Legacy KeyDown has no such field.
+        if let InputPayload::Event(InputEvent::Key { pressed: true, modifiers, .. }) = &packet.payload
+            && *modifiers != self.held.modifiers()
+        {
+            return None;
+        }
+        let had_held = !self.held.0.is_empty();
         let output = match &packet.payload {
             InputPayload::Event(event) => self
                 .held
@@ -230,8 +277,19 @@ impl InputLease {
             InputPayload::Held(_) => return None,
             InputPayload::Release => self.held.release_missing(&[]),
         };
-        self.last_valid_ms = now_ms;
-        self.last_valid = std::time::Instant::now();
+        let received = std::time::Instant::now();
+        let created = received.checked_sub(std::time::Duration::from_millis(now_ms - packet.created_host_ms))
+            .unwrap_or(self.last_valid);
+        self.last_valid_ms = packet.created_host_ms;
+        self.last_valid = created;
+        // Start a hold budget on the first accepted press. Only explicit held
+        // snapshots refresh existing presses: motion, new unrelated events,
+        // grants and transport heartbeats cannot keep an old press alive.
+        // Account for packet age rather than granting a new timeout at receipt.
+        if !self.held.0.is_empty() && (!had_held || matches!(packet.payload, InputPayload::Held(_))) {
+            self.last_held_ms = packet.created_host_ms;
+            self.last_held = created;
+        }
         Some(output)
     }
 }
@@ -330,6 +388,33 @@ mod tests {
         );
     }
     #[test]
+    fn revoked_native_owner_requires_a_new_empty_protocol_lease() {
+        let mut old = InputLease::new(binding(1), 1000);
+        old.accept(&packet(1, InputPayload::Event(InputEvent::ModifiersChanged(2))), 1000).unwrap();
+        let native_owner = old.revocation();
+        native_owner.revoke();
+        native_owner.revoke();
+        assert!(old.expired(1000));
+        for (sequence, payload) in [
+            (2, InputPayload::Held(vec![(Press::Modifier(2), 1)])),
+            (3, InputPayload::Event(InputEvent::Key { key_code: 8, pressed: true, modifiers: 2 })),
+            (4, InputPayload::Release),
+        ] {
+            assert!(old.accept(&packet(sequence, payload), 1000).is_none());
+        }
+        let mut fresh = InputLease::new(binding(2), 1000);
+        let mut old_snapshot = packet(1, InputPayload::Held(vec![(Press::Modifier(2), 1)]));
+        old_snapshot.binding = binding(2);
+        assert!(fresh.accept(&old_snapshot, 1000).unwrap().is_empty());
+        assert_eq!(fresh.held_modifiers(), 0);
+        native_owner.revoke(); // Late old cleanup cannot revoke the replacement.
+        assert!(!fresh.expired(1000));
+        let mut press = packet(2, InputPayload::Event(InputEvent::Key { key_code: 8, pressed: true, modifiers: 0 }));
+        press.binding = binding(2);
+        assert_eq!(fresh.accept(&press, 1000).unwrap().len(), 1);
+    }
+
+    #[test]
     fn reconnect_source_switch_and_old_release_cannot_touch_new_epoch() {
         let mut lease = InputLease::new(binding(2), 1000);
         let old = packet(90, InputPayload::Release);
@@ -396,6 +481,90 @@ mod tests {
         );
     }
     #[test]
+    fn continuous_hold_only_matching_fresh_snapshots_extend_pressed_state() {
+        let mut lease = InputLease::new(binding(1), 1000);
+        lease.accept(&packet(1, InputPayload::Event(InputEvent::KeyDown(0))), 1000).unwrap();
+        lease.accept(&packet(2, InputPayload::Event(InputEvent::MouseDown(0))), 1000).unwrap();
+        let held = vec![(Press::Key(0), 1), (Press::Button(0), 2)];
+        for (seq, now) in [(3, 1100), (4, 1200), (6, 1400)] {
+            let mut refresh = packet(seq, InputPayload::Held(held.clone()));
+            refresh.created_host_ms = now;
+            assert!(lease.accept(&refresh, now).unwrap().is_empty());
+        }
+        // A lost 1300ms snapshot is tolerated; duplicate, old epoch and stale
+        // packets do not renew, and no snapshot replays a key/button-down.
+        let mut duplicate = packet(6, InputPayload::Held(held.clone()));
+        duplicate.created_host_ms = 1600;
+        assert!(lease.accept(&duplicate, 1600).is_none());
+        let mut old_epoch = packet(7, InputPayload::Held(held.clone()));
+        old_epoch.binding.epoch = [99; 16]; old_epoch.created_host_ms = 1600;
+        assert!(lease.accept(&old_epoch, 1600).is_none());
+        assert!(lease.accept(&packet(8, InputPayload::Held(held.clone())), 1600).is_none());
+        assert!(!lease.expired(1699));
+        assert!(lease.expired(1700));
+        let mut late = packet(9, InputPayload::Held(held)); late.created_host_ms = 1700;
+        assert!(lease.accept(&late, 1700).is_none());
+        let mut fresh = InputLease::new(binding(2), 1700);
+        late.binding = binding(2);
+        assert!(fresh.accept(&late, 1700).unwrap().is_empty());
+        assert!(fresh.held.snapshot().is_empty()); // No automatic restart.
+    }
+
+    #[test]
+    fn continuous_hold_motion_does_not_renew_and_delayed_snapshot_keeps_its_age() {
+        let mut lease = InputLease::new(binding(1), 1000);
+        lease.accept(&packet(1, InputPayload::Event(InputEvent::MouseDown(0))), 1000).unwrap();
+        let mut motion = packet(2, InputPayload::Event(InputEvent::MouseMove { dx: 1, dy: 0 }));
+        motion.created_host_ms = 1200;
+        assert!(lease.accept(&motion, 1200).is_some());
+        assert!(lease.expired(1300));
+        let mut lease = InputLease::new(binding(1), 1000);
+        lease.accept(&packet(1, InputPayload::Event(InputEvent::MouseDown(0))), 1000).unwrap();
+        let mut refresh = packet(2, InputPayload::Held(vec![(Press::Button(0), 1)]));
+        refresh.created_host_ms = 1050;
+        assert!(lease.accept(&refresh, 1250).unwrap().is_empty());
+        assert!(!lease.expired(1349));
+        assert!(lease.expired(1350)); // Not 1250 + 300.
+        // Polling adds at most one nominal interval; a delayed executor stops
+        // on its first resumed poll, never re-authorizing expired intent.
+        for scheduling_delay in [0, 20, 200] {
+            let poll = 1350 + INPUT_WATCHDOG_INTERVAL_MS + scheduling_delay;
+            assert!(lease.expired(poll));
+        }
+    }
+
+    #[test]
+    fn modifier_intent_lost_or_reordered_down_never_becomes_bare_character() {
+        let mut lease = InputLease::new(binding(1), 1000);
+        let chord = InputPayload::Event(InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 2,
+        });
+        assert!(lease.accept(&packet(2, chord.clone()), 1000).is_none());
+        assert!(lease.accept(&packet(1, InputPayload::Event(InputEvent::ModifiersChanged(2))), 1000).is_none());
+        assert_eq!(lease.accept(&packet(3, InputPayload::Event(InputEvent::ModifiersChanged(2))), 1000),
+            Some(vec![InputEvent::ModifiersChanged(2)]));
+        assert!(lease.accept(&packet(2, chord.clone()), 1000).is_none());
+        // Rejected C never entered held state: a fresh deliberate C can succeed.
+        assert_eq!(lease.accept(&packet(4, chord), 1000), Some(vec![InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 2,
+        }]));
+    }
+
+    #[test]
+    fn modifier_intent_extra_held_modifier_drops_explicit_plain_key_but_legacy_keydown_remains() {
+        let mut lease = InputLease::new(binding(1), 1000);
+        lease.accept(&packet(1, InputPayload::Event(InputEvent::ModifiersChanged(2))), 1000).unwrap();
+        assert!(lease.accept(&packet(2, InputPayload::Event(InputEvent::Key {
+            key_code: 0x08, pressed: true, modifiers: 0,
+        })), 1000).is_none());
+        assert_eq!(lease.accept(&packet(3, InputPayload::Event(InputEvent::KeyDown(0x08))), 1000),
+            Some(vec![InputEvent::Key { key_code: 0x08, pressed: true, modifiers: 2 }]));
+        assert_eq!(lease.accept(&packet(4, InputPayload::Event(InputEvent::Key {
+            key_code: 0x08, pressed: false, modifiers: 15,
+        })), 1000), Some(vec![InputEvent::Key { key_code: 0x08, pressed: false, modifiers: 2 }]));
+    }
+
+    #[test]
     fn unowned_key_up_does_not_introduce_modifiers() {
         let mut lease = InputLease::new(binding(1), 1000);
         assert!(
@@ -427,12 +596,8 @@ mod tests {
                     ),
                     1000
                 )
-                .unwrap(),
-            vec![InputEvent::Key {
-                key_code: 9,
-                pressed: true,
-                modifiers: 0
-            }]
+                .is_none(),
+            true
         );
     }
 }
