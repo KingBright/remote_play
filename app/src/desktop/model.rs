@@ -136,7 +136,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             source_revision: 0,
             confirmed: false,
             supports_input: false,
-            locked: true,
+            // The authenticated connection authorizes control. Source, lease,
+            // frame and foreground checks still decide whether an event can flow.
+            locked: false,
             paused: false,
             pending: None,
             activity_revision: 0,
@@ -248,7 +250,6 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             }
         }
         self.confirmed = false;
-        self.locked = true;
         self.clear_transient_error();
         self.status = "Requesting video; waiting for the first decoded frame".into();
         self.request.source = self.source;
@@ -284,7 +285,6 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         }) {
             self.pending = Some((request, Instant::now()));
             self.confirmed = false;
-            self.locked = true;
             self.status = "Switching source".into();
         }
     }
@@ -857,10 +857,14 @@ mod static_input_tests {
             conn,
             events,
         );
+        // Connection intent needs no extra Enable click, but cannot bypass
+        // the source confirmation, presented frame or bound input grant.
+        assert!(!session.locked);
+        assert!(!session.can_input());
         // Synthetic presentation eligibility only; no native frame is decoded.
         session.confirmed = true;
         session.supports_input = true;
-        session.locked = false;
+        assert!(!session.can_input());
         session.first_frame_after = Instant::now() - Duration::from_secs(1);
         session.uploaded_at = Some(Instant::now());
         let inputs = [
