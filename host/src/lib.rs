@@ -45,6 +45,7 @@ pub use linux_portal::{
         PreparedPortalCapture, SelectedPortalSource, request_local_portal_capture,
         request_local_portal_control_capture, request_local_portal_capture_restorable,
         PortalSessionRestore, request_registered_portal_control_capture,
+        with_portal_stage_receipts,
     },
 };
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]

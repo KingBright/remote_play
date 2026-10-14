@@ -2668,7 +2668,7 @@ mod failure_admission_tests {
         let SessionCommand::InputBinding{binding,..}=peer.input_binding(31,100,10,1).unwrap() else{panic!()};
         let packet=RealtimeInput{binding,sequence:1,created_host_ms:host_input_time_ms(),payload:InputPayload::Event(InputEvent::MouseDown(0))};
         // Actual target identity changed without a revision acknowledgement.
-        peer.subscriptions.get_mut(&100).unwrap().input_target=Some(InputTarget::Display{id:77});
+        peer.subscriptions.get_mut(&100).unwrap().input_target=Some(InputTarget::Window{id:77,pid:7});
         assert!(peer.accept_input(&packet).is_none());
         peer.subscriptions.get_mut(&100).unwrap().settings.send_modify(|s|s.paused=true);
         assert!(peer.input_binding(31,100,10,2).is_none());

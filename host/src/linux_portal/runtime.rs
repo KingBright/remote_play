@@ -33,6 +33,22 @@ static GENERATION: AtomicU64 = AtomicU64::new(1);
 type Values = HashMap<String, OwnedValue>;
 type Result<T> = std::result::Result<T, PortalCallError>;
 
+tokio::task_local! {
+    static STAGE_RECEIPTS: std::time::Instant;
+}
+
+/// Opt-in receipts for a single controlled diagnostic future. Ordinary product
+/// requests do not log, and no tokens, object paths or source titles are exposed.
+pub async fn with_portal_stage_receipts<F: std::future::Future>(operation: F) -> F::Output {
+    STAGE_RECEIPTS.scope(std::time::Instant::now(), operation).await
+}
+
+fn stage_receipt(method: &str, stage: &str) {
+    let _ = STAGE_RECEIPTS.try_with(|started| {
+        eprintln!("PORTAL_STAGE method={method} stage={stage} elapsed_ms={}", started.elapsed().as_millis());
+    });
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerSources {
     Monitor,
@@ -736,6 +752,13 @@ async fn request<B: Serialize + Type>(
     timeout: Duration,
 ) -> Result<Values> {
     let path = format!("{DESKTOP_PATH}/request/{session_sender}/{request_token}");
+    let name = match method {
+        Method::Create => "CreateSession",
+        Method::SelectDevices => "SelectDevices",
+        Method::Select => "SelectSources",
+        Method::Start => "Start",
+    };
+    stage_receipt(name, "begin");
     let mut revoked = owner.control.revoked.subscribe();
     let results = bounded(
         async {
@@ -754,12 +777,7 @@ async fn request<B: Serialize + Type>(
                 .begin_request(method, path.clone())
                 .map_err(|_| PortalCallError::Revoked)?;
             let portal = proxy(connection, destination, DESKTOP_PATH, interface).await?;
-            let name = match method {
-                Method::Create => "CreateSession",
-                Method::SelectDevices => "SelectDevices",
-                Method::Select => "SelectSources",
-                Method::Start => "Start",
-            };
+            stage_receipt(name, "method_call");
             let returned: OwnedObjectPath = portal
                 .call(name, body)
                 .await
@@ -767,11 +785,15 @@ async fn request<B: Serialize + Type>(
             if returned.as_str() != path {
                 return Err(PortalCallError::Response);
             }
+            stage_receipt(name, "awaiting_response");
             let signal = responses.next().await.ok_or(PortalCallError::Revoked)?;
             let (code, values): (u32, Values) = signal
                 .body()
                 .deserialize()
                 .map_err(|_| PortalCallError::Response)?;
+            stage_receipt(name, match code {
+                0 => "response_success", 1 => "response_cancelled", _ => "response_failed",
+            });
             match code {
                 0 => Ok(values),
                 1 => Err(PortalCallError::Cancelled),
@@ -782,8 +804,16 @@ async fn request<B: Serialize + Type>(
         cancel,
         &mut revoked,
     )
-    .await?;
-    Ok(results)
+    .await;
+    stage_receipt(name, match &results {
+        Ok(_) => "complete",
+        Err(PortalCallError::Cancelled) => "cancelled",
+        Err(PortalCallError::Timeout) => "timeout",
+        Err(PortalCallError::Revoked) => "revoked",
+        Err(PortalCallError::Transport) => "transport_error",
+        Err(_) => "response_error",
+    });
+    results
 }
 
 fn complete(
