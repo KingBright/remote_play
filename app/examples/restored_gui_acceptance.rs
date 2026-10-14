@@ -10,6 +10,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Err("Use a fresh absolute acceptance directory and output file".into());
     }
     if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref() == Ok("1") {
+        if std::env::var("REMOTE_PLAY_RESTORED_TEST_SECONDS").ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| (5..=180).contains(seconds)).is_none() {
+            return Err("Media acceptance requires TEST_SECONDS in 5..=180".into());
+        }
         if !cfg!(target_os = "macos") || parent.join("test-profile").exists()
             || !output.starts_with(&parent) || std::env::var_os("REMOTE_PLAY_RESTORED_TEST_SEQUENCE").is_some() {
             return Err("Media acceptance requires a fresh isolated macOS single-device fixture".into());
