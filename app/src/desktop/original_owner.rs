@@ -1242,7 +1242,7 @@ impl OriginalOwner {
                 "activity_pending":s.media_activity_pending(),
                 "decoder_status":s.media.as_ref().and_then(|m|m.decode_status.try_lock().ok().map(|v|v.clone())),
                 "decoder_needs_keyframe":s.stats.video_decoder_needs_keyframe.load(std::sync::atomic::Ordering::Acquire),
-                "native_frame":native,"device_id":s.key,"name":s.name,"connection_id":s.conn.id,"target":s.conn.target.to_string(),"route":s.route,
+                "native_frame":native,"device_id":s.key,"name":s.name,"connection_id":s.conn.id,"subscription_id":s.video_id,"activity_revision":s.activity_revision,"target":s.conn.target.to_string(),"route":s.route,
                 "source":format!("{:?}",s.source),"decoded_frames":s.stats.video_frames_decoded.load(std::sync::atomic::Ordering::Relaxed),
                 "decode_errors":s.stats.video_decode_errors.load(std::sync::atomic::Ordering::Relaxed),"confirmed":s.confirmed,
                 "scene_submitted_frame":s.uploaded_at.is_some(),"input_locked":s.locked,"error":s.error,"video_error":s.video_error,

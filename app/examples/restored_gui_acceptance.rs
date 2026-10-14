@@ -9,6 +9,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !parent.is_absolute() || !output.is_absolute() || output.exists() {
         return Err("Use a fresh absolute acceptance directory and output file".into());
     }
+    if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref() == Ok("1") {
+        if !cfg!(target_os = "macos") || parent.join("test-profile").exists()
+            || !output.starts_with(&parent) || std::env::var_os("REMOTE_PLAY_RESTORED_TEST_SEQUENCE").is_some() {
+            return Err("Media acceptance requires a fresh isolated macOS single-device fixture".into());
+        }
+        let device = std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE")?;
+        let source: serde_json::Value = serde_json::from_str(&std::env::var("REMOTE_PLAY_RESTORED_TEST_SOURCE")?)?;
+        if device.len()!=32 || !device.bytes().all(|c|c.is_ascii_hexdigit())
+            || source["source"]["Window"].as_u64().is_none_or(|id|id==0)
+            || source["process_id"].as_i64().is_none_or(|pid|pid<=0)
+            || !source["title"].as_str().is_some_and(|title|title.starts_with("RemotePlay Media Fixture ")) {
+            return Err("Media acceptance requires the exact owned fixture device/window/PID/title".into());
+        }
+    }
     std::fs::create_dir_all(&parent)?;
     let original =
         AppPrivateMeshConfigStore::new(std::env::var("REMOTE_PLAY_RESTORED_AUTH_PROFILE")?)

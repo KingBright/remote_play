@@ -313,6 +313,7 @@ struct RestoredDashboard {
     test_source_request: Option<Result<sequence_acceptance::SourceRequest, String>>,
     test_selected_source: Option<protocol::session::CaptureSourceInfo>,
     test_sequence:Option<Result<sequence_acceptance::Sequence,String>>,
+    test_media_cycle:Option<Result<sequence_acceptance::MediaCycle,String>>,
     current_frame: Option<Arc<MacDecodedVideoFrame>>,
     presentation_frame: FrameSlot,
     host_stats: Option<Arc<SharedHostStats>>,
@@ -413,6 +414,7 @@ impl RestoredDashboard {
             test_source_request: sequence_acceptance::SourceRequest::from_env(),
             test_selected_source: None,
             test_sequence:sequence_acceptance::Sequence::from_env(),
+            test_media_cycle:sequence_acceptance::MediaCycle::from_env(),
             current_frame: None,
             presentation_frame: Arc::new(Mutex::new(None)),
             host_stats: None,
@@ -1162,6 +1164,9 @@ impl RestoredDashboard {
             let _ = std::fs::write(path, serde_json::to_vec_pretty(&observation).unwrap());
         }
         if self.test_sequence.is_some(){return self.sequence_acceptance_tick(&output,seconds,cx);}
+        if self.test_media_cycle.as_ref().is_some_and(|cycle|match cycle { Err(_)=>true, Ok(c)=>c.phase==4 }) {
+            return self.media_acceptance_tick(&output,seconds,cx);
+        }
         if !self.test_connect_started
             && let Ok(key) = std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE")
             && self
@@ -1178,9 +1183,11 @@ impl RestoredDashboard {
             self.pause_when_inactive = false;
             let ticket = self.session_commands.begin();
             let owner = self.owner.clone();
+            let media_mode = self.test_media_cycle.is_some();
             cx.spawn(async move |view, cx| {
                 if !view.update(cx, |this, _| this.session_commands.is_current(ticket)).unwrap_or(false) { return; }
-                let result = owner.connect_silent_files(&key).await;
+                let result = if media_mode { owner.connect_files(&key).await } else { owner.connect_silent_files(&key).await };
+                if media_mode { owner.set_input_locked(true); }
                 let _ = view.update(cx, |this, cx| {
                     if !this.session_commands.is_current(ticket) { return; }
                     if let Err(e) = result {
@@ -1226,6 +1233,7 @@ impl RestoredDashboard {
             }
             self.toolbar_revealed = true;
         }
+        if self.test_media_cycle.is_some() { return self.media_acceptance_tick(&output,seconds,cx); }
         if self.started.elapsed() >= Duration::from_secs(seconds) {
             owned_gui_stage(12);
             self.quitting = true;
@@ -1245,6 +1253,93 @@ impl RestoredDashboard {
             return true;
         }
         false
+    }
+
+    fn media_acceptance_tick(&mut self,output:&str,seconds:u64,cx:&mut Context<Self>)->bool {
+        let pending=self.test_media_cycle.take().expect("media cycle present");
+        let mut cycle=match pending {
+            Ok(c)=>c,
+            Err(error)=>{
+                let record=serde_json::json!({"cycle_observed":false,"passed":false,"error":error,"full_acceptance":false});
+                let _=std::fs::write(output,serde_json::to_vec_pretty(&record).unwrap());
+                self.clear_acceptance_session();self.quitting=true;cx.quit();return true;
+            }
+        };
+        let snapshot=self.owner.diagnostic_snapshot();
+        if cycle.phase<4 {
+            if self.started.elapsed()>=Duration::from_secs(seconds)||cycle.phase_started.elapsed()>Duration::from_secs(25) {cycle.error=Some(format!("media phase {} timed out",cycle.phase));}
+            let sessions=snapshot["sessions"].as_array().cloned().unwrap_or_default();
+            if sessions.len()>1 {cycle.error=Some("media fixture has more than its own one session".into());}
+            if self.test_source_started && let Some(s)=sessions.first()
+                && (cycle.phase>0 || s["confirmed"]==true) {
+                let id=(s["connection_id"].as_u64().unwrap_or(0),s["subscription_id"].as_u64().unwrap_or(0));
+                let frames=s["decoded_frames"].as_u64().unwrap_or(0);
+                let samples=s["audio_output_callback_evidence"]["nonzero_samples"].as_u64().unwrap_or(0);
+                let callbacks=s["audio_output_callback_evidence"]["callbacks"].as_u64().unwrap_or(0);
+                let revision=s["activity_revision"].as_u64().unwrap_or(0);
+                let expected=self.test_selected_source.as_ref().map(|source|format!("{:?}",source.source));
+                let device=std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").unwrap_or_default();
+                if s["device_id"]!=device || s["source"].as_str()!=expected.as_deref()
+                    || cycle.identity.is_some_and(|old|old!=id) {cycle.error=Some("media connection/subscription/source identity changed".into());}
+                if s["connected"]!=true || !s["video_error"].is_null() || s["audio_output_callback_evidence"]["errors"].as_u64().unwrap_or(0)>0 {cycle.error=Some("media connection or output failed".into());}
+                let ready=s["confirmed"]==true && s["activity_pending"]==false;
+                if cycle.error.is_none() {
+                    match cycle.phase {
+                        0 if ready && frames>=15 && samples>0 && callbacks>0 => {
+                            let since=cycle.stable_since.get_or_insert_with(Instant::now);
+                            if since.elapsed()>=Duration::from_secs(2) {
+                                cycle.identity=Some(id);cycle.frames=frames;cycle.samples=samples;cycle.callbacks=callbacks;cycle.revision=revision;
+                                cycle.observations.push(serde_json::json!({"phase":"warmup","state":snapshot}));
+                                self.manual_media_paused=true;self.sync_media_pause();
+                                cycle.phase=1;cycle.phase_started=Instant::now();cycle.stable_since=None;
+                            }
+                        }
+                        0=>{cycle.stable_since=None;}
+                        1 if ready && s["paused"]==true && revision>cycle.revision => {
+                            cycle.revision=revision;cycle.frames=frames;cycle.samples=samples;cycle.callbacks=callbacks;
+                            cycle.stable_since=Some(Instant::now());cycle.phase=2;cycle.phase_started=Instant::now();
+                        }
+                        2=>{
+                            if !ready || s["paused"]!=true {cycle.error=Some("pause acknowledgement was lost".into());}
+                            else if frames!=cycle.frames || samples!=cycle.samples {
+                                cycle.frames=frames;cycle.samples=samples;cycle.callbacks=callbacks;cycle.stable_since=Some(Instant::now());
+                            } else if cycle.stable_since.is_some_and(|since|since.elapsed()>=Duration::from_secs(2)) {
+                                if callbacks<=cycle.callbacks {cycle.error=Some("audio output callbacks stopped during pause".into());}
+                                else {
+                                    cycle.callbacks=callbacks;cycle.observations.push(serde_json::json!({"phase":"pause_stable_2s","state":snapshot}));
+                                    cycle.resume_started=Some(Instant::now());self.manual_media_paused=false;self.sync_media_pause();
+                                    cycle.phase=3;cycle.phase_started=Instant::now();
+                                }
+                            }
+                        }
+                        3=>{
+                            let elapsed=cycle.resume_started.unwrap().elapsed().as_millis();
+                            if frames>cycle.frames && cycle.first_decode_ms.is_none() {cycle.first_decode_ms=Some(elapsed);}
+                            if samples>cycle.samples && cycle.first_audio_ms.is_none() {cycle.first_audio_ms=Some(elapsed);}
+                            if ready && s["paused"]==false && revision>cycle.revision && callbacks>cycle.callbacks
+                                && cycle.first_decode_ms.is_some() && cycle.first_audio_ms.is_some() {
+                                cycle.observations.push(serde_json::json!({"phase":"resume_observed","state":snapshot}));
+                                cycle.phase=4;cycle.phase_started=Instant::now();self.clear_acceptance_session();
+                            }
+                        }
+                        _=>{}
+                    }
+                }
+            }
+            if cycle.error.is_some() {cycle.observations.push(snapshot);self.clear_acceptance_session();cycle.phase=4;cycle.phase_started=Instant::now();}
+        }
+        if cycle.phase==4 && cycle.phase_started.elapsed()>=Duration::from_millis(300) {
+            let closed=self.owner.diagnostic_snapshot()["sessions"].as_array().is_some_and(|sessions|sessions.is_empty());
+            let record=serde_json::json!({"version":env!("CARGO_PKG_VERSION"),"renderer":"restored-original-gpui",
+                "cycle_observed":cycle.error.is_none()&&closed,"passed":false,"error":cycle.error,"session_closed_locally":closed,
+                "connection_subscription_identity":cycle.identity,"observations":cycle.observations,
+                "observed_resume_first_decode_ms":cycle.first_decode_ms,"observed_resume_first_nonzero_audio_ms":cycle.first_audio_ms,
+                "actual_display_completion_measured":false,"acoustic_latency_measured":false,"host_build_verified":false,
+                "signature_verified":false,"remote_native_teardown_verified":false,"input_injected":false,"full_acceptance":false});
+            let _=std::fs::write(output,serde_json::to_vec_pretty(&record).unwrap());println!("RESTORED_MEDIA_CYCLE_RESULT {record}");
+            self.quitting=true;cx.quit();return true;
+        }
+        self.test_media_cycle=Some(Ok(cycle));cx.notify();false
     }
 
     fn clear_acceptance_session(&mut self) {

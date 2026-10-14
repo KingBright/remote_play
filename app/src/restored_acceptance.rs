@@ -88,6 +88,38 @@ impl Sequence {
     pub fn step(&self)->&Source{&self.plan.sources[self.index]}
     pub fn phase_expired(&self)->bool{self.phase_started.elapsed()>Duration::from_secs(25)}
 }
+/// One bounded observation cycle; transport/build/signature acceptance stays
+/// with the external executor. Counter observations are not display/acoustic latency.
+pub(super) struct MediaCycle {
+    pub phase: u8,
+    pub phase_started: Instant,
+    pub stable_since: Option<Instant>,
+    pub identity: Option<(u64,u64)>,
+    pub revision: u64,
+    pub frames: u64,
+    pub samples: u64,
+    pub callbacks: u64,
+    pub resume_started: Option<Instant>,
+    pub first_decode_ms: Option<u128>,
+    pub first_audio_ms: Option<u128>,
+    pub observations: Vec<serde_json::Value>,
+    pub error: Option<String>,
+}
+impl MediaCycle {
+    pub fn from_env()->Option<Result<Self,String>> {
+        if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref()!=Ok("1") {return None;}
+        Some((|| {
+            if !cfg!(target_os="macos") || std::env::var_os("REMOTE_PLAY_RESTORED_TEST_SEQUENCE").is_some() {return Err("media cycle requires macOS single-device mode".into());}
+            let device=std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").map_err(|_|"exact device required")?;
+            let source=SourceRequest::from_env().ok_or("exact source required")??;
+            if device.len()!=32 || !device.bytes().all(|c|c.is_ascii_hexdigit())
+                || !matches!(source.source,CaptureSource::Window(_)) || !source.title.starts_with("RemotePlay Media Fixture ") {
+                return Err("media cycle requires an owned synthetic window selector".into());
+            }
+            Ok(Self{phase:0,phase_started:Instant::now(),stable_since:None,identity:None,revision:0,frames:0,samples:0,callbacks:0,resume_started:None,first_decode_ms:None,first_audio_ms:None,observations:Vec::new(),error:None})
+        })())
+    }
+}
 #[cfg(test)]mod tests {
     use super::*;
     fn item(source: CaptureSource, title: &str, pid: Option<i32>) -> CaptureSourceInfo {
