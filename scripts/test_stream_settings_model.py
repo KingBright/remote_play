@@ -18,6 +18,10 @@ LINUX_TARGET = "x86_64-unknown-linux-gnu"
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "media-acceptance-build":
+        return [cargo, "build", *shared, "-p", "remote_play_app",
+                "--example", "restored_gui_acceptance",
+                "--no-default-features", "--features", "gpui-restoration"]
     if mode == "media-lifecycle-boundaries":
         return [cargo, "test", *shared, "-p", "client",
                 "--lib", "payload_boundary", "--", "--nocapture"]
@@ -35,6 +39,9 @@ def validation_command(cargo, target, mode):
 def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
+    if mode == "media-acceptance-build" and any(name in env for name in (
+            "REMOTEPLAY_BUILD_IDENTITY_FILE", "REMOTEPLAY_BUILD_IDENTITY_RS")):
+        raise ValueError("media acceptance development build must not inherit product identity inputs")
     if mode == "linux-x11-check":
         zig = shutil.which("zig")
         wrapper = shutil.which("cargo-zigbuild")
@@ -54,7 +61,7 @@ def validation_environment(mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries"),
+    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build"),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -96,7 +103,7 @@ def main():
             "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
-    if args.mode.startswith("media-lifecycle"):
+    if args.mode.startswith("media-lifecycle") or args.mode == "media-acceptance-build":
         paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
