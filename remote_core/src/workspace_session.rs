@@ -353,6 +353,34 @@ fn request_key(command: &SessionCommand) -> Option<(u8, u32)> {
         _ => None,
     }
 }
+fn confirmation_timeout_reason(category:u8) -> &'static str {
+    match category {
+        1=>"host source list confirmation timed out", 2=>"host video subscription confirmation timed out",
+        3=>"host video stop confirmation timed out", 4=>"host media activity confirmation timed out",
+        5=>"host clipboard confirmation timed out", 6=>"host video settings confirmation timed out",
+        7=>"host input release confirmation timed out", 8=>"host source switch confirmation timed out",
+        9=>"host connection close confirmation timed out", _=>"host confirmation timed out",
+    }
+}
+/// Classify only the local, category-preserving timeout messages emitted below.
+/// Other authenticated peer errors keep their existing handling. No wire change.
+pub fn confirmation_timeout_affects_media(reason:&str) -> Option<bool> {
+    (1..=9).find(|category|confirmation_timeout_reason(*category)==reason)
+        .map(|category|matches!(category,2|4|8))
+}
+
+/// Opt-in scalar diagnostics; never serialize a command or its private payload.
+pub fn trace_control_event(connection_id: u32, stage: &str, command: &SessionCommand,
+    elapsed: Option<Duration>, gui_pending: Option<bool>) {
+    if std::env::var("REMOTE_PLAY_SESSION_TRACE").as_deref() != Ok("1") { return; }
+    let Some((category, request_id)) = request_key(command).or_else(|| match command {
+        SessionCommand::Error { request_id, .. } => Some((0,*request_id)), _=>None }) else { return; };
+    let category = match category {0=>"error",1=>"sources",2=>"subscribe",3=>"unsubscribe",4=>"activity",
+        5=>"clipboard",6=>"configure",7=>"input_release",8=>"source_switch",9=>"close",_=>"unknown"};
+    eprintln!("SESSION_CONTROL_TRACE {}", serde_json::json!({"at_unix_ms":now_unix_ms(),
+        "connection_id":connection_id,"request_id":request_id,"category":category,"stage":stage,
+        "elapsed_ms":elapsed.map(|v|v.as_millis() as u64),"gui_pending":gui_pending}));
+}
 impl Actor {
     async fn send(&self, command: &SessionCommand) {
         let _ = self
@@ -382,6 +410,7 @@ impl Actor {
                 },
             );
         }
+        trace_control_event(self.id,"request",&command,Some(Duration::ZERO),None);
         self.send(&command).await;
     }
     fn source_switch_pending(&self, id: u32) -> bool {
@@ -465,7 +494,11 @@ impl Actor {
     fn accept_control(&mut self, command: &SessionCommand) -> bool {
         if let Some(key) = request_key(command) {
             let pending = self.pending.get(&key);
+            trace_control_event(self.id,"ack_received",command,pending.map(|p|p.started.elapsed()),None);
             let current = match command {
+                SessionCommand::Subscribed { id, .. } => self.subscriptions.contains_key(id)
+                    && pending.is_some_and(|pending| matches!(&pending.command,
+                        SessionCommand::Subscribe(request) if request.id == *id)),
                 SessionCommand::SourceSwitched { .. } => pending.is_some_and(|pending| {
                     matches!((&pending.command, command),
                         (SessionCommand::SwitchSource { id, request_id, source },
@@ -478,7 +511,11 @@ impl Actor {
                     _ => true,
                 }),
             };
-            if !current { return false; }
+            if !current {
+                trace_control_event(self.id,"ack_rejected",command,pending.map(|p|p.started.elapsed()),None);
+                return false;
+            }
+            trace_control_event(self.id,"ack_accepted",command,pending.map(|p|p.started.elapsed()),None);
             if let SessionCommand::SourceSwitched { id, .. } = command {
                 let Some(view) = self.subscriptions.get_mut(id) else { return false; };
                 view.handler.reset_video_source();
@@ -486,7 +523,11 @@ impl Actor {
             self.pending.remove(&key);
         }
         if let SessionCommand::Subscribed { id, audio_owner, .. } = command {
-            if let Some(view) = self.subscriptions.get_mut(id) { view.audio_owner = *audio_owner; }
+            if let Some(view) = self.subscriptions.get_mut(id) {
+                view.audio_owner = *audio_owner;
+                view.active = view.wanted.video;
+                view.audio_active = view.wanted.audio;
+            }
             self.refresh_audio_activity();
         }
         if let SessionCommand::Activity { id, revision, video, audio } = command {
@@ -503,18 +544,29 @@ impl Actor {
         }
         true
     }
-    fn expire_request(&mut self, key: (u8, u32)) {
+    async fn expire_request(&mut self, key: (u8, u32)) {
         // The local retry timer knows the exact command category. A numeric
         // subscription/request ID alone can also name an input release or a
         // settings request whose independent acknowledgement is still pending.
         let Some(pending) = self.pending.remove(&key) else { return; };
+        trace_control_event(self.id,"expired",&pending.command,Some(pending.started.elapsed()),None);
+        if let SessionCommand::Subscribe(request) = &pending.command {
+            // A timed-out initial request is terminal for this subscription ID.
+            // Retire ingress before reporting failure; late native startup/acks
+            // cannot keep invisible capture or audio alive behind a failed GUI.
+            let stop = SessionCommand::Unsubscribe { id:request.id };
+            self.prepare_control(&stop);
+            self.input.lock().unwrap().remove(request.id);
+            self.refresh_audio_activity();
+            self.request(stop).await;
+        }
         if let SessionCommand::SwitchSource { id, .. } = pending.command
             && let Some(view) = self.subscriptions.get_mut(&id) {
             view.handler.reset_video_source();
         }
         let _ = self.control_tx.send(SessionCommand::Error {
             request_id: key.1,
-            reason: "host confirmation timed out".into(),
+            reason: confirmation_timeout_reason(key.0).into(),
         });
     }
     async fn run(&mut self, mut cancel: broadcast::Receiver<()>) {
@@ -549,7 +601,7 @@ impl Actor {
                             pending.last_sent = Instant::now();
                         }
                     }
-                    for key in expired { self.expire_request(key); }
+                    for key in expired { self.expire_request(key).await; }
                 }
                 _ = input_tick.tick() => {
                     if input_requests_at.elapsed() >= Duration::from_millis(300) {
@@ -578,7 +630,7 @@ impl Actor {
                             let _ = self.control_tx.send(SessionCommand::Error { request_id: request.id, reason: "decoder subscription limit reached".into() }); continue;
                         }
                         let handler = MediaPacketHandler::new(stats, Arc::new(AtomicU32::new(request.id)), host_stats.clone(), self.audio_tx.clone(), video, None);
-                        self.subscriptions.insert(request.id, View { handler, host_stats, active: true, audio_active: request.audio, audio_owner: None, wanted: crate::media_demand::MediaDemand { video: true, audio: request.audio }, activity_revision: 0 });
+                        self.subscriptions.insert(request.id, View { handler, host_stats, active: false, audio_active: false, audio_owner: None, wanted: crate::media_demand::MediaDemand { video: true, audio: request.audio }, activity_revision: 0 });
                         self.refresh_audio_activity();
                         self.request(SessionCommand::Subscribe(request)).await;
                     }
@@ -851,6 +903,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn confirmation_accepts_current_ack_once_and_preserves_paused_demand() {
+        let (mut actor, _audio) = source_switch_actor().await;
+        actor.id=90109;
+        let _video = source_switch_view(&mut actor,7);
+        { let view=actor.subscriptions.get_mut(&7).unwrap();
+          view.active=false; view.audio_active=false; view.audio_owner=None;
+          view.wanted=crate::media_demand::MediaDemand { video:false,audio:false }; }
+        actor.audio_groups.clear();
+        actor.request(SessionCommand::Subscribe(SubscriptionRequest { id:7,
+            source:CaptureSource::Window(123),width:640,height:360,fps:30,bitrate_kbps:2000,audio:true })).await;
+        let ack=SessionCommand::Subscribed { id:7,audio_owner:Some(7),supports_input:true };
+        assert!(actor.accept_control(&ack));
+        assert!(!actor.subscriptions[&7].active);
+        assert!(!actor.subscriptions[&7].audio_active);
+        assert!(!actor.accept_control(&ack), "duplicate ack must not reopen a paused subscription");
+    }
+
+    #[test]
+    fn confirmation_timeout_retains_category_despite_equal_numeric_ids() {
+        for category in 1..=9 {
+            assert_eq!(confirmation_timeout_affects_media(confirmation_timeout_reason(category)),
+                Some(matches!(category,2|4|8)));
+        }
+        assert_ne!(confirmation_timeout_reason(2),confirmation_timeout_reason(6));
+        assert_eq!(confirmation_timeout_affects_media("capture permission denied"),None);
+    }
+
+    #[tokio::test]
+    async fn confirmation_late_subscribed_cannot_reopen_expired_media() {
+        let (mut actor, _audio) = source_switch_actor().await;
+        let _video = source_switch_view(&mut actor, 7);
+        actor.subscriptions.get_mut(&7).unwrap().audio_owner = None;
+        actor.audio_groups.clear();
+        let _other = source_switch_view(&mut actor, 8);
+        actor.request(SessionCommand::Subscribe(SubscriptionRequest { id:7,
+            source:CaptureSource::Window(123),width:640,height:360,fps:30,bitrate_kbps:2000,audio:true })).await;
+        actor.pending.get_mut(&(2,7)).unwrap().started -= Duration::from_secs(9);
+        actor.expire_request((2,7)).await;
+        let late = SessionCommand::Subscribed { id:7,audio_owner:Some(7),supports_input:true };
+        assert!(!actor.accept_control(&late), "expired subscription acknowledgement must not reopen media");
+        assert!(!actor.subscriptions.contains_key(&7), "expired subscription must retire its media ingress");
+        assert!(!actor.audio_groups.contains_key(&7));
+        assert!(actor.subscriptions[&8].active, "unrelated confirmed video must remain active");
+        assert!(actor.audio_groups[&8], "unrelated audio must remain active");
+        assert!(actor.pending.contains_key(&(3,7)), "remote teardown must retain acknowledgement/retry tracking");
+    }
+
+    #[tokio::test]
     async fn source_switch_gates_own_video_discards_old_reorder_and_preserves_other_media() {
         let (mut actor,mut audio)=source_switch_actor().await;
         let mut ours=source_switch_view(&mut actor,7);
@@ -947,7 +1047,7 @@ mod tests {
             }
         }
         assert_eq!(sent, [(4, 7), (7, 7), (6, 7), (8, 7)].into_iter().collect());
-        actor.expire_request((4, 7));
+        actor.expire_request((4, 7)).await;
         assert!(!actor.pending.contains_key(&(4, 7)));
         assert!(actor.pending.contains_key(&(7, 7)), "activity timeout must retain input-release retransmission");
         assert!(actor.pending.contains_key(&(6, 7)), "activity timeout must retain settings confirmation");
@@ -998,7 +1098,7 @@ mod tests {
         actor.request(SessionCommand::ReleaseInput { id: 7 }).await;
         actor.packet(source_video(7, 11), FrameTimingCheckpoints::default()).await;
         assert!(video.try_recv().is_err());
-        actor.expire_request((8, 7));
+        actor.expire_request((8, 7)).await;
         assert!(!actor.source_switch_pending(7));
         assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(), Some((actor.target, 7)));
         assert!(actor.pending.contains_key(&(7, 7)), "source timeout must retain input-release retransmission");
@@ -1015,7 +1115,7 @@ mod tests {
         actor.packet(source_video(8,10),FrameTimingCheckpoints::default()).await;
         ours.try_recv().unwrap();other.try_recv().unwrap();
         actor.request(SessionCommand::SwitchSource{id:7,request_id:100,source:CaptureSource::Display(88)}).await;
-        actor.expire_request((8, 100)); // Same transition used by the bounded retry timer.
+        actor.expire_request((8, 100)).await; // Same transition used by the bounded retry timer.
         assert!(!actor.source_switch_pending(7));
         assert_eq!(actor.subscriptions.get_mut(&7).unwrap().handler.take_keyframe_request(),Some((actor.target,7)));
         assert_eq!(actor.subscriptions.get_mut(&8).unwrap().handler.take_keyframe_request(),None);

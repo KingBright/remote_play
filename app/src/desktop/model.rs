@@ -210,7 +210,25 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         if self.pending.is_some() || !self.connected {
             return;
         }
+        if self.video_error.is_some() {
+            // A retry gets a fresh identity; an acknowledgement from the failed
+            // attempt must never confirm this request or its input source.
+            let Some(id) = self.video_id.checked_add(1).filter(|id|*id < 0x1000_0000) else {
+                self.error = "Reconnect before retrying this video subscription".into();
+                return;
+            };
+            self.video_id = id;
+            self.source_revision = 0;
+            self.activity_revision = 0;
+            self.activity_pending = None;
+            self.last_activity = Some(remote_core::media_demand::MediaDemand::BOTH);
+        }
         self.video_error = None;
+        if let Some(media) = &self.media {
+            media.reset_video();
+            #[cfg(target_os = "macos")]
+            media.set_video_payload_active(true);
+        }
         if self.media.is_none() {
             let create = || {
                 if self.request.audio {
@@ -423,6 +441,18 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
     }
     fn fail_video(&mut self, reason: String) {
         self.release_input();
+        if let Some(task) = self.reader_task.take() { task.abort(); }
+        // Keep the file/device connection, but end the failed media request.
+        // Core removes ingress immediately and retries the remote unsubscribe.
+        if !self.conn.try_control(SessionCommand::Unsubscribe { id:self.video_id }) {
+            let conn=self.conn.clone(); let id=self.video_id;
+            tokio::spawn(async move { let _=conn.control(SessionCommand::Unsubscribe{id}).await; });
+        }
+        if let Some(media) = &self.media {
+            #[cfg(target_os = "macos")]
+            media.set_video_payload_active(false);
+            media.reset_video();
+        }
         self.pending = None;
         self.confirmed = false;
         self.locked = true;
@@ -569,6 +599,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             let Ok(event) = self.events.control.try_recv() else {
                 break;
             };
+            remote_core::workspace_session::trace_control_event(self.conn.id,"gui_received",&event,
+                self.pending.map(|p|p.1.elapsed()),Some(self.pending.is_some()));
             match event {
                 SessionCommand::Sources { sources, .. } => self.sources = sources,
                 SessionCommand::Subscribed {
@@ -657,9 +689,10 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                         && self.media.is_some()
                         && self.uploaded_at.is_none()
                         && capture_permission_failure(&reason);
-                    if request_id == self.video_id
+                    let media_failure = remote_core::workspace_session::confirmation_timeout_affects_media(&reason) != Some(false);
+                    if media_failure && (request_id == self.video_id
                         || self.pending.is_some_and(|p| p.0 == request_id)
-                        || source_permission_failed
+                        || source_permission_failed)
                     {
                         self.fail_video(reason);
                     } else {
