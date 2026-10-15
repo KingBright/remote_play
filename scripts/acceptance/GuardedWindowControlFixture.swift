@@ -15,6 +15,10 @@ var clicks = ["A":0,"B":0]
 var keys = ["A":0,"B":0]
 var mouseUps = ["A":0,"B":0]
 var keyUps = ["A":0,"B":0]
+var heldKeys = ["A":Set<Int>(),"B":Set<Int>()]
+var heldButtons = ["A":Set<Int>(),"B":Set<Int>()]
+var keyUpSourcePID = ["A":Int64(0),"B":Int64(0)]
+var mouseUpSourcePID = ["A":Int64(0),"B":Int64(0)]
 var lastKey = ["A":"","B":""]
 var clickSourcePID = ["A":Int64(0),"B":Int64(0)]
 var keySourcePID = ["A":Int64(0),"B":Int64(0)]
@@ -25,10 +29,11 @@ var tick = 0
 func save() {
     var data: [String:Any] = ["pid":ProcessInfo.processInfo.processIdentifier,"tick":tick,"command":lastCommand]
     if mediaMode { data["media_fixture"] = true; data["tone_running"] = toneRunning; data["tone_error"] = toneError }
+    data["fixture_active"] = NSRunningApplication.current.isActive
     let main = CGDisplayBounds(CGMainDisplayID())
     for (label,window) in windows {
         let frame=window.frame
-        data[label] = ["id":window.windowNumber,"title":window.title,"clicks":clicks[label]!,"keys":keys[label]!,"mouse_ups":mouseUps[label]!,"key_ups":keyUps[label]!,"last_key":lastKey[label]!,"click_source_pid":clickSourcePID[label]!,"key_source_pid":keySourcePID[label]!,"last_point":points[label] ?? [],"closed":closed.contains(label),"key_window":window.isKeyWindow,"frame":[frame.minX,main.height-frame.maxY,frame.width,frame.height]] as [String:Any]
+        data[label] = ["id":window.windowNumber,"title":window.title,"clicks":clicks[label]!,"keys":keys[label]!,"mouse_ups":mouseUps[label]!,"key_ups":keyUps[label]!,"held_keys":heldKeys[label]!.sorted(),"held_buttons":heldButtons[label]!.sorted(),"key_up_source_pid":keyUpSourcePID[label]!,"mouse_up_source_pid":mouseUpSourcePID[label]!,"last_key":lastKey[label]!,"click_source_pid":clickSourcePID[label]!,"key_source_pid":keySourcePID[label]!,"last_point":points[label] ?? [],"closed":closed.contains(label),"key_window":window.isKeyWindow,"frame":[frame.minX,main.height-frame.maxY,frame.width,frame.height]] as [String:Any]
     }
     if let bytes=try? JSONSerialization.data(withJSONObject:data,options:[.sortedKeys]) {try? bytes.write(to:root.appendingPathComponent("state.json"),options:.atomic)}
 }
@@ -39,6 +44,7 @@ class FixtureView:NSView {
     override var acceptsFirstResponder:Bool{true}
     override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
     override func mouseDown(with event:NSEvent) {
+        heldButtons[label]!.insert(event.buttonNumber)
         clicks[label]! += 1;clickSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;window?.makeFirstResponder(self)
         if let window=window {
             let p=window.convertPoint(toScreen:event.locationInWindow)
@@ -46,9 +52,9 @@ class FixtureView:NSView {
         }
         save();needsDisplay=true
     }
-    override func mouseUp(with event:NSEvent){mouseUps[label]! += 1;save()}
-    override func keyUp(with event:NSEvent){keyUps[label]! += 1;save()}
-    override func keyDown(with event:NSEvent){keys[label]! += 1;keySourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;lastKey[label]=event.characters ?? "";save();needsDisplay=true}
+    override func mouseUp(with event:NSEvent){heldButtons[label]!.remove(event.buttonNumber);mouseUps[label]! += 1;mouseUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
+    override func keyUp(with event:NSEvent){heldKeys[label]!.remove(Int(event.keyCode));keyUps[label]! += 1;keyUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
+    override func keyDown(with event:NSEvent){heldKeys[label]!.insert(Int(event.keyCode));keys[label]! += 1;keySourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;lastKey[label]=event.characters ?? "";save();needsDisplay=true}
     override func draw(_ rect:NSRect){
         (label == "A" ? NSColor(srgbRed:0.05,green:0.15,blue:0.8,alpha:1) : NSColor(srgbRed:0.05,green:0.7,blue:0.15,alpha:1)).setFill();bounds.fill()
         ("Synthetic window \(label)\nClicks \(clicks[label]!)   Keys \(keys[label]!)\nFrame \(tick)" as NSString).draw(at:NSPoint(x:25,y:35),withAttributes:[.font:NSFont.systemFont(ofSize:24),.foregroundColor:NSColor.white])
@@ -88,6 +94,10 @@ app.activate(ignoringOtherApps:true)
 Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){_ in
     tick += 1
     if let data=try? Data(contentsOf:root.appendingPathComponent("command.json")),let cmd=try? JSONSerialization.jsonObject(with:data) as? [String:String],let id=cmd["id"],id != lastCommand {
+        if cmd["action"]=="activate_A" {
+            app.activate(ignoringOtherApps:true)
+            windows["A"]?.makeKeyAndOrderFront(nil)
+        }
         if cmd["action"]=="move_resize_A" {
             // The supported control mode is explicitly foreground-window control.
             // Restore A to the front for the geometry test, not as a hidden-input claim.

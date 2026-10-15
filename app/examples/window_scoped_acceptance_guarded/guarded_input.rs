@@ -88,7 +88,7 @@ async fn settle<L:Link>(link:&mut L, duration:Duration) -> Result<()> {
     Ok(())
 }
 
-async fn operation<L:Link>(link:&mut L, target:Target, budgets:Budgets, owned:&mut bool, report:&mut Value) -> Result<()> {
+async fn prepare_input<L:Link>(link:&mut L, target:Target, budgets:Budgets, owned:&mut bool, report:&mut Value) -> Result<()> {
     link.send(SessionCommand::ListSources{request_id:LIST}).await?;
     let sources=normal_ack(link,budgets.acknowledgement,|c| matches!(c,SessionCommand::Sources{request_id:LIST,..})).await?;
     let SessionCommand::Sources{sources,..}=sources else { unreachable!() };
@@ -112,6 +112,11 @@ async fn operation<L:Link>(link:&mut L, target:Target, budgets:Budgets, owned:&m
         settle(link,budgets.pause).await?;
     }
     report["frames_before_input"]=link.video().0.into();
+    Ok(())
+}
+
+async fn operation<L:Link>(link:&mut L, target:Target, budgets:Budgets, owned:&mut bool, report:&mut Value) -> Result<()> {
+    prepare_input(link,target,budgets,owned,report).await?;
     // Only center click and 'a', no clipboard, modifier, shortcut or business action.
     let events=[InputEvent::MouseMoveAbsolute{x:32768,y:32768},InputEvent::MouseDown(0),InputEvent::MouseUp(0),
         InputEvent::Key{key_code:0,pressed:true,modifiers:0},InputEvent::Key{key_code:0,pressed:false,modifiers:0}];
@@ -201,14 +206,83 @@ async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watc
     report
 }
 
+
+// Dedicated diagnostic mode. The direct parent observes held native effects,
+// then terminates only this owned helper without running graceful cleanup.
+// Its independent fixture observations, not this receipt, prove release.
+fn phase_receipt(output:&std::path::Path, phase:&str, report:&Value) -> Result<()> {
+    use std::{io::Write,os::unix::fs::OpenOptionsExt};
+    let path=output.with_extension(format!("{phase}.json"));
+    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(path).map_err(|_|"new private phase receipt required")?;
+    writeln!(file,"{report}").map_err(|_|"phase receipt write failed".into())
+}
+
+async fn hold_loss_operation(link:&mut Wire,target:Target,budgets:Budgets,owned:&mut bool,
+    report:&mut Value,output:&std::path::Path) -> Result<()> {
+    prepare_input(link,target,budgets,owned,report).await?;
+    let until=Instant::now()+budgets.acknowledgement;
+    let binding=loop {
+        if let Some(binding)=link.conn.input_binding(ID,0) {break binding;}
+        if Instant::now()>=until {return Err("current input binding unavailable; no input sent".into());}
+        settle(link,Duration::from_millis(50)).await?;
+    };
+    // The epoch is an ephemeral capability; keep it in memory only.
+    // No modifiers/shortcuts, dragging, desktop or non-fixture target.
+    for event in [InputEvent::MouseMoveAbsolute{x:32768,y:32768},InputEvent::MouseDown(0),
+        InputEvent::Key{key_code:0,pressed:true,modifiers:0}] {
+        if !link.conn.try_bound_input(binding,Some(event)) {return Err("exact held-input enqueue failed".into());}
+        report["input_commands_enqueued"]=json!(report["input_commands_enqueued"].as_u64().unwrap_or(0)+1);
+        if !link.conn.refresh_bound_input(binding) {return Err("held binding expired during setup".into());}
+        settle(link,Duration::from_millis(50)).await?;
+    }
+    report["helper_pid"]=std::process::id().into();
+    report["phase"]="armed_for_independent_fixture_check".into();
+    phase_receipt(output,"armed",report)?;
+    loop {
+        settle(link,Duration::from_millis(50)).await?;
+        if !link.conn.refresh_bound_input(binding) {return Err("held binding changed or expired; no replay".into());}
+    }
+}
+
+async fn drive_hold_loss(link:&mut Wire,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>,output:&std::path::Path) -> Value {
+    let mut report=json!({"schema":1,"kind":"controlled-synthetic-held-input-loss",
+        "connection_id":link.connection_id(),"subscription_id":ID,"fixture_pid":target.pid,
+        "fixture_window":target.window,"fixture_nonce":target.nonce.clone(),"source_revision":0,
+        "input_commands_enqueued":0,"external_process_loss_required":true,"target_effect_verified":false,
+        "cleanup_complete":false,"desktop_subscribed":false,"audio":false,"clipboard":false,
+        "OS_permissions_requested_or_changed":false,"cross_device_network_loss_verified":false});
+    let mut owned=false;
+    let result=if *cancel.borrow() {Err("cancelled before held operation".into())} else {
+        tokio::select! {
+            result=tokio::time::timeout(budgets.operation,hold_loss_operation(link,target,budgets,&mut owned,&mut report,output))=>
+                result.unwrap_or_else(|_|Err("held operation timed out; owned cleanup follows".into())),
+            _=cancel.changed()=>Err("held operation cancelled; owned cleanup follows".into()),
+        }
+    };
+    report["operation_succeeded"]=result.is_ok().into();
+    if let Err(error)=result {report["error"]=error.into();}
+    // Created BEFORE any ReleaseInput/Unsubscribe/Close. The supervisor rejects
+    // an observation if this exists before the parent terminates the helper.
+    if let Err(error)=phase_receipt(output,"closing",&report) {
+        report["operation_succeeded"]=false.into();report["error"]=error.into();
+    }
+    cleanup(link,owned,budgets,&mut report).await;
+    report
+}
+
 pub fn main_cli(args:&[String]) {
-    if args.len()!=7 { eprintln!("usage: probe input-window LOOPBACK_TARGET FIXTURE_PID WINDOW_ID FIXTURE_NONCE NEW_ABSOLUTE_OUTPUT_JSON");std::process::exit(2); }
+    let hold_loss=args.get(1).is_some_and(|mode|mode=="hold-loss");
+    if args.len()!=7 || !matches!(args[1].as_str(),"input-window"|"hold-loss") { eprintln!("usage: probe input-window|hold-loss LOOPBACK_TARGET FIXTURE_PID WINDOW_ID FIXTURE_NONCE NEW_ABSOLUTE_OUTPUT_JSON");std::process::exit(2); }
     let checked=(||->Result<_>{
         let address=args[2].parse::<SocketAddr>().map_err(|_|"invalid route")?;
         if !address.ip().is_loopback() || address.port()==0 { return Err("must use the existing viewer-local loopback route".into()); }
         let target=Target{pid:args[3].parse().map_err(|_|"invalid PID")?,window:args[4].parse().map_err(|_|"invalid Window ID")?,nonce:args[5].clone()}.validate()?;
         let output=PathBuf::from(&args[6]);
         if !output.is_absolute() || output.exists() || !output.parent().is_some_and(|p|p.is_dir()) { return Err("new absolute output in an existing owned directory required".into()); }
+        if hold_loss && ["armed","closing"].iter().any(|phase|output.with_extension(format!("{phase}.json")).exists()) {
+            return Err("held mode requires new phase receipts".into());
+        }
         Ok((address,target,output))
     })();
     let (address,target,output)=match checked{Ok(v)=>v,Err(e)=>{eprintln!("{e}");std::process::exit(2);}};
@@ -234,7 +308,8 @@ pub fn main_cli(args:&[String]) {
         let report=match tokio::time::timeout(Duration::from_secs(12),WorkspaceConnection::connect(address,scratch.clone())).await {
             Ok(Ok((conn,events)))=>{
                 let mut link=Wire{conn,events,stats:Statistics::new(),media:None};
-                drive(&mut link,target,Budgets::default(),rx).await
+                if hold_loss {drive_hold_loss(&mut link,target,Budgets::default(),rx,&output).await}
+                else {drive(&mut link,target,Budgets::default(),rx).await}
             },
             Ok(Err(e))=>json!({"error":e,"input_commands_enqueued":0,"target_effect_verified":false,"connection_opened":false}),
             Err(_)=>json!({"error":"connection setup timed out","input_commands_enqueued":0,"target_effect_verified":false,"connection_opened":false}),
