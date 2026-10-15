@@ -286,6 +286,16 @@ def stop_child_group(child):
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS can retain a zombie-only group after TERM while refusing
+            # another signal. Never suppress EPERM for a live/unknown process.
+            status = subprocess.run(['ps', '-ax', '-o', 'pgid=,stat='],
+                                    capture_output=True, text=True, timeout=10)
+            if status.returncode != 0 or any(
+                len(parts := row.split()) >= 2 and parts[0] == str(child.pid)
+                and not parts[1].startswith('Z') for row in status.stdout.splitlines()
+            ):
+                raise
         child.wait()
 
 

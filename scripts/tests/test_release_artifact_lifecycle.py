@@ -137,6 +137,21 @@ class ReleaseHookTests(unittest.TestCase):
         status = subprocess.run(['/bin/ps', '-p', str(descendant), '-o', 'stat='], capture_output=True, text=True)
         self.assertTrue(status.returncode == 1 or status.stdout.strip().startswith('Z'), status.stdout)
 
+    def test_zombie_only_group_permission_error_does_not_fail_completed_cleanup(self):
+        child=Mock(pid=12345)
+        child.wait.return_value=0
+        with patch.object(hook.os,'killpg',side_effect=[None,PermissionError()]), \
+             patch.object(hook.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='12345 Z\n')):
+            hook.stop_child_group(child)
+        self.assertEqual(child.wait.call_count,2)
+
+    def test_live_group_permission_error_still_blocks_cleanup(self):
+        child=Mock(pid=12345)
+        child.wait.return_value=0
+        with patch.object(hook.os,'killpg',side_effect=[None,PermissionError()]), \
+             patch.object(hook.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='12345 S\n')):
+            with self.assertRaises(PermissionError):hook.stop_child_group(child)
+
     def test_cleanup_deferred_does_not_change_child_success(self):
         def call(action, *args):
             if '--abort-current' in args: raise hook.Refusal('in-use temporary')

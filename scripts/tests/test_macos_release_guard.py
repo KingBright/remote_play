@@ -235,7 +235,7 @@ class PreservedConfigurationTests(unittest.TestCase):
 class NativeSignatureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp=tempfile.TemporaryDirectory();cls.root=Path(cls.temp.name);cls.policy=guard.load_policy()
+        cls.temp=tempfile.TemporaryDirectory();cls.root=Path(cls.temp.name).resolve();cls.policy=guard.load_policy()
         source=cls.root/'fixture.c';source.write_text('int main(void) { return 0; }\n')
         guard.run(['/usr/bin/clang',str(source),'-o',str(cls.root/'fixture')])
         cls.report=guard.package(cls.root/'fixture',cls.root/'out','2.0.0-alpha.99','29991231.1',cls.policy)
