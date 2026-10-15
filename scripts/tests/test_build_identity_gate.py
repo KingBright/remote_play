@@ -47,6 +47,35 @@ class BuildIdentityGateTests(unittest.TestCase):
                         'compiler_binary_sha256': gate.hash_file(self.binary),
                         'product_info': self.info, 'build_identity': self.identity}
 
+    def test_linux_build_reuses_observed_project_cache_without_creating_mac_cache(self):
+        import check_artifact_lifecycle as lifecycle
+        target = self.repo / 'target'; target.mkdir()
+        report = {'binding': {'selected_artifact_refs': [str(target)]}}
+        metadata = subprocess.CompletedProcess([], 0, json.dumps({'target_directory': str(target)}), '')
+        with patch.object(gate.sys, 'platform', 'linux'), patch.object(lifecycle, 'check', return_value=report) as check, patch.object(gate.subprocess, 'run', return_value=metadata), patch.object(gate, 'build_environment', return_value={}):
+            self.assertEqual(gate.shared_target(self.repo), target)
+            check.assert_called_once()
+        self.assertFalse((self.root / 'rust-target').exists())
+
+    def test_linux_build_rejects_metadata_or_requested_target_outside_observed_cache(self):
+        import check_artifact_lifecycle as lifecycle
+        target = self.repo / 'target'; target.mkdir()
+        other = self.root / 'other'; other.mkdir()
+        report = {'binding': {'selected_artifact_refs': [str(target)]}}
+        with patch.object(gate.sys, 'platform', 'linux'), patch.object(lifecycle, 'check', return_value=report):
+            with self.assertRaises(gate.IdentityRejected):
+                gate.shared_target(self.repo, other)
+            metadata = subprocess.CompletedProcess([], 0, json.dumps({'target_directory': str(other)}), '')
+            with patch.object(gate.subprocess, 'run', return_value=metadata), patch.object(gate, 'build_environment', return_value={}), self.assertRaisesRegex(gate.IdentityRejected, 'Cargo target'):
+                gate.shared_target(self.repo)
+
+    def test_linux_build_contract_refusal_never_runs_cargo(self):
+        import check_artifact_lifecycle as lifecycle
+        with patch.object(gate.sys, 'platform', 'linux'), patch.object(lifecycle, 'check', side_effect=lifecycle.Refusal('binding changed')), patch.object(gate.subprocess, 'run') as execute:
+            with self.assertRaises(gate.IdentityRejected):
+                gate.shared_target(self.repo)
+            execute.assert_not_called()
+
     def run_git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.repo), *args], text=True)
 

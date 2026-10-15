@@ -333,16 +333,31 @@ def compiled_module(expected: dict) -> bytes:
 
 
 def shared_target(repo: Path, requested: Path | None = None) -> Path:
-    target = (Path.home() / 'rust-target').resolve(strict=True)
-    require(target.is_dir(), 'The existing ~/rust-target cache is required')
-    require(requested is None or requested.resolve() == target, 'Only the existing ~/rust-target is supported')
+    if sys.platform == 'linux':
+        # Linux already owns a project-local cache. Reconcile its original
+        # observe-only authority, never create/migrate to the Mac cache path.
+        import check_artifact_lifecycle as lifecycle
+        try:
+            report = lifecycle.check('check', repo,
+                repo / lifecycle.AUTHORITY, repo / lifecycle.BINDING,
+                Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py')
+        except (lifecycle.Refusal, OSError, ValueError, KeyError) as error:
+            raise IdentityRejected('Existing Linux cache contract unavailable: ' + str(error)) from error
+        refs = report['binding']['selected_artifact_refs']
+        require(len(refs) == 1, 'One existing Linux cache reference is required')
+        target = Path(refs[0]).resolve(strict=True)
+    else:
+        target = (Path.home() / 'rust-target').resolve(strict=True)
+    require(target.is_dir() and target not in (repo.resolve(), Path.home().resolve(), Path('/')),
+            'An existing narrow Cargo cache is required')
+    require(requested is None or requested.resolve() == target, 'Requested target differs from the existing cache contract')
     result = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps', '--locked', '--offline'],
                             cwd=repo, env=build_environment(), capture_output=True, text=True, timeout=30)
     require(result.returncode == 0, 'Cannot resolve the existing Cargo output configuration')
     metadata = json.loads(result.stdout)
     require(Path(metadata['target_directory']).resolve() == target
             and Path(metadata.get('build_directory') or metadata['target_directory']).resolve() == target,
-            'Cargo target and intermediate build directory must already use ~/rust-target; remove conflicting overrides')
+            'Cargo target and intermediate build directory differ from the existing cache contract')
     return target
 
 
@@ -793,7 +808,7 @@ def main() -> None:
     build.add_argument('--repo', type=Path, required=True)
     build.add_argument('--identity', type=Path, required=True)
     build.add_argument('--identity-sha256', required=True, help='SHA-256 of the prepared JSON file from independent handoff')
-    build.add_argument('--target', type=Path, help='Compatibility argument; must resolve to the existing ~/rust-target')
+    build.add_argument('--target', type=Path, help='Must resolve to the existing platform cache contract')
     build.add_argument('--output', type=Path, required=True)
     candidate = commands.add_parser('verify-candidate')
     candidate.add_argument('--repo', type=Path, required=True)
