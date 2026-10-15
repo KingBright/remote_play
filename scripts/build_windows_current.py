@@ -69,7 +69,7 @@ def main():
                 'window_scoped_acceptance_guarded','--no-default-features','--features',
                 'gpui-restoration,native-windows-video','--locked','--offline','-j','2']
             settled = False
-            child = subprocess.Popen(helper_command, cwd=repo, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            child = subprocess.Popen(helper_command, cwd=repo, env=build_env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
             result = child.wait(); settled = True
             gate.require(result == 0, 'Controlled input helper failed; no receipt minted')
             helper_hash = gate.hash_file(target/'release/examples/window_scoped_acceptance_guarded.exe')
