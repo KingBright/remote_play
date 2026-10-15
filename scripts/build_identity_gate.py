@@ -152,7 +152,7 @@ def source_snapshot(repo: Path, expected_commit: str, *, expected_patch: str | N
     sha(expected_commit, 40)
     repo = repo.absolute()
     require(repo.is_dir() and not repo.is_symlink(), 'Source root must be a real directory')
-    require(git(repo, 'rev-parse', '--show-toplevel').decode().strip() == str(repo), 'Expected repository root')
+    require(Path(git(repo, 'rev-parse', '--show-toplevel').decode().strip()).resolve() == repo, 'Expected repository root')
     require(git(repo, 'rev-parse', 'HEAD').decode().strip() == expected_commit, 'Source commit mismatch')
     before = git(repo, 'status', '--porcelain=v1', '-uall', '-z')
     baseline = {}
