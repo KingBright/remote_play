@@ -1,6 +1,7 @@
 ﻿param(
     [string]$FfmpegPath = $env:REMOTE_PLAY_FFMPEG_BIN,
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$BuildReceipt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,20 @@ if (-not $SkipBuild) {
 }
 if (-not (Test-Path -LiteralPath $releaseExe -PathType Leaf)) {
     throw "RemotePlay release binary is missing: $releaseExe"
+}
+
+$observedBuild = $null
+if (-not [string]::IsNullOrWhiteSpace($BuildReceipt)) {
+    if (-not $SkipBuild) { throw 'BuildReceipt requires the fixed producer to finish compilation first.' }
+    $observedBuild = Get-Content -LiteralPath $BuildReceipt -Raw | ConvertFrom-Json
+    if ($observedBuild.kind -ne 'observed-build' -or $observedBuild.build_identity.configuration.platform -ne 'windows') {
+        throw 'A native Windows observed-build receipt is required.'
+    }
+    if ((Get-FileHash -LiteralPath $releaseExe -Algorithm SHA256).Hash.ToLower() -ne $observedBuild.compiler_binary_sha256) {
+        throw 'Compiler output differs from the observed-build receipt.'
+    }
+    python -c "import sys;from pathlib import Path;sys.path.insert(0,'scripts');import build_identity_gate as g;r=g.read_json(Path(sys.argv[1]));g.product_info(Path(sys.argv[2]),r['build_identity'],r['compiler_binary_sha256'])" $BuildReceipt $releaseExe | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Compiled Windows identity verification failed.' }
 }
 
 $productVersion = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
@@ -106,7 +121,12 @@ $buildInfo = [ordered]@{
     system_ffmpeg_fallback = $false
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
 }
-$buildInfo | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $appDir 'build-info.json') -Encoding UTF8
+if ($null -ne $observedBuild) {
+    $buildInfo['build_identity'] = $observedBuild.build_identity
+    $buildInfo['source_commit'] = $observedBuild.build_identity.source.commit
+    $buildInfo['build_receipt_sha256'] = (Get-FileHash -LiteralPath $BuildReceipt -Algorithm SHA256).Hash.ToLower()
+}
+$buildInfo | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $appDir 'build-info.json') -Encoding UTF8
 
 Compress-Archive -Path $appDir -DestinationPath $zipPath -CompressionLevel Optimal
 Write-Output ('PACKAGE=' + $zipPath)
