@@ -41,6 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     AppPrivateMeshConfigStore::new(&dir).save(&mesh)?;
     remote_core::session_crypto::use_paired_session_secret(mesh.network_secret.expose_secret());
     let mut config = remote_play_app::UnifiedRuntimeConfig::app_defaults();
+    // An isolated acceptance runtime must be able to avoid the installed owner's
+    // discovery port; Relay/P2P forward discovery to this same nonzero port.
+    config.discovery_port = remote_core::discovery::discovery_port_from_env()?;
     config.mesh_dir = dir;
     config.display_name = "RemotePlay restored GUI acceptance".into();
     config.enable_passive_host = false;
