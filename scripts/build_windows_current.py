@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--expected-commit', required=True)
     parser.add_argument('--expected-patch')
     parser.add_argument('--ffmpeg', type=Path, required=True)
+    parser.add_argument('--with-input-helper', action='store_true')
     args = parser.parse_args()
     gate.require(sys.platform == 'win32', 'Native Windows only')
     repo = Path(__file__).resolve().parents[1]
@@ -47,7 +48,8 @@ def main():
             with path.open('xb') as output:
                 output.write(raw)
             owned[path] = hashlib.sha256(raw).hexdigest()
-        build_env = dict(env, REMOTEPLAY_BUILD_IDENTITY_FILE=str(inputs[0]), REMOTEPLAY_BUILD_IDENTITY_RS=str(inputs[1]))
+        compiler_path = lambda path: '\\\\?\\' + str(path)
+        build_env = dict(env, REMOTEPLAY_BUILD_IDENTITY_FILE=compiler_path(inputs[0]), REMOTEPLAY_BUILD_IDENTITY_RS=compiler_path(inputs[1]))
         command = ['cargo','build','--release','-p','remote_play_app','--bin','remote_play',
             '--no-default-features','--features','gpui-restoration,native-windows-video','--locked','--offline','-j','2']
         settled = False
@@ -61,11 +63,22 @@ def main():
         binary = target/'release/remote_play.exe'
         binary_hash = gate.hash_file(binary)
         info = gate.product_info(binary, expected, binary_hash)
+        helper_hash = None
+        if args.with_input_helper:
+            helper_command = ['cargo','build','--release','-p','remote_play_app','--example',
+                'window_scoped_acceptance_guarded','--no-default-features','--features',
+                'gpui-restoration,native-windows-video','--locked','--offline','-j','2']
+            settled = False
+            child = subprocess.Popen(helper_command, cwd=repo, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            result = child.wait(); settled = True
+            gate.require(result == 0, 'Controlled input helper failed; no receipt minted')
+            helper_hash = gate.hash_file(target/'release/examples/window_scoped_acceptance_guarded.exe')
         receipt = {'schema':2,'kind':'observed-build','build_identity':expected,
             'compiler_binary_sha256':binary_hash,'compiler_binary_bytes':binary.stat().st_size,
             'product_info':info,'build_command':command,'fresh_target':False,
             'build_storage':{'mode':'shared-incremental','source_directory':str(repo),'target_directory':str(target)},
-            'visual_acceptance':'not_evaluated','stream_acceptance':'not_evaluated'}
+            'visual_acceptance':'not_evaluated','stream_acceptance':'not_evaluated',
+            'controlled_input_helper_sha256':helper_hash}
         package = target/'package/windows';package.mkdir(parents=True,exist_ok=True)
         receipt_path = package/'windows-current-build-receipt.json'
         pending = receipt_path.with_suffix('.pending')

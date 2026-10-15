@@ -6,6 +6,20 @@ use serde_json::{Value, json};
 use std::{net::SocketAddr, path::PathBuf, sync::{Arc, atomic::Ordering::Relaxed}, time::{Duration, Instant}};
 use tokio::sync::watch;
 
+fn new_private_receipt(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options=std::fs::OpenOptions::new();options.write(true).create_new(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    options.open(path)
+}
+fn existing_profile() -> Result<PathBuf> {
+    let profile=if let Some(value)=std::env::var_os("REMOTE_PLAY_DEVICE_GROUP_DIR") {PathBuf::from(value)}
+    else if cfg!(target_os="windows") {PathBuf::from(std::env::var_os("APPDATA").ok_or("appdata unavailable")?).join("RemotePlay/Mesh")}
+    else if cfg!(target_os="macos") {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join("Library/Application Support/RemotePlay/NativeMesh")}
+    else {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join(".config/remote-play/mesh")};
+    if !profile.is_absolute() || !profile.is_dir() {return Err("existing absolute paired profile required".into());}
+    Ok(profile)
+}
+
 const ID: u32 = 256;
 const LIST: u32 = 900_120;
 const TITLE: &str = "RemotePlay scoped-window acceptance";
@@ -211,10 +225,9 @@ async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watc
 // then terminates only this owned helper without running graceful cleanup.
 // Its independent fixture observations, not this receipt, prove release.
 fn phase_receipt(output:&std::path::Path, phase:&str, report:&Value) -> Result<()> {
-    use std::{io::Write,os::unix::fs::OpenOptionsExt};
+    use std::io::Write;
     let path=output.with_extension(format!("{phase}.json"));
-    let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .open(path).map_err(|_|"new private phase receipt required")?;
+    let mut file=new_private_receipt(&path).map_err(|_|"new private phase receipt required")?;
     writeln!(file,"{report}").map_err(|_|"phase receipt write failed".into())
 }
 
@@ -296,12 +309,13 @@ pub fn main_cli(args:&[String]) {
             let _=tx.send(true);
         });
         let setup=(||->Result<_>{
-            let profile=PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join("Library/Application Support/RemotePlay/NativeMesh");
+            let profile=existing_profile()?;
             let identity=remote_core::mesh::AppPrivateMeshConfigStore::new(profile).load().map_err(|_|"existing paired profile unavailable")?.ok_or("existing paired profile absent")?;
             remote_core::init_crypto_provider();remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
             let scratch=std::env::temp_dir().join(format!("rp-controlled-window-input-{}",std::process::id()));
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new().mode(0o700).create(&scratch).map_err(|_|"owned scratch unavailable")?;
+            let mut directory=std::fs::DirBuilder::new();
+            #[cfg(unix)] {use std::os::unix::fs::DirBuilderExt;directory.mode(0o700);}
+            directory.create(&scratch).map_err(|_|"owned scratch unavailable")?;
             Ok(scratch)
         })();
         let scratch=match setup{Ok(p)=>p,Err(e)=>return json!({"error":e,"input_commands_enqueued":0,"target_effect_verified":false,"connection_opened":false})};
@@ -316,8 +330,8 @@ pub fn main_cli(args:&[String]) {
         };
         let _=std::fs::remove_dir_all(scratch); report
     });
-    use std::{io::Write,os::unix::fs::OpenOptionsExt};
-    let written=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&output)
+    use std::io::Write;
+    let written=new_private_receipt(&output)
         .and_then(|mut f|writeln!(f,"{}",serde_json::to_string_pretty(&report).unwrap()));
     println!("{report}");
     if written.is_err() || report["operation_succeeded"]!=true || report["cleanup_complete"]!=true { std::process::exit(1); }
