@@ -296,9 +296,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                 eprintln!("subscription request failed: {e}");
             }
         }));
-        self.control(SessionCommand::ListSources {
-            request_id: 900_001,
-        });
+        // The source picker requests its own catalog. Starting video must not
+        // enqueue an unrelated expensive catalog ahead of Subscribe.
     }
     pub fn switch_source(&mut self, source: CaptureSource) {
         // A previously denied source must be explicitly selectable again after

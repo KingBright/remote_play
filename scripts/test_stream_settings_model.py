@@ -22,6 +22,10 @@ def validation_command(cargo, target, mode):
         return [cargo, "test" if mode.endswith("tests") else "build", *shared,
                 "-p", "remote_play_app", "--example", "window_scoped_acceptance_guarded",
                 "--no-default-features", "--features", "gpui-restoration"]
+    if mode == "host-control":
+        return [cargo, "test", *shared, "-p", "host", "--lib", "service::", "--", "--nocapture"]
+    if mode == "source-catalog":
+        return [cargo, "test", *shared, "-p", "host", "--lib", "source_catalog::tests", "--", "--nocapture"]
     if mode == "session-confirmation":
         return [cargo, "test", *shared, "-p", "remote_core", "--lib",
                 "workspace_session::tests", "--", "--nocapture"]
@@ -68,7 +72,7 @@ def validation_environment(mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "input-loss-build", "input-loss-tests"),
+    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests"),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -110,7 +114,7 @@ def main():
             "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
-    if args.mode.startswith("media-lifecycle") or args.mode in ("media-acceptance-build", "session-confirmation", "input-loss-build", "input-loss-tests"):
+    if args.mode.startswith("media-lifecycle") or args.mode in ("media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests"):
         paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]

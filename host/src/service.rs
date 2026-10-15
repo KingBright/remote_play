@@ -311,6 +311,7 @@ struct InputLeaseSlot {
 }
 
 struct Connection {
+    source_catalog: crate::source_catalog::SourceCatalog,
     versioned_control: bool,
     delivery_owner: Option<(crate::directed_delivery::Peer,[u8;32])>,
     delivery_cancel: Option<watch::Receiver<bool>>,
@@ -793,6 +794,14 @@ impl Connection {
         // ScreenCaptureKit/AX and FFmpeg capability probes can block. Keep the
         // host control future yielding so another owner's input can expire.
         let legacy = tokio::task::spawn_blocking(enumerate).await?;
+        self.merge_capture_sources(legacy.map_err(|error| error.to_string()))
+            .map_err(Into::into)
+    }
+
+    fn merge_capture_sources(
+        &self,
+        legacy: crate::source_catalog::CatalogResult,
+    ) -> crate::source_catalog::CatalogResult {
         #[cfg(not(all(unix, any(test, target_os = "linux"))))]
         let mut sources = legacy?;
         #[cfg(all(unix, any(test, target_os = "linux")))]
@@ -877,6 +886,7 @@ impl Connection {
         let resources = Arc::new(crate::lifecycle::Resources::default());
         crate::lifecycle::publish(id, &resources, "open");
         Self {
+            source_catalog: crate::source_catalog::SourceCatalog::default(),
             versioned_control: false,
             delivery_owner: None,
             delivery_cancel: None,
@@ -1888,7 +1898,16 @@ async fn run_host_service_inner(
                 let retain_for_local_share = local_shares.is_some();
                 #[cfg(not(target_os = "linux"))]
                 let retain_for_local_share = false;
-                for peer in peers.values_mut() { peer.prune_finished_subscriptions(retain_for_local_share); }
+                for (addr, peer) in &mut peers {
+                    peer.prune_finished_subscriptions(retain_for_local_share);
+                    if let Some((request_id, result)) = peer.source_catalog.take_ready().await {
+                        let reply = match peer.merge_capture_sources(result) {
+                            Ok(sources) => SessionCommand::Sources { request_id, sources },
+                            Err(reason) => SessionCommand::Error { request_id, reason },
+                        };
+                        input_owner.during_control(&injector, send_session(&udp_sender, *addr, reply)).await;
+                    }
+                }
                 if input_owner.owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) {
                     let _ = input_owner.release(&injector).await;
                 }
@@ -2012,8 +2031,14 @@ async fn run_host_service_inner(
                                     }
                                 }
                                 SessionCommand::ListSources { request_id } if peers.contains_key(&addr) => {
-                                    let reply = match input_owner.during_control(&injector,peers.get(&addr).unwrap().capture_sources()).await { Ok(sources) => SessionCommand::Sources { request_id, sources }, Err(e) => SessionCommand::Error { request_id, reason: e.to_string() } };
-                                    input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
+                                    let peer = peers.get_mut(&addr).unwrap();
+                                    if let Some(result) = peer.source_catalog.request(request_id) {
+                                        let reply = match peer.merge_capture_sources(result) {
+                                            Ok(sources) => SessionCommand::Sources { request_id, sources },
+                                            Err(reason) => SessionCommand::Error { request_id, reason },
+                                        };
+                                        input_owner.during_control(&injector,send_session(&udp_sender, addr, reply)).await;
+                                    }
                                 }
                                 SessionCommand::Subscribe(request) => {
                                     let id = request.id;
