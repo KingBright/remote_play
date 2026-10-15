@@ -99,7 +99,11 @@ def hash_file(path: Path) -> str:
         opened = os.fstat(incoming.fileno())
     after = path.stat()
     keys = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
-    require(all(getattr(before, k) == getattr(opened, k) == getattr(after, k) for k in keys),
+    # Windows path stat and CRT fstat can expose different ctime meanings.
+    # Preserve path-before/after ctime and all shared handle identity fields.
+    opened_keys = keys[:-1] if sys.platform == 'win32' else keys
+    require(all(getattr(before, k) == getattr(after, k) for k in keys)
+            and all(getattr(before, k) == getattr(opened, k) for k in opened_keys),
             'Artifact changed while hashing')
     return value
 

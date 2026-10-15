@@ -546,3 +546,31 @@ class IndependentNativeIdentityTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class WindowsHashStatSemanticsTests(unittest.TestCase):
+    def run_hash(self, platform, opened_ctime, final_ctime=10):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'fixture'
+            path.write_bytes(b'owned hash fixture')
+            fields = dict(st_dev=1, st_ino=2, st_size=18, st_mtime_ns=3, st_ctime_ns=10)
+            before = SimpleNamespace(**fields)
+            opened = SimpleNamespace(**dict(fields, st_ctime_ns=opened_ctime))
+            after = SimpleNamespace(**dict(fields, st_ctime_ns=final_ctime))
+            with patch.object(gate, 'regular', return_value=path), \
+                 patch.object(gate.Path, 'stat', side_effect=[before, after]), \
+                 patch.object(gate.os, 'fstat', return_value=opened), \
+                 patch.object(gate.sys, 'platform', platform):
+                return gate.hash_file(path)
+
+    def test_windows_accepts_handle_ctime_semantics_difference(self):
+        self.assertEqual(self.run_hash('win32', 20), gate.digest(b'owned hash fixture'))
+
+    def test_windows_still_rejects_path_ctime_change(self):
+        with self.assertRaises(gate.IdentityRejected):
+            self.run_hash('win32', 20, 11)
+
+    def test_posix_still_requires_handle_ctime_match(self):
+        with self.assertRaises(gate.IdentityRejected):
+            self.run_hash('linux', 20)
