@@ -144,7 +144,7 @@ async fn staged_input(link:&mut Wire,output:&std::path::Path,nonce:&str,report:&
     }
     super::phase_receipt(output,"clicked",report)?;
     wait_approval(link,output,nonce,"text").await?;
-    let text=format!("abc{}",&nonce[..4]);report["expected_text"]=text.clone().into();
+    let text=format!("731{:05}",u16::from_str_radix(&nonce[..4],16).map_err(|_|"invalid fixture nonce")?);report["expected_text"]=text.clone().into();
     for c in text.bytes(){let code=ascii_key(c).ok_or("unsupported synthetic text")?;
         for pressed in [true,false]{
             link.send(SessionCommand::SourceInput{id:ID,source_revision:0,event:InputEvent::Key{key_code:code,pressed,modifiers:0}}).await?;

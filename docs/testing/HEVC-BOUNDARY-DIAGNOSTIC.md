@@ -34,8 +34,10 @@ It sends only a normalized center move and one left-button down/up. It writes
 clicked.json, then waits at most 45s for text-approved.json. The coordinator must
 independently confirm native mouse events and exact fixture foreground before
 allowing keys. Missing, malformed, non-private, mismatched or expired approvals
-fail closed. The separate text is abc plus the first four hexadecimal nonce
-characters, sent as physical down/up pairs with no modifiers or clipboard.
+fail closed. The separate text is 731 followed by the five-digit decimal value of the first
+four hexadecimal nonce characters. Digits avoid composition by an existing IME;
+its settings remain untouched. Send physical down/up pairs with no modifiers or
+clipboard.
 
 Each approval is a private same-user JSON file at the output's extension path:
 fixture_nonce, phase (click/text), source=MainDisplay, source_revision=0,
@@ -53,3 +55,26 @@ RTT nor one-way latency.
 Offline replay uses only an existing synthetic sample, no network or input.
 Run both comparison cases in the same native VideoToolbox environment; a
 sandbox session-creation failure must not be mistaken for a codec regression.
+
+## Windows foreground and collector calibration
+
+A topmost opaque window is not proof of keyboard foreground. Verify the exact
+fixture HWND/PID via GetForegroundWindow before approving text. In the 2026-10-16
+cube run, a high-integrity administrator terminal remained foreground while the
+Agent and RemotePlay ran at medium integrity. SendInput reported acceptance, but
+cursor position, last-input time and the fixture native message stream did not
+change. Do not classify that observation as a RemotePlay injector defect or fix
+it by changing integrity, UIAccess, security policy or another application's UI.
+
+Opening the same medium-integrity synthetic fixture normally with the Shell open
+verb (not runas) gave it real foreground. RemotePlay then delivered native mouse
+down/up and eight digit key down/up pairs, visible as the expected unique text.
+Window messages used solely to calibrate a collector are not remote-input proof;
+Tk can ignore posted messages even when the native WndProc receives them. Keep
+calibration events separate from real input. Receipt counts alone remain insufficient.
+
+Preserve the user's IME. Letter sequences can be composed normally by an existing
+IME, so use the diagnostic's numeric nonce-derived text for the minimal physical
+key test. Verify the decoded visible text, native pairs, exact foreground and
+held-state release independently. At fixture close, a bounded GetAsyncKeyState
+check of the tested digits/button/modifiers can corroborate the release ACK.
