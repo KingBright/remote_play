@@ -23,9 +23,9 @@ android {
         applicationId = "com.remoteplay.client"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
+        versionCode = 10
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionName = "2.0.0-alpha.8"
+        versionName = "2.0.0-alpha.9"
 
         ndk {
             abiFilters.addAll(setOf("arm64-v8a"))
