@@ -73,6 +73,29 @@ def files(path: Path, *, private=False, excluded=()):
     return records
 
 
+def preferences_bytes(path: Path) -> bytes:
+    """Read legacy user settings; never use this for credentials/release state."""
+    safe_path(path)
+    gate.regular(path)
+    before = path.lstat()
+    def stable(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as source:
+        info = os.fstat(source.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                and stat.S_IMODE(info.st_mode) in (0o600, 0o644)
+                and info.st_size <= release.MAX_STATE and stable(info) == stable(before),
+                'Legacy preferences must be a stable owned regular 0600/0644 file')
+        raw = source.read(release.MAX_STATE + 1)
+        require(len(raw) == info.st_size and stable(os.fstat(source.fileno())) == stable(info)
+                and stable(path.lstat()) == stable(info), 'Legacy preferences changed while reading')
+        require(gate.hash_file(path) == digest(raw) and stable(path.lstat()) == stable(info),
+                'Legacy preferences changed after reading')
+    return raw
+
+
 def write_private(path, raw):
     safe_path(path)
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as output:
@@ -243,7 +266,7 @@ class Migration:
         require(not self.new_preferences.exists() and not self.new_preferences.is_symlink(), 'New identity preferences already exist')
         preferences_hash = self.preferences_hash()
         if self.import_preferences and preferences_hash is not None:
-            gate.json_bytes(release.private_bytes(self.old_preferences))
+            gate.json_bytes(preferences_bytes(self.old_preferences))
         self.backend.no_system_services()
         old_info = self.backend.old_identity(self.old)
         candidate_info = self.backend.candidate_identity(candidate, contract)
@@ -274,7 +297,7 @@ class Migration:
 
     def preferences_hash(self):
         safe_path(self.old_preferences)
-        return digest(release.private_bytes(self.old_preferences)) if self.old_preferences.exists() else None
+        return digest(preferences_bytes(self.old_preferences)) if self.old_preferences.exists() else None
 
     def old_release_state_hash(self):
         path = self.apps / '.remoteplay-release-identity.json'
@@ -305,7 +328,7 @@ class Migration:
                     write_private(backup / 'legacy-release-state.json', legacy_state)
                 require(self.preferences_hash() == plan['old_preferences_sha256'], 'Legacy preferences drift')
                 if plan['old_preferences_sha256'] is not None:
-                    preferences = release.private_bytes(self.old_preferences)
+                    preferences = preferences_bytes(self.old_preferences)
                     require(digest(preferences) == plan['old_preferences_sha256'], 'Preferences changed while reading')
                     write_private(backup / 'preferences.json', preferences)
                 staged_profile = self.work / 'NativeMesh'

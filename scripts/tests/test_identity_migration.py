@@ -170,6 +170,63 @@ class MacMigrationTests(unittest.TestCase):
             check_upgrade({'bundle_id':'com.remoteplay.unified'},{'bundle_id':'fun.hackerlife.weavelo'})
 
 
+    def test_legacy_0644_preferences_backup_and_import_preserve_original_mode(self):
+        raw=b'{"ui":{"scale_mode":"fill"}}'
+        self.m.old_preferences.write_bytes(raw);self.m.old_preferences.chmod(0o644)
+        self.m.import_preferences=True
+        self.m.apply(self.candidate,self.contract,self.reviewed())
+        self.assertEqual(self.m.old_preferences.stat().st_mode & 0o777,0o644)
+        self.assertEqual(self.m.old_preferences.read_bytes(),raw)
+        for p in [self.m.new_preferences,self.m.work/'backup/preferences.json']:
+            self.assertEqual(p.read_bytes(),raw);self.assertEqual(p.stat().st_mode & 0o777,0o600)
+
+    def test_preferences_reader_allows_only_owned_0600_and_0644(self):
+        p=self.m.old_preferences;p.write_bytes(b'{}')
+        for mode in [0o600,0o644]:
+            p.chmod(mode);self.assertEqual(mac.preferences_bytes(p),b'{}')
+        for mode in [0o640,0o666,0o700]:
+            p.chmod(mode)
+            with self.subTest(mode=mode),self.assertRaises(ReleaseRejected):mac.preferences_bytes(p)
+            self.assertEqual(p.stat().st_mode & 0o777,mode)
+
+    def test_preferences_reader_rejects_foreign_descriptor_owner(self):
+        p=self.m.old_preferences;p.write_bytes(b'{}');p.chmod(0o644)
+        real=p.stat()
+        foreign=os.stat_result((real.st_mode,real.st_ino,real.st_dev,real.st_nlink,real.st_uid+1,
+                                real.st_gid,real.st_size,real.st_atime,real.st_mtime,real.st_ctime))
+        with patch.object(mac.os,'fstat',return_value=foreign),self.assertRaises(ReleaseRejected):mac.preferences_bytes(p)
+        self.assertEqual(p.read_bytes(),b'{}')
+
+    def test_preferences_reader_rejects_link_directory_fifo_and_hardlink(self):
+        p=self.m.old_preferences;target=p.with_name('settings-target');target.write_bytes(b'{}');target.chmod(0o644)
+        p.symlink_to(target)
+        with self.assertRaises((ReleaseRejected,mac.gate.IdentityRejected)):mac.preferences_bytes(p)
+        p.unlink();p.mkdir()
+        with self.assertRaises((ReleaseRejected,mac.gate.IdentityRejected)):mac.preferences_bytes(p)
+        p.rmdir();os.mkfifo(p)
+        with self.assertRaises((ReleaseRejected,mac.gate.IdentityRejected)):mac.preferences_bytes(p)
+        p.unlink();os.link(target,p)
+        with self.assertRaises(ReleaseRejected):mac.preferences_bytes(p)
+        self.assertEqual(target.read_bytes(),b'{}')
+
+    def test_preferences_reader_refuses_descriptor_or_path_drift(self):
+        p=self.m.old_preferences;p.write_bytes(b'{}');p.chmod(0o644)
+        real=mac.os.fstat;calls=0
+        def drift(fd):
+            nonlocal calls
+            calls+=1
+            result=real(fd)
+            if calls==2:p.write_bytes(b'foreign')
+            return result
+        with patch.object(mac.os,'fstat',side_effect=drift),self.assertRaises(ReleaseRejected):mac.preferences_bytes(p)
+        self.assertEqual(p.read_bytes(),b'foreign')
+
+    def test_release_state_still_requires_private_0600(self):
+        p=self.m.apps/'.remoteplay-release-identity.json';p.write_bytes(b'{}');p.chmod(0o644)
+        with self.assertRaises(mac.gate.IdentityRejected):self.m.old_release_state_hash()
+        self.assertNotIn('stop_old',self.backend.events)
+
+
 class LinuxDesktopTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.home=Path(self.temp.name).resolve();self.t=linux.DesktopTransaction(self.home)
