@@ -314,6 +314,12 @@ fn take_access_unit(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
             return None;
         };
         let nal_type = hevc_nal_type(&buffer[start..next]).unwrap_or(0);
+        // HEVC prefix parameter sets/AUD/prefix-SEI belong to the next
+        // picture, not the preceding VCL. Keeping them on a delta frame
+        // strands a receiver that skipped that frame while awaiting an IDR.
+        if saw_vcl && matches!(nal_type, 32..=35 | 39) {
+            return Some(buffer.drain(..start).collect());
+        }
         if is_hevc_vcl(nal_type) {
             if saw_vcl {
                 let au = buffer.drain(..start).collect();
@@ -481,6 +487,27 @@ mod tests {
         let first = take_access_unit(&mut buffer).expect("first AU");
         assert_eq!(first, vec![0, 0, 0, 1, 0x02, 0xAA]);
         assert!(take_access_unit(&mut buffer).is_none());
+    }
+
+    #[test]
+    fn repeated_parameter_sets_stay_with_following_keyframe() {
+        fn nal(kind:u8)->Vec<u8>{vec![0,0,0,1,kind<<1,1,0x80]}
+        let mut buffer=Vec::new();
+        for kind in [1,32,33,34,39,21,1,1]{buffer.extend(nal(kind));}
+        assert_eq!(take_access_unit(&mut buffer).unwrap(),nal(1));
+        let mut expected=Vec::new();for kind in [32,33,34,39,21]{expected.extend(nal(kind));}
+        let keyframe=take_access_unit(&mut buffer).unwrap();
+        assert_eq!(keyframe,expected);assert!(is_hevc_keyframe(&keyframe));
+    }
+
+    #[test]
+    fn suffix_sei_remains_on_previous_picture_and_aud_starts_next() {
+        fn nal(kind:u8)->Vec<u8>{vec![0,0,1,kind<<1,1,0x80]}
+        let mut buffer=Vec::new();for kind in [1,40,35,32,33,34,20,1,1]{buffer.extend(nal(kind));}
+        let mut first=nal(1);first.extend(nal(40));
+        assert_eq!(take_access_unit(&mut buffer).unwrap(),first);
+        let mut next=Vec::new();for kind in [35,32,33,34,20]{next.extend(nal(kind));}
+        assert_eq!(take_access_unit(&mut buffer).unwrap(),next);
     }
 
     #[test]
