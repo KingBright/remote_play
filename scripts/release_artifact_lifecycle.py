@@ -119,25 +119,32 @@ def transition_config(kind):
     require(bool(re.fullmatch('[0-9a-f]{64}', intent)), 'Exact transition intent digest is required')
     pins = {key: os.environ.get(env, '') for key, env in (
         ('commit', 'WEAVELO_EXPECTED_COMMIT'),
-        ('identity_sha256', 'WEAVELO_EXPECTED_IDENTITY_SHA256'),
-        ('manifest_sha256', 'WEAVELO_EXPECTED_MANIFEST_SHA256'))}
+        ('identity_sha256', 'WEAVELO_EXPECTED_IDENTITY_SHA256'))}
     require(all(re.fullmatch('[0-9a-f]{40}' if key == 'commit' else '[0-9a-f]{64}', value)
-                for key, value in pins.items()), 'Independent transition source/identity/manifest pins are required')
+                for key, value in pins.items()), 'Independent transition source/identity pins are required')
     return {'intent_sha256': intent, 'candidate_expectations': pins}
 
 
-def verify_transition_producer(state, admission):
+def verify_transition_producer(state, admission, phase='prepare'):
     transition = state.get('transition')
     if transition is None:
         return
     regular(HELPER)
     spec = importlib.util.spec_from_file_location('weavelo_transition_helper', HELPER)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    require(phase in ('prepare', 'sealed'), 'Explicit transition phase is required')
+    pins = transition['candidate_expectations']
+    kwargs = {'transition_intent_sha256': transition['intent_sha256'], 'transition_phase': phase}
+    if phase == 'sealed':
+        require(admission.get('candidate_state') == 'sealed'
+                and bool(re.fullmatch('[0-9a-f]{64}', admission.get('candidate_seal_sha256', ''))),
+                'Sealed official candidate is required')
+        kwargs['candidate_seal_sha256'] = admission['candidate_seal_sha256']
+        pins = admission['candidate_expectations']
     result = module.companion('rust_release').validate_producer(
-        module.release_api(), str(ROOT), admission['component'], admission['files'], state['producer_pid'],
-        transition_intent_sha256=transition['intent_sha256'])
+        module.release_api(), str(ROOT), admission['component'], admission['files'], state['producer_pid'], **kwargs)
     require(result.get('transition_intent_sha256') == transition['intent_sha256']
-            and result.get('candidate_expectations') == transition['candidate_expectations']
+            and result.get('candidate_expectations') == pins
             and result.get('files') == admission['files']
             and result.get('staged_files') == admission['staged_files']
             and result.get('owned_aux_stages') == admission.get('owned_aux_stages', []),
@@ -217,6 +224,11 @@ def admit(state, component, files, current=None, aux_stage=None):
     require(result.get('owned_aux_stages', []) == ([str(aux_stage)] if aux_stage else []), 'Unexpected packaging workspace ownership')
     require(result.get('transition_intent_sha256') == (transition['intent_sha256'] if transition else None),
             'Official admission did not confirm the exact transition intent')
+    if transition is not None:
+        require(result.get('candidate_state') == 'unsealed'
+                and result.get('candidate_expectations') == transition['candidate_expectations']
+                and bool(re.fullmatch('[0-9a-f]{64}', result.get('reservation_sha256', ''))),
+                'Official unsealed preparation reservation was not confirmed')
     verify_transition_producer(state, result)
     return result
 
@@ -232,9 +244,14 @@ def publish(state, admission, expected):
     transition = state.get('transition')
     if transition is not None:
         require(admission.get('transition_intent_sha256') == transition['intent_sha256'], 'Publication intent changed')
+        verify_transition_producer(state, admission, phase='sealed')
+        pins = admission['candidate_expectations']
+        require({k: pins.get(k) for k in ('commit', 'identity_sha256')} == transition['candidate_expectations'],
+                'Sealed candidate changed the accepted source/identity')
         args.extend(['--transition-intent-sha256', transition['intent_sha256'],
-                     '--expected-identity-sha256', transition['candidate_expectations']['identity_sha256'],
-                     '--expected-manifest-sha256', transition['candidate_expectations']['manifest_sha256']])
+                     '--expected-identity-sha256', pins['identity_sha256'],
+                     '--expected-manifest-sha256', pins['manifest_sha256'],
+                     '--candidate-seal-sha256', admission['candidate_seal_sha256']])
     result = public('release-publish', *args)
     require(result.get('current_committed') is True and result.get('paths') == admission['files'],
             'Current output commit was not confirmed; preserve the public transaction for recovery')
@@ -256,8 +273,28 @@ def publish_macos(state, admission, report):
     recorded, expected = macos_evidence(archive, receipt, admission['files'][0])
     require(recorded == report, 'macOS receipt changed after signing verification')
     if state.get('transition') is not None:
-        require(recorded.get('build_identity_expectations') == state['transition']['candidate_expectations'],
-                'Signed candidate source/identity/manifest differs from the accepted transition')
+        pins = recorded.get('build_identity_expectations', {})
+        require(set(pins) == {'commit', 'identity_sha256', 'manifest_sha256'}
+                and {k: pins.get(k) for k in ('commit', 'identity_sha256')} == state['transition']['candidate_expectations'],
+                'Signed candidate source/identity differs from the accepted transition')
+        require(bool(re.fullmatch('[0-9a-f]{64}', pins.get('manifest_sha256', ''))), 'Real manifest digest is required')
+        require(len(admission.get('owned_aux_stages', [])) == 1, 'Exact owned macOS packaging workspace is required')
+        manifest = Path(admission['owned_aux_stages'][0]) / 'weavelo-release-manifest.json'
+        require(hashed(manifest)[0] == pins['manifest_sha256'], 'Actual owned manifest differs from signed receipt')
+        args = ['--component', admission['component'], '--producer-pid', state['producer_pid'],
+                '--transition-intent-sha256', state['transition']['intent_sha256'],
+                '--expected-reservation-sha256', admission['reservation_sha256'],
+                '--manifest-file', manifest, '--expected-identity-sha256', pins['identity_sha256'],
+                '--expected-manifest-sha256', pins['manifest_sha256'], '--validation-kind', 'signing',
+                '--validation-file', receipt, '--validation-digest', expected[1]]
+        for path, value in zip(admission['files'], expected):
+            args.extend(['--file', path, '--expected-sha256', value])
+        seal = public('release-transition-seal', *args)
+        require(seal.get('candidate_state') == 'sealed' and seal.get('candidate_expectations') == pins
+                and bool(re.fullmatch('[0-9a-f]{64}', seal.get('candidate_seal_sha256', ''))),
+                'Official signed-stage seal was not confirmed; preserve the original reservation')
+        admission = dict(admission, candidate_state='sealed', candidate_expectations=pins,
+                         candidate_seal_sha256=seal['candidate_seal_sha256'])
     return publish(state, admission, expected)
 
 
