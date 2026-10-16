@@ -6,6 +6,7 @@ Plans are read-only. Apply/recover require the exact reviewed plan hash.
 """
 from __future__ import annotations
 import argparse
+import ctypes
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -69,6 +70,30 @@ def sync(path):
     finally: os.close(fd)
 
 
+def exclusive_rename(source, destination):
+    """Native no-replace rename; no check-then-replace fallback."""
+    require(source.parent.stat().st_dev == destination.parent.stat().st_dev, 'Desktop transaction must use one filesystem')
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == 'darwin':
+        fn = libc.renamex_np; fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        result = fn(os.fsencode(source), os.fsencode(destination), 0x4)
+    elif sys.platform.startswith('linux') and hasattr(libc, 'renameat2'):
+        fn = libc.renameat2; fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = fn(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    else: raise ValueError('Exclusive desktop rename unavailable; no fallback')
+    if result: raise OSError(ctypes.get_errno(), 'Exclusive desktop rename failed', str(destination))
+    sync(source.parent); sync(destination.parent)
+
+
+def identity(path):
+    safe(path)
+    if not path.exists(): return None
+    before = path.lstat(); value = state(path); after = path.lstat()
+    require((before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns, before.st_size)
+            == (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns, after.st_size), 'Unstable desktop inode')
+    return dict(value, device=after.st_dev, inode=after.st_ino)
+
+
 class DesktopTransaction:
     def __init__(self, home, data_home=None):
         self.home = home
@@ -85,11 +110,9 @@ class DesktopTransaction:
         return paths
 
     def payloads(self, assets, executable):
-        # Desktop Exec is not a shell; quote and escape its field-code/metacharacter syntax.
         require(executable.is_absolute() and not any(ord(c) < 32 or c in '\\"`$%' for c in str(executable)),
                 'Desktop executable contains unsupported control/quoting characters')
-        name = str(executable).replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%')
-        desktop = f'[Desktop Entry]\nType=Application\nName=Weavelo\nExec="{name}"\nIcon={APP_ID}\nStartupWMClass={APP_ID}\nTerminal=false\nCategories=Network;RemoteAccess;\n'
+        desktop = f'[Desktop Entry]\nType=Application\nName=Weavelo\nExec="{executable}"\nIcon={APP_ID}\nStartupWMClass={APP_ID}\nTerminal=false\nCategories=Network;RemoteAccess;\n'
         return {n: desktop.encode() if n == 'desktop' else gate.regular(assets / n).read_bytes() for n in self.targets()}
 
     def plan(self, assets, executable, provenance):
@@ -97,89 +120,126 @@ class DesktopTransaction:
         require(not self.journal.exists(), 'An original desktop transaction exists; observe/recover it')
         payloads = self.payloads(assets, executable)
         require(gate.hash_file(executable) == gate.sha(provenance['binary_sha256']), 'Verified executable changed')
-        return {'schema': 1, 'kind': 'weavelo-user-desktop-install', 'home': str(self.home),
-                'executable': str(executable), 'data_home': str(self.data_home),
-                'executable_sha256': provenance['binary_sha256'], 'provenance': provenance,
-                'entries': [{'name': name, 'path': str(path), 'before': state(path),
-                             'after': {'sha256': sha(payloads[name]), 'mode': 0o644}}
-                            for name, path in self.targets().items()],
-                'security_settings_modified': False, 'new_file_mode': 0o644,
-                'services_modified': False, 'applied': False}
+        entries = []
+        for name, path in self.targets().items():
+            before = state(path); desired = sha(payloads[name])
+            require(before is None or before['sha256'] == desired,
+                    'Existing new-identity desktop file differs; first install never replaces it')
+            entries.append({'name':name, 'path':str(path), 'before':before,
+                'action':'create' if before is None else 'preserve',
+                'after':{'sha256':desired,'mode':0o644} if before is None else before})
+        return {'schema':2,'kind':'weavelo-user-desktop-first-install','home':str(self.home),
+                'executable':str(executable),'data_home':str(self.data_home),
+                'executable_sha256':provenance['binary_sha256'],'provenance':provenance,'entries':entries,
+                'security_settings_modified':False,'services_modified':False,'applied':False}
 
     @contextmanager
     def lock(self):
-        safe(self.work)
-        self.work.mkdir(parents=True, exist_ok=True, mode=0o700)
-        require(stat.S_IMODE(self.work.stat().st_mode) == 0o700, 'Desktop transaction directory is not private')
-        lock = self.work / 'lock'; safe(lock)
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        safe(self.work); self.work.mkdir(parents=True,exist_ok=True,mode=0o700)
+        require(stat.S_IMODE(self.work.stat().st_mode)==0o700,'Desktop transaction directory is not private')
+        lock=self.work/'lock';safe(lock)
+        fd=os.open(lock,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         try:
-            m = os.fstat(fd)
-            require(m.st_uid == os.getuid() and m.st_nlink == 1 and stat.S_ISREG(m.st_mode), 'Unsafe desktop transaction lock')
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            yield
-        finally: os.close(fd)
+            m=os.fstat(fd)
+            require(m.st_uid==os.getuid() and m.st_nlink==1 and stat.S_ISREG(m.st_mode),'Unsafe desktop transaction lock')
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);yield
+        finally:os.close(fd)
 
     def save(self, document):
-        current = state(self.journal)
-        atomic_write(self.journal, json.dumps(document, sort_keys=True, indent=2).encode() + b'\n', 0o600, current)
+        # Only the private, locked journal uses replace. Public assets never do.
+        atomic_write(self.journal,json.dumps(document,sort_keys=True,indent=2).encode()+b'\n',0o600,state(self.journal))
 
     def validate(self, document, expected):
-        plan = document['plan']
-        require(plan_hash(plan) == gate.sha(expected) == document['plan_sha256']
-                and plan['schema'] == 1 and plan['kind'] == 'weavelo-user-desktop-install'
-                and plan['home'] == str(self.home), 'Original desktop transaction hash/home differs')
-        require([(e['name'], e['path']) for e in plan['entries']] == [(n, str(p)) for n, p in self.targets().items()],
-                'Desktop transaction destinations differ')
-        require(plan['data_home'] == str(self.data_home), 'Desktop data directory differs from original plan')
+        plan=document['plan']
+        require(document.get('schema')==2 and plan_hash(plan)==gate.sha(expected)==document['plan_sha256']
+                and plan['schema']==2 and plan['kind']=='weavelo-user-desktop-first-install'
+                and plan['home']==str(self.home),'Original desktop transaction differs; legacy journals cannot be reinterpreted')
+        require([(e['name'],e['path']) for e in plan['entries']]==[(n,str(p)) for n,p in self.targets().items()]
+                and plan['data_home']==str(self.data_home),'Desktop destinations differ')
+        for key,record in document['owned'].items():
+            i=int(key);require(str(i)==key and 0<=i<len(plan['entries']),'Invalid publication index')
+            e=plan['entries'][i]
+            require(e['action']=='create' and record['staging']==str(self.work/'payloads'/key)
+                    and record['retired']==str(self.work/'retired'/key)
+                    and record['identity']['sha256']==e['after']['sha256']
+                    and record['identity']['mode']==e['after']['mode'],'Invalid publication ownership receipt')
         return plan
 
     def apply(self, assets, executable, provenance, expected):
         with self.lock():
-            plan = self.plan(assets, executable, provenance)
-            require(plan_hash(plan) == gate.sha(expected), 'Reviewed desktop plan drift')
-            payloads = self.payloads(assets, executable)
-            backup = self.work / 'backup'; safe(backup)
-            require(not backup.exists(), 'Unknown previous desktop backup; preserve it')
-            backup.mkdir(mode=0o700)
-            document = {'schema': 1, 'plan': plan, 'plan_sha256': expected, 'phase': 'backing_up'}
+            plan=self.plan(assets,executable,provenance)
+            require(plan_hash(plan)==gate.sha(expected),'Reviewed desktop plan drift')
+            payloads=self.payloads(assets,executable)
+            for name in ['backup','payloads','retired']:
+                directory=self.work/name;safe(directory);require(not directory.exists(),'Unknown original transaction files')
+                directory.mkdir(mode=0o700)
+            document={'schema':2,'plan':plan,'plan_sha256':expected,'phase':'preparing','owned':{}}
             self.save(document)
             try:
-                for index, e in enumerate(plan['entries']):
-                    path = Path(e['path'])
-                    require(state(path) == e['before'], 'Desktop file changed before backup')
-                    if e['before'] is not None:
-                        raw = path.read_bytes(); require(sha(raw) == e['before']['sha256'], 'Unstable desktop preimage')
-                        atomic_write(backup / str(index), raw, 0o600, None)
-                require(gate.hash_file(executable) == plan['executable_sha256'], 'Executable drift before desktop publication')
-                document['phase'] = 'installing'; self.save(document)
-                for e in plan['entries']:
-                    require(sha(payloads[e['name']]) == e['after']['sha256'], 'Source asset drift')
-                    atomic_write(Path(e['path']), payloads[e['name']], 0o644, e['before'])
-                require(all(state(Path(e['path'])) == e['after'] for e in plan['entries'])
-                        and gate.hash_file(executable) == plan['executable_sha256'], 'Desktop install/executable verification failed')
-                document['phase'] = 'completed'; self.save(document)
-                return {'applied': True, 'plan_sha256': expected, 'installed_files': len(plan['entries']),
-                        'journal': str(self.journal), 'services_modified': False, 'system_icon_display': 'not_evaluated'}
+                for i,e in enumerate(plan['entries']):
+                    path=Path(e['path']);require(state(path)==e['before'],'Destination changed before preparation')
+                    if e['action']=='preserve':
+                        raw=path.read_bytes();require(sha(raw)==e['before']['sha256'],'Unstable preserved preimage')
+                        atomic_write(self.work/'backup'/str(i),raw,0o600,None)
+                        continue
+                    path.parent.mkdir(parents=True,exist_ok=True);safe(path.parent)
+                    require(path.parent.stat().st_dev==self.work.stat().st_dev,'Desktop targets must share the private transaction filesystem')
+                    stage=self.work/'payloads'/str(i)
+                    require(sha(payloads[e['name']])==e['after']['sha256'],'Source asset drift')
+                    atomic_write(stage,payloads[e['name']],0o644,None)
+                    document['owned'][str(i)]={'staging':str(stage),'retired':str(self.work/'retired'/str(i)),
+                                              'identity':identity(stage)}
+                    self.save(document)  # Durable inode intent BEFORE publication.
+                require(gate.hash_file(executable)==plan['executable_sha256'],'Executable drift before publication')
+                document['phase']='installing';self.save(document)
+                for i,e in enumerate(plan['entries']):
+                    if e['action']=='preserve':continue
+                    record=document['owned'][str(i)]
+                    require(identity(Path(record['staging']))==record['identity'],'Owned staged inode changed')
+                    exclusive_rename(Path(record['staging']),Path(e['path']))
+                    require(identity(Path(e['path']))==record['identity'],'Published inode differs')
+                for i,e in enumerate(plan['entries']):
+                    actual=identity(Path(e['path']))
+                    require((actual==document['owned'][str(i)]['identity'] if e['action']=='create' else state(Path(e['path']))==e['before']),
+                            'Desktop publication verification failed')
+                require(gate.hash_file(executable)==plan['executable_sha256'],'Executable drift after publication')
+                document['phase']='completed';self.save(document)
+                return {'applied':True,'plan_sha256':expected,'installed_files':len(plan['entries']),
+                        'created_files':len(document['owned']),'journal':str(self.journal),
+                        'services_modified':False,'system_icon_display':'not_evaluated'}
             except Exception:
-                self.rollback(document, expected)
+                self.rollback(document,expected)
                 raise
 
     def rollback(self, document, expected):
-        plan = self.validate(document, expected)
-        for index, e in reversed(list(enumerate(plan['entries']))):
-            path = Path(e['path']); current = state(path)
-            if current == e['before']: continue
-            require(current == e['after'], 'Desktop file changed outside original transaction; no unsafe recovery')
-            if e['before'] is None:
-                path.unlink(); sync(path.parent)
-            else:
-                saved = self.work / 'backup' / str(index)
-                require(state(saved) is not None and gate.hash_file(saved) == e['before']['sha256'], 'Desktop backup differs')
-                atomic_write(path, saved.read_bytes(), e['before']['mode'], current)
-        require(all(state(Path(e['path'])) == e['before'] for e in plan['entries']), 'Desktop rollback unverified')
-        document['phase'] = 'rolled_back'; self.save(document)
-        return {'rolled_back': True, 'journal': str(self.journal)}
+        plan=self.validate(document,expected);conflicts=[]
+        for i,e in reversed(list(enumerate(plan['entries']))):
+            # No ownership receipt, no mutation, even if bytes match the candidate.
+            record=document['owned'].get(str(i))
+            if record is None:continue
+            path=Path(e['path']);retired=Path(record['retired']);wanted=record['identity']
+            current=identity(path);saved=identity(retired)
+            if saved is not None:
+                if saved!=wanted:
+                    if current is None:
+                        exclusive_rename(retired,path)
+                    conflicts.append(e['path']);continue
+                if current is not None:conflicts.append(e['path'])
+                continue
+            if current is None:continue
+            if current!=wanted:
+                conflicts.append(e['path']);continue
+            exclusive_rename(path,retired)  # Captures races without deleting any file.
+            if identity(retired)!=wanted:
+                if not path.exists():
+                    try:exclusive_rename(retired,path)
+                    except FileExistsError:pass
+                conflicts.append(e['path'])
+        document['external_changes_preserved']=conflicts
+        document['phase']='recovery_blocked_external_changes' if conflicts else 'rolled_back'
+        self.save(document)
+        require(not conflicts,'Desktop file changed outside original transaction; external files preserved, inspect original journal')
+        return {'rolled_back':True,'journal':str(self.journal),'retired_owned_assets_retained':True}
 
 
 def main():

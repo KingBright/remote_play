@@ -10,6 +10,7 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import asdict
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,25 @@ def write_private(path, raw):
     upgrade.fsync_directory(path.parent)
 
 
+@contextmanager
+def migration_locks(applications):
+    """Old then new, nonblocking; retain both lock inodes."""
+    path = applications / '.remoteplay-install.lock'
+    safe_path(path)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and info.st_nlink == 1 and info.st_ino == path.lstat().st_ino,
+                'Unsafe legacy installer lock')
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ReleaseRejected('Legacy installer is active; no migration') from error
+        require(info.st_ino == path.lstat().st_ino, 'Legacy lock changed after acquiring')
+        with upgrade.installation_lock(applications): yield
+    finally: os.close(fd)
+
+
 class MacBackend:
     def __init__(self, home, expected_release, old_binary_sha256, deadline):
         self.home, self.expected, self.old_hash, self.deadline = home, expected_release, gate.sha(old_binary_sha256), deadline
@@ -146,6 +166,34 @@ class MacBackend:
             row = line.strip().split(None, 1)
             if len(row) == 2 and row[1] == str(executable): owners.append(int(row[0]))
         require(owners == [state['pid']], 'Duplicate/manual runtime; close it before migration')
+
+    def verify_cleanup_owner(self, state, app, contract, plist, expected_agent_sha256):
+        """Never waive native image proof for a reported PID."""
+        executable = app / 'Contents/MacOS/weavelo'
+        for _ in range(4):
+            current = state
+            if not current['loaded']: return current
+            if current.get('pid') is not None or current.get('running') is not False:
+                self.verify_owner(current, executable, contract['manifest']['binary_sha256'])
+            else:
+                require(current.get('program') == str(executable)
+                        and current.get('arguments') == [str(executable), '--background-service'],
+                        'Unstarted job differs from the exact new backend')
+                require(gate.hash_file(plist) == gate.sha(expected_agent_sha256),
+                        'Unstarted job plist changed; no bootout')
+                agent = plistlib.loads(plist.read_bytes())
+                require(agent.get('Label') == NEW_LABEL
+                        and agent.get('ProgramArguments') == [str(executable), '--background-service'],
+                        'Unstarted job label/arguments differ')
+                self.candidate_identity(app, contract)
+                for line in self.deadline.run(['/bin/ps', '-axo', 'pid=,comm=']).splitlines():
+                    row = line.strip().split(None, 1)
+                    require(not (len(row) == 2 and row[1] == str(executable)),
+                            'An unreported new backend process exists; no bootout')
+            observed = self.state(NEW_LABEL)
+            if observed == current: return current
+            state = observed  # A newly appeared PID re-enters native verification.
+        raise ReleaseRejected('New job generation changed during cleanup verification')
 
     def assert_absent(self, label, executable, old_pid=None):
         for _ in range(40):
@@ -237,7 +285,7 @@ class Migration:
         document['phase'] = phase; upgrade.atomic_json(self.journal, document)
 
     def apply(self, candidate, contract, expected_plan):
-        with upgrade.installation_lock(self.apps):
+        with migration_locks(self.apps):
             plan = self.plan(candidate, contract)
             require(plan_hash(plan) == gate.sha(expected_plan), 'Migration plan drift; no mutation')
             self.work.mkdir(mode=0o700)
@@ -329,8 +377,10 @@ class Migration:
         self.backend.no_system_services()
         new_state = self.backend.state(NEW_LABEL)
         if new_state['loaded']:
-            self.backend.verify_owner(new_state, self.new_exe, contract['manifest']['binary_sha256'])
-            self.backend.stop(NEW_LABEL)
+            expected_agent = digest(plistlib.dumps(plan['new_service']))
+            require(document.get('new_agent_sha256') == expected_agent, 'Original new-agent binding differs')
+            new_state = self.backend.verify_cleanup_owner(new_state, self.new, contract, self.new_plist, expected_agent)
+            if new_state['loaded']: self.backend.stop(NEW_LABEL)
         self.backend.assert_absent(NEW_LABEL, self.new_exe, new_state.get('pid'))
         self.checkpoint(document, 'rollback_new_stopped')
         failed = self.work / 'failed'; safe_path(failed); failed.mkdir(mode=0o700, exist_ok=True)
@@ -402,7 +452,7 @@ def main():
                                            runner=deadline.run, check=deadline.check) as (candidate, _, contract):
         if args.recover or args.rollback:
             require(args.plan_sha256 is not None, 'Original reviewed plan hash is required for recovery/rollback')
-            with upgrade.installation_lock(migration.apps):
+            with migration_locks(migration.apps):
                 upgrade.private_regular_file(migration.journal)
                 document = gate.read_json(migration.journal)
                 require(document['plan']['release_expectations'] == asdict(expected), 'Original recovery expectations differ')

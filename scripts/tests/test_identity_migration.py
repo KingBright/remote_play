@@ -27,6 +27,7 @@ class Expected:
 
 
 class FakeMac:
+    verify_cleanup_owner = mac.MacBackend.verify_cleanup_owner
     def __init__(self, home):
         self.home = home; self.deadline = upgrade.Deadline(20)
         self.events = []; self.old_loaded = True; self.new_loaded = False
@@ -192,18 +193,20 @@ class LinuxDesktopTests(unittest.TestCase):
             if name!='desktop':self.assertEqual(path.read_bytes(),(self.assets/name).read_bytes())
     def test_plan_drift_preserves_existing_icon(self):
         h=self.reviewed();path=self.t.targets()['icon-16.png'];path.parent.mkdir(parents=True);path.write_bytes(b'user change')
-        with self.assertRaisesRegex(ValueError,'plan drift'):self.t.apply(self.assets,self.exe,self.provenance,h)
+        with self.assertRaisesRegex(ValueError,'differs|plan drift'):self.t.apply(self.assets,self.exe,self.provenance,h)
         self.assertEqual(path.read_bytes(),b'user change')
-    def test_partial_failure_restores_preimage_and_mode(self):
-        path=self.t.targets()['icon-16.png'];path.parent.mkdir(parents=True);path.write_bytes(b'old icon');path.chmod(0o640)
-        h=self.reviewed();real=linux.atomic_write
-        def fail(path,raw,mode,expected):
-            if path==self.t.targets()['icon-32.png']:raise OSError('injected disk failure')
-            return real(path,raw,mode,expected)
-        with patch.object(linux,'atomic_write',side_effect=fail):
+    def test_partial_failure_preserves_identical_preexisting_file_and_mode(self):
+        path=self.t.targets()['icon-16.png'];path.parent.mkdir(parents=True)
+        raw=(self.assets/'icon-16.png').read_bytes();path.write_bytes(raw);path.chmod(0o640);inode=path.stat().st_ino
+        h=self.reviewed();real=linux.exclusive_rename
+        def fail(source,destination):
+            if destination==self.t.targets()['icon-32.png']:raise OSError('injected disk failure')
+            return real(source,destination)
+        with patch.object(linux,'exclusive_rename',side_effect=fail):
             with self.assertRaisesRegex(OSError,'injected'):self.t.apply(self.assets,self.exe,self.provenance,h)
-        self.assertEqual(path.read_bytes(),b'old icon');self.assertEqual(path.stat().st_mode&0o777,0o640)
-        self.assertFalse(self.t.targets()['desktop'].exists())
+        self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_mode&0o777,0o640)
+        self.assertEqual(path.stat().st_ino,inode);self.assertFalse(self.t.targets()['desktop'].exists())
+
     def test_recovery_refuses_concurrent_user_edit(self):
         h=self.reviewed();self.t.apply(self.assets,self.exe,self.provenance,h)
         self.t.targets()['desktop'].write_bytes(b'user replacement');document=json.loads(self.t.journal.read_text())
