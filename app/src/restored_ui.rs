@@ -325,6 +325,7 @@ struct RestoredDashboard {
     root_focus: FocusHandle,
     video_surface_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     input_session_id: Option<u32>,
+    input_ready_since: Option<Instant>,
     status: String,
 
     drawer_open: bool,
@@ -426,6 +427,7 @@ impl RestoredDashboard {
             root_focus,
             video_surface_bounds: Arc::new(Mutex::new(None)),
             input_session_id: None,
+            input_ready_since: None,
             status: "Ready".into(),
             drawer_open: true,
             active_tab: DrawerTab::Devices,
@@ -1829,6 +1831,11 @@ impl Render for RestoredDashboard {
             remote_input_hint(&snapshot.input_status, snapshot.input_eligible,
                 self.input_focus.is_focused(window), show_drawer || self.show_apps_menu)
         }).flatten();
+        // Presentation-only hysteresis: gates close immediately; readiness is shown
+        // only after it remains stable. This never enables or authorizes input.
+        let input_ready = stable_input_ready(snapshot.input_eligible
+            && self.input_focus.is_focused(window) && !show_drawer && !self.show_apps_menu,
+            &mut self.input_ready_since, Instant::now());
         let is_fullscreen = window.is_fullscreen();
         let compact = f32::from(window.viewport_size().width) < 1200.0;
         let host_stats = self.host_stats_snapshot(&role);
@@ -1925,6 +1932,8 @@ impl Render for RestoredDashboard {
                         &self.viewer_media_status,
                         &self.status,
                         self.input_locked,
+                        input_ready,
+                        input_hint.as_deref().unwrap_or(&snapshot.input_status),
                         snapshot.active_capture_supports_input,
                         side_services,
                         self.scale_mode,
@@ -1943,16 +1952,6 @@ impl Render for RestoredDashboard {
                 },
             )
             .child(self.session_switcher(cx))
-            .children(input_hint.map(|message| {
-                div().id("remote_input_status_notice").absolute()
-                    .bottom(px(16.0)).left(px(20.0)).right(px(20.0))
-                    .flex().justify_center()
-                    .child(div().occlude().max_w(px(720.0)).px_3().py_2()
-                        .bg(color_glass_card()).border_1().border_color(color_border_fine())
-                        .rounded(px(8.0)).text_size(px(11.0)).text_color(theme.content.secondary)
-                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                        .child(message))
-            }))
             .child(self.paint_acknowledgement())
             .child(drawer_trigger_capsule(
                 &snapshot.devices,
@@ -2216,6 +2215,8 @@ fn floating_control_island(
     _viewer_media_status: &UnifiedViewerMediaStatus,
     status: &str,
     input_locked: bool,
+    input_ready: bool,
+    input_status: &str,
     capture_supports_input: bool,
     side_services: SideServiceUiState,
     scale_mode: ViewportScaleMode,
@@ -2410,8 +2411,11 @@ fn floating_control_island(
                                 cx,
                             )
                             .disabled(!capture_supports_input)
+                            .tooltip(tooltip(input_status.to_owned()).build())
                             .h(px(26.0))
+                            .w(px(if compact { 90.0 } else { 138.0 }))
                             .px_2()
+                            .gap_1()
                             .text_size(px(10.0))
                             .on_click(move |_event, _window, cx| {
                                 if !capture_supports_input {
@@ -2422,15 +2426,10 @@ fn floating_control_island(
                                     cx.notify();
                                 });
                             })
-                            .child(if !capture_supports_input {
-                                if compact { "View" } else { "View Only" }
-                            } else if compact {
-                                if input_locked { "Enable" } else { "Control on" }
-                            } else if input_locked {
-                                "Enable control"
-                            } else {
-                                "Control enabled"
-                            })
+                            .child(icon(IconName::User).size(px(12.0)).color(if input_ready {
+                                theme.content.primary
+                            } else { theme.content.secondary }))
+                            .child(input_control_caption(input_locked, capture_supports_input, input_ready, compact))
                         })
                         .child(scale_mode_control(scale_mode, cx)),
                     )
@@ -5064,6 +5063,20 @@ struct DashboardSnapshot {
     input_eligible: bool,
 }
 
+// Coarse state in the existing control, exact backend reason in its tooltip.
+fn input_control_caption(locked: bool, supported: bool, ready: bool, compact: bool) -> &'static str {
+    match (supported, locked, ready, compact) {
+        (false, _, _, true) => "View", (false, _, _, false) => "View only",
+        (true, true, _, true) => "Enable", (true, true, _, false) => "Enable control",
+        (true, false, false, true) => "Paused", (true, false, false, false) => "Control paused",
+        (true, false, true, true) => "Ready", (true, false, true, false) => "Control ready",
+    }
+}
+fn stable_input_ready(available: bool, since: &mut Option<Instant>, now: Instant) -> bool {
+    if !available { *since=None; return false; }
+    now.saturating_duration_since(*since.get_or_insert(now)) >= Duration::from_millis(750)
+}
+
 fn remote_input_hint(status: &str, eligible: bool, focused: bool, local_overlay: bool) -> Option<String> {
     if local_overlay {
         Some("Remote input is paused while a local menu is open. Close the drawer or source menu to continue".into())
@@ -5088,6 +5101,22 @@ mod input_tests {
     };
     use crate::HostStats;
 
+    #[test]
+    fn readiness_display_closes_immediately_and_debounces_recovery() {
+        let start=std::time::Instant::now();let mut since=None;
+        assert!(!super::stable_input_ready(true,&mut since,start));
+        assert!(!super::stable_input_ready(true,&mut since,start+std::time::Duration::from_millis(749)));
+        assert!(super::stable_input_ready(true,&mut since,start+std::time::Duration::from_millis(750)));
+        assert!(!super::stable_input_ready(false,&mut since,start+std::time::Duration::from_millis(751)));
+        assert!(!super::stable_input_ready(true,&mut since,start+std::time::Duration::from_secs(2)));
+    }
+    #[test]
+    fn control_caption_never_calls_a_blocked_or_locked_session_ready() {
+        assert_eq!(super::input_control_caption(false,true,false,false),"Control paused");
+        assert_eq!(super::input_control_caption(false,true,true,false),"Control ready");
+        assert_eq!(super::input_control_caption(true,true,true,false),"Enable control");
+        assert_eq!(super::input_control_caption(false,false,true,false),"View only");
+    }
     #[test]
     fn blocked_input_reason_remains_visible_without_enabling_control() {
         for reason in ["View only: click Enable control", "Host source is view-only", "RemotePlay needs Accessibility"] {

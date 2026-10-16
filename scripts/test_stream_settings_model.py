@@ -18,6 +18,9 @@ LINUX_TARGET = "x86_64-unknown-linux-gnu"
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "gui-input-status":
+        return [cargo, "test", *shared, "-p", "remote_play_app", "--lib", "--no-default-features",
+                "--features", "gpui-restoration", "restored_ui::input_tests::", "--", "--nocapture"]
     if mode in ("input-loss-build", "input-loss-tests"):
         return [cargo, "test" if mode.endswith("tests") else "build", *shared,
                 "-p", "remote_play_app", "--example", "window_scoped_acceptance_guarded",
@@ -50,7 +53,7 @@ def validation_command(cargo, target, mode):
 def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
-    if mode in ("media-acceptance-build", "input-loss-build", "input-loss-tests") and any(name in env for name in (
+    if mode in ("media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status") and any(name in env for name in (
             "REMOTEPLAY_BUILD_IDENTITY_FILE", "REMOTEPLAY_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
     if mode == "linux-x11-check":
@@ -72,7 +75,7 @@ def validation_environment(mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests"),
+    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -114,7 +117,7 @@ def main():
             "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
-    if args.mode.startswith("media-lifecycle") or args.mode in ("media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests"):
+    if args.mode.startswith("media-lifecycle") or args.mode in ("media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"):
         paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]

@@ -474,7 +474,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         } else if !self.conn.input_ready(self.video_id,self.source_revision) {
             "Waiting for this host to bind safe input to the current source"
         } else if !self.input_focused {
-            "Window is not focused: remote input released"
+            "RemotePlay window is inactive; remote control is paused"
         } else if self.paused || self.presentation_hidden || self.activity_pending.is_some() {
             "Remote control paused. Resume video and wait for a frame from this source"
         } else if self
@@ -482,7 +482,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             .video_decoder_needs_keyframe
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            "Recovering video references: control waits for a newly displayed frame"
+            "Waiting for a video keyframe; remote control is temporarily paused"
         } else if !self.conn.peer_is_responsive() {
             "Host heartbeat is stale: control disabled"
         } else if !current_input_frame(self.uploaded_at, self.first_frame_after, true) {
