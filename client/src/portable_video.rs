@@ -33,6 +33,7 @@ pub struct DecodedFrame {
     pub recv_time: u32,
     pub decode_cost_ms: f32,
     pub timing: protocol::FrameTimingCheckpoints,
+    pub video_epoch: remote_core::video_recovery::VideoEpoch,
     pub decoded_at: Instant,
 }
 impl remote_core::VideoFrame for DecodedFrame {
@@ -177,7 +178,7 @@ impl DecoderPipe {
         shared: Arc<Mutex<Option<DecodedFrame>>>,
         stats: Arc<Statistics>,
         epoch: Arc<AtomicU64>,
-        generation: u64,
+        recovery: remote_core::video_recovery::VideoEpoch,
         status: Arc<Mutex<String>>,
         timestamp: Arc<AtomicU32>,
         frame_signal: Option<Arc<tokio::sync::Notify>>,
@@ -232,13 +233,14 @@ impl DecoderPipe {
         let stdout = child.stdout.take().ok_or("decoder stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("decoder stderr unavailable")?;
         let report = status.clone();
+        let error_stats = stats.clone();
         let reader = tokio::spawn(async move {
             let mut input = BufReader::new(stdout);
             loop {
                 let start = Instant::now();
                 match read_rgba_frame(&mut input).await {
                     Ok(Some((width, height, rgba))) => {
-                        if epoch.load(Ordering::Acquire) != generation {
+                        if epoch.load(Ordering::Acquire) != recovery.source {
                             break;
                         }
                         let frame = DecodedFrame {
@@ -253,28 +255,30 @@ impl DecoderPipe {
                             recv_time: 0,
                             decode_cost_ms: start.elapsed().as_secs_f32() * 1000.,
                             timing: Default::default(),
+                            video_epoch: recovery,
                             decoded_at: Instant::now(),
                         };
-                        let mut slot = shared.lock().unwrap();
-                        if epoch.load(Ordering::Acquire) != generation {
+                        let Some(previous) = stats.video_recovery.publish(recovery, || {
+                            report.lock().unwrap().clear();
+                            shared.lock().unwrap().replace(frame)
+                        }) else {
                             break;
-                        }
-                        stats
-                            .video_decoder_needs_keyframe
-                            .store(false, Ordering::Release);
-                        let previous = slot.replace(frame);
-                        drop(slot);
+                        };
                         drop(previous);
                         if let Some(signal) = &frame_signal {
                             signal.notify_one();
                         }
                         stats.video_frames_decoded.fetch_add(1, Ordering::Relaxed);
-                        report.lock().unwrap().clear();
                     }
-                    Ok(None) => break,
+                    Ok(None) => {
+                        stats.video_recovery.fail(recovery, || ());
+                        break;
+                    }
                     Err(e) => {
-                        *report.lock().unwrap() = e;
-                        stats.video_decode_errors.fetch_add(1, Ordering::Relaxed);
+                        stats.video_recovery.fail(recovery, || {
+                            *report.lock().unwrap() = e;
+                            stats.video_decode_errors.fetch_add(1, Ordering::Relaxed);
+                        });
                         break;
                     }
                 }
@@ -287,7 +291,9 @@ impl DecoderPipe {
                 match header_line(&mut reader).await {
                     Ok(Some(line)) => {
                         if !line.is_empty() {
-                            *status.lock().unwrap() = line.chars().take(300).collect();
+                            error_stats.video_recovery.with_current(recovery, || {
+                                *status.lock().unwrap() = line.chars().take(300).collect();
+                            });
                         }
                     }
                     _ => break,
@@ -304,7 +310,7 @@ impl DecoderPipe {
 }
 
 pub fn spawn_decoder(
-    packets: mpsc::Receiver<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>,
+    packets: mpsc::Receiver<remote_core::client_session::VideoPacket>,
     shared: Arc<Mutex<Option<DecodedFrame>>>,
     stats: Arc<Statistics>,
     epoch: Arc<AtomicU64>,
@@ -314,7 +320,7 @@ pub fn spawn_decoder(
 }
 
 pub fn spawn_decoder_with_signal(
-    mut packets: mpsc::Receiver<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>,
+    mut packets: mpsc::Receiver<remote_core::client_session::VideoPacket>,
     shared: Arc<Mutex<Option<DecodedFrame>>>,
     stats: Arc<Statistics>,
     epoch: Arc<AtomicU64>,
@@ -323,28 +329,34 @@ pub fn spawn_decoder_with_signal(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut pipe: Option<DecoderPipe> = None;
-        let mut generation = epoch.load(Ordering::Acquire);
         let mut previous: Option<(u32, u16)> = None;
         let mut waiting = true;
-        stats
-            .video_decoder_needs_keyframe
-            .store(true, Ordering::Release);
+        let mut recovery = stats.video_recovery.snapshot().epoch;
         let timestamp = Arc::new(AtomicU32::new(0));
-        while let Some((packet, _timing)) = packets.recv().await {
+        while let Some((packet, _timing, packet_epoch)) = packets.recv().await {
+            let current = stats.video_recovery.snapshot();
+            if packet_epoch != current.epoch.source {
+                continue;
+            }
             let id = (packet.header.ssrc, packet.header.sequence_number);
-            let changed = epoch.load(Ordering::Acquire) != generation
-                || previous.is_some_and(|p| p.0 != id.0 || p.1.wrapping_add(1) != id.1);
+            let gap = previous.is_some_and(|p| p.0 != id.0 || p.1.wrapping_add(1) != id.1);
+            let changed = current.epoch != recovery || gap;
             if changed {
-                stats
-                    .video_decoder_reference_gaps
-                    .fetch_add(1, Ordering::Relaxed);
-                stats
-                    .video_decoder_needs_keyframe
-                    .store(true, Ordering::Release);
+                if gap {
+                    stats
+                        .video_decoder_reference_gaps
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                recovery = if gap {
+                    let Some(next) = stats.video_recovery.require_keyframe(packet_epoch) else {
+                        continue;
+                    };
+                    next
+                } else {
+                    current.epoch
+                };
                 pipe.take();
                 waiting = true;
-                generation = epoch.load(Ordering::Acquire);
-                shared.lock().unwrap().take();
             }
             previous = Some(id);
             let keyframe = remote_core::media_plane::is_hevc_keyframe(&packet.payload);
@@ -362,14 +374,18 @@ pub fn spawn_decoder_with_signal(
                     shared.clone(),
                     stats.clone(),
                     epoch.clone(),
-                    generation,
+                    recovery,
                     status.clone(),
                     timestamp.clone(),
                     frame_signal.clone(),
                 ) {
                     Ok(p) => pipe = Some(p),
                     Err(e) => {
-                        *status.lock().unwrap() = e;
+                        if let Some(next) = stats.video_recovery.fail(recovery, || {
+                            *status.lock().unwrap() = e;
+                        }) {
+                            recovery = next;
+                        }
                         continue;
                     }
                 }
@@ -381,13 +397,14 @@ pub fn spawn_decoder_with_signal(
             {
                 Ok(Ok(())) => waiting = false,
                 _ => {
-                    *status.lock().unwrap() =
-                        "HEVC decoder input stalled or closed; waiting for a keyframe".into();
                     pipe.take();
                     waiting = true;
-                    stats
-                        .video_decoder_needs_keyframe
-                        .store(true, Ordering::Release);
+                    if let Some(next) = stats.video_recovery.fail(recovery, || {
+                        *status.lock().unwrap() =
+                            "HEVC decoder input stalled or closed; waiting for a keyframe".into();
+                    }) {
+                        recovery = next;
+                    }
                 }
             }
         }
@@ -404,7 +421,8 @@ mod tests {
         }
         let shared = Arc::new(Mutex::new(None));
         let stats = Statistics::new();
-        let epoch = Arc::new(AtomicU64::new(1));
+        stats.video_recovery.reset_source(|| ());
+        let epoch = stats.video_recovery.source_counter();
         let error = Arc::new(Mutex::new(String::new()));
         let (tx, rx) = mpsc::channel(4);
         let task = spawn_decoder(rx, shared.clone(), stats.clone(), epoch, error.clone());
@@ -422,6 +440,7 @@ mod tests {
                 payload,
             },
             Default::default(),
+            stats.video_recovery.snapshot().epoch.source,
         ))
         .await
         .unwrap();

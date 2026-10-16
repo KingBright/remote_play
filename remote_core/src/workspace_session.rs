@@ -3,7 +3,7 @@
 use crate::Statistics;
 use crate::workspace_input::InputState;
 use crate::client_session::{
-    AudioIngressEvent, EnvelopeIngress, MediaPacketHandler, SharedHostStats,
+    AudioIngressEvent, EnvelopeIngress, MediaPacketHandler, SharedHostStats, VideoPacket,
 };
 use crate::file_transfer_runtime::{
     FileTransferCommand, FileTransferEvent, FileTransferRuntimeConfig, run_file_transfer_runtime,
@@ -22,7 +22,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
-type VideoIngress = mpsc::Sender<(RtpPacket, FrameTimingCheckpoints)>;
+type VideoIngress = mpsc::Sender<VideoPacket>;
 enum Command {
     Control(SessionCommand),
     Realtime(protocol::realtime_input::RealtimeInput, Instant),
@@ -266,6 +266,7 @@ impl WorkspaceConnection {
 struct View {
     host_stats: Arc<SharedHostStats>,
     handler: MediaPacketHandler,
+    accepted: bool,
     active: bool,
     audio_active: bool,
     audio_owner: Option<u32>,
@@ -422,6 +423,7 @@ impl Actor {
             SessionCommand::Close { .. } => {
                 *self.input.lock().unwrap() = InputState::default();
                 self.pending.clear();
+                self.subscriptions.clear();
             }
             SessionCommand::Unsubscribe { id } => {
                 self.subscriptions.remove(id);
@@ -430,15 +432,29 @@ impl Actor {
                 self.pending.retain(|_, pending|
                     !matches!(pending.command, SessionCommand::SwitchSource { id: requested, .. } if requested == *id));
             }
-            SessionCommand::SetActivity { id, revision, video, audio } => {
+            SessionCommand::SetActivity {
+                id,
+                revision,
+                video,
+                audio,
+            } => {
                 if let Some(view) = self.subscriptions.get_mut(id)
-                    && *revision > view.activity_revision {
+                    && *revision > view.activity_revision
+                {
                     view.activity_revision = *revision;
-                    view.wanted = crate::media_demand::MediaDemand { video: *video, audio: *audio };
+                    view.wanted = crate::media_demand::MediaDemand {
+                        video: *video,
+                        audio: *audio,
+                    };
                     // Stop ingress immediately; reopening waits for this exact
                     // activity revision to be acknowledged by the host.
-                    if !video { view.active = false; view.handler.reset_video_source(); }
-                    if !audio { view.audio_active = false; }
+                    if !video {
+                        view.active = false;
+                        view.handler.suspend_video_source();
+                    }
+                    if !audio {
+                        view.audio_active = false;
+                    }
                 }
             }
             _ => {}
@@ -469,32 +485,68 @@ impl Actor {
         self.flush_audio_activity();
     }
     fn audio_payload_active(&self, stream_id: u32) -> bool {
-        self.audio_groups.iter().any(|(owner, active)| *active &&
-            [protocol::remote_system_audio_stream_id(*owner), protocol::remote_microphone_audio_stream_id(*owner)].contains(&stream_id))
+        self.audio_groups.iter().any(|(owner, active)| {
+            *active
+                && [
+                    protocol::remote_system_audio_stream_id(*owner),
+                    protocol::remote_microphone_audio_stream_id(*owner),
+                ]
+                .contains(&stream_id)
+        })
     }
     fn flush_audio_activity(&mut self) -> bool {
         while let Some((&stream_id, &active)) = self.pending_audio_activity.first_key_value() {
-            if self.audio_tx.try_send(AudioIngressEvent::PayloadActivity { stream_id, active }).is_err() { return false; }
+            if self
+                .audio_tx
+                .try_send(AudioIngressEvent::PayloadActivity { stream_id, active })
+                .is_err()
+            {
+                return false;
+            }
             self.pending_audio_activity.remove(&stream_id);
         }
         true
     }
     fn reject_request(&mut self, request_id: u32) {
-        let video: Vec<_> = self.pending.values().filter_map(|pending| match pending.command {
-            SessionCommand::SwitchSource { id, request_id: requested, .. } if requested == request_id => Some(id),
-            _ => None,
-        }).collect();
+        let video: Vec<_> = self
+            .pending
+            .values()
+            .filter_map(|pending| match pending.command {
+                SessionCommand::SwitchSource {
+                    id,
+                    request_id: requested,
+                    ..
+                } if requested == request_id => Some(id),
+                _ => None,
+            })
+            .collect();
         self.pending.retain(|key, _| key.1 != request_id);
         // Video was gated while waiting, so even a rejected switch has skipped
         // compressed references. Recover the retained source from a keyframe.
         for id in video {
-            if let Some(view) = self.subscriptions.get_mut(&id) { view.handler.reset_video_source(); }
+            if let Some(view) = self.subscriptions.get_mut(&id) {
+                view.handler.reset_video_source();
+            }
         }
     }
     fn accept_control(&mut self, command: &SessionCommand) -> bool {
+        if let SessionCommand::Activity { id, .. } = command
+            && (self.pending.contains_key(&(2, *id))
+                || !self.subscriptions.get(id).is_some_and(|view| view.accepted))
+        {
+            // An activity reply cannot stand in for the initial subscription
+            // acknowledgement or resurrect a removed recovery target.
+            return false;
+        }
         if let Some(key) = request_key(command) {
             let pending = self.pending.get(&key);
-            trace_control_event(self.id,"ack_received",command,pending.map(|p|p.started.elapsed()),None);
+            trace_control_event(
+                self.id,
+                "ack_received",
+                command,
+                pending.map(|p| p.started.elapsed()),
+                None,
+            );
             let current = match command {
                 SessionCommand::Subscribed { id, .. } => self.subscriptions.contains_key(id)
                     && pending.is_some_and(|pending| matches!(&pending.command,
@@ -512,28 +564,64 @@ impl Actor {
                 }),
             };
             if !current {
-                trace_control_event(self.id,"ack_rejected",command,pending.map(|p|p.started.elapsed()),None);
+                trace_control_event(
+                    self.id,
+                    "ack_rejected",
+                    command,
+                    pending.map(|p| p.started.elapsed()),
+                    None,
+                );
                 return false;
             }
-            trace_control_event(self.id,"ack_accepted",command,pending.map(|p|p.started.elapsed()),None);
+            trace_control_event(
+                self.id,
+                "ack_accepted",
+                command,
+                pending.map(|p| p.started.elapsed()),
+                None,
+            );
             if let SessionCommand::SourceSwitched { id, .. } = command {
-                let Some(view) = self.subscriptions.get_mut(id) else { return false; };
+                let Some(view) = self.subscriptions.get_mut(id) else {
+                    return false;
+                };
                 view.handler.reset_video_source();
             }
             self.pending.remove(&key);
         }
-        if let SessionCommand::Subscribed { id, audio_owner, .. } = command {
+        if let SessionCommand::Subscribed {
+            id, audio_owner, ..
+        } = command
+        {
             if let Some(view) = self.subscriptions.get_mut(id) {
+                view.accepted = true;
                 view.audio_owner = *audio_owner;
                 view.active = view.wanted.video;
                 view.audio_active = view.wanted.audio;
+                if view.active {
+                    view.handler.activate_video_source(self.target);
+                } else {
+                    view.handler.suspend_video_source();
+                }
             }
             self.refresh_audio_activity();
         }
-        if let SessionCommand::Activity { id, revision, video, audio } = command {
+        if let SessionCommand::Activity {
+            id,
+            revision,
+            video,
+            audio,
+        } = command
+        {
             if let Some(view) = self.subscriptions.get_mut(id) {
-                if *revision < view.activity_revision { return false; }
-                if *video && view.wanted.video && !view.active { view.handler.reset_video_source(); }
+                if *revision < view.activity_revision {
+                    return false;
+                }
+                if *video && view.wanted.video && !view.active {
+                    view.handler.activate_video_source(self.target);
+                }
+                if !video && view.active {
+                    view.handler.suspend_video_source();
+                }
                 view.active = *video && view.wanted.video;
                 view.audio_active = *audio && view.wanted.audio;
             }
@@ -573,7 +661,11 @@ impl Actor {
         let mut last_pong = Instant::now();
         let mut rejected_count = 0u64;
         let mut rejection_log_at: Option<Instant> = None;
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        let mut clock = crate::clock_sync::ClockSynchronizer::new();
+        let mut clock_continuity=crate::clock_sync::ClockContinuity::new();
+        let mut probe_id = 0u64;
+        let mut last_probe=Instant::now()-Duration::from_secs(5);
         let mut retry = tokio::time::interval(Duration::from_millis(250));
         let mut input_tick = tokio::time::interval(Duration::from_millis(protocol::realtime_input::INPUT_REFRESH_INTERVAL_MS));
         input_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -590,7 +682,23 @@ impl Actor {
                         let _ = self.control_tx.send(SessionCommand::Closed { connection_id:self.id, reason:"device stopped responding".into() });
                         break;
                     }
-                    let _ = self.sender.send_control(&ControlMessage::Ping { client_send_ts: now_unix_ms() }, self.target).await;
+                    let now=crate::timing::quanta_now_us();
+                    if !clock_continuity.observe(now,std::time::SystemTime::now()){clock.invalidate_measurements();}
+                    let estimate=clock.estimate(now);
+                    for view in self.subscriptions.values_mut(){view.handler.update_clock_estimate(estimate.clone());}
+                    let cadence=if self.subscriptions.values().any(|view|view.active){Duration::from_secs(1)}else{Duration::from_secs(5)};
+                    if last_probe.elapsed()<cadence{continue;}last_probe=Instant::now();
+                    if let Some(session_id)=self.sender.peer_session_id(self.target) {
+                        let Some(next)=probe_id.checked_add(1) else { break; };probe_id=next;
+                        if clock.begin_probe(probe_id,now).is_ok() {
+                            let probe=protocol::session_auth::ClockProbe{session_id,probe_id,client_send_us:now};
+                            if self.sender.send_control(&ControlMessage::ClockProbe(probe),self.target).await.is_err(){clock.cancel_probe(probe_id);}
+                        }
+                    } else {
+                        // Unpaired development transport can retain a heartbeat but
+                        // never obtains a cross-device clock estimate.
+                        let _=self.sender.send_control(&ControlMessage::Ping{client_send_ts:0},self.target).await;
+                    }
                 }
                 _ = retry.tick(), if !self.pending.is_empty() => {
                     let mut expired = Vec::new();
@@ -630,7 +738,7 @@ impl Actor {
                             let _ = self.control_tx.send(SessionCommand::Error { request_id: request.id, reason: "decoder subscription limit reached".into() }); continue;
                         }
                         let handler = MediaPacketHandler::new(stats, Arc::new(AtomicU32::new(request.id)), host_stats.clone(), self.audio_tx.clone(), video, None);
-                        self.subscriptions.insert(request.id, View { handler, host_stats, active: false, audio_active: false, audio_owner: None, wanted: crate::media_demand::MediaDemand { video: true, audio: request.audio }, activity_revision: 0 });
+                        self.subscriptions.insert(request.id, View { handler, host_stats, accepted: false, active: false, audio_active: false, audio_owner: None, wanted: crate::media_demand::MediaDemand { video: true, audio: request.audio }, activity_revision: 0 });
                         self.refresh_audio_activity();
                         self.request(SessionCommand::Subscribe(request)).await;
                     }
@@ -674,12 +782,16 @@ impl Actor {
                             let _ = self.control_tx.send(command);
                             if closed { return; }
                         }
-                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { client_send_ts, host_recv_ts, host_send_ts }, addr)) if addr == self.target => {
-                            last_pong = Instant::now(); self.last_response_tx.send_replace(last_pong);
-                            let now = now_unix_ms();
-                            let rtt = (now.saturating_sub(client_send_ts) as f32).clamp(0.1,1000.0);
-                            let offset = ((host_recv_ts as f64-client_send_ts as f64)+(host_send_ts as f64-now as f64))/2.0;
-                            for view in self.subscriptions.values_mut() { view.handler.update_clock_sync(rtt,offset); }
+                        Ok(MultiplexedPacket::ClockReply(reply,received_us,addr)) if addr==self.target => {
+                            // Liveness follows authenticated session traffic, never clock fit quality.
+                            last_pong=Instant::now();self.last_response_tx.send_replace(last_pong);
+                            if clock.complete_probe(reply.probe.probe_id,reply.probe.client_send_us,reply.host_recv_us,reply.host_send_us,received_us).is_ok(){
+                                let estimate=clock.estimate(received_us);
+                                for view in self.subscriptions.values_mut(){view.handler.update_clock_estimate(estimate.clone());}
+                            }
+                        },
+                        Ok(MultiplexedPacket::Control(ControlMessage::Pong { .. }, addr)) if addr==self.target && self.sender.peer_session_id(self.target).is_none()=>{
+                            last_pong=Instant::now();self.last_response_tx.send_replace(last_pong);
                         },
                         Ok(MultiplexedPacket::Control(ControlMessage::HostTelemetry { fps, encode_latency_ms, jitter_ms, bitrate_kbps }, addr)) if addr == self.target => {
                             for view in self.subscriptions.values() { view.host_stats.apply_host_telemetry(fps,encode_latency_ms,jitter_ms,bitrate_kbps); }
@@ -772,59 +884,7 @@ async fn authenticate_with_key(
     target: SocketAddr,
     psk: &[u8],
 ) -> Result<(), String> {
-    let nonce = random_bytes_16();
-    let timestamp_ms = now_unix_ms();
-    let hello = ControlMessage::SessionHello {
-        nonce,
-        timestamp_ms,
-        mac: mac_session_hello(psk, &nonce, timestamp_ms),
-    };
-    let mut last_error = None;
-    for _ in 0..4 {
-        sender
-            .send_control(&hello, target)
-            .await
-            .map_err(|e| e.to_string())?;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(750);
-        loop {
-            let received = tokio::time::timeout_at(deadline, receiver.recv()).await;
-            let reply = match received {
-                Ok(Ok(MultiplexedPacket::Control(reply, addr))) if addr == target => reply,
-                Ok(Ok(_)) => continue,
-                Ok(Err(error)) => {
-                    last_error = Some(error.to_string());
-                    continue;
-                }
-                Err(_) => break,
-            };
-            match reply {
-                ControlMessage::SessionAccept {
-                    salt,
-                    timestamp_ms,
-                    mac,
-                } => {
-                    verify_session_mac(
-                        &mac_session_accept(psk, &salt, timestamp_ms),
-                        &mac,
-                        timestamp_ms,
-                        now_unix_ms(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                    sender.install_peer_crypto(
-                        target,
-                        SessionCrypto::from_psk(psk, &salt).map_err(|e| e.to_string())?,
-                    );
-                    return Ok(());
-                }
-                ControlMessage::SessionReject { reason } => return Err(reason),
-                _ => {}
-            }
-        }
-    }
-    Err(match last_error {
-        Some(error) => format!("authentication timed out: {error}"),
-        None => "authentication timed out".into(),
-    })
+    crate::session_auth::authenticate_with_key(sender,receiver,target,psk).await.map(|_|())
 }
 
 async fn initial_open(
@@ -864,7 +924,6 @@ async fn initial_open(
                     SessionCommand::Error { reason, .. } => return Err(reason),
                     _ => {}
                 },
-                ControlMessage::SessionReject { reason } => return Err(reason),
                 _ => {}
             }
         }
@@ -877,6 +936,22 @@ mod tests {
     use super::*;
     use protocol::session::CaptureSource;
 
+    #[tokio::test]
+    async fn authenticated_open_ignores_plaintext_retired_reject_and_handshake(){
+        let server=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let target=server.local_addr().unwrap();let (tx,rx)=server.split();
+        let client=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let local=client.local_addr().unwrap();let(sender,receiver)=client.split();
+        sender.install_peer_crypto(target,SessionCrypto::from_psk(b"fixture",b"open",SessionRole::Client).unwrap());tx.install_peer_crypto(local,SessionCrypto::from_psk(b"fixture",b"open",SessionRole::Host).unwrap());
+        let task=tokio::spawn(async move{
+            assert!(matches!(rx.recv().await.unwrap(),MultiplexedPacket::Control(ControlMessage::Session(_),_)));
+            tx.send_control(&ControlMessage::SessionReject{reason:"forged abort".into()},local).await.unwrap();
+            tx.send_control(&ControlMessage::SessionAccept{salt:[0;16],timestamp_ms:0,mac:[0;32]},local).await.unwrap();
+            let unrelated=crate::session_auth::ClientHandshake::new(crate::session_auth::AuthTime::now()).message(b"wrong-key");
+            tx.send_control(&ControlMessage::SessionHandshake(Box::new(unrelated)),local).await.unwrap();
+            tx.send_control(&ControlMessage::Session(Box::new(SessionCommand::Opened{connection_id:55,version:SESSION_VERSION,max_subscriptions:1,files:false,clipboard:false,window_capture:false})),local).await.unwrap();
+        });
+        assert!(matches!(initial_open(&sender,&receiver,target,SessionCommand::Open{connection_id:55,version:SESSION_VERSION}).await.unwrap(),SessionCommand::Opened{connection_id:55,..}));task.await.unwrap();
+    }
+
     async fn source_switch_actor() -> (Actor, mpsc::Receiver<AudioIngressEvent>) {
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let target = mux.local_addr().unwrap();
@@ -886,38 +961,405 @@ mod tests {
         let (control_tx, _) = mpsc::unbounded_channel();
         let (audio_tx, audio_rx) = mpsc::channel(8);
         let (files_tx, _) = mpsc::channel(1);
-        (Actor {input:Arc::new(std::sync::Mutex::new(InputState::default())),last_response_tx,id:90108,target,sender,receiver,commands,
-            control_tx,audio_tx,files_tx,subscriptions:HashMap::new(),pending:HashMap::new(),clipboard:None,audio_groups:HashMap::new(),pending_audio_activity:std::collections::BTreeMap::new()},audio_rx)
+        (
+            Actor {
+                input: Arc::new(std::sync::Mutex::new(InputState::default())),
+                last_response_tx,
+                id: 90108,
+                target,
+                sender,
+                receiver,
+                commands,
+                control_tx,
+                audio_tx,
+                files_tx,
+                subscriptions: HashMap::new(),
+                pending: HashMap::new(),
+                clipboard: None,
+                audio_groups: HashMap::new(),
+                pending_audio_activity: std::collections::BTreeMap::new(),
+            },
+            audio_rx,
+        )
     }
-    fn source_switch_view(actor: &mut Actor, id: u32) -> mpsc::Receiver<(RtpPacket,FrameTimingCheckpoints)> {
+    fn source_switch_view(actor: &mut Actor, id: u32) -> mpsc::Receiver<VideoPacket> {
         let (decode_tx, decode_rx) = mpsc::channel(8);
-        let handler = MediaPacketHandler::new(Statistics::new(), Arc::new(AtomicU32::new(id)),
-            Arc::new(SharedHostStats::default()),actor.audio_tx.clone(),decode_tx,None);
+        let handler = MediaPacketHandler::new(
+            Statistics::new(),
+            Arc::new(AtomicU32::new(id)),
+            Arc::new(SharedHostStats::default()),
+            actor.audio_tx.clone(),
+            decode_tx,
+            None,
+        );
         actor.audio_groups.insert(id, true);
-        actor.subscriptions.insert(id, View {host_stats:Arc::new(SharedHostStats::default()),handler,active:true,audio_active:true,audio_owner:Some(id),wanted:crate::media_demand::MediaDemand::BOTH,activity_revision:0});
+        actor.subscriptions.insert(
+            id,
+            View {
+                host_stats: Arc::new(SharedHostStats::default()),
+                handler,
+                accepted: true,
+                active: true,
+                audio_active: true,
+                audio_owner: Some(id),
+                wanted: crate::media_demand::MediaDemand::BOTH,
+                activity_revision: 0,
+            },
+        );
         decode_rx
     }
-    fn source_video(id:u32, seq:u16) -> RtpPacket {
-        RtpPacket {header:protocol::RtpHeader {version:2,payload_type:protocol::PayloadType::VideoH265 as u8,
-            sequence_number:seq,timestamp:1,ssrc:id},payload:vec![0,0,1,0x26,1,seq as u8]}
+    fn source_video(id: u32, seq: u16) -> RtpPacket {
+        RtpPacket {
+            header: protocol::RtpHeader {
+                version: 2,
+                payload_type: protocol::PayloadType::VideoH265 as u8,
+                sequence_number: seq,
+                timestamp: 1,
+                ssrc: id,
+            },
+            payload: vec![0, 0, 1, 0x26, 1, seq as u8],
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_first_packet_loss_uses_real_retries_and_pause_unsubscribe_stop_them() {
+        let server = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target = server.local_addr().unwrap();
+        let (server_tx, server_rx) = server.split();
+        let (mut actor, _) = source_switch_actor().await;
+        let local = actor.target;
+        actor.target = target;
+        let key = b"first-packet-recovery-fixture";
+        actor
+            .sender
+            .install_peer_crypto(target, SessionCrypto::from_psk(key, b"test", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"test", SessionRole::Host).unwrap());
+        let (commands, rx) = mpsc::channel(8);
+        actor.commands = rx;
+        let (cancel, cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move {
+            Box::pin(actor.run(cancel_rx)).await;
+        });
+        let (video, _video_rx) = mpsc::channel(1);
+        let stats = Statistics::new();
+        stats.video_recovery.track_output();
+        let request = SubscriptionRequest {
+            id: 7,
+            source: CaptureSource::MainDisplay,
+            width: 640,
+            height: 360,
+            fps: 30,
+            bitrate_kbps: 2000,
+            audio: false,
+        };
+        commands
+            .send(Command::Subscribe(
+                request,
+                video,
+                stats.clone(),
+                Arc::new(SharedHostStats::default()),
+            ))
+            .await
+            .unwrap();
+        async fn next_control(rx: &UdpReceiver, category: u8) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let MultiplexedPacket::Control(ControlMessage::Session(command), _) =
+                        rx.recv().await.unwrap()
+                        && request_key(&command).is_some_and(|key| key.0 == category)
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        async fn next_recovery(rx: &UdpReceiver) {
+            loop {
+                if matches!(
+                    rx.recv().await.unwrap(),
+                    MultiplexedPacket::Control(
+                        ControlMessage::RequestKeyframe { session_id: 7 },
+                        _
+                    )
+                ) {
+                    break;
+                }
+            }
+        }
+        next_control(&server_rx, 2).await;
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Activity {
+                    id: 7,
+                    revision: 0,
+                    video: true,
+                    audio: false,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                Box::pin(next_recovery(&server_rx))
+            )
+            .await
+            .is_err()
+        );
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Subscribed {
+                    id: 7,
+                    audio_owner: None,
+                    supports_input: true,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), Box::pin(next_recovery(&server_rx)))
+            .await
+            .unwrap();
+        let first = Instant::now();
+        tokio::time::timeout(Duration::from_secs(1), Box::pin(next_recovery(&server_rx)))
+            .await
+            .unwrap();
+        assert!(
+            first.elapsed() >= Duration::from_millis(200),
+            "retry must be rate limited"
+        );
+        assert_eq!(
+            stats
+                .udp_packets_recv
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        commands
+            .send(Command::Control(SessionCommand::SetActivity {
+                id: 7,
+                revision: 1,
+                video: false,
+                audio: false,
+            }))
+            .await
+            .unwrap();
+        next_control(&server_rx, 4).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                Box::pin(next_recovery(&server_rx))
+            )
+            .await
+            .is_err()
+        );
+        commands
+            .send(Command::Control(SessionCommand::SetActivity {
+                id: 7,
+                revision: 2,
+                video: true,
+                audio: false,
+            }))
+            .await
+            .unwrap();
+        next_control(&server_rx, 4).await;
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Activity {
+                    id: 7,
+                    revision: 1,
+                    video: true,
+                    audio: false,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                Box::pin(next_recovery(&server_rx))
+            )
+            .await
+            .is_err(),
+            "stale activity ACK"
+        );
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Activity {
+                    id: 7,
+                    revision: 2,
+                    video: true,
+                    audio: false,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), Box::pin(next_recovery(&server_rx)))
+            .await
+            .unwrap();
+        commands
+            .send(Command::Control(SessionCommand::Unsubscribe { id: 7 }))
+            .await
+            .unwrap();
+        next_control(&server_rx, 3).await;
+        server_tx
+            .send_control(
+                &ControlMessage::Session(Box::new(SessionCommand::Subscribed {
+                    id: 7,
+                    audio_owner: None,
+                    supports_input: true,
+                })),
+                local,
+            )
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(300),
+                Box::pin(next_recovery(&server_rx))
+            )
+            .await
+            .is_err()
+        );
+        cancel.send(()).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_epoch_is_fixed_before_enqueue_and_duplicate_audio_ack_preserves_it() {
+        let (mut actor, _) = source_switch_actor().await;
+        let mut packets = source_switch_view(&mut actor, 7);
+        actor
+            .packet(source_video(7, 10), FrameTimingCheckpoints::default())
+            .await;
+        actor
+            .request(SessionCommand::SwitchSource {
+                id: 7,
+                request_id: 100,
+                source: CaptureSource::Display(88),
+            })
+            .await;
+        assert!(actor.accept_control(&SessionCommand::SourceSwitched {
+            id: 7,
+            request_id: 100,
+            source: CaptureSource::Display(88),
+            supports_input: true
+        }));
+        actor
+            .packet(source_video(7, 20), FrameTimingCheckpoints::default())
+            .await;
+        let old = packets.try_recv().unwrap();
+        let current = packets.try_recv().unwrap();
+        assert_ne!(old.2, current.2, "queued old IDR must retain its old epoch");
+        assert!(actor.accept_control(&SessionCommand::Activity {
+            id: 7,
+            revision: 1,
+            video: true,
+            audio: false
+        }));
+        assert!(actor.accept_control(&SessionCommand::Activity {
+            id: 7,
+            revision: 1,
+            video: true,
+            audio: false
+        }));
+        actor
+            .packet(source_video(7, 21), FrameTimingCheckpoints::default())
+            .await;
+        assert_eq!(
+            packets.try_recv().unwrap().2,
+            current.2,
+            "audio/duplicate ACK must not invalidate video"
+        );
+        actor.prepare_control(&SessionCommand::Close {
+            connection_id: actor.id,
+        });
+        assert!(
+            actor.subscriptions.is_empty(),
+            "closing removes recovery targets immediately"
+        );
     }
 
     #[tokio::test]
     async fn confirmation_accepts_current_ack_once_and_preserves_paused_demand() {
         let (mut actor, _audio) = source_switch_actor().await;
-        actor.id=90109;
-        let _video = source_switch_view(&mut actor,7);
-        { let view=actor.subscriptions.get_mut(&7).unwrap();
-          view.active=false; view.audio_active=false; view.audio_owner=None;
-          view.wanted=crate::media_demand::MediaDemand { video:false,audio:false }; }
+        actor.id = 90109;
+        let _video = source_switch_view(&mut actor, 7);
+        {
+            let view = actor.subscriptions.get_mut(&7).unwrap();
+            view.active = false;
+            view.audio_active = false;
+            view.audio_owner = None;
+            view.wanted = crate::media_demand::MediaDemand {
+                video: false,
+                audio: false,
+            };
+        }
         actor.audio_groups.clear();
-        actor.request(SessionCommand::Subscribe(SubscriptionRequest { id:7,
-            source:CaptureSource::Window(123),width:640,height:360,fps:30,bitrate_kbps:2000,audio:true })).await;
-        let ack=SessionCommand::Subscribed { id:7,audio_owner:Some(7),supports_input:true };
+        actor
+            .request(SessionCommand::Subscribe(SubscriptionRequest {
+                id: 7,
+                source: CaptureSource::Window(123),
+                width: 640,
+                height: 360,
+                fps: 30,
+                bitrate_kbps: 2000,
+                audio: true,
+            }))
+            .await;
+        let ack = SessionCommand::Subscribed {
+            id: 7,
+            audio_owner: Some(7),
+            supports_input: true,
+        };
         assert!(actor.accept_control(&ack));
         assert!(!actor.subscriptions[&7].active);
         assert!(!actor.subscriptions[&7].audio_active);
-        assert!(!actor.accept_control(&ack), "duplicate ack must not reopen a paused subscription");
+        assert!(
+            !actor.accept_control(&ack),
+            "duplicate ack must not reopen a paused subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_cannot_replace_a_rejected_initial_subscription_ack() {
+        let (mut actor, _audio) = source_switch_actor().await;
+        let _video = source_switch_view(&mut actor, 7);
+        let view = actor.subscriptions.get_mut(&7).unwrap();
+        view.accepted = false;
+        view.active = false;
+        view.audio_active = false;
+        view.handler.suspend_video_source();
+        actor
+            .request(SessionCommand::Subscribe(SubscriptionRequest {
+                id: 7,
+                source: CaptureSource::MainDisplay,
+                width: 640,
+                height: 360,
+                fps: 30,
+                bitrate_kbps: 2000,
+                audio: false,
+            }))
+            .await;
+        assert!(actor.accept_control(&SessionCommand::Error {
+            request_id: 7,
+            reason: "source unavailable".into()
+        }));
+        assert!(!actor.pending.contains_key(&(2, 7)));
+        assert!(!actor.accept_control(&SessionCommand::Activity {
+            id: 7,
+            revision: 1,
+            video: true,
+            audio: false
+        }));
+        let view = actor.subscriptions.get_mut(&7).unwrap();
+        assert!(!view.active);
+        assert!(view.handler.take_keyframe_request().is_none());
     }
 
     #[test]
@@ -1133,8 +1575,8 @@ mod tests {
         let local = client.local_addr().unwrap();
         let (sender, receiver) = client.split();
         let key = b"local-actor-backpressure-regression";
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture").unwrap());
-        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture", SessionRole::Host).unwrap());
         let (last_response_tx, mut last_response_rx) = tokio::sync::watch::channel(Instant::now());
         let (commands, command_rx) = mpsc::channel(128);
         let (control_tx, mut controls) = mpsc::unbounded_channel();
@@ -1144,6 +1586,7 @@ mod tests {
         let stats = Statistics::new();
         let view = View {
             host_stats: Arc::new(SharedHostStats::default()),
+            accepted: true,
             active: true,
             audio_active: true,
             audio_owner: Some(7),
@@ -1213,17 +1656,10 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0
         );
-        server_tx
-            .send_control(
-                &ControlMessage::Pong {
-                    client_send_ts: 1,
-                    host_recv_ts: 2,
-                    host_send_ts: 3,
-                },
-                local,
-            )
-            .await
-            .unwrap();
+        let (probe,host_recv_us)=tokio::time::timeout(Duration::from_secs(2),async{
+            loop{if let MultiplexedPacket::ClockProbe(probe,received,from)=server_rx.recv().await.unwrap(){assert_eq!(from,local);break(probe,received);}}
+        }).await.unwrap();
+        server_tx.send_control(&ControlMessage::ClockReply(protocol::session_auth::ClockReply{probe,host_recv_us,host_send_us:crate::timing::quanta_now_us()}),local).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), last_response_rx.changed())
             .await
             .unwrap()
@@ -1276,8 +1712,8 @@ mod tests {
         let local = client.local_addr().unwrap();
         let (sender, receiver) = client.split();
         let key = b"isolated-close-retry-fixture";
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture").unwrap());
-        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture").unwrap());
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"fixture", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"fixture", SessionRole::Host).unwrap());
         let (last_response_tx, _) = tokio::sync::watch::channel(Instant::now());
         let (commands, command_rx) = mpsc::channel(8);
         let (control_tx, mut controls) = mpsc::unbounded_channel();
@@ -1363,50 +1799,22 @@ mod tests {
         let (client_tx, client_rx) = client.split();
         let key = b"workspace-handshake-regression-key";
         let task = tokio::spawn(async move {
-            let mut first_nonce = None;
+            let mut first_nonce=None;
+            let mut state=crate::session_auth::ServerHandshake::default();
+            let mut dropped_finish=false;
             loop {
-                if let MultiplexedPacket::Control(
-                    ControlMessage::SessionHello {
-                        nonce,
-                        timestamp_ms,
-                        mac,
-                    },
-                    addr,
-                ) = server_rx.recv().await.unwrap()
-                {
-                    verify_session_mac(
-                        &mac_session_hello(key, &nonce, timestamp_ms),
-                        &mac,
-                        timestamp_ms,
-                        now_unix_ms(),
-                    )
-                    .unwrap();
-                    if first_nonce.is_none() {
-                        first_nonce = Some(nonce);
-                        continue;
+                if let MultiplexedPacket::Control(ControlMessage::SessionHandshake(message),addr)=server_rx.recv().await.unwrap(){
+                    if let protocol::session_auth::HandshakeMessage::Hello{client_nonce,..}=&*message {
+                        if first_nonce.is_none(){first_nonce=Some(*client_nonce);continue;}
+                        assert_eq!(first_nonce,Some(*client_nonce));
+                        for _ in 0..6 {server_tx.send_control(&ControlMessage::Ping{client_send_ts:1},addr).await.unwrap();}
                     }
-                    assert_eq!(first_nonce, Some(nonce));
-                    for _ in 0..6 {
-                        server_tx
-                            .send_control(&ControlMessage::Ping { client_send_ts: 1 }, addr)
-                            .await
-                            .unwrap();
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    let salt = random_bytes_16();
-                    let timestamp_ms = now_unix_ms();
-                    server_tx
-                        .send_control(
-                            &ControlMessage::SessionAccept {
-                                salt,
-                                timestamp_ms,
-                                mac: mac_session_accept(key, &salt, timestamp_ms),
-                            },
-                            addr,
-                        )
-                        .await
-                        .unwrap();
-                    break;
+                    let reply=state.receive(key,&message,addr,crate::session_auth::AuthTime::now(),true).unwrap();
+                    if let Some(established)=reply.established {server_tx.install_peer_crypto(addr,established.crypto);}
+                    if matches!(reply.message,protocol::session_auth::HandshakeMessage::ServerFinish{..})&&!dropped_finish{dropped_finish=true;continue;}
+                    let done=matches!(reply.message,protocol::session_auth::HandshakeMessage::ServerFinish{..});
+                    server_tx.send_control(&ControlMessage::SessionHandshake(Box::new(reply.message)),addr).await.unwrap();
+                    if done {break;}
                 }
             }
         });
@@ -1431,13 +1839,13 @@ mod rejected_datagram_tests {
         // Independent encryption state over the same test socket simulates a
         // delayed plaintext packet carrying a forged session-level command.
         let (plain, _) = server.split();
-        let (server_tx, _) = server.split();
+        let (server_tx, server_rx) = server.split();
         let client = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let local = client.local_addr().unwrap();
         let (sender, receiver) = client.split();
         let key = b"local-only-rejected-datagram-regression";
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"test-salt").unwrap());
-        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"test-salt").unwrap());
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"test-salt", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"test-salt", SessionRole::Host).unwrap());
         let (last_response_tx, mut response) = tokio::sync::watch::channel(Instant::now());
         let (commands, commands_rx) = mpsc::channel(8);
         let (control_tx, mut controls) = mpsc::unbounded_channel();
@@ -1473,17 +1881,10 @@ mod rejected_datagram_tests {
                 .await
                 .unwrap();
         }
-        server_tx
-            .send_control(
-                &ControlMessage::Pong {
-                    client_send_ts: 1,
-                    host_recv_ts: 2,
-                    host_send_ts: 3,
-                },
-                local,
-            )
-            .await
-            .unwrap();
+        let (probe,host_recv_us)=tokio::time::timeout(Duration::from_secs(2),async{
+            loop{if let MultiplexedPacket::ClockProbe(probe,received,from)=server_rx.recv().await.unwrap(){assert_eq!(from,local);break(probe,received);}}
+        }).await.unwrap();
+        server_tx.send_control(&ControlMessage::ClockReply(protocol::session_auth::ClockReply{probe,host_recv_us,host_send_us:crate::timing::quanta_now_us()}),local).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), response.changed())
             .await
             .unwrap()
@@ -1538,8 +1939,8 @@ mod open_packet_isolation_tests {
         let (server_tx, _) = server.split();
         let (sender, receiver) = client.split();
         let key = b"synthetic-open-retry-isolation";
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt").unwrap());
-        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt").unwrap());
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt", SessionRole::Host).unwrap());
         for _ in 0..8 {
             plain
                 .send_control(&ControlMessage::Heartbeat, local)
@@ -1588,8 +1989,8 @@ mod open_packet_isolation_tests {
         let (server_tx, _) = server.split();
         let (sender, receiver) = client.split();
         let key = b"synthetic-open-error-test";
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt").unwrap());
-        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt").unwrap());
+        sender.install_peer_crypto(target, SessionCrypto::from_psk(key, b"salt", SessionRole::Client).unwrap());
+        server_tx.install_peer_crypto(local, SessionCrypto::from_psk(key, b"salt", SessionRole::Host).unwrap());
         server_tx
             .send_control(
                 &ControlMessage::Session(Box::new(SessionCommand::Error {

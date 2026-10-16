@@ -318,7 +318,7 @@ impl MobileWorkspace {
         let connection = Arc::downgrade(&self.connection);
         let task = tokio::spawn(async move {
             let mut waiting = true;
-            while let Some((packet, timing)) = rx.recv().await {
+            while let Some((packet, timing, _source_epoch)) = rx.recv().await {
                 let keyframe = hevc_keyframe(&packet.payload);
                 let overflow = {
                     let mut state = state.lock().unwrap();

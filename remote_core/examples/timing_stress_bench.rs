@@ -2,10 +2,10 @@ use protocol::{FrameTimingCheckpoints, RtpHeader, RtpPacket, StageId};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use remote_core::clock_sync::{ClockSyncState, ClockSynchronizer};
 use remote_core::jitter_buffer::JitterBuffer;
 use remote_core::timing::{
-    ClientFrameTracker, ClockSynchronizer, HighPrecisionClock, HostFrameTracker, quanta_now,
-    quanta_now_us,
+    ClientFrameTracker, HighPrecisionClock, HostFrameTracker, quanta_now, quanta_now_us,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -653,53 +653,47 @@ fn run_concurrent_jitter_buffer_pipeline_stress(num_producers: usize, packets_pe
 }
 
 fn run_clock_synchronizer_stress() {
-    println!("\n=== [2.6] ClockSynchronizer EWMA & Outlier Stress Test ===");
+    println!("\n=== [2.6] ClockSynchronizer Matched Probes & Low-RTT Fit ===");
     let mut syncer = ClockSynchronizer::new();
+    let base = quanta_now_us();
+    let mut now = base;
 
-    // Initial warm up with ~10ms RTT and 500µs offset
+    // Synthetic timestamps share one anchored domain; every probe registers t1.
     for i in 0..100 {
-        let t1 = 1_000_000_000 + i * 50_000;
-        let host_delay = 500;
-        let t2 = t1 + 5_000 + 500; // t2 = t1 + one_way + offset
-        let t3 = t2 + host_delay;
-        let t4 = t1 + 10_000 + host_delay; // total rtt = 10_000 + host_delay
-
-        syncer.update_pong(t1, t2, t3, t4);
+        let t1 = base + i * 50_000;
+        let t2 = t1 + 5_000 + 500;
+        let t3 = t2 + 500;
+        now = t1 + 10_500;
+        syncer.begin_probe(i, t1).unwrap();
+        syncer.complete_probe(i, t1, t2, t3, now).unwrap();
     }
+    let normal = syncer.estimate(now).unwrap();
+    assert_eq!(normal.latest_sample.network_rtt_us, 10_000);
+    assert!((normal.offset_us - 500.0).abs() < 0.001);
+    assert_eq!(normal.state, ClockSyncState::Synchronized);
 
-    println!(
-        "ClockSynchronizer after 100 normal pings: RTT={}µs, Offset={}µs",
-        syncer.rtt_us(),
-        syncer.clock_offset_us()
-    );
-    assert!(
-        (syncer.rtt_us() as i32 - 10_000).abs() < 500,
-        "RTT should converge to ~10ms"
-    );
-    assert!(
-        (syncer.clock_offset_us() - 500).abs() < 100,
-        "Offset should converge to ~500µs"
-    );
-
-    // Inject massive latency spikes (e.g. 500ms RTT)
-    for _ in 0..10 {
-        let t1 = quanta_now_us();
-        let t2 = t1 + 250_000;
-        let t3 = t2 + 1_000;
-        let t4 = t1 + 500_000;
-        syncer.update_pong(t1, t2, t3, t4);
+    // Preserve 500ms raw spikes for telemetry while excluding them from the fit.
+    for i in 100..110 {
+        let t1 = now + 100_000;
+        now = t1 + 500_000;
+        syncer.begin_probe(i, t1).unwrap();
+        syncer
+            .complete_probe(i, t1, t1 + 250_000, t1 + 251_000, now)
+            .unwrap();
     }
-
+    let after_spikes = syncer.estimate(now).unwrap();
+    assert_eq!(after_spikes.latest_sample.raw_total_rtt_us, 500_000);
+    assert_eq!(after_spikes.latest_sample.network_rtt_us, 499_000);
+    assert!(after_spikes.selected_sample_count < after_spikes.sample_count);
+    assert!((after_spikes.offset_us - 500.0).abs() < 0.001);
     println!(
-        "ClockSynchronizer after 10 huge spikes (500ms): RTT={}µs, Offset={}µs",
-        syncer.rtt_us(),
-        syncer.clock_offset_us()
+        "Raw RTT={}µs, network RTT={}µs, fitted offset={}µs, asymmetry allowance={}µs",
+        after_spikes.latest_sample.raw_total_rtt_us,
+        after_spikes.latest_sample.network_rtt_us,
+        after_spikes.offset_us,
+        after_spikes.asymmetry_bound_us,
     );
-    assert!(
-        syncer.rtt_us() < 50_000,
-        "Spikes should be filtered out, RTT must remain bounded"
-    );
-    println!(">>> [PASS] ClockSynchronizer EWMA filtering and outlier rejection verified");
+    println!(">>> [PASS] Matched-probe low-RTT fit preserves raw outlier telemetry");
 }
 
 fn main() {

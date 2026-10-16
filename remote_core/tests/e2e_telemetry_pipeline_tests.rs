@@ -1,11 +1,10 @@
 use protocol::{FrameTimingCheckpoints, PipelineTelemetryReport, StageId, StageLatencyStats};
+use remote_core::clock_sync::ClockSynchronizer;
 use remote_core::telemetry::{
     DropReason, PipelineTelemetryEngine, RollingBitrateCalculator, RollingFpsCalculator,
     RollingQuantileAggregator,
 };
-use remote_core::timing::{
-    ClientFrameTracker, ClockSynchronizer, HighPrecisionClock, HostFrameTracker,
-};
+use remote_core::timing::{ClientFrameTracker, HighPrecisionClock, HostFrameTracker};
 use remote_core::trace::{
     BottleneckAnalyzer, BottleneckSeverity, ChromeTraceExporter, TraceSpikeTrigger,
 };
@@ -229,8 +228,11 @@ fn test_tier2_spike_trigger_threshold_edge_cases() {
 #[test]
 fn test_tier3_clock_sync_tracker_and_telemetry_pairwise() {
     let mut syncer = ClockSynchronizer::new();
-    syncer.update_pong(1_000_000, 1_005_000, 1_006_000, 1_012_000);
-    assert!(syncer.is_initialized());
+    syncer.begin_probe(1, 1_000_000).unwrap();
+    syncer
+        .complete_probe(1, 1_000_000, 1_005_000, 1_006_000, 1_012_000)
+        .unwrap();
+    let estimate = syncer.estimate(1_012_000).unwrap();
 
     let clock = HighPrecisionClock::new();
     let mut host_tracker = HostFrameTracker::start(clock.clone());
@@ -244,7 +246,7 @@ fn test_tier3_clock_sync_tracker_and_telemetry_pairwise() {
     let host_cp = host_tracker.finish();
 
     let mut client_tracker =
-        ClientFrameTracker::start(host_cp, clock.clone(), syncer.clock_offset_us());
+        ClientFrameTracker::start(host_cp, clock.clone(), estimate.offset_us.round() as i64);
     std::thread::sleep(Duration::from_micros(100));
     client_tracker.mark_jitter_enter();
     std::thread::sleep(Duration::from_micros(100));

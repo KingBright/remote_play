@@ -2,6 +2,7 @@
 //! the canonical profile lock; frontends own only outgoing sessions and windows.
 //! No shell execution or media copies cross this endpoint; GUI activation uses the installed executable.
 use crate::{UnifiedRuntimeConfig, UnifiedRuntimeHandle, UnifiedServiceOwner};
+use crate::service_contract::{self, Offer, Selection};
 use client::{MeshPairingBackend, MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
 use remote_core::{discovery::DiscoveryPeerSnapshot, mesh::AppPrivateMeshConfigStore};
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
+enum Request { Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -37,7 +38,7 @@ struct Snapshot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Response { Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
+enum Response { Negotiated { generation: String, executable_sha256: String, selection: Result<Selection, service_contract::Rejection> }, Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
 
 pub(crate) use crate::private_ipc::private_directory;
 #[cfg(unix)]
@@ -141,6 +142,9 @@ impl Drop for Service {
     fn drop(&mut self) { let mut closed=self.closing.lock().unwrap();*closed=true;self.broker.verified_gui_generation("");self.broker.reconcile(|_|false); self.delivery_task.abort(); self.task.abort(); crate::private_ipc::remove_endpoint(&self.path); }
 }
 fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: String, executable_sha256: String, owner_mode:OwnerMode) -> Response {
+    if let Request::Negotiate { generation: expected, executable_sha256: hash, offer } = request {
+        return answer_negotiation(expected, hash, offer, generation, executable_sha256);
+    }
     if let Request::Delivery {generation:expected,executable_sha256:hash,intent} = request {
         if expected!=generation || hash!=executable_sha256 {return Response::Rejected("Background generation changed".into());}
         if let Err(error)=runtime.owner.delivery.local(intent){return Response::Rejected(error);}
@@ -159,30 +163,64 @@ fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: Stri
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
         Request::Reload(message) => pairing.request_runtime_reload(message),
-        Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
+        Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
     };
     let peers = runtime.owner.discovery_snapshot_rx().map(|rx| rx.borrow().clone()).unwrap_or_default();
     Response::Snapshot(Snapshot { schema: SCHEMA, owner_mode, version: env!("CARGO_PKG_VERSION").into(), generation, executable_sha256, pid: std::process::id(), peers, pairing })
 }
 
+fn answer_negotiation(expected: String, hash: String, offer: Offer, generation: String, executable_sha256: String) -> Response {
+    // Compatibility is not process identity. Preserve the current exact
+    // executable and service-generation gates even for this read-only API.
+    if expected != generation || hash != executable_sha256 {
+        return Response::Rejected("Background generation or executable changed".into());
+    }
+    Response::Negotiated { generation, executable_sha256, selection: service_contract::current_offer().negotiate(&offer) }
+}
+
 #[derive(Clone)]
-pub struct Client { profile: PathBuf, executable_sha256: String, cached: Arc<Mutex<Snapshot>> }
+pub struct Client { profile: PathBuf, executable_sha256: String, cached: Arc<Mutex<Snapshot>>, contract: Arc<Mutex<Option<Selection>>>, transition: Arc<Mutex<()>> }
 impl Client {
     pub fn connect(profile: &Path) -> Result<Self, Error> {
         let executable_sha256 = executable_hash()?;
         let snapshot = request(profile, &Request::Snapshot, &executable_sha256)?;
+        let contract = negotiate(profile, &snapshot, &executable_sha256)?;
         refresh_secret(profile)?;
-        Ok(Self { profile: profile.into(), executable_sha256, cached: Arc::new(Mutex::new(snapshot)) })
+        Ok(Self { profile: profile.into(), executable_sha256, cached: Arc::new(Mutex::new(snapshot)), contract: Arc::new(Mutex::new(Some(contract))), transition: Arc::new(Mutex::new(())) })
     }
     fn exchange(&self, command: Request) -> Result<DiscoveryPeerSnapshot, Error> {
-        let snapshot = request(&self.profile, &command, &self.executable_sha256)?;
-        let mut cached = self.cached.lock().unwrap();
-        // A service restart invalidates all GUI session/source/file bindings;
-        // it does not launch a new GUI or silently keep stale routed endpoints.
-        if cached.generation != snapshot.generation || cached.pairing.invite_code != snapshot.pairing.invite_code {
-            refresh_secret(&self.profile)?;
+        self.transition(|| {
+            let snapshot = request(&self.profile, &command, &self.executable_sha256)?;
+            let (generation, invite, contract) = {
+                let cached = self.cached.lock().unwrap();
+                (cached.generation.clone(), cached.pairing.invite_code.clone(), self.contract.lock().unwrap().clone())
+            };
+            // A restart requires a fresh capability result, never the previous
+            // process's selection. Keep I/O outside the short cache locks.
+            let contract = if generation != snapshot.generation || contract.is_none() {
+                negotiate(&self.profile, &snapshot, &self.executable_sha256)?
+            } else { contract.unwrap() };
+            if generation != snapshot.generation || invite != snapshot.pairing.invite_code {
+                refresh_secret(&self.profile)?;
+            }
+            Ok((snapshot, contract))
+        })
+    }
+    fn transition(&self, operation: impl FnOnce() -> Result<(Snapshot, Selection), Error>) -> Result<DiscoveryPeerSnapshot, Error> {
+        // Polling and pairing share one transition. A late old success/failure
+        // cannot overwrite or invalidate a newer confirmed owner. Include error
+        // invalidation in this lock, not in an asynchronous caller afterwards.
+        let _serial = self.transition.lock().unwrap();
+        match operation() {
+            Ok((snapshot, contract)) => {
+                let peers = snapshot.peers.clone();
+                let mut cached = self.cached.lock().unwrap();
+                *self.contract.lock().unwrap() = Some(contract);
+                *cached = snapshot;
+                Ok(peers)
+            }
+            Err(error) => { self.unavailable(); Err(error) }
         }
-        let peers = snapshot.peers.clone(); *cached = snapshot; Ok(peers)
     }
     pub(crate) fn delivery(&self,intent:host::directed_delivery::LocalIntent)->Result<(),Error> {
         let generation=self.cached.lock().unwrap().generation.clone();
@@ -196,6 +234,7 @@ impl Client {
         let cached = self.cached.lock().unwrap();
         serde_json::json!({"schema": SCHEMA, "role": if cached.owner_mode==OwnerMode::Background {"background-service"}else{"standalone-gui"}, "pid": cached.pid,
             "version": cached.version, "executable_sha256": cached.executable_sha256,
+            "service_contract": *self.contract.lock().unwrap(),
             "discovered_routes": cached.peers.len(), "profile": self.profile})
     }
     pub async fn frontend_runtime(&self) -> Result<UnifiedRuntimeHandle, Error> {
@@ -213,7 +252,7 @@ impl Client {
                 let result = tokio::task::spawn_blocking(move || worker.exchange(Request::Snapshot)).await;
                 let snapshot = match result {
                     Ok(Ok(snapshot)) => snapshot,
-                    _ => { client.unavailable(); DiscoveryPeerSnapshot::default() },
+                    _ => DiscoveryPeerSnapshot::default(),
                 };
                 if previous != client.cached.lock().unwrap().generation { epoch.fetch_add(1, std::sync::atomic::Ordering::Release); }
                 if tx.send(snapshot).is_err() { break; }
@@ -224,6 +263,7 @@ impl Client {
     }
     fn unavailable(&self) {
         let mut cached = self.cached.lock().unwrap();
+        *self.contract.lock().unwrap() = None;
         // Invalidate once per outage, not on every poll.
         if cached.generation != "unavailable" {
             cached.generation = "unavailable".into();
@@ -233,27 +273,57 @@ impl Client {
         cached.pairing.message_kind = MeshPairingMessageKind::Error;
     }
     fn pairing_command(&self, command: Request) -> MeshPairingSnapshot {
-        if self.exchange(command).is_err() { self.unavailable(); }
+        let _ = self.exchange(command);
         self.snapshot()
     }
 }
 pub(crate) fn executable_hash() -> Result<String, Error> {
     Ok(format!("{:x}", Sha256::digest(fs::read(std::env::current_exe()?)?)))
 }
-fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result<Snapshot, Error> {
+fn exchange_response(profile: &Path, command: &Request) -> Result<Response, Error> {
     let mut socket=crate::private_ipc::connect(profile,SOCKET,TIMEOUT)?;
     socket.write_all(&frame(&serde_json::to_vec(command)?)?)?;
     let mut header = [0; 4]; socket.read_exact(&mut header)?;
     let mut bytes = vec![0; valid_length(header)?]; socket.read_exact(&mut bytes)?;
-    let snapshot = match serde_json::from_slice::<Response>(&bytes)? {
+    Ok(serde_json::from_slice::<Response>(&bytes)?)
+}
+fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result<Snapshot, Error> {
+    let snapshot = match exchange_response(profile, command)? {
         Response::Snapshot(snapshot) => snapshot,
         Response::Rejected(_) => return Err("Background service rejected the operation".into()),
-        Response::ConnectionDiagnostics(_)=>return Err("Expected background Snapshot".into()),
+        Response::ConnectionDiagnostics(_)|Response::Negotiated{..}=>return Err("Expected background Snapshot".into()),
     };
+    validate_snapshot(&snapshot, profile, executable_sha256)?;
+    Ok(snapshot)
+}
+fn validate_snapshot(snapshot: &Snapshot, profile: &Path, executable_sha256: &str) -> Result<(), Error> {
     if snapshot.executable_sha256 != executable_sha256 || snapshot.schema != SCHEMA || snapshot.version != env!("CARGO_PKG_VERSION") || snapshot.pairing.config_dir != profile {
         return Err("Background service executable/protocol/version/profile mismatch; upgrade the service and GUI together".into());
     }
-    Ok(snapshot)
+    Ok(())
+}
+fn negotiate(profile: &Path, snapshot: &Snapshot, executable_sha256: &str) -> Result<Selection, Error> {
+    // Keep the legacy trust gate independent of negotiation. In particular, a
+    // compatible major/minor does not admit a different or untrusted binary.
+    validate_snapshot(snapshot, profile, executable_sha256)?;
+    let offer = service_contract::current_offer();
+    let response = exchange_response(profile, &Request::Negotiate {
+        generation: snapshot.generation.clone(), executable_sha256: executable_sha256.into(), offer: offer.clone(),
+    })?;
+    validate_negotiation(response, snapshot, &offer)
+}
+fn validate_negotiation(response: Response, snapshot: &Snapshot, offer: &Offer) -> Result<Selection, Error> {
+    let Response::Negotiated { generation, executable_sha256, selection } = response else {
+        return Err("Background service did not negotiate the local API".into());
+    };
+    if generation != snapshot.generation || executable_sha256 != snapshot.executable_sha256 {
+        return Err("Background generation or executable changed during negotiation".into());
+    }
+    // The existing trust policy admits only this exact executable, whose offer
+    // is known. Reject fabricated, extra or missing negotiated capabilities.
+    let expected = service_contract::current_offer().negotiate(offer);
+    if selection != expected { return Err("Invalid service capability selection".into()); }
+    selection.map_err(|error| format!("Incompatible service API: {error:?}").into())
 }
 fn refresh_secret(profile: &Path) -> Result<(), Error> {
     // Read existing membership only. A GUI never generates or saves credentials.
@@ -299,6 +369,286 @@ pub async fn run(mut config: UnifiedRuntimeConfig) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(test)]
+mod service_contract_tests {
+    use super::*;
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            schema: SCHEMA,
+            owner_mode: OwnerMode::Background,
+            version: env!("CARGO_PKG_VERSION").into(),
+            generation: "service-1".into(),
+            executable_sha256: "fixture-trusted-hash".into(),
+            pid: 123,
+            peers: DiscoveryPeerSnapshot::default(),
+            pairing: MeshPairingSnapshot {
+                network_name: "fixture".into(),
+                device_id: "fixture-device".into(),
+                display_name: "fixture".into(),
+                invite_code: "fixture-invite".into(),
+                config_dir: PathBuf::from("/fixture"),
+                message: String::new(),
+                message_kind: MeshPairingMessageKind::Neutral,
+                restart_required: false,
+            },
+        }
+    }
+
+    // Frozen pre-negotiation DTO: adding even an optional field to the legacy
+    // Snapshot is a breaking change for already installed strict readers.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct LegacySnapshot {
+        schema: u32,
+        owner_mode: OwnerMode,
+        version: String,
+        generation: String,
+        executable_sha256: String,
+        pid: u32,
+        peers: DiscoveryPeerSnapshot,
+        pairing: MeshPairingSnapshot,
+    }
+    #[derive(Deserialize)]
+    enum LegacyResponse {
+        Snapshot(LegacySnapshot),
+    }
+
+    #[test]
+    fn legacy_snapshot_and_requests_keep_their_exact_wire_shape() {
+        let encoded = serde_json::to_vec(&Response::Snapshot(snapshot())).unwrap();
+        let LegacyResponse::Snapshot(legacy) = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(legacy.schema, 2);
+        let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        let keys: std::collections::BTreeSet<_> = value["Snapshot"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "schema",
+                "owner_mode",
+                "version",
+                "generation",
+                "executable_sha256",
+                "pid",
+                "peers",
+                "pairing"
+            ]
+            .into_iter()
+            .collect()
+        );
+        for (request, legacy_json) in [
+            (Request::Snapshot, r#""Snapshot""#),
+            (Request::CreateGroup, r#""CreateGroup""#),
+            (
+                Request::JoinGroup("fixture-invite".into()),
+                r#"{"JoinGroup":"fixture-invite"}"#,
+            ),
+            (Request::Reload("fixture".into()), r#"{"Reload":"fixture"}"#),
+            (
+                Request::InspectConnection { connection_id: 42 },
+                r#"{"InspectConnection":{"connection_id":42}}"#,
+            ),
+        ] {
+            assert_eq!(serde_json::to_string(&request).unwrap(), legacy_json);
+            assert!(serde_json::from_str::<Request>(legacy_json).is_ok());
+        }
+    }
+
+    #[test]
+    fn negotiation_request_dispatch_and_response_use_the_real_framed_json_contract() {
+        let snapshot = snapshot();
+        let mut offer = service_contract::current_offer();
+        offer.version.minor = 8;
+        offer.capabilities.push("future-optional.v1".into());
+        let request = Request::Negotiate {
+            generation: snapshot.generation.clone(),
+            executable_sha256: snapshot.executable_sha256.clone(),
+            offer: offer.clone(),
+        };
+        let bytes = frame(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert_eq!(
+            valid_length(bytes[..4].try_into().unwrap()).unwrap(),
+            bytes.len() - 4
+        );
+        let Request::Negotiate {
+            generation,
+            executable_sha256,
+            offer: decoded,
+        } = serde_json::from_slice(&bytes[4..]).unwrap()
+        else {
+            panic!("wrong request");
+        };
+        let response = answer_negotiation(
+            generation,
+            executable_sha256,
+            decoded,
+            snapshot.generation.clone(),
+            snapshot.executable_sha256.clone(),
+        );
+        let encoded = frame(&serde_json::to_vec(&response).unwrap()).unwrap();
+        let response = serde_json::from_slice(&encoded[4..]).unwrap();
+        let selected = validate_negotiation(response, &snapshot, &offer).unwrap();
+        assert_eq!(selected.version, service_contract::VERSION);
+        assert!(
+            !selected
+                .capabilities
+                .iter()
+                .any(|c| c == "future-optional.v1")
+        );
+        assert!(serde_json::from_str::<Request>(r#"{"Negotiate":{"generation":"service-1","executable_sha256":"fixture","offer":{"version":{"major":1,"minor":0},"capabilities":[]},"trusted":true}}"#).is_err());
+    }
+
+    #[test]
+    fn compatible_protocol_cannot_relax_existing_snapshot_trust_checks() {
+        let profile = Path::new("/fixture");
+        let hash = "fixture-trusted-hash";
+        assert!(validate_snapshot(&snapshot(), profile, hash).is_ok());
+        let mut wrong_hash = snapshot();
+        wrong_hash.executable_sha256 = "different".into();
+        let mut wrong_profile = snapshot();
+        wrong_profile.pairing.config_dir = PathBuf::from("/other");
+        let mut wrong_version = snapshot();
+        wrong_version.version = "different".into();
+        let mut wrong_schema = snapshot();
+        wrong_schema.schema += 1;
+        for changed in [wrong_hash, wrong_profile, wrong_version, wrong_schema] {
+            assert!(validate_snapshot(&changed, profile, hash).is_err());
+        }
+        assert!(validate_snapshot(&snapshot(), profile, "different").is_err());
+    }
+
+    #[test]
+    fn stale_generation_and_wrong_hash_reject_before_compatibility_is_considered() {
+        let current = snapshot();
+        let offer = service_contract::current_offer();
+        for (generation, hash) in [
+            ("service-old", "fixture-trusted-hash"),
+            ("service-1", "wrong-hash"),
+        ] {
+            let response = answer_negotiation(
+                generation.into(),
+                hash.into(),
+                offer.clone(),
+                current.generation.clone(),
+                current.executable_sha256.clone(),
+            );
+            assert!(matches!(response, Response::Rejected(_)));
+            let response = Response::Negotiated {
+                generation: generation.into(),
+                executable_sha256: hash.into(),
+                selection: offer.negotiate(&offer),
+            };
+            assert!(validate_negotiation(response, &current, &offer).is_err());
+        }
+    }
+
+    #[test]
+    fn incompatible_or_fabricated_selection_never_becomes_a_client_contract() {
+        let current = snapshot();
+        let mut incompatible = service_contract::current_offer();
+        incompatible.version.major += 1;
+        let response = answer_negotiation(
+            current.generation.clone(),
+            current.executable_sha256.clone(),
+            incompatible.clone(),
+            current.generation.clone(),
+            current.executable_sha256.clone(),
+        );
+        assert!(matches!(
+            &response,
+            Response::Negotiated {
+                selection: Err(service_contract::Rejection::MajorMismatch),
+                ..
+            }
+        ));
+        assert!(validate_negotiation(response, &current, &incompatible).is_err());
+        let offer = service_contract::current_offer();
+        let mut invented = offer.negotiate(&offer).unwrap();
+        invented.capabilities.push("exit-all.v1".into());
+        let response = Response::Negotiated {
+            generation: current.generation.clone(),
+            executable_sha256: current.executable_sha256.clone(),
+            selection: Ok(invented),
+        };
+        assert!(validate_negotiation(response, &current, &offer).is_err());
+        assert!(validate_negotiation(Response::Snapshot(snapshot()), &current, &offer).is_err());
+    }
+
+    #[test]
+    fn slow_old_transition_cannot_overtake_or_invalidate_new_owner() {
+        for old_fails in [false, true] {
+            let cached = snapshot();
+            let offer = service_contract::current_offer();
+            let client = Client {
+                profile: cached.pairing.config_dir.clone(),
+                executable_sha256: cached.executable_sha256.clone(),
+                cached: Arc::new(Mutex::new(cached)),
+                contract: Arc::new(Mutex::new(Some(offer.negotiate(&offer).unwrap()))),
+                transition: Arc::new(Mutex::new(())),
+            };
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let old = client.clone();
+            let first = std::thread::spawn(move || {
+                old.transition(|| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    if old_fails {
+                        return Err("old owner unavailable".into());
+                    }
+                    let offer = service_contract::current_offer();
+                    Ok((snapshot(), offer.negotiate(&offer).unwrap()))
+                })
+                .is_ok()
+            });
+            entered_rx.recv().unwrap();
+            let (new_tx, new_rx) = std::sync::mpsc::channel();
+            let new = client.clone();
+            let second = std::thread::spawn(move || {
+                new.transition(|| {
+                    new_tx.send(()).unwrap();
+                    let mut current = snapshot();
+                    current.generation = "service-2".into();
+                    let offer = service_contract::current_offer();
+                    Ok((current, offer.negotiate(&offer).unwrap()))
+                })
+                .is_ok()
+            });
+            assert!(new_rx.recv_timeout(Duration::from_millis(30)).is_err());
+            // Status reads remain available while the serialized operation waits.
+            assert_eq!(client.status()["service_contract"]["version"]["major"], 1);
+            release_tx.send(()).unwrap();
+            assert_eq!(first.join().unwrap(), !old_fails);
+            assert!(second.join().unwrap());
+            assert_eq!(client.cached.lock().unwrap().generation, "service-2");
+            assert!(client.contract.lock().unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn outage_discards_cached_capabilities_until_new_owner_is_negotiated() {
+        let cached = snapshot();
+        let offer = service_contract::current_offer();
+        let client = Client {
+            profile: cached.pairing.config_dir.clone(),
+            executable_sha256: cached.executable_sha256.clone(),
+            cached: Arc::new(Mutex::new(cached)),
+            contract: Arc::new(Mutex::new(Some(offer.negotiate(&offer).unwrap()))),
+            transition: Arc::new(Mutex::new(())),
+        };
+        client.unavailable();
+        assert!(client.contract.lock().unwrap().is_none());
+        assert_eq!(client.cached.lock().unwrap().generation, "unavailable");
+        assert!(client.status()["service_contract"].is_null());
+    }
+}
+
 #[cfg(all(test,unix))]
 mod tests {
     use std::os::unix::{fs::{PermissionsExt,MetadataExt}};
@@ -337,6 +687,8 @@ mod tests {
         let service = Service::start(dir.path(), runtime, guard).unwrap();
         let profile = dir.path().to_owned();
         let client = tokio::task::spawn_blocking(move || Client::connect(&profile)).await.unwrap().unwrap();
+        assert_eq!(client.status()["service_contract"]["version"]["major"], 1);
+        assert!(client.contract.lock().unwrap().is_some());
         let original = ["mesh.conf", "mesh.secret"].map(|name| {
             let meta = dir.path().join(name).metadata().unwrap(); (meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())
         });

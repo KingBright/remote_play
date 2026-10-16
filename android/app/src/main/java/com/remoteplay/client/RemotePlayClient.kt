@@ -30,7 +30,15 @@ enum class TouchMode(val code: Int) {
 
 data class TelemetrySnapshot(
     val fps: Float = 0.0f,
+    // Decoder cost only; capture-to-receive and its uncertainty are separate.
     val latencyMs: Float = 0.0f,
+    val captureReceiveEstimateMs: Double? = null,
+    val networkRttMs: Double? = null,
+    val rawTotalRttMs: Double? = null,
+    val clockState: String = "unavailable",
+    val clockUncertaintyMs: Double? = null,
+    val clockFitCi95Ms: Double? = null,
+    val clockAsymmetryAllowanceMs: Double? = null,
     val jitterMs: Float = 0.0f,
     val packetLossPercent: Float = 0.0f,
     val videoBitrateKbps: Int = 0,
@@ -350,6 +358,13 @@ object RemotePlayClient {
                     val snap = TelemetrySnapshot(
                         fps = obj.optDouble("fps", 0.0).toFloat(),
                         latencyMs = obj.optDouble("latency_ms", 0.0).toFloat(),
+                        captureReceiveEstimateMs = nullableTelemetryNumber(obj.opt("capture_receive_estimate_ms")),
+                        networkRttMs = nullableTelemetryNumber(obj.opt("network_rtt_ms")),
+                        rawTotalRttMs = nullableTelemetryNumber(obj.opt("raw_total_rtt_ms")),
+                        clockState = obj.optString("clock_state", "unavailable"),
+                        clockUncertaintyMs = nullableTelemetryNumber(obj.opt("clock_uncertainty_ms")),
+                        clockFitCi95Ms = nullableTelemetryNumber(obj.opt("clock_fit_ci95_ms")),
+                        clockAsymmetryAllowanceMs = nullableTelemetryNumber(obj.opt("clock_asymmetry_allowance_ms")),
                         jitterMs = obj.optDouble("jitter_ms", 0.0).toFloat(),
                         packetLossPercent = obj.optDouble("packet_loss_percent", 0.0).toFloat(),
                         videoBitrateKbps = obj.optInt("video_bitrate_kbps", 0),

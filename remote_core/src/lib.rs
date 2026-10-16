@@ -6,6 +6,7 @@ pub mod clipboard_provider;
 pub mod clipboard_runtime;
 pub mod clipboard_sync;
 pub mod clock;
+pub mod clock_sync;
 pub mod data_plane;
 pub mod discovery;
 mod file_delivery;
@@ -26,6 +27,7 @@ pub mod relay;
 pub mod role;
 pub mod scheduled_sender;
 pub mod session_crypto;
+pub mod session_auth;
 pub mod session_tabs;
 pub mod stats;
 pub mod stream_settings;
@@ -34,6 +36,7 @@ pub mod telemetry;
 pub mod timing;
 pub mod trace;
 pub mod traits;
+pub mod video_recovery;
 pub mod workspace_session;
 mod workspace_input;
 
@@ -47,16 +50,18 @@ pub use pairing_qr::{
     PairingQrPayload, QrMatrix, encode_pairing_qr, parse_pairing_qr, qr_matrix_from_payload,
 };
 pub use session_crypto::{
-    SessionCrypto, SessionCryptoError, load_session_psk, mac_session_accept, mac_session_hello,
-    require_session_auth, verify_session_mac,
+    SessionCrypto, SessionCryptoError, SessionRole, load_session_psk, require_session_auth,
 };
 pub use stats::Statistics;
 pub use telemetry::{
     DropReason, PipelineTelemetryEngine, RollingBitrateCalculator, RollingFpsCalculator,
     RollingQuantileAggregator,
 };
+pub use clock_sync::{
+    ClockEstimate, ClockSample, ClockSyncConfig, ClockSyncError, ClockSyncState, ClockSynchronizer,
+};
 pub use timing::{
-    ClientFrameTracker, ClockSynchronizer, HighPrecisionClock, HostFrameTracker,
+    ClientFrameTracker, HighPrecisionClock, HostFrameTracker,
     advance_client_stage, client_stage_offset_us, global_clock, quanta_now, quanta_now_us,
     stamp_client_stage,
 };

@@ -2129,8 +2129,8 @@ mod routed_p2p_tests {
     async fn routed_p2p_authenticates_two_clients_and_reverse_connection_independently() {
         use crate::net::{MultiplexedPacket, UdpMultiplexer};
         use crate::p2p::tests::announcement;
-        use crate::session_crypto::{mac_session_accept, mac_session_hello, now_unix_ms};
-        use protocol::ControlMessage;
+        use crate::session_auth::{AuthTime, ClientHandshake, ServerHandshake};
+        use protocol::{ControlMessage, session_auth::HandshakeMessage};
         let server = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
         ))
@@ -2202,69 +2202,122 @@ mod routed_p2p_tests {
         let cb = client_b.split();
         let ha = host_a.split();
         let hb = host_b.split();
+        async fn receive_handshake(
+            receiver: &crate::net::UdpReceiver,
+        ) -> (HandshakeMessage, SocketAddr) {
+            match tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await
+                .expect("handshake flight must reach its owner, not another viewer")
+                .unwrap()
+            {
+                MultiplexedPacket::Control(ControlMessage::SessionHandshake(message), addr) => {
+                    (*message, addr)
+                }
+                other => panic!("wrong handshake: {other:?}"),
+            }
+        }
         async fn handshake(
             client: &(crate::net::UdpSender, crate::net::UdpReceiver),
             host: &(crate::net::UdpSender, crate::net::UdpReceiver),
+            server: &mut ServerHandshake,
             endpoint: SocketAddr,
-            nonce: [u8; 16],
         ) -> SocketAddr {
             let psk = b"isolated-test-session-secret";
-            let ts = now_unix_ms();
+            let mut attempt = ClientHandshake::new(AuthTime::now());
             client
                 .0
                 .send_control(
-                    &ControlMessage::SessionHello {
-                        nonce,
-                        timestamp_ms: ts,
-                        mac: mac_session_hello(psk, &nonce, ts),
-                    },
+                    &ControlMessage::SessionHandshake(Box::new(attempt.message(psk))),
                     endpoint,
                 )
                 .await
                 .unwrap();
-            let packet = tokio::time::timeout(Duration::from_secs(1), host.1.recv())
-                .await
-                .expect("hello must reach host, not the previous viewer")
+            let (hello, addr) = receive_handshake(&host.1).await;
+            assert!(matches!(hello, HandshakeMessage::Hello { client_nonce, .. }
+                if client_nonce == attempt.client_nonce()));
+            let challenge = server
+                .receive(psk, &hello, addr, AuthTime::now(), true)
                 .unwrap();
-            let addr = match packet {
-                MultiplexedPacket::Control(
-                    ControlMessage::SessionHello { nonce: got, .. },
-                    addr,
-                ) => {
-                    assert_eq!(got, nonce);
-                    addr
-                }
-                other => panic!("wrong handshake: {other:?}"),
-            };
-            let salt = nonce;
-            let ts = now_unix_ms();
+            assert!(challenge.established.is_none());
+            assert!(host.0.peer_session_id(addr).is_none());
+            assert!(client.0.peer_session_id(endpoint).is_none());
             host.0
                 .send_control(
-                    &ControlMessage::SessionAccept {
-                        salt,
-                        timestamp_ms: ts,
-                        mac: mac_session_accept(psk, &salt, ts),
-                    },
+                    &ControlMessage::SessionHandshake(Box::new(challenge.message)),
                     addr,
                 )
                 .await
                 .unwrap();
+            let (challenge, from) = receive_handshake(&client.1).await;
+            assert_eq!(from, endpoint);
             assert!(
-                matches!(tokio::time::timeout(Duration::from_secs(1),client.1.recv()).await.unwrap().unwrap(),MultiplexedPacket::Control(ControlMessage::SessionAccept{salt:got,..},from) if got==salt && from==endpoint)
+                attempt
+                    .receive(psk, &challenge, AuthTime::now())
+                    .unwrap()
+                    .is_none()
             );
-            client.0.install_peer_crypto(
-                endpoint,
-                crate::session_crypto::SessionCrypto::from_psk(psk, &salt).unwrap(),
+            let transcript = match challenge {
+                HandshakeMessage::Challenge { transcript, .. } => transcript,
+                other => panic!("expected host challenge: {other:?}"),
+            };
+            client
+                .0
+                .send_control(
+                    &ControlMessage::SessionHandshake(Box::new(attempt.message(psk))),
+                    endpoint,
+                )
+                .await
+                .unwrap();
+            let (finish, from) = receive_handshake(&host.1).await;
+            assert_eq!(from, addr);
+            assert!(
+                matches!(finish, HandshakeMessage::ClientFinish { transcript: got, .. }
+                if got == transcript)
             );
-            host.0.install_peer_crypto(
-                addr,
-                crate::session_crypto::SessionCrypto::from_psk(psk, &salt).unwrap(),
+            let response = server
+                .receive(psk, &finish, addr, AuthTime::now(), true)
+                .unwrap();
+            let established = response
+                .established
+                .expect("only ClientFinish installs host keys");
+            assert_eq!(established.client_nonce, attempt.client_nonce());
+            assert_eq!(established.session_id, transcript.session_id);
+            host.0.install_peer_crypto(addr, established.crypto);
+            host.0
+                .send_control(
+                    &ControlMessage::SessionHandshake(Box::new(response.message)),
+                    addr,
+                )
+                .await
+                .unwrap();
+            let (finish, from) = receive_handshake(&client.1).await;
+            assert_eq!(from, endpoint);
+            assert!(
+                matches!(finish, HandshakeMessage::ServerFinish { transcript: got, .. }
+                if got == transcript)
             );
+            let crypto = attempt
+                .receive(psk, &finish, AuthTime::now())
+                .unwrap()
+                .expect("only ServerFinish installs client keys");
+            client.0.install_peer_crypto(endpoint, crypto);
+            assert_eq!(
+                client.0.peer_session_id(endpoint),
+                Some(transcript.session_id)
+            );
+            assert_eq!(host.0.peer_session_id(addr), Some(transcript.session_id));
             addr
         }
-        let a1 = handshake(&ca, &hb, endpoint_a, [1; 16]).await;
-        let reverse = handshake(&cb, &ha, endpoint_b, [2; 16]).await;
-        let a2 = handshake(&ca2, &hb, endpoint_a, [3; 16]).await;
+        let mut auth_a = ServerHandshake::default();
+        let mut auth_b = ServerHandshake::default();
+        let a1 = handshake(&ca, &hb, &mut auth_b, endpoint_a).await;
+        let reverse = handshake(&cb, &ha, &mut auth_a, endpoint_b).await;
+        let a2 = handshake(&ca2, &hb, &mut auth_b, endpoint_a).await;
+        assert_ne!(
+            hb.0.peer_session_id(a1),
+            hb.0.peer_session_id(a2),
+            "independent viewers must have independent authenticated sessions"
+        );
         assert_ne!(
             a1, a2,
             "host crypto/session owners need distinct UDP addresses"
@@ -2279,7 +2332,7 @@ mod routed_p2p_tests {
                 .send_control(
                     &ControlMessage::Session(Box::new(protocol::session::SessionCommand::Open {
                         connection_id: id,
-                        version: 2,
+                        version: protocol::session::SESSION_VERSION,
                     })),
                     endpoint,
                 )
@@ -2287,6 +2340,23 @@ mod routed_p2p_tests {
                 .unwrap();
             assert!(
                 matches!(tokio::time::timeout(Duration::from_secs(1),host.1.recv()).await.unwrap().unwrap(),MultiplexedPacket::Control(ControlMessage::Session(command),from) if from==addr && matches!(*command,protocol::session::SessionCommand::Open{connection_id,..} if connection_id==id))
+            );
+            host.0
+                .send_control(
+                    &ControlMessage::Session(Box::new(protocol::session::SessionCommand::Opened {
+                        connection_id: id,
+                        version: protocol::session::SESSION_VERSION,
+                        max_subscriptions: 8,
+                        files: false,
+                        clipboard: false,
+                        window_capture: true,
+                    })),
+                    addr,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(tokio::time::timeout(Duration::from_secs(1),client.1.recv()).await.unwrap().unwrap(),MultiplexedPacket::Control(ControlMessage::Session(command),from) if from==endpoint && matches!(*command,protocol::session::SessionCommand::Opened{connection_id,..} if connection_id==id))
             );
         }
         let _ = cancel.send(());

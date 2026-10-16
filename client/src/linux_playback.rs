@@ -17,7 +17,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{Notify, mpsc, oneshot, watch};
-type Packet = (protocol::RtpPacket, protocol::FrameTimingCheckpoints);
+type Packet = remote_core::client_session::VideoPacket;
 static LIVE_WORKERS: AtomicU64 = AtomicU64::new(0);
 pub fn active_workers() -> u64 {
     LIVE_WORKERS.load(Ordering::Acquire)
@@ -45,6 +45,7 @@ struct Metadata {
 struct DecoderState {
     decoder: Option<LinuxHevcDecoder>,
     generation: u64,
+    recovery: remote_core::video_recovery::VideoEpoch,
     previous: Option<(u32, u16)>,
     waiting: bool,
     tag: u64,
@@ -55,6 +56,7 @@ impl DecoderState {
         Self {
             decoder: None,
             generation,
+            recovery: Default::default(),
             previous: None,
             waiting: true,
             tag: 0,
@@ -67,14 +69,22 @@ impl DecoderState {
         self.previous = None;
         self.waiting = true;
         self.generation = generation;
-        s.stats
-            .video_decoder_needs_keyframe
-            .store(true, Ordering::Release);
+        if let Some(recovery) = s.stats.video_recovery.require_keyframe(generation) {
+            self.recovery = recovery;
+        }
     }
     fn fail(&mut self, s: &Shared, error: anyhow::Error) {
-        self.reset(s, s.epoch.load(Ordering::Acquire));
-        *s.status.lock().unwrap() = error.to_string();
-        s.stats.video_decode_errors.fetch_add(1, Ordering::Relaxed);
+        if s.stats
+            .video_recovery
+            .fail(self.recovery, || {
+                *s.status.lock().unwrap() = error.to_string();
+                s.stats.video_decode_errors.fetch_add(1, Ordering::Relaxed);
+            })
+            .is_none()
+        {
+            return;
+        }
+        self.reset(s, self.generation);
         s.updates.notify_one();
     }
     fn output(&mut self, s: &Shared) -> Result<()> {
@@ -111,29 +121,26 @@ impl DecoderState {
                 recv_time: 0,
                 decode_cost_ms: cost.as_secs_f32() * 1000.,
                 timing,
+                video_epoch: self.recovery,
                 decoded_at: Instant::now(),
             };
-            let old = {
-                let mut slot = s.frame.lock().unwrap();
-                if self.generation != s.epoch.load(Ordering::Acquire) {
-                    drop(slot);
-                    drop(frame);
-                    continue;
-                }
-                s.stats
-                    .video_decoder_needs_keyframe
-                    .store(false, Ordering::Release);
-                slot.replace(frame)
+            let Some(old) = s.stats.video_recovery.publish(self.recovery, || {
+                s.status.lock().unwrap().clear();
+                s.frame.lock().unwrap().replace(frame)
+            }) else {
+                continue;
             };
             drop(old);
             self.waiting = false;
             s.stats.video_frames_decoded.fetch_add(1, Ordering::Relaxed);
-            s.status.lock().unwrap().clear();
             s.updates.notify_one();
         }
     }
-    fn input(&mut self, (packet, mut timing): Packet, s: &Shared) -> Result<()> {
+    fn input(&mut self, (packet, mut timing, packet_epoch): Packet, s: &Shared) -> Result<()> {
         let epoch = s.epoch.load(Ordering::Acquire);
+        if packet_epoch != epoch {
+            return Ok(());
+        }
         if epoch != self.generation {
             self.reset(s, epoch);
         }
@@ -259,8 +266,8 @@ pub fn spawn_decoder(
                     "native Linux decoder worker failed; reconnect the stream".into();
                 shared
                     .stats
-                    .video_decoder_needs_keyframe
-                    .store(true, Ordering::Release);
+                    .video_recovery
+                    .require_keyframe(shared.epoch.load(Ordering::Acquire));
                 shared.updates.notify_one();
             }
             let _ = done_tx.send(());
@@ -276,9 +283,7 @@ pub fn spawn_decoder(
 }
 async fn run(mut packets: mpsc::Receiver<Packet>, mut cancel: watch::Receiver<bool>, s: &Shared) {
     let mut decoder = DecoderState::new(s.epoch.load(Ordering::Acquire));
-    s.stats
-        .video_decoder_needs_keyframe
-        .store(true, Ordering::Release);
+    decoder.recovery = s.stats.video_recovery.snapshot().epoch;
     loop {
         if *cancel.borrow() {
             break;

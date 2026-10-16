@@ -12,8 +12,7 @@ use protocol::{AudioControlTarget, ContentKind, ControlMessage, DataEnvelope, In
 use remote_core::net::{MultiplexedPacket, UdpMultiplexer, UdpSender};
 use remote_core::scheduled_sender::{ScheduledDataSender, ScheduledDataSenderConfig};
 use remote_core::session_crypto::{
-    SessionCrypto, load_session_psk, mac_session_accept, mac_session_hello, now_unix_ms,
-    random_bytes_16, require_session_auth, verify_session_mac,
+    load_session_psk, now_unix_ms, random_bytes_16, require_session_auth,
 };
 use remote_core::{InputInjector, stats::Statistics};
 use std::collections::HashMap;
@@ -396,51 +395,42 @@ fn pending_closed_count(closed: &HashMap<SocketAddr, ClosedReceipt>) -> usize {
         .count()
 }
 
-// Keep Hello admission in the same production path used by the state regression.
-fn accept_session_hello(
+// Challenge issuance and Finish commit share the same native ownership gate.
+fn authentication_admission_error(
+    addr: SocketAddr,
+    peers: &HashMap<SocketAddr, Connection>,
+    closing: &HashMap<SocketAddr, ClosingTask>,
+    closed: &HashMap<SocketAddr, ClosedReceipt>,
+    authenticated: &HashMap<SocketAddr, ([u8; 16], [u8; 16], Instant)>,
+) -> Option<&'static str> {
+    if peers.contains_key(&addr) || closing.contains_key(&addr) || closed.get(&addr).is_some_and(ClosedReceipt::resources_live) {
+        return Some("close the existing connection before rekeying");
+    }
+    if authenticated.contains_key(&addr) { return Some("existing session must expire before rekeying"); }
+    if authenticated.len() >= 16 { return Some("authentication capacity reached"); }
+    None
+}
+fn accept_session_message(
     psk: Option<&[u8]>,
-    hello: ([u8; 16], u64, [u8; 32]),
+    message: &protocol::session_auth::HandshakeMessage,
     addr: SocketAddr,
     udp_sender: &UdpSender,
     peers: &HashMap<SocketAddr, Connection>,
     closing: &HashMap<SocketAddr, ClosingTask>,
     closed: &mut HashMap<SocketAddr, ClosedReceipt>,
-    authenticated: &mut HashMap<SocketAddr, ([u8; 16], [u8; 16], u64)>,
-) -> Result<([u8; 16], u64), String> {
-    let (nonce, timestamp_ms, mac) = hello;
-    let key = psk.ok_or("host has no session PSK configured")?;
-    verify_session_mac(
-        &mac_session_hello(key, &nonce, timestamp_ms),
-        &mac,
-        timestamp_ms,
-        now_unix_ms(),
-    )
-    .map_err(|e| e.to_string())?;
-    if let Some((previous, salt, ts)) = authenticated.get(&addr) {
-        if *previous == nonce {
-            return Ok((*salt, *ts));
-        }
+    authenticated: &mut HashMap<SocketAddr, ([u8; 16], [u8; 16], Instant)>,
+    handshakes: &mut remote_core::session_auth::ServerHandshake,
+) -> Result<protocol::session_auth::HandshakeMessage, String> {
+    let key=psk.ok_or("host has no session PSK configured")?;
+    let allow_new=authentication_admission_error(addr,peers,closing,closed,authenticated).is_none();
+    let reply=handshakes.receive(key,message,addr,remote_core::session_auth::AuthTime::now(),allow_new).map_err(|e|e.to_string())?;
+    if let Some(established)=reply.established {
+        // No await between admission, consuming the one-shot Finish and commit.
+        udp_sender.install_peer_crypto(addr,established.crypto);
+        authenticated.insert(addr,(established.session_id,established.client_nonce,Instant::now()));
+        closed.remove(&addr);
     }
-    // Authentication can be cleared on key rotation while native owners survive.
-    // The retained resource slot must be checked before any identity/receipt replacement.
-    if peers.contains_key(&addr)
-        || closing.contains_key(&addr)
-        || closed.get(&addr).is_some_and(ClosedReceipt::resources_live)
-    {
-        return Err("close the existing connection before rekeying".into());
-    }
-    if authenticated.len() >= 16 && !authenticated.contains_key(&addr) {
-        return Err("authentication capacity reached".into());
-    }
-    let salt = random_bytes_16();
-    let ts = now_unix_ms();
-    udp_sender.install_peer_crypto(
-        addr,
-        SessionCrypto::from_psk(key, &salt).map_err(|e| e.to_string())?,
-    );
-    authenticated.insert(addr, (nonce, salt, ts));
-    closed.remove(&addr);
-    Ok((salt, ts))
+    Ok(reply.message)
 }
 
 // Both Open and legacy StartStream must account for retained native ownership.
@@ -1814,7 +1804,8 @@ async fn run_host_service_inner(
     let mut peers = HashMap::<SocketAddr, Connection>::new();
     let mut closing = HashMap::<SocketAddr, ClosingTask>::new();
     let mut closed = HashMap::<SocketAddr, ClosedReceipt>::new();
-    let mut authenticated = HashMap::<SocketAddr, ([u8; 16], [u8; 16], u64)>::new();
+    let mut authenticated = HashMap::<SocketAddr, ([u8; 16], [u8; 16], Instant)>::new();
+    let mut handshakes = remote_core::session_auth::ServerHandshake::default();
     let mut psk = load_session_psk();
     let mut require_auth = require_session_auth() || psk.is_some();
     let mut input_owner = ActiveInput::default();
@@ -1869,7 +1860,7 @@ async fn run_host_service_inner(
                 if current_key != psk {
                     for addr in authenticated.keys() { udp_sender.remove_peer_crypto(*addr); }
                     for addr in peers.keys().copied().collect::<Vec<_>>(){begin_close(&mut peers,&mut closing,addr,false);}
-                    closed.retain(|_,receipt|receipt.resources_live());authenticated.clear(); psk = current_key;
+                    closed.retain(|_,receipt|receipt.resources_live());authenticated.clear(); handshakes.clear(); psk = current_key;
                     require_auth = require_session_auth() || psk.is_some();
                 }
                 if let Some(broker)=&delivery {
@@ -1890,8 +1881,8 @@ async fn run_host_service_inner(
                 }
                 closed.retain(|_,receipt|receipt.resources_live() || receipt.at.elapsed()<Duration::from_secs(30));
                 authenticated.retain(|addr, (_, _, ts)| {
-                    let keep = peers.contains_key(addr)||closing.contains_key(addr)||closed.contains_key(addr)|| now_unix_ms().saturating_sub(*ts) < 30_000;
-                    if !keep { udp_sender.remove_peer_crypto(*addr); }
+                    let keep = peers.contains_key(addr)||closing.contains_key(addr)||closed.contains_key(addr)|| ts.elapsed() < Duration::from_secs(30);
+                    if !keep { udp_sender.remove_peer_crypto(*addr); handshakes.forget(*addr); }
                     keep
                 });
                 #[cfg(target_os = "linux")]
@@ -1915,16 +1906,26 @@ async fn run_host_service_inner(
             received = udp_receiver.recv() => {
                 let packet = match received { Ok(packet) => packet, Err(error) => { eprintln!("UDP receive: {error}"); continue; } };
                 match packet {
-                    MultiplexedPacket::Control(ControlMessage::SessionHello { nonce, timestamp_ms, mac }, addr) => {
-                        eprintln!("RP_SESSION_AUTH t_ms={} stage=hello_received local_peer_port={}",now_unix_ms(),addr.port());
-                        let result = accept_session_hello(
-                            psk.as_deref(), (nonce, timestamp_ms, mac), addr, &udp_sender,
-                            &peers, &closing, &mut closed, &mut authenticated,
-                        );
-                        eprintln!("RP_SESSION_AUTH t_ms={} stage={} local_peer_port={}",now_unix_ms(),if result.is_ok(){"accepted"}else{"rejected"},addr.port());
-                        let reply = match result { Ok((salt, timestamp_ms)) => ControlMessage::SessionAccept { salt, timestamp_ms, mac: mac_session_accept(psk.as_ref().unwrap(), &salt, timestamp_ms) }, Err(reason) => ControlMessage::SessionReject { reason } };
-                        let _ = input_owner.during_control(&injector,udp_sender.send_control(&reply, addr)).await;
+                    MultiplexedPacket::Control(ControlMessage::SessionHandshake(message), addr) => {
+                        if let Ok(reply)=accept_session_message(psk.as_deref(),&message,addr,&udp_sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes) {
+                            let _=input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionHandshake(Box::new(reply)),addr)).await;
+                        }
                     }
+                    // Retired and wrong-role handshakes never refresh peer liveness.
+                    MultiplexedPacket::Control(ControlMessage::SessionHello{..}|ControlMessage::SessionAccept{..},addr)=>{
+                        let _=input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject{reason:"RemotePlay authentication protocol mismatch: version 3 is required; update both endpoints".into()},addr)).await;
+                    }
+                    MultiplexedPacket::Control(ControlMessage::SessionReject{..},_)=>{}
+                    MultiplexedPacket::ClockProbe(probe,received_us,addr)=>{
+                        if authenticated.contains_key(&addr) && !closing.contains_key(&addr) {
+                            if let Some(peer)=peers.get_mut(&addr) {
+                                peer.last_seen=Instant::now();
+                                let reply=protocol::session_auth::ClockReply{probe,host_recv_us:received_us,host_send_us:remote_core::timing::quanta_now_us()};
+                                let _=input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::ClockReply(reply),addr)).await;
+                            }
+                        }
+                    }
+                    MultiplexedPacket::ClockReply(..)=>{}
                     MultiplexedPacket::Control(message, addr) => {
                         if require_auth && !authenticated.contains_key(&addr) {
                             let _ = input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject { reason: "authenticate before opening a connection".into() }, addr)).await;
@@ -2900,6 +2901,32 @@ mod failure_admission_tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_authenticate(key:&[u8],client:&mut remote_core::session_auth::ClientHandshake,addr:SocketAddr,sender:&UdpSender,
+        peers:&HashMap<SocketAddr,Connection>,closing:&HashMap<SocketAddr,ClosingTask>,closed:&mut HashMap<SocketAddr,ClosedReceipt>,
+        authenticated:&mut HashMap<SocketAddr,([u8;16],[u8;16],Instant)>,handshakes:&mut remote_core::session_auth::ServerHandshake)->Result<[u8;16],String>{
+        let challenge=accept_session_message(Some(key),&client.message(key),addr,sender,peers,closing,closed,authenticated,handshakes)?;
+        client.receive(key,&challenge,remote_core::session_auth::AuthTime::now()).map_err(|e|e.to_string())?;
+        let finish=accept_session_message(Some(key),&client.message(key),addr,sender,peers,closing,closed,authenticated,handshakes)?;
+        let crypto=client.receive(key,&finish,remote_core::session_auth::AuthTime::now()).map_err(|e|e.to_string())?.ok_or("missing Finish")?;
+        Ok(crypto.session_id())
+    }
+
+    #[tokio::test]
+    async fn finish_rechecks_native_owner_and_retired_finish_cannot_replace_new_session(){
+        use remote_core::session_auth::{AuthTime,ClientHandshake,ServerHandshake};
+        use protocol::session_auth::{HandshakeMessage,RejectCode};
+        let key=b"synthetic-owner-epoch-key";let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let(sender,_)=mux.split();let addr="127.0.0.1:43112".parse().unwrap();
+        let peers=HashMap::new();let closing=HashMap::new();let mut closed=HashMap::new();let mut authenticated=HashMap::new();let mut handshakes=ServerHandshake::default();let mut old=ClientHandshake::new(AuthTime::now());
+        let challenge=accept_session_message(Some(key),&old.message(key),addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).unwrap();old.receive(key,&challenge,AuthTime::now()).unwrap();let old_finish=old.message(key);
+        let resources=Arc::new(crate::lifecycle::Resources::default());let owner=crate::lifecycle::WorkerGuard::new(resources.clone());closed.insert(addr,ClosedReceipt{resources:resources.clone(),id:11,result:Err("pending".into()),at:Instant::now()});
+        let denied=accept_session_message(Some(key),&old_finish,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).unwrap();assert!(matches!(denied,HandshakeMessage::Reject{code:RejectCode::Busy,..}));assert!(authenticated.is_empty());assert!(sender.peer_session_id(addr).is_none());assert!(Arc::ptr_eq(&closed[&addr].resources,&resources));
+        drop(owner);handshakes.forget(addr);let mut new=ClientHandshake::new(AuthTime::now());let current=fixture_authenticate(key,&mut new,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).unwrap();assert_eq!(sender.peer_session_id(addr),Some(current));assert!(!closed.contains_key(&addr));
+        assert!(accept_session_message(Some(key),&old_finish,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).is_err());assert_eq!(authenticated[&addr].0,current);assert_eq!(sender.peer_session_id(addr),Some(current));
+        // A late old close cannot select a replacement connection just by address.
+        let(replacement,_)=fixture_peer(12).await;let mut peers=HashMap::from([(addr,replacement)]);let mut closing=HashMap::new();assert!(matches!(request_close(&mut peers,&mut closing,&closed,addr,11),Some(SessionCommand::Error{request_id:11,..})));assert!(peers.contains_key(&addr));peers.remove(&addr).unwrap().shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn key_rotation_same_address_hello_keeps_pending_native_budget_until_release() {
         use std::sync::atomic::Ordering::SeqCst;
@@ -2935,101 +2962,16 @@ mod failure_admission_tests {
             );
         }
         let closing = HashMap::new();
-        let mut authenticated = HashMap::from([(addr, (nonce, [0x61; 16], now_unix_ms()))]);
-        let timestamp = now_unix_ms();
-        let replay = accept_session_hello(
-            Some(&old_key),
-            (
-                nonce,
-                timestamp,
-                mac_session_hello(&old_key, &nonce, timestamp),
-            ),
-            addr,
-            &sender,
-            &peers,
-            &closing,
-            &mut closed,
-            &mut authenticated,
-        );
-        assert_eq!(
-            replay.unwrap(),
-            (authenticated[&addr].1, authenticated[&addr].2)
-        );
-        let changed_nonce = [0x52; 16];
-        assert!(
-            accept_session_hello(
-                Some(&old_key),
-                (
-                    changed_nonce,
-                    timestamp,
-                    mac_session_hello(&old_key, &changed_nonce, timestamp)
-                ),
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
-            .is_err()
-        );
-        // Mirror the key-rotation tick: remove old crypto/auth, retain live receipts.
-        sender.remove_peer_crypto(addr);
-        authenticated.clear();
-        closed.retain(|_, receipt| receipt.resources_live());
-        assert_eq!(pending_closed_count(&closed), 1);
-        // A valid MAC under the revoked key cannot authenticate with the new key.
-        assert!(
-            accept_session_hello(
-                Some(&new_key),
-                (
-                    nonce,
-                    timestamp,
-                    mac_session_hello(&old_key, &nonce, timestamp)
-                ),
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
-            .is_err()
-        );
-        assert!(authenticated.is_empty());
-        let stale = timestamp.saturating_sub(61_000);
-        assert!(
-            accept_session_hello(
-                Some(&new_key),
-                (nonce, stale, mac_session_hello(&new_key, &nonce, stale)),
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
-            .is_err()
-        );
-        let hello = (
-            nonce,
-            timestamp,
-            mac_session_hello(&new_key, &nonce, timestamp),
-        );
-        let admission = accept_session_hello(
-            Some(&new_key),
-            hello,
-            addr,
-            &sender,
-            &peers,
-            &closing,
-            &mut closed,
-            &mut authenticated,
-        );
-        assert!(
-            admission.is_err(),
-            "valid same-address Hello after key rotation must not erase live native ownership: {admission:?}"
-        );
+        let mut authenticated = HashMap::from([(addr, (nonce, [0x61; 16], Instant::now()))]);
+        let mut handshakes=remote_core::session_auth::ServerHandshake::default();
+        let mut client=remote_core::session_auth::ClientHandshake::new(remote_core::session_auth::AuthTime::now());
+        assert!(fixture_authenticate(&old_key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).is_err());
+        // Mirror key rotation: remove old crypto and challenge cache; keep live owners.
+        sender.remove_peer_crypto(addr);authenticated.clear();handshakes.clear();
+        closed.retain(|_,receipt|receipt.resources_live());
+        let old_hello=client.message(&old_key);
+        assert!(accept_session_message(Some(&new_key),&old_hello,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).is_err());
+        assert!(fixture_authenticate(&new_key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).is_err());
         assert!(authenticated.is_empty());
         assert!(Arc::ptr_eq(&closed[&addr].resources, &resources));
         assert_eq!(pending_closed_count(&closed), 1);
@@ -3054,16 +2996,7 @@ mod failure_admission_tests {
         assert_eq!(resources.native_streams.load(SeqCst), 0);
         assert_eq!(pending_closed_count(&closed), 0);
         assert!(
-            accept_session_hello(
-                Some(&new_key),
-                hello,
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
+            fixture_authenticate(&new_key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes)
             .is_ok()
         );
         assert!(!closed.contains_key(&addr));
@@ -3096,9 +3029,8 @@ mod failure_admission_tests {
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let (sender, _) = mux.split();
         let key = [0x71; 32];
-        let nonce = [0x72; 16];
-        let ts = now_unix_ms();
-        let hello = (nonce, ts, mac_session_hello(&key, &nonce, ts));
+        let mut client=remote_core::session_auth::ClientHandshake::new(remote_core::session_auth::AuthTime::now());
+        let mut handshakes=remote_core::session_auth::ServerHandshake::default();
         let mut peers = HashMap::from([(addr, peer)]);
         let mut closing = HashMap::new();
         let mut closed = HashMap::new();
@@ -3106,16 +3038,7 @@ mod failure_admission_tests {
         let mut authenticated = HashMap::new();
         begin_close(&mut peers, &mut closing, addr, false);
         assert!(
-            accept_session_hello(
-                Some(&key),
-                hello,
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
+            fixture_authenticate(&key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes)
             .is_err()
         );
         assert!(authenticated.is_empty());
@@ -3154,16 +3077,7 @@ mod failure_admission_tests {
             authenticated.clear();
             closed.retain(|_, receipt| receipt.resources_live());
             assert!(
-                accept_session_hello(
-                    Some(&key),
-                    hello,
-                    addr,
-                    &sender,
-                    &peers,
-                    &closing,
-                    &mut closed,
-                    &mut authenticated
-                )
+                fixture_authenticate(&key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes)
                 .is_err()
             );
             assert!(authenticated.is_empty());
@@ -3195,20 +3109,10 @@ mod failure_admission_tests {
         let closing = HashMap::new();
         let mut authenticated = HashMap::new();
         let key = [0x73; 32];
-        let nonce = [0x74; 16];
-        let ts = now_unix_ms();
-        let hello = (nonce, ts, mac_session_hello(&key, &nonce, ts));
+        let mut client=remote_core::session_auth::ClientHandshake::new(remote_core::session_auth::AuthTime::now());
+        let mut handshakes=remote_core::session_auth::ServerHandshake::default();
         assert!(
-            accept_session_hello(
-                Some(&key),
-                hello,
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
+            fixture_authenticate(&key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes)
             .is_err()
         );
         assert!(authenticated.is_empty());
@@ -3216,16 +3120,7 @@ mod failure_admission_tests {
         drop(worker);
         assert_eq!(pending_closed_count(&closed), 0);
         assert!(
-            accept_session_hello(
-                Some(&key),
-                hello,
-                addr,
-                &sender,
-                &peers,
-                &closing,
-                &mut closed,
-                &mut authenticated
-            )
+            fixture_authenticate(&key,&mut client,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes)
             .is_ok()
         );
         assert!(!closed.contains_key(&addr));

@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{Notify, mpsc, oneshot, watch};
-type Packet = (protocol::RtpPacket, protocol::FrameTimingCheckpoints);
+type Packet = remote_core::client_session::VideoPacket;
 static LIVE_WORKERS: AtomicU64 = AtomicU64::new(0);
 /// Diagnostic observation only; never used to infer that frames were displayed.
 pub fn active_workers() -> u64 {
@@ -83,6 +83,7 @@ struct DecoderState {
     decoder: Option<WindowsHevcDecoder>,
     sequence: Option<SequenceInfo>,
     generation: u64,
+    recovery: remote_core::video_recovery::VideoEpoch,
     previous: Option<(u32, u16)>,
     waiting: bool,
     next_tag: u64,
@@ -96,6 +97,7 @@ impl DecoderState {
             decoder: None,
             sequence: None,
             generation,
+            recovery: Default::default(),
             previous: None,
             waiting: true,
             next_tag: 0,
@@ -111,24 +113,26 @@ impl DecoderState {
         self.waiting = true;
         self.metadata.clear();
         self.generation = generation;
-        shared
-            .stats
-            .video_decoder_needs_keyframe
-            .store(true, Ordering::Release);
-        let mut slot = shared.frame.lock().unwrap();
-        if generation == shared.epoch.load(Ordering::Acquire) {
-            let old = slot.take();
-            drop(slot);
-            drop(old);
+        if let Some(recovery) = shared.stats.video_recovery.require_keyframe(generation) {
+            self.recovery = recovery;
         }
     }
     fn fail(&mut self, shared: &Shared, error: impl std::fmt::Display) {
-        self.reset(shared, shared.epoch.load(Ordering::Acquire));
-        *shared.status.lock().unwrap() = format!("Native HEVC: {error}");
-        shared
+        if shared
             .stats
-            .video_decode_errors
-            .fetch_add(1, Ordering::Relaxed);
+            .video_recovery
+            .fail(self.recovery, || {
+                *shared.status.lock().unwrap() = format!("Native HEVC: {error}");
+                shared
+                    .stats
+                    .video_decode_errors
+                    .fetch_add(1, Ordering::Relaxed);
+            })
+            .is_none()
+        {
+            return;
+        }
+        self.reset(shared, self.generation);
         shared.updates.notify_one();
     }
     fn pending(&self) -> bool {
@@ -163,25 +167,20 @@ impl DecoderState {
                 recv_time: timing.recv_ts_us / 1000,
                 decode_cost_ms: meta.entered.elapsed().as_secs_f32() * 1000.,
                 timing,
+                video_epoch: self.recovery,
                 decoded_at: Instant::now(),
             };
-            let mut slot = shared.frame.lock().unwrap();
-            if self.generation != shared.epoch.load(Ordering::Acquire) {
-                drop(slot);
+            let Some(previous) = shared.stats.video_recovery.publish(self.recovery, || {
+                shared.status.lock().unwrap().clear();
+                shared.frame.lock().unwrap().replace(frame)
+            }) else {
                 continue;
-            }
-            let previous = slot.replace(frame);
-            shared
-                .stats
-                .video_decoder_needs_keyframe
-                .store(false, Ordering::Release);
-            drop(slot);
+            };
             drop(previous);
             shared
                 .stats
                 .video_frames_decoded
                 .fetch_add(1, Ordering::Relaxed);
-            shared.status.lock().unwrap().clear();
             shared.updates.notify_one();
         }
         // Free completed leases before retrying the latest decoded output.
@@ -189,17 +188,34 @@ impl DecoderState {
         self.try_submit_copy()?;
         Ok(())
     }
-    fn try_submit_copy(&mut self)->Result<()> {
-        let Some(pending)=self.pending_copy.as_ref() else {return Ok(());};
-        let Some(pool)=self.pool.as_mut() else {return Ok(());};
-        let accepted=unsafe{pool.submit(pending.frame.texture(),pending.frame.subresource,
-            pending.geometry,pending.color,pending.lease.clone(),pending.tag)?};
-        if accepted {self.pending_copy.take();}
+    fn try_submit_copy(&mut self) -> Result<()> {
+        let Some(pending) = self.pending_copy.as_ref() else {
+            return Ok(());
+        };
+        let Some(pool) = self.pool.as_mut() else {
+            return Ok(());
+        };
+        let accepted = unsafe {
+            pool.submit(
+                pending.frame.texture(),
+                pending.frame.subresource,
+                pending.geometry,
+                pending.color,
+                pending.lease.clone(),
+                pending.tag,
+            )?
+        };
+        if accepted {
+            self.pending_copy.take();
+        }
         Ok(())
     }
     fn input(&mut self, packet: Packet, shared: &Shared, fps: u32) -> Result<()> {
-        let (packet, mut timing) = packet;
+        let (packet, mut timing, packet_epoch) = packet;
         let generation = shared.epoch.load(Ordering::Acquire);
+        if packet_epoch != generation {
+            return Ok(());
+        }
         let id = (packet.header.ssrc, packet.header.sequence_number);
         let gap = self
             .previous
@@ -390,8 +406,8 @@ pub fn spawn_decoder(
                     "native decoder worker failed; reconnect this video session".into();
                 shared
                     .stats
-                    .video_decoder_needs_keyframe
-                    .store(true, Ordering::Release);
+                    .video_recovery
+                    .require_keyframe(shared.epoch.load(Ordering::Acquire));
                 shared.updates.notify_one();
             }
             let _ = done_tx.send(());
@@ -414,10 +430,7 @@ async fn run(
     fps: u32,
 ) {
     let mut decoder = DecoderState::new(shared.epoch.load(Ordering::Acquire));
-    shared
-        .stats
-        .video_decoder_needs_keyframe
-        .store(true, Ordering::Release);
+    decoder.recovery = shared.stats.video_recovery.snapshot().epoch;
     loop {
         if *cancel.borrow() {
             break;

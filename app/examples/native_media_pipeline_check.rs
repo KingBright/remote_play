@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .send((
                     packet(sent, sent as u16, 900, 1000 + sent as u32),
                     Default::default(),
+                    stats.video_recovery.snapshot().epoch.source,
                 ))
                 .await?;
             sent += 1;
@@ -91,17 +92,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     // Do not declare input safe from a previously displayed resource after reset.
     media.reset_video();
-    if slot.lock().unwrap().is_some() || !stats.video_decoder_needs_keyframe.load(Ordering::Acquire)
-    {
+    if slot.lock().unwrap().is_some() || !stats.video_recovery.is_waiting() {
         return Err("reset kept an obsolete frame or recovery flag".into());
     }
     media
         .decode_tx
-        .send((packet(1, 100, 901, 8001), Default::default()))
+        .send((
+            packet(1, 100, 901, 8001),
+            Default::default(),
+            stats.video_recovery.snapshot().epoch.source,
+        ))
         .await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    if slot.lock().unwrap().is_some() || !stats.video_decoder_needs_keyframe.load(Ordering::Acquire)
-    {
+    if slot.lock().unwrap().is_some() || !stats.video_recovery.is_waiting() {
         return Err("non-key input bypassed source recovery".into());
     }
     for index in 0..6 {
@@ -110,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .send((
                 packet(index, 101 + index as u16, 901, 9000 + index as u32),
                 Default::default(),
+                stats.video_recovery.snapshot().epoch.source,
             ))
             .await?;
         tokio::time::sleep(Duration::from_millis(35)).await;

@@ -86,7 +86,16 @@ pub enum BridgeSessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeTelemetry {
     pub fps: f32,
+    /// Local decoder cost only. Never a cross-device or display latency.
     pub latency_ms: f32,
+    pub capture_receive_estimate_ms: Option<f32>,
+    pub network_rtt_ms: Option<f64>,
+    pub raw_total_rtt_ms: Option<f64>,
+    pub clock_state: String,
+    /// Combined model allowance, not a certified accuracy bound.
+    pub clock_uncertainty_ms: Option<f64>,
+    pub clock_fit_ci95_ms: Option<f64>,
+    pub clock_asymmetry_allowance_ms: Option<f64>,
     pub jitter_ms: f32,
     pub packet_loss_percent: f32,
     pub video_bitrate_kbps: u32,
@@ -101,6 +110,13 @@ impl Default for BridgeTelemetry {
         Self {
             fps: 0.0,
             latency_ms: 0.0,
+            capture_receive_estimate_ms:None,
+            network_rtt_ms:None,
+            raw_total_rtt_ms:None,
+            clock_state:"unavailable".into(),
+            clock_uncertainty_ms:None,
+            clock_fit_ci95_ms:None,
+            clock_asymmetry_allowance_ms:None,
             jitter_ms: 0.0,
             packet_loss_percent: 0.0,
             video_bitrate_kbps: 0,
@@ -740,9 +756,17 @@ impl RemoteBridgeClient {
             self.telemetry_tx.send_replace(BridgeTelemetry::default());
             return;
         }
+        let clock=self.host_stats.clock_estimate();
         let _ = self.telemetry_tx.send(BridgeTelemetry {
             fps: snap.fps,
-            latency_ms: snap.e2e_latency_ms.max(snap.latency),
+            latency_ms: snap.decode_latency_ms,
+            capture_receive_estimate_ms: self.host_stats.estimated_e2e_latency_ms(),
+            network_rtt_ms: clock.map(|c|c.latest_sample.network_rtt_us as f64/1000.0),
+            raw_total_rtt_ms: clock.map(|c|c.latest_sample.raw_total_rtt_us as f64/1000.0),
+            clock_state: clock.map(|c|format!("{:?}",c.state).to_lowercase()).unwrap_or_else(||"unavailable".into()),
+            clock_uncertainty_ms: clock.and_then(|c|c.uncertainty_us()).map(|us|us/1000.0),
+            clock_fit_ci95_ms: clock.and_then(|c|c.fit_ci95_us).map(|us|us/1000.0),
+            clock_asymmetry_allowance_ms: clock.map(|c|c.asymmetry_bound_us/1000.0),
             jitter_ms: snap.jitter,
             packet_loss_percent: snap.packet_loss_rate,
             video_bitrate_kbps: snap.bitrate_kbps,
@@ -839,7 +863,7 @@ async fn start_live_session(
     let decode_pump = tokio::spawn(async move {
         let mut waiting_for_keyframe = true;
         let mut received_video = false;
-        while let Some((packet, timing)) = decode_rx.recv().await {
+        while let Some((packet, timing, _source_epoch)) = decode_rx.recv().await {
             if media_stats.media_pause.is_paused() {
                 waiting_for_keyframe = true;
                 continue;
@@ -919,9 +943,17 @@ async fn start_live_session(
             if snap.updated_at.is_none() {
                 continue;
             }
+            let clock=host_stats.clock_estimate();
             let _ = telemetry_tx.send(BridgeTelemetry {
                 fps: snap.fps,
-                latency_ms: snap.e2e_latency_ms.max(snap.latency),
+                latency_ms: snap.decode_latency_ms,
+            capture_receive_estimate_ms: host_stats.estimated_e2e_latency_ms(),
+            network_rtt_ms: clock.map(|c|c.latest_sample.network_rtt_us as f64/1000.0),
+            raw_total_rtt_ms: clock.map(|c|c.latest_sample.raw_total_rtt_us as f64/1000.0),
+            clock_state: clock.map(|c|format!("{:?}",c.state).to_lowercase()).unwrap_or_else(||"unavailable".into()),
+            clock_uncertainty_ms: clock.and_then(|c|c.uncertainty_us()).map(|us|us/1000.0),
+            clock_fit_ci95_ms: clock.and_then(|c|c.fit_ci95_us).map(|us|us/1000.0),
+            clock_asymmetry_allowance_ms: clock.map(|c|c.asymmetry_bound_us/1000.0),
                 jitter_ms: snap.jitter,
                 packet_loss_percent: snap.packet_loss_rate,
                 video_bitrate_kbps: snap.bitrate_kbps,
@@ -1324,6 +1356,9 @@ mod tests {
         assert_eq!(telemetry.fps, 0.0);
         assert_eq!(telemetry.latency_ms, 0.0);
         assert_eq!(telemetry.video_bitrate_kbps, 0);
+        let json=serde_json::to_value(&telemetry).unwrap();
+        for field in ["capture_receive_estimate_ms","network_rtt_ms","raw_total_rtt_ms","clock_uncertainty_ms","clock_fit_ci95_ms","clock_asymmetry_allowance_ms"]{assert!(json[field].is_null(),"{field} must remain unknown, not zero");}
+        let roundtrip:BridgeTelemetry=serde_json::from_value(json).unwrap();assert_eq!(roundtrip.clock_state,"unavailable");
     }
 
     #[test]

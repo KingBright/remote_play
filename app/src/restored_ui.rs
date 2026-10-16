@@ -14,6 +14,7 @@ use crate::desktop::device_list::{
 };
 use crate::desktop::original_owner::{FrameSlot, OriginalOwner, SourceViewBinding};
 use crate::original_design::{full_idle_canvas_stage, stream_status_capsule_card};
+use crate::telemetry_display::UiHostStats;
 use crate::{
     AppDevice, HostStats, MacDecodedVideoFrame, MeshPairingControl, MeshPairingMessageKind,
     MeshPairingSnapshot, RoleState, SharedHostStats, StreamStartOptions, UnifiedRuntimeConfig,
@@ -558,14 +559,14 @@ impl RestoredDashboard {
         // render_done from decoder timestamps; the paint hook below records eligibility only.
     }
 
-    fn host_stats_snapshot(&self, role: &RoleState) -> Option<HostStats> {
+    fn host_stats_snapshot(&self, role: &RoleState) -> Option<UiHostStats> {
         if !matches!(role, RoleState::Viewing(_)) {
             return None;
         }
         self.host_stats
             .as_ref()
-            .map(|stats| stats.snapshot())
-            .filter(host_stats_available)
+            .map(|stats| UiHostStats::read(stats))
+            .filter(|stats| host_stats_available(stats))
     }
 
     fn reset_host_stats(&self) {
@@ -1621,8 +1622,8 @@ impl Render for PopoutStreamView {
         let stats = self
             .host_stats
             .as_ref()
-            .map(|stats| stats.snapshot())
-            .filter(host_stats_available);
+            .map(|stats| UiHostStats::read(stats))
+            .filter(|stats| host_stats_available(stats));
 
         let content = stream_video_canvas_surface(
             current_frame.as_deref(),
@@ -2222,7 +2223,7 @@ fn floating_control_island(
     scale_mode: ViewportScaleMode,
     is_fullscreen: bool,
     compact: bool,
-    _host_stats: Option<&HostStats>,
+    _host_stats: Option<&UiHostStats>,
     owner: Arc<OriginalOwner>,
     capture_sources: &[protocol::session::CaptureSourceInfo],
     source_binding: Option<&SourceViewBinding>,
@@ -2956,7 +2957,7 @@ fn slide_over_management_drawer(
     selected_fps: u32,
     selected_bitrate_kbps: u32,
     media_controls: Div,
-    host_stats: Option<&HostStats>,
+    host_stats: Option<&UiHostStats>,
     owner: Arc<OriginalOwner>,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
@@ -3852,18 +3853,16 @@ fn host_stats_available(stats: &HostStats) -> bool {
         && (stats.fps > 0.0 || stats.latency > 0.0 || stats.jitter > 0.0 || stats.bitrate_kbps > 0)
 }
 
-fn compact_telemetry_label(stats: Option<&HostStats>) -> String {
+fn compact_telemetry_label(stats: Option<&UiHostStats>) -> String {
     stats.map_or_else(
         || "Awaiting telemetry".to_string(),
         |stats| {
-            if stats.e2e_latency_ms > 0.0 {
-                format!(
-                    "{:.0} FPS / E2E {:.1} ms (Net {:.1}ms | Enc {:.1}ms)",
-                    stats.fps, stats.e2e_latency_ms, stats.rtt_ms, stats.latency
-                )
-            } else {
-                format!("{:.0} FPS / enc {:.1} ms", stats.fps, stats.latency)
-            }
+            format!(
+                "{:.0} FPS / capture→receive {} / enc {:.1} ms",
+                stats.fps,
+                stats.capture_receive.value(),
+                stats.latency
+            )
         },
     )
 }
@@ -3891,7 +3890,7 @@ fn drawer_network_telemetry_tab(
     selected_fps: u32,
     selected_bitrate_kbps: u32,
     media_controls: Div,
-    host_stats: Option<&HostStats>,
+    host_stats: Option<&UiHostStats>,
     _owner: Arc<OriginalOwner>,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
@@ -3908,14 +3907,16 @@ fn drawer_network_telemetry_tab(
     );
 
     if let Some(stats) = host_stats {
-        if stats.e2e_latency_ms > 0.0 {
-            content = content.child(telemetry_metric_row(
-                "End-to-End Latency (Total)",
-                format!("{:.1} ms", stats.e2e_latency_ms),
+        content = content.child(
+            telemetry_metric_row(
+                "Capture → receive (est.)",
+                stats.capture_receive.value(),
                 color_accent_cyan(),
                 cx,
-            ));
-        }
+            )
+            .id("capture_receive_metric")
+            .tooltip(tooltip(stats.capture_receive.detail()).build()),
+        );
         if stats.rtt_ms > 0.0 {
             content = content.child(telemetry_metric_row(
                 "Network RTT",
@@ -4197,7 +4198,7 @@ fn telemetry_metric_row(
 
 fn telemetry_waterfall_overlay(
     collapsed: bool,
-    host_stats: Option<&HostStats>,
+    host_stats: Option<&UiHostStats>,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let theme = cx.theme().clone();
@@ -4275,7 +4276,7 @@ fn telemetry_waterfall_overlay(
     }
 }
 
-fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> Div {
+fn telemetry_hud_metrics_list(host_stats: Option<&UiHostStats>, theme: &Theme) -> Div {
     if let Some(stats) = host_stats {
         div()
             .flex()
@@ -4319,11 +4320,17 @@ fn telemetry_hud_metrics_list(host_stats: Option<&HostStats>, theme: &Theme) -> 
                     .gap_6()
                     .text_size(px(10.0))
                     .font_family(crate::design_system::product_mono_font())
-                    .child(div().text_color(theme.content.tertiary).child("End-to-End"))
+                    .id("capture_receive_hud_metric")
+                    .tooltip(tooltip(stats.capture_receive.detail()).build())
+                    .child(
+                        div()
+                            .text_color(theme.content.tertiary)
+                            .child("Capture → receive"),
+                    )
                     .child(
                         div()
                             .text_color(color_accent_emerald())
-                            .child(format!("{:.1} ms", stats.e2e_latency_ms)),
+                            .child(stats.capture_receive.value()),
                     ),
             )
             .child(

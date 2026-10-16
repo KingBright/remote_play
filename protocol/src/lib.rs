@@ -3,6 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 pub mod session;
+pub mod session_auth;
 pub mod realtime_input;
 pub mod shared_files;
 pub mod timing;
@@ -1090,6 +1091,11 @@ pub enum ControlMessage {
         paused: bool,
     },
     Session(Box<session::SessionCommand>),
+    /// The sole supported media authentication protocol. Older handshake
+    /// variants above remain decodable only for an explicit mismatch diagnosis.
+    SessionHandshake(Box<session_auth::HandshakeMessage>),
+    ClockProbe(session_auth::ClockProbe),
+    ClockReply(session_auth::ClockReply),
 }
 
 /// Validate integer custom settings without restricting users to preset tiers.

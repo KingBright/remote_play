@@ -58,6 +58,7 @@ pub struct SessionState<Texture, Pan: Default> {
     pub fit: bool,
     pub texture: Option<Texture>,
     pub uploaded_at: Option<Instant>,
+    pub uploaded_epoch: Option<remote_core::video_recovery::VideoEpoch>,
     pub keys: BTreeSet<u16>,
     pub mouse: BTreeSet<u8>,
     pub modifiers: u8,
@@ -78,7 +79,6 @@ pub struct SessionState<Texture, Pan: Default> {
     pub file_page_after: u64,
     pub file_history: Vec<u64>,
     next_request: u32,
-    decoder_recovery_pending: bool,
 }
 #[cfg(feature = "gpui-restoration")]
 pub(crate) type OriginalGuiSession =
@@ -166,6 +166,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             fit: true,
             texture: None,
             uploaded_at: None,
+            uploaded_epoch: None,
             keys: BTreeSet::new(),
             mouse: BTreeSet::new(),
             modifiers: 0,
@@ -194,7 +195,6 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             file_page_after: 0,
             file_history: Vec::new(),
             next_request: 1000,
-            decoder_recovery_pending: false,
         }
     }
     pub fn control(&mut self, command: SessionCommand) -> bool {
@@ -373,8 +373,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         }) {
             if self.last_activity.is_some_and(|previous| previous.video != active.video) {
                 self.release_input();
-                self.first_frame_after = Instant::now();
                 self.uploaded_at = None;
+                self.uploaded_epoch = None;
                 self.texture = None;
             }
             self.activity_revision = revision;
@@ -457,11 +457,13 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         self.locked = true;
         self.texture = None;
         self.uploaded_at = None;
+        self.uploaded_epoch = None;
         self.video_error = Some(reason.clone());
         self.error = reason;
         self.status = "Video request failed; file connection remains available".into();
     }
     pub fn input_status(&self) -> &'static str {
+        let recovery = self.stats.video_recovery.snapshot();
         if self.video_error.is_some() || !self.connected {
             "Video/connection unavailable: control disabled"
         } else if !self.confirmed || self.pending.is_some() {
@@ -477,15 +479,17 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             "RemotePlay window is inactive; remote control is paused"
         } else if self.paused || self.presentation_hidden || self.activity_pending.is_some() {
             "Remote control paused. Resume video and wait for a frame from this source"
-        } else if self
-            .stats
-            .video_decoder_needs_keyframe
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        } else if recovery.waiting {
             "Waiting for a video keyframe; remote control is temporarily paused"
         } else if !self.conn.peer_is_responsive() {
             "Host heartbeat is stale: control disabled"
-        } else if !current_input_frame(self.uploaded_at, self.first_frame_after, true) {
+        } else if self.uploaded_epoch != Some(recovery.epoch)
+            || !current_input_frame(
+                self.uploaded_at,
+                self.first_frame_after.max(recovery.began_at),
+                true,
+            )
+        {
             "Waiting for a frame from the current source"
         } else if self.locked {
             "View only: click Enable control, then click the remote picture"
@@ -494,11 +498,9 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
         }
     }
     pub fn can_input(&self) -> bool {
+        let recovery = self.stats.video_recovery.snapshot();
         self.video_error.is_none()
-            && !self
-                .stats
-                .video_decoder_needs_keyframe
-                .load(std::sync::atomic::Ordering::Acquire)
+            && !recovery.waiting
             && self.connected
             && self.confirmed
             && self.pending.is_none()
@@ -509,11 +511,22 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             && !self.paused
             && !self.presentation_hidden
             && self.activity_pending.is_none()
+            && self.uploaded_epoch == Some(recovery.epoch)
             && current_input_frame(
                 self.uploaded_at,
-                self.first_frame_after,
+                self.first_frame_after.max(recovery.began_at),
                 self.conn.peer_is_responsive(),
             )
+    }
+    pub fn current_video_frame(
+        &self,
+        epoch: remote_core::video_recovery::VideoEpoch,
+        decoded_at: Instant,
+    ) -> bool {
+        let recovery = self.stats.video_recovery.snapshot();
+        epoch == recovery.epoch
+            && !recovery.waiting
+            && decoded_at >= self.first_frame_after.max(recovery.began_at)
     }
     pub fn input_command(&self, event: InputEvent) -> SessionCommand {
         SessionCommand::SourceInput {id:self.video_id,source_revision:self.source_revision,event}
@@ -575,16 +588,16 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             let healthy=self.conn.input_binding(self.video_id,self.source_revision).is_some_and(|binding|self.conn.refresh_bound_input(binding));
             if !healthy {self.release_input();self.locked=true;self.status="Input paused after the window stopped responding; enable control to continue".into();}
         }
-        let decoder_waiting = self
-            .stats
-            .video_decoder_needs_keyframe
-            .load(std::sync::atomic::Ordering::Acquire);
-        if decoder_waiting && !self.decoder_recovery_pending {
+        let recovery = self.stats.video_recovery.snapshot();
+        self.first_frame_after = self.first_frame_after.max(recovery.began_at);
+        if self
+            .uploaded_epoch
+            .is_some_and(|epoch| epoch != recovery.epoch)
+        {
             self.release_input();
-            self.first_frame_after = Instant::now();
             self.uploaded_at = None;
+            self.uploaded_epoch = None;
         }
-        self.decoder_recovery_pending = decoder_waiting;
         if !self.can_input()
             && (!self.keys.is_empty() || !self.mouse.is_empty() || self.modifiers != 0)
         {
@@ -611,7 +624,6 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.confirmed = true;
                     self.supports_input = supports_input;
                     self.pending = None;
-                    self.first_frame_after = Instant::now();
                     self.status = "Video accepted; waiting for its first decoded frame".into();
                     self.last_activity = Some(remote_core::media_demand::MediaDemand { video: true, audio: self.request.audio });
                     self.send_activity();
@@ -630,22 +642,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     self.pending = None;
                     self.confirmed = true;
                     self.uploaded_at = None;
+                    self.uploaded_epoch = None;
                     self.texture = None;
-                    self.first_frame_after = Instant::now();
-                    if let Some(media) = &self.media {
-                        media.reset_video();
-                    }
-                    let conn = self.conn.clone();
-                    let id = self.video_id;
-                    tokio::spawn(async move {
-                        let _ = conn
-                            .sender
-                            .send_control(
-                                &protocol::ControlMessage::RequestKeyframe { session_id: id },
-                                conn.target,
-                            )
-                            .await;
-                    });
                     self.status = "Source accepted; waiting for its first frame".into();
                 }
                 SessionCommand::Activity {
@@ -658,9 +656,7 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
                     && self.activity_pending.is_some_and(|r| revision >= r) =>
                 {
                     self.activity_pending = None;
-                    if video {
-                        self.first_frame_after = Instant::now();
-                    } else if self.payload_demand().video {
+                    if !video && self.payload_demand().video {
                         self.locked = true;
                         self.error =
                             "The host did not resume video; retry before enabling input".into();
@@ -874,38 +870,95 @@ fn current_input_frame(frame: Option<Instant>, source_started: Instant, responsi
 mod static_input_tests {
     use super::*;
     use protocol::ControlMessage;
-    use remote_core::net::{MultiplexedPacket, UdpMultiplexer};
+    use remote_core::{
+        net::{MultiplexedPacket, UdpMultiplexer},
+        session_auth::{AuthTime, ServerHandshake},
+    };
 
     // Real session commands and wire encoding, with only a loopback recorder.
     // No GUI, capture, permission request, clipboard start or OS input injection.
-    #[tokio::test]
-    async fn selected_display_input_reaches_the_wire_with_current_source_revision() {
-        let psk=remote_core::session_crypto::load_session_psk();
+    async fn recorder_session() -> (
+        SessionState<(), ()>,
+        tokio::sync::mpsc::UnboundedReceiver<protocol::realtime_input::RealtimeInput>,
+        JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let psk = remote_core::session_crypto::load_session_psk();
         remote_core::init_crypto_provider();
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let addr = mux.local_addr().unwrap();
         let (sender, receiver) = mux.split();
-        let (recorded_tx, mut recorded_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (recorded_tx, recorded_rx) = tokio::sync::mpsc::unbounded_channel();
         let recorder = tokio::spawn(async move {
+            let mut handshake = ServerHandshake::default();
+            let mut owner = None;
             while let Ok(packet) = receiver.recv().await {
                 match packet {
-                    MultiplexedPacket::Control(ControlMessage::SessionHello{nonce,timestamp_ms,mac},from) => {
-                        use remote_core::session_crypto::*;
-                        let key=psk.as_deref().unwrap();
-                        verify_session_mac(&mac_session_hello(key,&nonce,timestamp_ms),&mac,timestamp_ms,now_unix_ms()).unwrap();
-                        let salt=random_bytes_16();let timestamp_ms=now_unix_ms();
-                        sender.send_control(&ControlMessage::SessionAccept{salt,timestamp_ms,mac:mac_session_accept(key,&salt,timestamp_ms)},from).await.unwrap();
-                        sender.install_peer_crypto(from,SessionCrypto::from_psk(key,&salt).unwrap());
+                    MultiplexedPacket::Control(ControlMessage::SessionHandshake(message), from) => {
+                        let reply = handshake
+                            .receive(
+                                psk.as_deref().unwrap(),
+                                &message,
+                                from,
+                                AuthTime::now(),
+                                owner.is_none(),
+                            )
+                            .unwrap();
+                        if let Some(established) = reply.established {
+                            sender.install_peer_crypto(from, established.crypto);
+                            owner = Some(from);
+                        }
+                        sender
+                            .send_control(
+                                &ControlMessage::SessionHandshake(Box::new(reply.message)),
+                                from,
+                            )
+                            .await
+                            .unwrap();
                     }
-                    MultiplexedPacket::Control(ControlMessage::Session(command), from) => {
-                        if let SessionCommand::RequestInputBinding{connection_id,id,source_revision,request}=*command {
-                            sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::InputBinding {
-                                binding:protocol::realtime_input::InputBinding{connection_id,subscription_id:id,source_revision,epoch:[source_revision as u8;16]},
-                                request,host_time_ms:remote_core::session_crypto::now_unix_ms(),
-                            })),from).await.unwrap();
-                        } else if let SessionCommand::RealtimeInput(packet)=*command {
-                            if matches!(packet.payload,protocol::realtime_input::InputPayload::Event(_)) {recorded_tx.send(packet).unwrap();}
+                    MultiplexedPacket::Control(ControlMessage::Session(command), from)
+                        if owner == Some(from)
+                            || (psk.is_none()
+                                && owner.is_none()
+                                && matches!(command.as_ref(), SessionCommand::Open { .. })) =>
+                    {
+                        if let SessionCommand::RequestInputBinding {
+                            connection_id,
+                            id,
+                            source_revision,
+                            request,
+                        } = *command
+                        {
+                            sender
+                                .send_control(
+                                    &ControlMessage::Session(Box::new(
+                                        SessionCommand::InputBinding {
+                                            binding: protocol::realtime_input::InputBinding {
+                                                connection_id,
+                                                subscription_id: id,
+                                                source_revision,
+                                                epoch: [source_revision as u8; 16],
+                                            },
+                                            request,
+                                            host_time_ms: remote_core::session_crypto::now_unix_ms(
+                                            ),
+                                        },
+                                    )),
+                                    from,
+                                )
+                                .await
+                                .unwrap();
+                        } else if let SessionCommand::RealtimeInput(packet) = *command {
+                            if matches!(
+                                packet.payload,
+                                protocol::realtime_input::InputPayload::Event(_)
+                            ) {
+                                recorded_tx.send(packet).unwrap();
+                            }
                         } else if let SessionCommand::Open { connection_id, .. } = *command {
+                            // This test-only recorder also serves the existing unpaired
+                            // loopback diagnostic; it is not authentication evidence.
+                            owner = Some(from);
                             sender
                                 .send_control(
                                     &ControlMessage::Session(Box::new(SessionCommand::Opened {
@@ -922,14 +975,16 @@ mod static_input_tests {
                                 .unwrap();
                         }
                     }
-                    MultiplexedPacket::Control(ControlMessage::Ping { client_send_ts }, from) => {
+                    MultiplexedPacket::ClockProbe(probe, host_recv_us, from)
+                        if owner == Some(from) =>
+                    {
                         sender
                             .send_control(
-                                &ControlMessage::Pong {
-                                    client_send_ts,
-                                    host_recv_ts: client_send_ts,
-                                    host_send_ts: client_send_ts,
-                                },
+                                &ControlMessage::ClockReply(protocol::session_auth::ClockReply {
+                                    probe,
+                                    host_recv_us,
+                                    host_send_us: remote_core::quanta_now_us(),
+                                }),
                                 from,
                             )
                             .await
@@ -943,13 +998,19 @@ mod static_input_tests {
         let (conn, events) = WorkspaceConnection::connect(addr, temp.path().join("receive"))
             .await
             .unwrap();
-        let mut session = SessionState::<(), ()>::new(
+        let session = SessionState::<(), ()>::new(
             "loopback".into(),
             "Input recorder".into(),
             "Loopback".into(),
             conn,
             events,
         );
+        (session, recorded_rx, recorder, temp)
+    }
+
+    #[tokio::test]
+    async fn selected_display_input_reaches_the_wire_with_current_source_revision() {
+        let (mut session, mut recorded_rx, recorder, _temp) = recorder_session().await;
         // Connection intent needs no extra Enable click, but cannot bypass
         // the source confirmation, presented frame or bound input grant.
         assert!(!session.locked);
@@ -960,6 +1021,7 @@ mod static_input_tests {
         assert!(!session.can_input());
         session.first_frame_after = Instant::now() - Duration::from_secs(1);
         session.uploaded_at = Some(Instant::now());
+        session.uploaded_epoch = Some(session.stats.video_recovery.snapshot().epoch);
         let inputs = [
             InputEvent::MouseMoveAbsolute { x: 32768, y: 32768 },
             InputEvent::MouseDown(0),
@@ -1029,6 +1091,149 @@ mod static_input_tests {
         let start = now - Duration::from_secs(1200);
         let decoded = now - Duration::from_secs(600);
         assert!(current_input_frame(Some(decoded), start, true));
+    }
+    #[tokio::test]
+    async fn delayed_ack_and_poll_preserve_the_only_current_output_without_reusing_old_paint() {
+        let (mut session, _received, recorder, _temp) = recorder_session().await;
+        let (video, _packets) = tokio::sync::mpsc::channel(1);
+        session
+            .conn
+            .subscribe(
+                session.request.clone(),
+                video,
+                session.stats.clone(),
+                session.host_stats.clone(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.conn.input_ready(session.video_id, 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // The real actor's ingress/reset behavior is covered in remote_core.
+        // This model regression controls GUI delivery and one decoded output;
+        // paint metadata below is explicit test input, not native-display proof.
+        let (events, control) = tokio::sync::mpsc::unbounded_channel();
+        session.events.control = control;
+        session.stats.video_recovery.track_output();
+        session.stats.video_recovery.reset_source(|| ());
+        let accepted = session.stats.video_recovery.snapshot();
+        let decoded = session
+            .stats
+            .video_recovery
+            .publish(accepted.epoch, Instant::now)
+            .unwrap();
+        session.pending = Some((session.video_id, accepted.began_at));
+        events
+            .send(SessionCommand::Subscribed {
+                id: session.video_id,
+                audio_owner: None,
+                supports_input: true,
+            })
+            .unwrap();
+        session.poll();
+        assert!(session.confirmed);
+        assert_eq!(session.first_frame_after, accepted.began_at);
+        assert!(session.current_video_frame(accepted.epoch, decoded));
+        assert!(!session.can_input(), "decoding alone is not paint");
+        session.uploaded_at = Some(decoded);
+        session.uploaded_epoch = Some(accepted.epoch);
+        assert!(session.can_input());
+
+        // The complete wait -> valid output transition happens between polls.
+        let recovered = session
+            .stats
+            .video_recovery
+            .require_keyframe(accepted.epoch.source)
+            .unwrap();
+        let decoded_again = session
+            .stats
+            .video_recovery
+            .publish(recovered, Instant::now)
+            .unwrap();
+        assert!(
+            !session.can_input(),
+            "old paint cannot unlock even before GUI polling"
+        );
+        assert!(!session.current_video_frame(accepted.epoch, decoded));
+        session.poll();
+        assert!(session.current_video_frame(recovered, decoded_again));
+        assert!(!session.can_input());
+        session.uploaded_at = Some(decoded_again);
+        session.uploaded_epoch = Some(recovered);
+        assert!(session.can_input());
+
+        // Audio-only/duplicate activity must leave the healthy static frame valid.
+        session.activity_revision = 1;
+        session.activity_pending = Some(1);
+        events
+            .send(SessionCommand::Activity {
+                id: session.video_id,
+                revision: 1,
+                video: true,
+                audio: false,
+            })
+            .unwrap();
+        session.poll();
+        assert!(session.can_input());
+        assert_eq!(session.stats.video_recovery.snapshot().epoch, recovered);
+
+        // Resume was already accepted and its only output decoded before GUI ACK.
+        session.activity_revision = 2;
+        session.activity_pending = Some(2);
+        session.stats.video_recovery.reset_source(|| ());
+        let resumed = session.stats.video_recovery.snapshot();
+        let resumed_frame = session
+            .stats
+            .video_recovery
+            .publish(resumed.epoch, Instant::now)
+            .unwrap();
+        events
+            .send(SessionCommand::Activity {
+                id: session.video_id,
+                revision: 2,
+                video: true,
+                audio: false,
+            })
+            .unwrap();
+        session.poll();
+        assert_eq!(session.first_frame_after, resumed.began_at);
+        assert!(session.current_video_frame(resumed.epoch, resumed_frame));
+        assert!(!session.can_input());
+
+        // A late source ACK must not reset/drop the already-current decoded frame.
+        session.confirmed = false;
+        session.pending = Some((100, Instant::now()));
+        session.stats.video_recovery.reset_source(|| ());
+        let switched = session.stats.video_recovery.snapshot();
+        let switched_frame = session
+            .stats
+            .video_recovery
+            .publish(switched.epoch, Instant::now)
+            .unwrap();
+        events
+            .send(SessionCommand::SourceSwitched {
+                id: session.video_id,
+                request_id: 100,
+                source: CaptureSource::Display(88),
+                supports_input: true,
+            })
+            .unwrap();
+        session.poll();
+        assert_eq!(
+            session.stats.video_recovery.snapshot().epoch,
+            switched.epoch
+        );
+        assert!(session.current_video_frame(switched.epoch, switched_frame));
+        assert!(!session.current_video_frame(resumed.epoch, resumed_frame));
+        assert!(
+            !session.can_input(),
+            "new source still requires its own binding and paint"
+        );
+        recorder.abort();
     }
     #[test]
     fn stale_connection_or_old_source_cannot_receive_input() {

@@ -83,6 +83,15 @@ impl UdpSender {
             .insert(peer, Arc::new(crypto));
     }
 
+    pub fn peer_session_id(&self, peer: SocketAddr) -> Option<[u8; 16]> {
+        self.peer_crypto
+            .read()
+            .unwrap()
+            .get(&peer)
+            .map(|crypto| crypto.session_id())
+            .or_else(|| self.crypto.get().map(SessionCrypto::session_id))
+    }
+
     pub fn remove_peer_crypto(&self, peer: SocketAddr) {
         self.peer_crypto.write().unwrap().remove(&peer);
     }
@@ -161,7 +170,8 @@ impl UdpSender {
         // Session handshake must remain plaintext so peers can derive the AEAD key.
         if matches!(
             msg,
-            ControlMessage::SessionHello { .. }
+            ControlMessage::SessionHandshake(_)
+                | ControlMessage::SessionHello { .. }
                 | ControlMessage::SessionAccept { .. }
                 | ControlMessage::SessionReject { .. }
         ) {
@@ -271,6 +281,8 @@ pub struct UdpReceiver {
 pub enum MultiplexedPacket {
     Rtp(RtpPacket, SocketAddr),
     Control(ControlMessage, SocketAddr),
+    ClockProbe(protocol::session_auth::ClockProbe, u64, SocketAddr),
+    ClockReply(protocol::session_auth::ClockReply, u64, SocketAddr),
     Data(DataEnvelope, SocketAddr),
     DataWithTiming(
         DataEnvelope,
@@ -299,7 +311,17 @@ impl UdpReceiver {
         len: usize,
         addr: SocketAddr,
     ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
-        self.decode_payload_inner(buf, len, addr, false)
+        self.decode_payload_at(buf, len, addr, crate::timing::quanta_now_us())
+    }
+
+    fn decode_payload_at(
+        &self,
+        buf: &[u8],
+        len: usize,
+        addr: SocketAddr,
+        received_us: u64,
+    ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
+        self.decode_payload_inner(buf, len, addr, None, received_us)
             .map_err(|error| rejected_packet(addr, error))
     }
 
@@ -308,18 +330,20 @@ impl UdpReceiver {
         buf: &[u8],
         len: usize,
         addr: SocketAddr,
-        authenticated: bool,
+        authenticated: Option<[u8; 16]>,
+        received_us: u64,
     ) -> Result<Option<MultiplexedPacket>, Box<dyn Error + Send + Sync>> {
         if len == 0 {
             return Ok(None);
         }
         let peer_key = self.peer_crypto.read().unwrap().get(&addr).cloned();
         let key = peer_key.as_deref().or_else(|| self.crypto.get());
-        if !authenticated && key.is_some() && buf[0] != MULTIPLEX_ENCRYPTED {
+        if authenticated.is_none() && key.is_some() && buf[0] != MULTIPLEX_ENCRYPTED {
             let handshake = buf[0] == 0x02
                 && matches!(
                     ControlMessage::decode(&buf[1..len]),
-                    Ok(ControlMessage::SessionHello { .. }
+                    Ok(ControlMessage::SessionHandshake(_)
+                        | ControlMessage::SessionHello { .. }
                         | ControlMessage::SessionAccept { .. }
                         | ControlMessage::SessionReject { .. })
                 );
@@ -329,14 +353,20 @@ impl UdpReceiver {
         }
         match buf[0] {
             MULTIPLEX_ENCRYPTED => {
-                if authenticated {
+                if authenticated.is_some() {
                     return Err("nested encryption is not supported".into());
                 }
                 let Some(crypto) = key else {
                     return Err("encrypted packet received without session crypto".into());
                 };
                 let opened = crypto.open(&buf[1..len])?;
-                self.decode_payload_inner(&opened, opened.len(), addr, true)
+                self.decode_payload_inner(
+                    &opened,
+                    opened.len(),
+                    addr,
+                    Some(crypto.session_id()),
+                    received_us,
+                )
             }
             0x01 => {
                 let rtp = RtpPacket::decode(&buf[1..len])?;
@@ -344,7 +374,30 @@ impl UdpReceiver {
             }
             0x02 => {
                 let msg = ControlMessage::decode(&buf[1..len])?;
-                Ok(Some(MultiplexedPacket::Control(msg, addr)))
+                match msg {
+                    ControlMessage::ClockProbe(probe)
+                        if authenticated == Some(probe.session_id) =>
+                    {
+                        Ok(Some(MultiplexedPacket::ClockProbe(
+                            probe,
+                            received_us,
+                            addr,
+                        )))
+                    }
+                    ControlMessage::ClockReply(reply)
+                        if authenticated == Some(reply.probe.session_id) =>
+                    {
+                        Ok(Some(MultiplexedPacket::ClockReply(
+                            reply,
+                            received_us,
+                            addr,
+                        )))
+                    }
+                    ControlMessage::ClockProbe(_) | ControlMessage::ClockReply(_) => {
+                        Err("clock measurements require the current authenticated session".into())
+                    }
+                    other => Ok(Some(MultiplexedPacket::Control(other, addr))),
+                }
             }
             0x04 => {
                 let envelope = DataEnvelope::decode(&buf[1..len])?;
@@ -391,6 +444,7 @@ impl UdpReceiver {
         let mut buf = [0u8; 65536];
         loop {
             let (len, addr) = self.socket.recv_from(&mut buf).await?;
+            let received_us = crate::timing::quanta_now_us();
             if len == 0 {
                 continue;
             }
@@ -467,7 +521,7 @@ impl UdpReceiver {
                             assembled.extend_from_slice(&chunk);
                         }
                         if let Some(packet) =
-                            self.decode_payload(&assembled, assembled.len(), addr)?
+                            self.decode_payload_at(&assembled, assembled.len(), addr, received_us)?
                         {
                             return Ok(packet);
                         }
@@ -476,7 +530,9 @@ impl UdpReceiver {
                     }
                 }
                 _ => {
-                    if let Some(packet) = self.decode_payload(&buf[..len], len, addr)? {
+                    if let Some(packet) =
+                        self.decode_payload_at(&buf[..len], len, addr, received_us)?
+                    {
                         return Ok(packet);
                     }
                 }
@@ -624,6 +680,54 @@ mod tests {
 
     fn fragment_key(id: u32) -> FragmentKey {
         ("127.0.0.1:39271".parse().unwrap(), 0x01, id)
+    }
+
+    #[tokio::test]
+    async fn authenticated_clock_records_keep_ingress_timestamp_and_reject_replay_plaintext_and_wrong_session()
+     {
+        use crate::session_crypto::SessionRole;
+        let (left, right) = bind_pair().await;
+        let addr = left.local_addr().unwrap();
+        let (tx, rx) = right.split();
+        let client =
+            crate::SessionCrypto::from_psk(b"clock-key", b"clock-salt", SessionRole::Client)
+                .unwrap();
+        tx.install_peer_crypto(
+            addr,
+            crate::SessionCrypto::from_psk(b"clock-key", b"clock-salt", SessionRole::Host).unwrap(),
+        );
+        let probe = protocol::session_auth::ClockProbe {
+            session_id: client.session_id(),
+            probe_id: 1,
+            client_send_us: 99,
+        };
+        let mut plain = vec![2];
+        plain.extend(ControlMessage::ClockProbe(probe).encode().unwrap());
+        assert!(
+            rx.decode_payload_at(&plain, plain.len(), addr, 100)
+                .is_err()
+        );
+        let mut sealed = vec![MULTIPLEX_ENCRYPTED];
+        sealed.extend(client.seal(&plain).unwrap());
+        assert!(
+            matches!(rx.decode_payload_at(&sealed,sealed.len(),addr,12345).unwrap(),Some(MultiplexedPacket::ClockProbe(p,12345,a))if p==probe&&a==addr)
+        );
+        assert!(
+            rx.decode_payload_at(&sealed, sealed.len(), addr, 12346)
+                .is_err()
+        );
+        let wrong = protocol::session_auth::ClockProbe {
+            session_id: [0; 16],
+            ..probe
+        };
+        let mut inner = vec![2];
+        inner.extend(ControlMessage::ClockProbe(wrong).encode().unwrap());
+        let mut sealed = vec![MULTIPLEX_ENCRYPTED];
+        sealed.extend(client.seal(&inner).unwrap());
+        assert!(
+            rx.decode_payload_at(&sealed, sealed.len(), addr, 12347)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -779,8 +883,14 @@ mod tests {
         let (_, receiver) = right.split();
         let psk = b"test-psk";
         let salt = b"salt-16-bytes!!!!";
-        sender.install_crypto(crate::SessionCrypto::from_psk(psk, salt).unwrap());
-        receiver.install_crypto(crate::SessionCrypto::from_psk(psk, salt).unwrap());
+        sender.install_crypto(
+            crate::SessionCrypto::from_psk(psk, salt, crate::session_crypto::SessionRole::Client)
+                .unwrap(),
+        );
+        receiver.install_crypto(
+            crate::SessionCrypto::from_psk(psk, salt, crate::session_crypto::SessionRole::Host)
+                .unwrap(),
+        );
 
         sender
             .send_control(&ControlMessage::Heartbeat, right_addr)
@@ -808,9 +918,18 @@ mod tests {
         ] {
             server_tx.install_peer_crypto(
                 peer.local_addr().unwrap(),
-                SessionCrypto::from_psk(b"shared", salt).unwrap(),
+                SessionCrypto::from_psk(b"shared", salt, crate::session_crypto::SessionRole::Host)
+                    .unwrap(),
             );
-            tx.install_peer_crypto(addr, SessionCrypto::from_psk(b"shared", salt).unwrap());
+            tx.install_peer_crypto(
+                addr,
+                SessionCrypto::from_psk(
+                    b"shared",
+                    salt,
+                    crate::session_crypto::SessionRole::Client,
+                )
+                .unwrap(),
+            );
             tx.send_control(&ControlMessage::Heartbeat, addr)
                 .await
                 .unwrap();
@@ -834,10 +953,14 @@ mod tests {
         );
         let mut wrong = vec![MULTIPLEX_ENCRYPTED];
         wrong.extend(
-            SessionCrypto::from_psk(b"shared", b"second-salt-12345")
-                .unwrap()
-                .seal(&plain)
-                .unwrap(),
+            SessionCrypto::from_psk(
+                b"shared",
+                b"second-salt-12345",
+                crate::session_crypto::SessionRole::Client,
+            )
+            .unwrap()
+            .seal(&plain)
+            .unwrap(),
         );
         assert!(
             server_rx

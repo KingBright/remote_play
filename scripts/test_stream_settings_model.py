@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Fixed local regressions and Linux X11 test compilation; no GUI/network."""
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -14,10 +16,52 @@ import time
 
 RESERVE = 4 * 1024**3
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
+BUILD_TIMEOUT_SECONDS = 1800
+TEST_TIMEOUT_SECONDS = 120
+OBSERVATION_TIMEOUT_SECONDS = 60
+# Fixed package/filter pairs only. These modes share the same guarded transaction;
+# callers cannot supply Cargo arguments, alternate profiles or test executables.
+SESSION_CLOCK_TESTS = {
+    "session-security": ("remote_core", "session_"),
+    "clock-measurement": ("remote_core", "clock_sync::tests"),
+    "clock-timing": ("remote_core", "timing::tests"),
+    "clock-protocol": ("protocol", "session_auth"),
+    "clock-media": ("remote_core", "client_session::tests"),
+    "clock-workspace": ("remote_core", "workspace_session::"),
+    "clock-host-cleared": ("host", "service::failure_admission_tests::cleared_auth_"),
+    "host-resubscribe-lifecycle": ("host", "service::failure_admission_tests::resubscribe_allows_capture_source_switch"),
+    "host-capture-lifecycle": ("host", "linux_capture::lifecycle_tests::"),
+    "hevc-access-units": ("host", "ffmpeg_hevc::tests"),
+    "clock-host-auth": ("host", "service::failure_admission_tests::finish_rechecks_native_owner_and_retired_finish_cannot_replace_new_session"),
+    "clock-host-rotation": ("host", "service::failure_admission_tests::key_rotation_same_address_hello_keeps_pending_native_budget_until_release"),
+    "transport-replay": ("remote_core", "net::tests"),
+    "routed-auth": ("remote_core", "p2p::routed_p2p_tests"),
+    "clock-display": ("remote_play_app", "telemetry_display::tests"),
+    "clock-renderer": ("client", "render_timing::tests"),
+    "bridge-auth": ("remote_client_bridge", "publisher_bridge::tests"),
+    "bridge-telemetry": ("remote_client_bridge", "tests::telemetry_defaults_are_zero_not_marketing_numbers"),
+    "bridge-keepalive": ("remote_client_bridge", "tests::paused_session_uses_sparse_shared_keepalive_and_stops_input_grants"),
+}
+
+
+PLATFORM_CHECKS = {
+    "platform-macos-check": ("--bin", "remote_play", "--features", "gpui-native-video"),
+    "platform-windows-check": ("--tests", "--target", "x86_64-pc-windows-gnu", "--features", "native-windows-video"),
+    "platform-linux-check": ("--tests", "--target", LINUX_TARGET),
+}
 
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode in PLATFORM_CHECKS:
+        return [cargo, "check", *shared, "-p", "remote_play_app", *PLATFORM_CHECKS[mode]]
+    if mode in SESSION_CLOCK_TESTS:
+        package, test_filter = SESSION_CLOCK_TESTS[mode]
+        return [cargo, "test", *shared, "-p", package, "--lib",
+                test_filter, "--", "--nocapture"]
+    if mode == "service-contract":
+        return [cargo, "test", *shared, "-p", "remote_play_app", "--lib",
+                "service_contract", "--", "--nocapture"]
     if mode == "gui-input-status":
         return [cargo, "test", *shared, "-p", "remote_play_app", "--lib", "--no-default-features",
                 "--features", "gpui-restoration", "restored_ui::input_tests::", "--", "--nocapture"]
@@ -25,8 +69,6 @@ def validation_command(cargo, target, mode):
         return [cargo, "test" if mode.endswith("tests") else "build", *shared,
                 "-p", "remote_play_app", "--example", "window_scoped_acceptance_guarded",
                 "--no-default-features", "--features", "gpui-restoration"]
-    if mode == "hevc-access-units":
-        return [cargo, "test", *shared, "-p", "host", "--lib", "ffmpeg_hevc::tests", "--", "--nocapture"]
     if mode == "host-control":
         return [cargo, "test", *shared, "-p", "host", "--lib", "service::", "--", "--nocapture"]
     if mode == "source-catalog":
@@ -55,10 +97,11 @@ def validation_command(cargo, target, mode):
 def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
-    if mode in ("media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status") and any(name in env for name in (
+    env["CARGO_TERM_COLOR"] = "never"
+    if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
             "REMOTEPLAY_BUILD_IDENTITY_FILE", "REMOTEPLAY_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
-    if mode == "linux-x11-check":
+    if mode in ("linux-x11-check", "platform-linux-check"):
         zig = shutil.which("zig")
         wrapper = shutil.which("cargo-zigbuild")
         cache = Path.home() / ".cache/zig"
@@ -74,22 +117,279 @@ def validation_environment(mode):
     return env
 
 
+def requires_workspace_source_guard(mode):
+    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode.startswith("media-lifecycle") or
+            mode in ("service-contract", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"))
+
+
+@contextlib.contextmanager
+def fixed_validation_lock(root):
+    """Cloud project-runner lock only; no claim of managed/cleanup coverage."""
+    if os.name != "posix":
+        raise ValueError("explicit environment validation requires POSIX flock")
+    import fcntl
+    state = root / ".rust-storage"
+    path = state / "fixed-validation.lock"
+    if state.is_symlink() or not state.is_dir() or path.is_symlink():
+        raise ValueError("validation lock must stay in existing project metadata")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError("another project validation owns the activity lock") from error
+        # Retain this exact inode; never unlink a lock another waiter may hold.
+        yield
+    finally:
+        os.close(fd)
+
+
+def validate_observed_target(report, target):
+    target = target.resolve()
+    references = report.get("binding", {}).get("selected_artifact_refs", [])
+    if str(target) not in references or not target.is_dir():
+        raise ValueError("actual Cargo target is not an existing observed artifact reference")
+    return target
+
+
+@contextlib.contextmanager
+def owned_interruption():
+    previous = signal.getsignal(signal.SIGTERM)
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt("validation cancelled; waiting for owned build before unlock")
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@contextlib.contextmanager
+def finish_owned_transaction():
+    # Once cancellation starts, a second interrupt cannot skip child wait or
+    # release the activity lock while this runner's processes still use target.
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    for sig in previous:
+        signal.signal(sig, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def stop_owned_process(process):
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except ProcessLookupError:
+            pass
+
+        # A run deadline never authorizes releasing target while its child lives.
+        process.wait()
+    if os.name == "posix":
+        # The group was created by this runner's start_new_session=True. Cargo
+        # may exit before a descendant that ignored TERM, so wait(parent) alone
+        # is not proof the owned process group has stopped.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def owned_group_absent(process):
+    """Observe only the process group this runner created, never other namespaces."""
+    if os.name != "posix":
+        return None
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+@contextlib.contextmanager
+def private_validation_log(root, mode):
+    state = root / ".rust-storage"
+    directory = state / "validation-logs"
+    if state.is_symlink() or not state.is_dir() or directory.is_symlink():
+        raise ValueError("validation logs must stay in existing project metadata")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.stat().st_mode & 0o077:
+        raise ValueError("validation log directory must be private (0700)")
+    fd, name = tempfile.mkstemp(prefix=mode + "-", suffix=".log", dir=directory)
+    path = Path(name)
+    receipt_path = path.with_suffix(".jsonl")
+    try:
+        receipt_fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "wb", buffering=0) as log, os.fdopen(receipt_fd, "w") as receipt:
+        yield path, log, receipt_path, receipt
+
+
+def execute_guarded_command(command, root, target, env, observation, sources, hashes, mode):
+    with private_validation_log(root, mode) as (log_path, log, receipt_path, receipt):
+        print(f"Live private log: {log_path}", flush=True)
+        print(f"Validation receipt: {receipt_path}", flush=True)
+        def record(value):
+            receipt.write(json.dumps(value, sort_keys=True) + "\n")
+            receipt.flush()
+        process = None
+        reason, exit_code, error = "completed", 0, None
+        started, tests_started, pending = time.monotonic(), None, b""
+        tests_observed = 0
+        test_results = {"passed": 0, "failed": 0, "ignored": 0}
+        cleanup_error, group_absent, post_code, sources_unchanged = None, None, None, False
+        try:
+            process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            record({"event": "started", "mode": mode, "pid": process.pid, "owned_process_group": process.pid,
+                    "command": command, "build_timeout_seconds": BUILD_TIMEOUT_SECONDS,
+                    "test_timeout_seconds": TEST_TIMEOUT_SECONDS})
+            # A separate open description avoids moving the child's output cursor.
+            with log_path.open("rb") as reader:
+                while process.poll() is None:
+                    now = time.monotonic()
+                    pending = (pending + reader.read(65536))[-131072:]
+                    if tests_started is None and (b"Running unittests" in pending or re.search(rb"running \d+ tests?", pending)):
+                        tests_started = now
+                        record({"event": "tests_started", "elapsed_seconds": now - started})
+                    if now - started >= BUILD_TIMEOUT_SECONDS:
+                        reason, exit_code = "build_deadline", 124
+                        break
+                    if tests_started is not None and now - tests_started >= TEST_TIMEOUT_SECONDS:
+                        reason, exit_code = "test_deadline", 124
+                        break
+                    if shutil.disk_usage(target).free < RESERVE:
+                        reason, exit_code = "disk_reserve", 125
+                        break
+                    time.sleep(0.2)
+        except KeyboardInterrupt:
+            reason, exit_code = "cancelled", 130
+        except Exception as failure:
+            reason, exit_code, error = "runner_error", 1, str(failure)
+        finally:
+            # Cancellation must not skip output, source checks or the final receipt.
+            with finish_owned_transaction():
+                if process is not None:
+                    while True:
+                        try:
+                            stop_owned_process(process)
+                            group_absent = owned_group_absent(process)
+                            if group_absent is not False:
+                                break
+                        except Exception as failure:
+                            cleanup_error = str(failure)
+                        exit_code = exit_code or 1
+                        # Disk-full/closed-console diagnostics cannot release the
+                        # activity lock before our process group has stopped.
+                        try:
+                            record({"event": "cleanup_wait", "owned_process_group": process.pid,
+                                    "error": cleanup_error, "activity_lock_retained": True})
+                        except (OSError, ValueError):
+                            pass
+                        try:
+                            print("Owned group not confirmed stopped; retaining activity lock", flush=True)
+                        except (OSError, ValueError):
+                            pass
+                        time.sleep(1)
+                try:
+                    postflight = subprocess.run(observation, cwd=root, capture_output=True, text=True,
+                                                timeout=OBSERVATION_TIMEOUT_SECONDS)
+                    post_code = postflight.returncode
+                    if post_code:
+                        print(postflight.stderr or postflight.stdout, file=sys.stderr)
+                except Exception as failure:
+                    error = f"post-observation failed: {failure}"
+                try:
+                    sources_unchanged = hashes == [hashlib.sha256(path.read_bytes()).hexdigest() for path in sources]
+                except OSError as failure:
+                    error = f"source verification failed: {failure}"
+                child_code = process.returncode if process is not None else None
+                with log_path.open("rb") as reader:
+                    for line in reader:
+                        count = re.search(rb"^running (\d+) tests?", line.strip())
+                        if count:
+                            tests_observed += int(count[1])
+                        result = re.search(rb"^test result: .*? (\d+) passed; (\d+) failed; (\d+) ignored;", line.strip())
+                        if result:
+                            for key, value in zip(test_results, result.groups()):
+                                test_results[key] += int(value)
+                if mode in SESSION_CLOCK_TESTS and not tests_observed:
+                    error = "no matching library tests executed; result not accepted"
+                    exit_code = exit_code or 1
+                if not exit_code:
+                    exit_code = child_code or post_code or 0
+                if cleanup_error or group_absent is False or post_code is None or not sources_unchanged:
+                    exit_code = exit_code or 1
+                record({"event": "finished", "reason": reason, "exit_code": exit_code,
+                        "child_exit_code": child_code, "post_observation_exit": post_code,
+                        "sources_unchanged": sources_unchanged, "owned_group_absent": group_absent,
+                        "tests_observed": tests_observed,
+                        "reported_test_results": test_results,
+                        "cleanup_error": cleanup_error, "error": error,
+                        "elapsed_seconds": time.monotonic() - started})
+                with log_path.open("rb") as reader:
+                    reader.seek(max(0, log_path.stat().st_size - 12000))
+                    print(reader.read().decode("utf-8", errors="replace"), flush=True)
+                print(f"Exit: {exit_code}; reason: {reason}; post-observation: {post_code}; "
+                      f"sources unchanged: {sources_unchanged}; owned group absent: {group_absent}; "
+                      f"free GiB: {shutil.disk_usage(target).free / 1024**3:.3f}", flush=True)
+        return exit_code
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target-dir", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", "hevc-access-units"),
+    parser.add_argument("--lifecycle-authority", type=Path)
+    parser.add_argument("--lifecycle-binding", type=Path)
+    parser.add_argument("--lifecycle-helper", type=Path)
+    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    # Refresh stale evidence explicitly with the existing adoption tool; never
-    # compile through a failed lifecycle observation.
-    preflight = subprocess.run(
-        [sys.executable, "-B", str(root / "scripts/check_artifact_lifecycle.py"), "check"],
-        cwd=root, capture_output=True, text=True,
-    )
+    selectors = [args.lifecycle_authority, args.lifecycle_binding, args.lifecycle_helper]
+    if any(selectors) and not all(selectors):
+        parser.error("explicit lifecycle authority, binding and helper must be supplied together")
+    # The legacy defaults remain intact. An explicitly reconciled environment
+    # additionally serializes the whole project-specific test transaction.
+    lock = fixed_validation_lock(root) if all(selectors) else contextlib.nullcontext()
+    try:
+        with lock, owned_interruption():
+            return guarded_run(args, root, parser)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
+
+
+def guarded_run(args, root, parser):
+    observation = [sys.executable, "-B", str(root / "scripts/check_artifact_lifecycle.py"), "check"]
+    for key in ("authority", "binding", "helper"):
+        value = getattr(args, "lifecycle_" + key)
+        if value is not None:
+            observation.extend(["--" + key, str(value)])
+    # Official adopt-check must pass; never compile through failed observation.
+    preflight = subprocess.run(observation, cwd=root, capture_output=True, text=True)
     if preflight.returncode:
         print(preflight.stderr or preflight.stdout, file=sys.stderr)
         return preflight.returncode
+    report = json.loads(preflight.stdout)
     print(f"Source workspace: {root}", flush=True)
     print("Git source: " + subprocess.check_output(
         ["git", "log", "-1", "--format=%H %D"], cwd=root, text=True
@@ -97,15 +397,17 @@ def main():
     cargo = shutil.which("cargo")
     if not cargo:
         parser.error("cargo is required")
-    if args.target_dir:
-        target = args.target_dir.resolve()
-    else:
-        metadata = subprocess.check_output(
-            [cargo, "metadata", "--offline", "--locked", "--no-deps", "--format-version=1"], cwd=root
-        )
-        target = Path(json.loads(metadata)["target_directory"])
-    if not target.is_dir():
-        parser.error("use an existing target; this script does not create a new target")
+    metadata = json.loads(subprocess.check_output(
+        [cargo, "metadata", "--offline", "--locked", "--no-deps", "--format-version=1"], cwd=root
+    ))
+    resolved_target = Path(metadata["target_directory"]).resolve()
+    target = args.target_dir.resolve() if args.target_dir else resolved_target
+    target = validate_observed_target(report, target)
+    if args.lifecycle_authority and target != resolved_target:
+        parser.error("explicit environment tests must reuse the actual configured Cargo target")
+    build = metadata.get("build_directory")
+    if build and args.lifecycle_authority:
+        validate_observed_target(report, Path(build))
     if shutil.disk_usage(target).free < RESERVE:
         parser.error("less than 4 GiB free; no build started")
     command = validation_command(cargo, target, args.mode)
@@ -119,28 +421,20 @@ def main():
             "Cargo.toml", "Cargo.lock", "third_party/gpui-ce/Cargo.toml",
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
-    if args.mode.startswith("media-lifecycle") or args.mode in ("media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", "hevc-access-units"):
+    if requires_workspace_source_guard(args.mode):
         paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
+    sources.extend([root / "scripts/test_stream_settings_model.py", root / "scripts/check_artifact_lifecycle.py"])
+    for path in (args.lifecycle_authority, args.lifecycle_binding, args.lifecycle_helper):
+        if path is not None:
+            sources.append(path)
+    if args.lifecycle_helper:
+        sources.extend(args.lifecycle_helper.parent / name for name in ("rust_scope.py", "rust_adopt.py", "rust_release.py"))
     hashes = [hashlib.sha256(path.read_bytes()).hexdigest() for path in sources]
     print(f"Using existing target: {target}", flush=True)
-    with tempfile.TemporaryFile(mode="w+") as log:
-        process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        while process.poll() is None:
-            if shutil.disk_usage(target).free < RESERVE:
-                os.killpg(process.pid, signal.SIGTERM)  # Only this script's owned build group.
-                process.wait()
-                raise SystemExit("4 GiB reserve reached; owned build stopped, no cache cleaned")
-            time.sleep(0.2)
-        if hashes != [hashlib.sha256(path.read_bytes()).hexdigest() for path in sources]:
-            raise SystemExit("sources changed during tests; result not accepted")
-        log.seek(0)
-        output = log.read()
-        marker = output.rfind("running ")
-        print(output[marker:] if process.returncode == 0 and marker >= 0 else output[-12000:])
-        print(f"Exit: {process.returncode}; free GiB: {shutil.disk_usage(target).free / 1024**3:.3f}")
-        return process.returncode
+    print("Project-specific run; observation coverage remains false; no cleanup", flush=True)
+    return execute_guarded_command(command, root, target, env, observation, sources, hashes, args.mode)
 
 
 if __name__ == "__main__":

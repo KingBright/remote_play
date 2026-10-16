@@ -12,8 +12,13 @@ pub struct HighPrecisionClock {
 }
 
 impl HighPrecisionClock {
-    /// 初始化时钟锚点
+    /// Clone the process-wide monotonic anchor, including for frame trackers.
+    /// Creating a clock later must not resample wall time into a different domain.
     pub fn new() -> Self {
+        global_clock().clone()
+    }
+
+    fn create_process_anchor() -> Self {
         let clock = Clock::new();
         let anchor_instant = clock.now();
         let anchor_epoch_us = SystemTime::now()
@@ -34,18 +39,20 @@ impl HighPrecisionClock {
         self.clock.now()
     }
 
-    /// 获取当前挂钟微秒绝对时间戳
+    /// Epoch-shaped monotonic timestamp. Wall time is sampled only at process
+    /// anchor creation; later OS clock corrections never change this domain.
     #[inline(always)]
     pub fn now_epoch_us(&self) -> u64 {
         let now_inst = self.clock.now();
         let delta = now_inst.saturating_duration_since(self.anchor_instant);
-        self.anchor_epoch_us + delta.as_micros() as u64
+        self.anchor_epoch_us
+            .saturating_add(u64::try_from(delta.as_micros()).unwrap_or(u64::MAX))
     }
 
     /// 计算两个瞬时点之间的微秒差值 (Saturating)
     #[inline(always)]
     pub fn delta_us(&self, start: Instant, end: Instant) -> u32 {
-        end.saturating_duration_since(start).as_micros() as u32
+        u32::try_from(end.saturating_duration_since(start).as_micros()).unwrap_or(u32::MAX)
     }
 
     /// 计算自起始瞬时点至当前的微秒差值
@@ -66,10 +73,11 @@ static GLOBAL_CLOCK: OnceLock<HighPrecisionClock> = OnceLock::new();
 /// 获取全局共享的高精度时钟引用
 #[inline]
 pub fn global_clock() -> &'static HighPrecisionClock {
-    GLOBAL_CLOCK.get_or_init(HighPrecisionClock::new)
+    GLOBAL_CLOCK.get_or_init(HighPrecisionClock::create_process_anchor)
 }
 
-/// 获取当前全局高精度微秒绝对时间戳 (Unix Epoch)
+/// Global epoch-shaped monotonic microseconds; not a fresh wall-clock reading.
+/// Clock probes and frame timestamps must share this process-wide anchor.
 #[inline(always)]
 pub fn quanta_now_us() -> u64 {
     global_clock().now_epoch_us()
@@ -167,16 +175,15 @@ fn aligned_client_offset_us(
     clock_offset_us: i64,
     min_offset_us: u32,
 ) -> u32 {
-    let min_epoch = capture_ts_us.saturating_add(min_offset_us as u64);
-    let host_aligned = (client_now_us as i64)
-        .saturating_add(clock_offset_us)
-        .max(min_epoch as i64) as u64;
-    (host_aligned.saturating_sub(capture_ts_us) as u32).max(min_offset_us)
+    let host_aligned = client_now_us as i128 + clock_offset_us as i128;
+    let delta =
+        (host_aligned - capture_ts_us as i128).clamp(min_offset_us as i128, u32::MAX as i128);
+    delta as u32
 }
 
 /// Stamp a later client stage in the host-capture domain.
 ///
-/// Uses Ping/Pong `clock_offset_us` when available, and never moves earlier
+/// Uses an explicitly supplied clock offset, and never moves earlier
 /// than recv/jitter/decode checkpoints already on `timing`.
 #[inline]
 pub fn stamp_client_stage(
@@ -300,75 +307,6 @@ impl ClientFrameTracker {
     }
 }
 
-/// 时钟同步与 RTT 偏移估计器 (基于 Ping/Pong 与 EWMA 滤波)
-#[derive(Debug, Clone)]
-pub struct ClockSynchronizer {
-    rtt_us: f64,
-    clock_offset_us: f64,
-    initialized: bool,
-}
-
-impl ClockSynchronizer {
-    pub fn new() -> Self {
-        Self {
-            rtt_us: 0.0,
-            clock_offset_us: 0.0,
-            initialized: false,
-        }
-    }
-
-    /// 处理 Ping-Pong 消息并更新估算
-    /// t1: client_send_ts (微秒)
-    /// t2: host_recv_ts (微秒)
-    /// t3: host_send_ts (微秒)
-    /// t4: client_recv_ts (微秒)
-    pub fn update_pong(&mut self, t1: u64, t2: u64, t3: u64, t4: u64) {
-        if t4 <= t1 || t3 < t2 {
-            return;
-        }
-        let total_rtt = (t4 - t1) as f64;
-        let host_processing = (t3 - t2) as f64;
-        let sample_rtt = (total_rtt - host_processing).max(0.0);
-
-        // Host_Time = Client_Time + Offset
-        // Offset = ((t2 - t1) + (t3 - t4)) / 2
-        let sample_offset = (((t2 as i64 - t1 as i64) + (t3 as i64 - t4 as i64)) as f64) / 2.0;
-
-        if !self.initialized {
-            self.rtt_us = sample_rtt;
-            self.clock_offset_us = sample_offset;
-            self.initialized = true;
-        } else {
-            // 剔除偏离当前均值 3 倍以上的异常峰值
-            if sample_rtt < self.rtt_us * 3.0 || self.rtt_us < 1_000.0 {
-                self.rtt_us = self.rtt_us * 0.85 + sample_rtt * 0.15;
-                self.clock_offset_us = self.clock_offset_us * 0.85 + sample_offset * 0.15;
-            }
-        }
-    }
-
-    #[inline]
-    pub fn clock_offset_us(&self) -> i64 {
-        self.clock_offset_us as i64
-    }
-
-    #[inline]
-    pub fn rtt_us(&self) -> u32 {
-        self.rtt_us as u32
-    }
-
-    #[inline]
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
-    }
-}
-
-impl Default for ClockSynchronizer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,26 +427,30 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_synchronizer_update_and_outliers() {
-        let mut syncer = ClockSynchronizer::new();
-        assert!(!syncer.is_initialized());
+    fn all_clock_instances_share_the_process_anchor() {
+        let first = HighPrecisionClock::new();
+        let second = HighPrecisionClock::new();
+        assert_eq!(first.anchor_instant, second.anchor_instant);
+        assert_eq!(first.anchor_epoch_us, second.anchor_epoch_us);
+        assert_eq!(first.anchor_instant, global_clock().anchor_instant);
+        assert_eq!(first.anchor_epoch_us, global_clock().anchor_epoch_us);
+        let before = quanta_now_us();
+        let local = second.now_epoch_us();
+        let after = quanta_now_us();
+        assert!(before <= local && local <= after);
+    }
 
-        // t1: 1000, t2: 1005 (host received), t3: 1006 (host replied), t4: 1012 (client received)
-        // total_rtt = 1012 - 1000 = 12, host_proc = 1
-        // sample_rtt = 11
-        // sample_offset = ((1005 - 1000) + (1006 - 1012)) / 2 = (5 + (-6)) / 2 = -0.5
-        syncer.update_pong(1_000_000, 1_005_000, 1_006_000, 1_012_000);
-        assert!(syncer.is_initialized());
-        assert_eq!(syncer.rtt_us(), 11_000);
-        assert_eq!(syncer.clock_offset_us(), -500);
-
-        // Update with another normal sample
-        syncer.update_pong(2_000_000, 2_005_000, 2_006_000, 2_012_000);
-        assert_eq!(syncer.rtt_us(), 11_000);
-
-        // Huge spike outlier (RTT = 100ms)
-        syncer.update_pong(3_000_000, 3_055_000, 3_056_000, 3_112_000);
-        // Outlier filtered, RTT should not jump to 100ms
-        assert!(syncer.rtt_us() < 30_000);
+    #[test]
+    fn alignment_uses_wide_arithmetic_and_saturates_stage_duration() {
+        assert_eq!(
+            client_stage_offset_us(u64::MAX - 10_000, u64::MAX - 5_000, 100),
+            5_100
+        );
+        assert_eq!(client_stage_offset_us(0, u64::MAX, i64::MAX), u32::MAX);
+        assert_eq!(client_stage_offset_us(u64::MAX, 0, i64::MIN), 0);
+        assert_eq!(
+            client_stage_offset_us(0, u32::MAX as u64 + 100, 0),
+            u32::MAX
+        );
     }
 }

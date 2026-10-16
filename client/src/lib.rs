@@ -15,6 +15,8 @@ mod native_call;
 pub mod portable_video;
 #[cfg(target_os = "macos")]
 mod render;
+#[cfg(any(target_os = "macos", test))]
+mod render_timing;
 pub mod session;
 #[cfg(target_os = "macos")]
 mod talkback;
@@ -339,12 +341,12 @@ pub fn decoded_video_frame_surface(_frame: &MacDecodedVideoFrame) {}
 pub fn decoded_video_frame_surface_with_fit(_frame: &MacDecodedVideoFrame, _mode: u8) {}
 
 #[cfg(target_os = "macos")]
-type VideoIngressQueue = Mutex<mpsc::Receiver<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>>;
+type VideoIngressQueue = Mutex<mpsc::Receiver<remote_core::client_session::VideoPacket>>;
 
 #[cfg(target_os = "macos")]
 enum VideoPayloadEvent {
     Changed((u64, bool)),
-    Packet(Option<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>),
+    Packet(Option<remote_core::client_session::VideoPacket>),
 }
 
 #[cfg(target_os = "macos")]
@@ -403,10 +405,9 @@ async fn next_video_payload_event(queue: &VideoIngressQueue,
 pub struct ClientMediaRuntime {
     pub audio_playback: AudioPlaybackControl,
     pub audio_tx: mpsc::Sender<AudioPlayerEvent>,
-    pub decode_tx: mpsc::Sender<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>,
+    pub decode_tx: mpsc::Sender<remote_core::client_session::VideoPacket>,
     pub status: ClientMediaRuntimeStatus,
     pub decode_status: Arc<Mutex<String>>,
-    decode_epoch: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(target_os = "macos")]
     video_payload: tokio::sync::watch::Sender<(u64, bool)>,
     #[cfg(target_os = "macos")]
@@ -469,11 +470,12 @@ impl ClientMediaRuntime {
         let shared_frame = Arc::new(Mutex::new(None));
         let frame_signal = Arc::new(tokio::sync::Notify::new());
         let decode_status = Arc::new(Mutex::new(String::new()));
-        let decode_epoch = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        stats.video_recovery.track_output();
+        stats.video_recovery.reset_source(|| ());
+        let decode_epoch = stats.video_recovery.source_counter();
         #[cfg(target_os = "macos")]
         let (video_payload, mut payload_rx) = tokio::sync::watch::channel((0_u64, true));
-        let (decode_tx, decode_rx) =
-            mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(8);
+        let (decode_tx, decode_rx) = mpsc::channel::<remote_core::client_session::VideoPacket>(8);
         #[cfg(target_os = "macos")]
         let video_ingress = Arc::new(Mutex::new(decode_rx));
 
@@ -482,7 +484,6 @@ impl ClientMediaRuntime {
             let decode_shared_frame = shared_frame.clone();
             let frame_signal = frame_signal.clone();
             let stats_decode = stats.clone();
-            let decode_epoch = decode_epoch.clone();
             let decode_status = decode_status.clone();
             let video_ingress = video_ingress.clone();
             spawn(async move {
@@ -494,27 +495,38 @@ impl ClientMediaRuntime {
                     }
                 };
 
-                let mut generation = decode_epoch.load(std::sync::atomic::Ordering::Acquire);
+                let initial = stats_decode.video_recovery.snapshot();
+                let mut generation = initial.epoch.source;
                 let mut waiting_for_keyframe = true;
-                stats_decode
-                    .video_decoder_needs_keyframe
-                    .store(true, std::sync::atomic::Ordering::Release);
+                let mut rebuild_decoder = false;
+                let mut recovery = initial.epoch;
                 let mut previous_packet = None;
                 let mut payload = *payload_rx.borrow_and_update();
                 loop {
-                    let next = match next_video_payload_event(&video_ingress, &mut payload_rx, payload.0).await {
-                        VideoPayloadEvent::Changed(state) => {
-                            payload = state;
-                            previous_packet = None;
-                            waiting_for_keyframe = true;
-                            continue;
-                        }
-                        VideoPayloadEvent::Packet(packet) => packet,
+                    let next =
+                        match next_video_payload_event(&video_ingress, &mut payload_rx, payload.0)
+                            .await
+                        {
+                            VideoPayloadEvent::Changed(state) => {
+                                payload = state;
+                                previous_packet = None;
+                                waiting_for_keyframe = true;
+                                continue;
+                            }
+                            VideoPayloadEvent::Packet(packet) => packet,
+                        };
+                    let Some((ordered_pkt, mut timing, packet_epoch)) = next else {
+                        break;
                     };
-                    let Some((ordered_pkt, mut timing)) = next else { break; };
-                    if !payload.1 { continue; }
+                    if !payload.1 {
+                        continue;
+                    }
                     let current = (ordered_pkt.header.ssrc, ordered_pkt.header.sequence_number);
-                    let observed_epoch = decode_epoch.load(std::sync::atomic::Ordering::Acquire);
+                    let observed = stats_decode.video_recovery.snapshot();
+                    let observed_epoch = observed.epoch.source;
+                    if packet_epoch != observed_epoch {
+                        continue;
+                    }
                     if observed_epoch != generation {
                         generation = observed_epoch;
                         video_decoder = match video_decode::MacVideoDecoder::new() {
@@ -526,20 +538,22 @@ impl ClientMediaRuntime {
                         };
                         previous_packet = None;
                         waiting_for_keyframe = true;
-                        stats_decode
-                            .video_decoder_needs_keyframe
-                            .store(true, std::sync::atomic::Ordering::Release);
+                        rebuild_decoder = false;
+                        recovery = observed.epoch;
                     }
                     if previous_packet.is_some_and(|(ssrc, seq): (u32, u16)| {
                         ssrc != current.0 || seq.wrapping_add(1) != current.1
                     }) {
                         waiting_for_keyframe = true;
+                        rebuild_decoder = true;
                         stats_decode
                             .video_decoder_reference_gaps
                             .fetch_add(1, Relaxed);
-                        stats_decode
-                            .video_decoder_needs_keyframe
-                            .store(true, std::sync::atomic::Ordering::Release);
+                        let Some(next) = stats_decode.video_recovery.require_keyframe(generation)
+                        else {
+                            continue;
+                        };
+                        recovery = next;
                     }
                     previous_packet = Some(current);
                     if waiting_for_keyframe
@@ -552,6 +566,21 @@ impl ClientMediaRuntime {
                             .video_decode_queue_dropped
                             .fetch_add(1, Relaxed);
                         continue;
+                    }
+                    if rebuild_decoder {
+                        // A timed-out VT callback can still arrive on the old
+                        // decoder's channel. Retire that channel before the new
+                        // attempt, rather than relabeling its output with this IDR.
+                        video_decoder = match video_decode::MacVideoDecoder::new() {
+                            Ok(decoder) => decoder,
+                            Err(error) => {
+                                stats_decode.video_recovery.fail(recovery, || {
+                                    *decode_status.lock().unwrap() = error.to_string();
+                                });
+                                break;
+                            }
+                        };
+                        rebuild_decoder = false;
                     }
                     use remote_core::VideoDecoder;
                     let decode_start = std::time::Instant::now();
@@ -572,34 +601,35 @@ impl ClientMediaRuntime {
                             frame.recv_time = timing.recv_ts_us / 1000;
                             frame.decode_cost_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
                             frame.decoded_at = std::time::Instant::now();
+                            frame.video_epoch = recovery;
                             frame.timing = timing;
-                            // Synchronize epoch validation with reset_video's frame lock.
-                            // An output queued before a source reset cannot publish afterward.
-                            let mut slot = decode_shared_frame.lock().unwrap();
-                            if generation != decode_epoch.load(std::sync::atomic::Ordering::Acquire)
-                                || payload != *payload_rx.borrow()
-                            {
-                                drop(slot);
-                                drop(frame);
+                            if payload != *payload_rx.borrow() {
                                 continue;
                             }
-                            stats_decode
-                                .video_decoder_needs_keyframe
-                                .store(false, std::sync::atomic::Ordering::Release);
-                            let previous = slot.replace(frame);
-                            drop(slot);
+                            // State -> slot is the common lock order on all platforms.
+                            // Reset and publication cannot cross their epoch checks.
+                            let Some(previous) =
+                                stats_decode.video_recovery.publish(recovery, || {
+                                    decode_status.lock().unwrap().clear();
+                                    decode_shared_frame.lock().unwrap().replace(frame)
+                                })
+                            else {
+                                continue;
+                            };
                             drop(previous);
                             stats_decode.video_frames_decoded.fetch_add(1, Relaxed);
-                            decode_status.lock().unwrap().clear();
                             frame_signal.notify_one();
                         }
                         Err(err) => {
                             waiting_for_keyframe = true;
-                            stats_decode
-                                .video_decoder_needs_keyframe
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            *decode_status.lock().unwrap() = err.to_string();
-                            stats_decode.video_decode_errors.fetch_add(1, Relaxed);
+                            rebuild_decoder = true;
+                            let Some(next) = stats_decode.video_recovery.fail(recovery, || {
+                                *decode_status.lock().unwrap() = err.to_string();
+                                stats_decode.video_decode_errors.fetch_add(1, Relaxed);
+                            }) else {
+                                continue;
+                            };
+                            recovery = next;
                             if err.to_string() != "No frame data or session not ready" {
                                 eprintln!("Decode error: {}", err);
                             }
@@ -659,7 +689,6 @@ impl ClientMediaRuntime {
             shared_frame,
             frame_signal,
             decode_status,
-            decode_epoch,
             #[cfg(target_os = "macos")]
             video_payload,
             #[cfg(target_os = "macos")]
@@ -672,26 +701,23 @@ impl ClientMediaRuntime {
 
     #[cfg(target_os = "macos")]
     pub fn set_video_payload_active(&self, active: bool) {
-        let mut frame = self.shared_frame.lock().unwrap();
-        if !fence_video_payload(&self.video_ingress, &self.video_payload, active) { return; }
-        self.decode_stats.video_decoder_needs_keyframe.store(true, std::sync::atomic::Ordering::Release);
-        frame.take();
+        if self.video_payload.borrow().1 == active {
+            return;
+        }
+        let previous = self.decode_stats.video_recovery.reset_source(|| {
+            let mut frame = self.shared_frame.lock().unwrap();
+            fence_video_payload(&self.video_ingress, &self.video_payload, active);
+            frame.take()
+        });
+        drop(previous);
     }
 
     pub fn reset_video(&self) {
-        let previous = {
-            let mut slot = self.shared_frame.lock().unwrap();
-            // Serialize generation changes and publication under the same lock.
-            // The counter alone cannot close the check-then-publish race.
-            self.decode_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            self.decode_stats
-                .video_decoder_needs_keyframe
-                .store(true, std::sync::atomic::Ordering::Release);
-            slot.take()
-        };
+        let previous = self.decode_stats.video_recovery.reset_source(|| {
+            self.decode_status.lock().unwrap().clear();
+            self.shared_frame.lock().unwrap().take()
+        });
         drop(previous);
-        self.decode_status.lock().unwrap().clear();
     }
 
     /// Coalescing notification only; frame ownership stays in the latest-frame slot.
@@ -845,7 +871,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Decouple decoding from receiving
     let (decode_tx, mut decode_rx) =
-        tokio::sync::mpsc::channel::<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>(8);
+        tokio::sync::mpsc::channel::<remote_core::client_session::VideoPacket>(8);
 
     // Decode Task
     spawn(async move {
@@ -859,7 +885,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
 
         let mut waiting_for_keyframe = true;
         let mut previous_packet = None;
-        while let Some((ordered_pkt, mut timing)) = decode_rx.recv().await {
+        while let Some((ordered_pkt, mut timing, _packet_epoch)) = decode_rx.recv().await {
             let current = (ordered_pkt.header.ssrc, ordered_pkt.header.sequence_number);
             if previous_packet.is_some_and(|(ssrc, seq): (u32, u16)| {
                 ssrc != current.0 || seq.wrapping_add(1) != current.1
@@ -1548,6 +1574,64 @@ mod tests {
         );
         assert!(config.receive_policy.allow_overwrite);
     }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[tokio::test]
+    async fn runtime_rejects_a_queued_old_idr_and_preserves_new_generation_output() {
+        use std::time::{Duration, Instant};
+        let stats = Statistics::new();
+        let media = ClientMediaRuntime::start_video_only(stats.clone()).unwrap();
+        let old = stats.video_recovery.snapshot().epoch.source;
+        let packet = |timestamp| protocol::RtpPacket {
+            header: protocol::RtpHeader {
+                version: 2,
+                payload_type: 96,
+                sequence_number: 1,
+                timestamp,
+                ssrc: 7,
+            },
+            payload: include_bytes!("../tests/fixtures/desktop-test.h265").to_vec(),
+        };
+        // No await: the old packet is certainly still queued at reset time.
+        media
+            .decode_tx
+            .try_send((packet(100), Default::default(), old))
+            .unwrap();
+        media.reset_video();
+        let current = stats.video_recovery.snapshot().epoch.source;
+        assert_ne!(old, current);
+        media
+            .decode_tx
+            .try_send((packet(200), Default::default(), current))
+            .unwrap();
+        let shared = media.shared_frame();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let frame = loop {
+            if let Some(frame) = shared.lock().unwrap().take() {
+                break frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{}",
+                media.decode_status.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(frame.timestamp, 200);
+        assert_eq!(frame.video_epoch.source, current);
+        assert!(!stats.video_recovery.is_waiting());
+        media.reset_video();
+        media
+            .decode_tx
+            .try_send((packet(300), Default::default(), current))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            shared.lock().unwrap().is_none(),
+            "queued or in-flight old output crossed reset"
+        );
+        assert!(stats.video_recovery.is_waiting());
+    }
 }
 
 #[cfg(all(target_os = "windows", feature = "native-windows-video"))]
@@ -1569,18 +1653,39 @@ mod payload_boundary_tests {
         let queue = Mutex::new(rx);
         let (state, mut changes) = tokio::sync::watch::channel((0_u64, true));
         let packet = |sequence_number| protocol::RtpPacket {
-            header: protocol::RtpHeader { version: 2, payload_type: 96, sequence_number, timestamp: 1, ssrc: 7 },
+            header: protocol::RtpHeader {
+                version: 2,
+                payload_type: 96,
+                sequence_number,
+                timestamp: 1,
+                ssrc: 7,
+            },
             payload: vec![0, 0, 1, 0x26, 1],
         };
-        input.send((packet(10), Default::default())).await.unwrap();
+        input
+            .send((packet(10), Default::default(), 0))
+            .await
+            .unwrap();
         assert!(fence_video_payload(&queue, &state, false));
         assert!(fence_video_payload(&queue, &state, true));
         // The host's new IDR arrives after the synchronous resume fence, but
         // before the decoder observes either coalesced watch notification.
-        input.send((packet(11), Default::default())).await.unwrap();
-        assert!(matches!(next_video_payload_event(&queue, &mut changes, 0).await, VideoPayloadEvent::Changed((2, true))));
-        match tokio::time::timeout(Duration::from_secs(1), next_video_payload_event(&queue, &mut changes, 2)).await.unwrap() {
-            VideoPayloadEvent::Packet(Some((idr, _))) => {
+        input
+            .send((packet(11), Default::default(), 0))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_video_payload_event(&queue, &mut changes, 0).await,
+            VideoPayloadEvent::Changed((2, true))
+        ));
+        match tokio::time::timeout(
+            Duration::from_secs(1),
+            next_video_payload_event(&queue, &mut changes, 2),
+        )
+        .await
+        .unwrap()
+        {
+            VideoPayloadEvent::Packet(Some((idr, _, _))) => {
                 assert_eq!(idr.header.sequence_number, 11);
                 assert!(remote_core::media_plane::is_hevc_keyframe(&idr.payload));
             }
@@ -1601,21 +1706,37 @@ mod payload_boundary_tests {
         assert!(changed.as_mut().poll(&mut cx).is_pending());
 
         assert!(fence_video_payload(&queue, &state, true));
-        input.try_send((protocol::RtpPacket {
-            header: protocol::RtpHeader { version: 2, payload_type: 96, sequence_number: 11, timestamp: 1, ssrc: 7 },
-            payload: vec![0, 0, 1, 0x26, 1],
-        }, Default::default())).unwrap();
+        input
+            .try_send((
+                protocol::RtpPacket {
+                    header: protocol::RtpHeader {
+                        version: 2,
+                        payload_type: 96,
+                        sequence_number: 11,
+                        timestamp: 1,
+                        ssrc: 7,
+                    },
+                    payload: vec![0, 0, 1, 0x26, 1],
+                },
+                Default::default(),
+                0,
+            ))
+            .unwrap();
 
         // Deterministically poll the packet branch only after changed() was
         // Pending and the resume fence plus new IDR have both completed.
-        assert!(matches!(poll_video_payload_packet(&queue, &observed, 1, &mut cx),
-            Poll::Ready(VideoPayloadEvent::Changed((2, true)))));
+        assert!(matches!(
+            poll_video_payload_packet(&queue, &observed, 1, &mut cx),
+            Poll::Ready(VideoPayloadEvent::Changed((2, true)))
+        ));
         assert_eq!(queue.lock().unwrap().len(), 1, "new IDR must remain queued");
         drop(changed);
-        assert!(matches!(next_video_payload_event(&queue, &mut changes, 1).await,
-            VideoPayloadEvent::Changed((2, true))));
+        assert!(matches!(
+            next_video_payload_event(&queue, &mut changes, 1).await,
+            VideoPayloadEvent::Changed((2, true))
+        ));
         match next_video_payload_event(&queue, &mut changes, 2).await {
-            VideoPayloadEvent::Packet(Some((idr, _))) => {
+            VideoPayloadEvent::Packet(Some((idr, _, _))) => {
                 assert_eq!(idr.header.sequence_number, 11);
                 assert!(remote_core::media_plane::is_hevc_keyframe(&idr.payload));
             }

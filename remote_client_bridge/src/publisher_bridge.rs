@@ -149,7 +149,8 @@ impl MobilePublisher {
         let task = tokio::spawn(async move {
             let _advertised_lifetime = advertised_lifetime;
             let mut peer: Option<Peer> = None;
-            let mut authenticated: Option<(SocketAddr, [u8; 16], [u8; 16], u64)> = None;
+            let mut authenticated: Option<(SocketAddr,[u8;16],[u8;16],Instant)>=None;
+            let mut handshakes=remote_core::session_auth::ServerHandshake::default();
             let mut maintenance = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
@@ -179,8 +180,12 @@ impl MobilePublisher {
                         break;
                     }
                     _ = maintenance.tick() => {
+                        handshakes.expire(remote_core::session_auth::AuthTime::now());
+                        if peer.is_none() && authenticated.is_some_and(|(_,_,_,at)|at.elapsed()>Duration::from_secs(30)) {
+                            if let Some((addr,..))=authenticated.take(){sender.remove_peer_crypto(addr);handshakes.forget(addr);}
+                        }
                         if peer.as_ref().is_some_and(|p| p.seen.elapsed() > Duration::from_secs(30)) {
-                            if let Some(p) = peer.take() { sender.remove_peer_crypto(p.addr); }
+                            if let Some(p) = peer.take() { sender.remove_peer_crypto(p.addr);handshakes.forget(p.addr); }
                             authenticated = None; shared.lock().unwrap().active = false; shared.lock().unwrap().audio = false;
                         }
                         if let Some(p) = &peer && shared.lock().unwrap().audio && let Some(subscription) = &p.subscription {
@@ -205,19 +210,28 @@ impl MobilePublisher {
                     packet = receiver.recv() => {
                         let Ok(packet) = packet else { continue; };
                         match packet {
-                            MultiplexedPacket::Control(ControlMessage::SessionHello { nonce, timestamp_ms, mac }, addr) => {
-                                if peer.as_ref().is_some_and(|p| p.addr != addr) { continue; }
-                                if verify_session_mac(&mac_session_hello(&key, &nonce, timestamp_ms), &mac, timestamp_ms, now_unix_ms()).is_err() { continue; }
-                                let (salt, timestamp) = if let Some((a, n, salt, timestamp)) = authenticated && a == addr && n == nonce { (salt, timestamp) }
-                                else {
-                                    if peer.is_some() { continue; }
-                                    if let Some((previous, ..)) = authenticated.take() { sender.remove_peer_crypto(previous); }
-                                    let salt = random_bytes_16(); let timestamp = now_unix_ms();
-                                    let Ok(crypto) = SessionCrypto::from_psk(&key, &salt) else { continue; };
-                                    sender.install_peer_crypto(addr, crypto); authenticated = Some((addr, nonce, salt, timestamp)); (salt, timestamp)
-                                };
-                                let _ = sender.send_control(&ControlMessage::SessionAccept { salt, timestamp_ms:timestamp, mac:mac_session_accept(&key, &salt, timestamp) }, addr).await;
+                            MultiplexedPacket::Control(ControlMessage::SessionHandshake(message),addr)=>{
+                                let allow_new=peer.is_none()&&authenticated.is_none();
+                                if let Ok(response)=handshakes.receive(&key,&message,addr,remote_core::session_auth::AuthTime::now(),allow_new){
+                                    if let Some(established)=response.established{
+                                        sender.install_peer_crypto(addr,established.crypto);
+                                        authenticated=Some((addr,established.session_id,established.client_nonce,Instant::now()));
+                                    }
+                                    let _=sender.send_control(&ControlMessage::SessionHandshake(Box::new(response.message)),addr).await;
+                                }
                             }
+                            MultiplexedPacket::Control(ControlMessage::SessionHello{..}|ControlMessage::SessionAccept{..},addr)=>{
+                                let _=sender.send_control(&ControlMessage::SessionReject{reason:"RemotePlay authentication protocol mismatch: version 3 required".into()},addr).await;
+                            }
+                            MultiplexedPacket::Control(ControlMessage::SessionReject{..},_)=>{}
+                            MultiplexedPacket::ClockProbe(probe,host_recv_us,addr)=>{
+                                if authenticated.is_some_and(|(a,id,..)|a==addr&&id==probe.session_id) && let Some(p)=peer.as_mut(){
+                                    p.seen=Instant::now();
+                                    let reply=protocol::session_auth::ClockReply{probe,host_recv_us,host_send_us:remote_core::timing::quanta_now_us()};
+                                    let _=sender.send_control(&ControlMessage::ClockReply(reply),addr).await;
+                                }
+                            }
+                            MultiplexedPacket::ClockReply(..)=>{}
                             MultiplexedPacket::Control(message, addr) => {
                                 if authenticated.is_none_or(|(a, ..)| a != addr) { continue; }
                                 if let Some(p) = peer.as_mut() { p.seen = Instant::now(); }
@@ -488,41 +502,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let nonce = random_bytes_16();
-        let timestamp_ms = now_unix_ms();
-        sender
-            .send_control(
-                &ControlMessage::SessionHello {
-                    nonce,
-                    timestamp_ms,
-                    mac: mac_session_hello(&key, &nonce, timestamp_ms),
-                },
-                target,
-            )
-            .await
-            .unwrap();
-        let MultiplexedPacket::Control(
-            ControlMessage::SessionAccept {
-                salt,
-                timestamp_ms,
-                mac,
-            },
-            _,
-        ) = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        else {
-            panic!("authentication reply missing")
-        };
-        verify_session_mac(
-            &mac_session_accept(&key, &salt, timestamp_ms),
-            &mac,
-            timestamp_ms,
-            now_unix_ms(),
-        )
-        .unwrap();
-        sender.install_peer_crypto(target, SessionCrypto::from_psk(&key, &salt).unwrap());
+        remote_core::session_auth::authenticate_with_key(&sender,&receiver,target,&key).await.unwrap();
         command(
             &sender,
             target,
@@ -671,45 +651,7 @@ mod tests {
     ) -> (UdpSender, remote_core::net::UdpReceiver) {
         let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let (sender, receiver) = mux.split();
-        let nonce = random_bytes_16();
-        let timestamp_ms = now_unix_ms();
-        sender
-            .send_control(
-                &ControlMessage::SessionHello {
-                    nonce,
-                    timestamp_ms,
-                    mac: mac_session_hello(key, &nonce, timestamp_ms),
-                },
-                publisher.address,
-            )
-            .await
-            .unwrap();
-        let packet = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let MultiplexedPacket::Control(
-            ControlMessage::SessionAccept {
-                salt,
-                timestamp_ms,
-                mac,
-            },
-            _,
-        ) = packet
-        else {
-            panic!("missing handshake");
-        };
-        verify_session_mac(
-            &mac_session_accept(key, &salt, timestamp_ms),
-            &mac,
-            timestamp_ms,
-            now_unix_ms(),
-        )
-        .unwrap();
-        sender.install_peer_crypto(
-            publisher.address,
-            SessionCrypto::from_psk(key, &salt).unwrap(),
-        );
+        remote_core::session_auth::authenticate_with_key(&sender,&receiver,publisher.address,key).await.unwrap();
         command(
             &sender,
             publisher.address,

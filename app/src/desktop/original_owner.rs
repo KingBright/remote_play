@@ -308,7 +308,7 @@ impl OriginalOwner {
                 let shared = media.shared_frame();
                 let next = shared.try_lock().ok().and_then(|mut f| f.take());
                 if let Some(frame) = next
-                    && frame.decoded_at >= s.first_frame_after
+                    && s.current_video_frame(frame.video_epoch, frame.decoded_at)
                 {
                     let frame = Arc::new(frame);
                     s.texture = Some(frame.clone());
@@ -1241,7 +1241,7 @@ impl OriginalOwner {
                 "paused":s.paused,"presentation_hidden":s.presentation_hidden,
                 "activity_pending":s.media_activity_pending(),
                 "decoder_status":s.media.as_ref().and_then(|m|m.decode_status.try_lock().ok().map(|v|v.clone())),
-                "decoder_needs_keyframe":s.stats.video_decoder_needs_keyframe.load(std::sync::atomic::Ordering::Acquire),
+                "decoder_needs_keyframe":s.stats.video_recovery.is_waiting(),
                 "native_frame":native,"device_id":s.key,"name":s.name,"connection_id":s.conn.id,"subscription_id":s.video_id,"activity_revision":s.activity_revision,"target":s.conn.target.to_string(),"route":s.route,
                 "source":format!("{:?}",s.source),"decoded_frames":s.stats.video_frames_decoded.load(std::sync::atomic::Ordering::Relaxed),
                 "decode_errors":s.stats.video_decode_errors.load(std::sync::atomic::Ordering::Relaxed),"confirmed":s.confirmed,
@@ -1258,6 +1258,7 @@ impl OriginalOwner {
         session.locked = false;
         session.first_frame_after = Instant::now() - std::time::Duration::from_secs(1);
         session.uploaded_at = Some(Instant::now());
+        session.uploaded_epoch = Some(session.stats.video_recovery.snapshot().epoch);
         let mut p = self.pool.lock().unwrap();
         let key = session.key.clone();
         p.sessions.push(ViewSession {

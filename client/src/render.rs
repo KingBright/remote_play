@@ -1,5 +1,6 @@
 use crate::host_config::configured_hosts;
 use crate::mesh_pairing::{MeshPairingControl, MeshPairingMessageKind, MeshPairingSnapshot};
+use crate::render_timing::{SmoothedLatency, stamp_ui_submission};
 use crate::transfer_center::{
     TransferCancelTarget, TransferDirection, TransferEntrySnapshot, TransferStatus,
 };
@@ -178,10 +179,8 @@ pub struct RemotePlayView {
     last_fps_update: std::time::Instant,
     frames_since_update: usize,
     client_fps: f32,
-    client_latency_ms: f32,
-    client_jitter_ms: f32,
-    global_latency_ms: f32,
-    global_jitter_ms: f32,
+    client_submit_latency: SmoothedLatency,
+    capture_submit_latency: SmoothedLatency,
     target_width: u32,
     target_height: u32,
     target_fps: u32,
@@ -237,10 +236,8 @@ impl RemotePlayView {
             last_fps_update: std::time::Instant::now(),
             frames_since_update: 0,
             client_fps: 0.0,
-            client_latency_ms: 0.0,
-            client_jitter_ms: 0.0,
-            global_latency_ms: 0.0,
-            global_jitter_ms: 0.0,
+            client_submit_latency: SmoothedLatency::default(),
+            capture_submit_latency: SmoothedLatency::default(),
             target_width: 1920,
             target_height: 1080,
             target_fps: 60,
@@ -288,42 +285,15 @@ impl RemotePlayView {
         if self.state != ViewState::Streaming {
             return;
         }
-        if frame.timing.capture_ts_us > 0 {
-            let floor = frame
-                .timing
-                .decode_done_ts_us
-                .max(frame.timing.jitter_exit_ts_us)
-                .max(frame.timing.recv_ts_us);
-            let elapsed_us = frame.decoded_at.elapsed().as_micros() as u32;
-            frame.timing.render_submit_ts_us =
-                remote_core::timing::advance_client_stage(floor, elapsed_us);
-            frame.timing.render_done_ts_us = frame.timing.render_submit_ts_us;
-        }
-
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u32;
-
-        let c_latency = now_ms.wrapping_sub(frame.recv_time) as f32;
-        let c_d = (c_latency - self.client_latency_ms).abs();
-        self.client_jitter_ms = self.client_jitter_ms + (c_d - self.client_jitter_ms) / 16.0;
-        if self.client_latency_ms == 0.0 {
-            self.client_latency_ms = c_latency;
-        } else {
-            self.client_latency_ms =
-                self.client_latency_ms + (c_latency - self.client_latency_ms) / 16.0;
-        }
-
-        let g_latency = now_ms.wrapping_sub(frame.timestamp) as f32;
-        let g_d = (g_latency - self.global_latency_ms).abs();
-        self.global_jitter_ms = self.global_jitter_ms + (g_d - self.global_jitter_ms) / 16.0;
-        if self.global_latency_ms == 0.0 {
-            self.global_latency_ms = g_latency;
-        } else {
-            self.global_latency_ms =
-                self.global_latency_ms + (g_latency - self.global_latency_ms) / 16.0;
-        }
+        let latencies = stamp_ui_submission(
+            &mut frame.timing,
+            frame.decoded_at.elapsed(),
+            self.clock_mapping_is_fresh(),
+        );
+        self.client_submit_latency
+            .record(latencies.receive_to_submit_ms);
+        self.capture_submit_latency
+            .record(latencies.capture_to_submit_ms);
 
         let timing = frame.timing;
         self.telemetry_engine.record_frame(&timing, 0);
@@ -344,6 +314,12 @@ impl RemotePlayView {
             .set_pipeline_report(self.telemetry_engine.generate_report());
 
         cx.notify();
+    }
+
+    fn clock_mapping_is_fresh(&self) -> bool {
+        self.host_stats.clock_estimate().is_some_and(|estimate| {
+            estimate.state == remote_core::clock_sync::ClockSyncState::Synchronized
+        })
     }
 
     fn start_talkback_session(&self, addr: SocketAddr, session_id: u32) {
@@ -427,8 +403,16 @@ impl RemotePlayView {
             .detach();
     }
 
-    fn request_stream(&self, sender: UdpSender, addr: SocketAddr, cx: &mut gpui::Context<Self>) {
+    fn request_stream(
+        &mut self,
+        sender: UdpSender,
+        addr: SocketAddr,
+        cx: &mut gpui::Context<Self>,
+    ) {
         let sid = rand::random::<u32>();
+        self.client_submit_latency = SmoothedLatency::default();
+        self.capture_submit_latency = SmoothedLatency::default();
+        self.telemetry_engine = remote_core::PipelineTelemetryEngine::new(sid, 300);
         self.active_session_id
             .store(sid, std::sync::atomic::Ordering::Relaxed);
         self.start_talkback_session(addr, sid);
@@ -806,6 +790,12 @@ impl Render for RemotePlayView {
                 list.into_any_element()
             }
             ViewState::Streaming => {
+                // The read checks freshness again even if no newer frame arrived.
+                let capture_estimate_available = self.clock_mapping_is_fresh();
+                if !capture_estimate_available {
+                    // A later clock fit must wait for a new frame, not revive old samples.
+                    self.capture_submit_latency.record(None);
+                }
                 let video_surface = if let Some(frame) = &self.current_frame {
                     let cv_pixel_buffer = unsafe {
                         core_foundation::base::CFRetain(
@@ -1392,13 +1382,20 @@ impl Render for RemotePlayView {
                                 hs.latency
                             )))
                             .child(div().text_xs().text_color(rgb(0xaab4c2)).child(format!(
-                                "Client {:.1} fps / {:.1} ms / jitter {:.1} ms",
-                                self.client_fps, self.client_latency_ms, self.client_jitter_ms
+                                "Tracked client stages estimate / {:.1} fps / {} / jitter {}",
+                                self.client_fps,
+                                self.client_submit_latency.latency_text(true),
+                                self.client_submit_latency.jitter_text(true)
                             )))
-                            .child(div().text_xs().text_color(rgb(0xaab4c2)).child(format!(
-                                "End to end {:.1} ms / jitter {:.1} ms",
-                                self.global_latency_ms, self.global_jitter_ms
-                            ))),
+                            .child(
+                                div().text_xs().text_color(rgb(0xaab4c2)).child(format!(
+                                    "Capture + tracked stages estimate {} / jitter {} (excludes decoder queue wait and actual display)",
+                                    self.capture_submit_latency
+                                        .latency_text(capture_estimate_available),
+                                    self.capture_submit_latency
+                                        .jitter_text(capture_estimate_available)
+                                )),
+                            ),
                     );
 
                     panel = panel.child(panel_section("Audio"));
@@ -2061,7 +2058,7 @@ impl Render for RemotePlayView {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .child("Client (Network/Render)")
+                                            .child("Tracked client stages estimate")
                                             .text_color(rgb(0xcba6f7))
                                             .font_weight(FontWeight::BOLD),
                                     )
@@ -2073,16 +2070,16 @@ impl Render for RemotePlayView {
                                     .child(
                                         div()
                                             .child(format!(
-                                                "Latency: {:.1} ms",
-                                                self.client_latency_ms
+                                                "Latency: {}",
+                                                self.client_submit_latency.latency_text(true)
                                             ))
                                             .text_color(rgb(0xf9e2af)),
                                     )
                                     .child(
                                         div()
                                             .child(format!(
-                                                "Jitter: {:.1} ms",
-                                                self.client_jitter_ms
+                                                "Jitter: {}",
+                                                self.client_submit_latency.jitter_text(true)
                                             ))
                                             .text_color(rgb(0xf38ba8)),
                                     ),
@@ -2094,24 +2091,30 @@ impl Render for RemotePlayView {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .child("Global (End-to-End)")
+                                            .child("Capture + tracked stages estimate")
                                             .text_color(rgb(0xf38ba8))
                                             .font_weight(FontWeight::BOLD),
                                     )
-                                    .child(div().child("FPS: N/A").text_color(rgb(0x6c7086))) // Global FPS is effectively Client FPS
+                                    .child(
+                                        div()
+                                            .child("excludes decoder queue wait and actual display")
+                                            .text_color(rgb(0x6c7086)),
+                                    )
                                     .child(
                                         div()
                                             .child(format!(
-                                                "Latency: {:.1} ms",
-                                                self.global_latency_ms
+                                                "Latency: {}",
+                                                self.capture_submit_latency
+                                                    .latency_text(capture_estimate_available)
                                             ))
                                             .text_color(rgb(0xf9e2af)),
                                     )
                                     .child(
                                         div()
                                             .child(format!(
-                                                "Jitter: {:.1} ms",
-                                                self.global_jitter_ms
+                                                "Jitter: {}",
+                                                self.capture_submit_latency
+                                                    .jitter_text(capture_estimate_available)
                                             ))
                                             .text_color(rgb(0xf38ba8)),
                                     ),

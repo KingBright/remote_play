@@ -344,7 +344,13 @@ mod tests {
             "remote-play-client-mesh-pairing-{name}-{}",
             rand::random::<u64>()
         ));
-        fs::create_dir_all(&root).expect("create temp dir");
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&root).expect("create private temp dir");
         root
     }
 }

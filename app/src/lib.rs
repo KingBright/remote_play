@@ -1,4 +1,5 @@
 pub mod entrypoint;
+pub mod service_contract;
 #[cfg(any(unix,windows))]
 pub mod background_service;
 #[cfg(any(unix,windows))]
@@ -12,6 +13,7 @@ pub mod desktop;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod original_design;
 pub mod preferences;
+mod telemetry_display;
 
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveredPeer, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
@@ -966,7 +968,7 @@ impl From<ClientMediaRuntimeStatus> for UnifiedViewerMediaStatus {
 }
 
 type ViewerAudioTx = mpsc::Sender<client::audio_player::AudioPlayerEvent>;
-type ViewerDecodeTx = mpsc::Sender<(protocol::RtpPacket, protocol::FrameTimingCheckpoints)>;
+type ViewerDecodeTx = mpsc::Sender<remote_core::client_session::VideoPacket>;
 
 struct ViewerMediaChannels {
     audio_tx: ViewerAudioTx,

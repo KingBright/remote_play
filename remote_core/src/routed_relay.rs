@@ -52,8 +52,14 @@ fn handshake_stage(payload: &[u8]) -> Option<&'static str> {
         return None;
     }
     match protocol::ControlMessage::decode(&payload[1..]).ok()? {
-        protocol::ControlMessage::SessionHello { .. } => Some("hello"),
-        protocol::ControlMessage::SessionAccept { .. } => Some("accept"),
+        protocol::ControlMessage::SessionHandshake(message) => Some(match *message {
+            protocol::session_auth::HandshakeMessage::Hello{..}=>"hello-v3",
+            protocol::session_auth::HandshakeMessage::Challenge{..}=>"challenge-v3",
+            protocol::session_auth::HandshakeMessage::ClientFinish{..}=>"client-finish-v3",
+            protocol::session_auth::HandshakeMessage::ServerFinish{..}=>"server-finish-v3",
+            protocol::session_auth::HandshakeMessage::Reject{..}=>"reject-v3",
+        }),
+        protocol::ControlMessage::SessionHello { .. } | protocol::ControlMessage::SessionAccept { .. } => Some("retired-protocol"),
         protocol::ControlMessage::SessionReject { .. } => Some("reject"),
         _ => None,
     }

@@ -840,6 +840,10 @@ mod deadline_tests {
     #[test]
     fn fresh_deadline_posts_and_cleans_only_the_accepted_key() {
         let (input, calls) = fixture(None);
+        // First CoreGraphics event creation may initialize native services.
+        // The positive case tests accepted ownership, not initialization speed.
+        CGEvent::new_keyboard_event(input.source.clone(), 0, true)
+            .expect("initialize keyboard event fixture");
         input.inject(
             InputEvent::KeyDown(0),
             Some(Instant::now() + std::time::Duration::from_secs(1)),

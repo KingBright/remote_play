@@ -30,13 +30,15 @@ pub(crate) fn adopt_latest_frame(session: &mut OriginalGuiSession) -> bool {
     let Some(frame) = frame else {
         return false;
     };
-    if !admissible_frame(
-        frame.decoded_at,
-        session.first_frame_after,
-        session.confirmed,
-        session.paused,
-        session.video_error.is_some(),
-    ) {
+    if !session.current_video_frame(frame.video_epoch, frame.decoded_at)
+        || !admissible_frame(
+            frame.decoded_at,
+            session.first_frame_after,
+            session.confirmed,
+            session.paused,
+            session.video_error.is_some(),
+        )
+    {
         return false;
     }
     session.texture = Some(Arc::new(frame));
@@ -54,6 +56,7 @@ pub(crate) fn acknowledge_paint(
         return false;
     };
     if !Arc::ptr_eq(current, frame)
+        || !session.current_video_frame(frame.video_epoch, frame.decoded_at)
         || !admissible_frame(
             frame.decoded_at,
             session.first_frame_after,
@@ -80,6 +83,7 @@ pub(crate) fn acknowledge_paint(
         if !native.frame.was_submitted() || native.frame.stats().last_error.lock().unwrap().is_some(){return false;}
     }
     session.uploaded_at = Some(frame.decoded_at);
+    session.uploaded_epoch = Some(frame.video_epoch);
     true
 }
 

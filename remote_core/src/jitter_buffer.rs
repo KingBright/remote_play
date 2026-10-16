@@ -342,7 +342,11 @@ mod tests {
         let mut buffer = JitterBuffer::new(10);
         buffer.push(packet(10));
         assert_eq!(pop_seq(&mut buffer), Some(10));
-        buffer.push(packet(12));
+        // This test measures local queue residency, not a synthetic host clock.
+        // A fictional capture timestamp saturates under the v3 clock-domain guard.
+        let mut timing = FrameTimingCheckpoints::new(1);
+        timing.recv_ts_us = 1_000;
+        buffer.push_with_timing(packet(12), timing);
         let entered = buffer.heap.peek().unwrap().enter_ts_us;
         assert!(buffer.pop_at(entered + MAX_REORDER_WAIT_US - 1).is_none());
         let (packet, timing) = buffer.pop_at(entered + MAX_REORDER_WAIT_US).unwrap();

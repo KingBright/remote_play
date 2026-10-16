@@ -1,12 +1,17 @@
-//! Explicit loopback Session-v2 fixture. Production transport and authentication,
+//! Explicit loopback Session fixture. Production transport and v3 authentication,
 //! generated encoded content; no system capture or input injector.
 #[path = "../../../client/src/hevc_sequence.rs"]
 mod hevc_sequence;
-use protocol::{ControlMessage, PayloadType, RtpHeader, RtpPacket, session::*};
+use protocol::{
+    ControlMessage, PayloadType, RtpHeader, RtpPacket,
+    session::*,
+    session_auth::{ClockReply, HandshakeMessage},
+};
 use remote_core::{
     discovery::*,
     net::{MultiplexedPacket, UdpMultiplexer, UdpSender},
-    session_crypto::*,
+    session_auth::{AuthTime, ServerHandshake},
+    session_crypto::{load_session_psk, now_unix_ms},
 };
 use std::{
     collections::BTreeMap,
@@ -350,6 +355,7 @@ async fn serve(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut faults = Faults::default();
     let mut authenticated = BTreeMap::new();
+    let mut handshakes = ServerHandshake::default();
     let mut connections: BTreeMap<SocketAddr, Connection> = BTreeMap::new();
     let mut delayed: Vec<Delayed> = vec![];
     let mut events = vec![];
@@ -401,17 +407,30 @@ async fn serve(
             received=receiver.recv()=>{
                 let packet=match received {Ok(p)=>p,Err(_)=>continue};
                 match packet {
-                    MultiplexedPacket::Control(ControlMessage::SessionHello{nonce,timestamp_ms,mac},addr) if addr.ip().is_loopback()=>{
-                        hello_count+=1;
-                        if (silent && !faults.allow_retry_handshake) || (!silent && hello_count==1) {continue;}
-                        verify_session_mac(&mac_session_hello(&psk,&nonce,timestamp_ms),&mac,timestamp_ms,now_unix_ms())?;
-                        let (salt,ts)=if let Some((old,salt,ts))=authenticated.get(&addr) {
-                            if *old!=nonce && connections.contains_key(&addr) {continue;} (*salt,*ts)
-                        } else { let salt=random_bytes_16();let ts=now_unix_ms();sender.install_peer_crypto(addr,SessionCrypto::from_psk(&psk,&salt)?);authenticated.insert(addr,(nonce,salt,ts));(salt,ts) };
-                        sender.send_control(&ControlMessage::SessionAccept{salt,timestamp_ms:ts,mac:mac_session_accept(&psk,&salt,ts)},addr).await?;
+                    MultiplexedPacket::Control(ControlMessage::SessionHandshake(message),addr) if addr.ip().is_loopback()=>{
+                        if matches!(*message, HandshakeMessage::Hello{..}) {
+                            hello_count+=1;
+                            // Keep the intentional first-flight loss and silent peer retry fixture.
+                            if !silent && hello_count==1 {continue;}
+                        }
+                        if silent && !faults.allow_retry_handshake {continue;}
+                        // An established connection owns this endpoint until it closes.
+                        // Duplicate Finish flights remain idempotent without replacing its key.
+                        let reply=match handshakes.receive(&psk,&message,addr,AuthTime::now(),!connections.contains_key(&addr)) {
+                            Ok(reply)=>reply,
+                            Err(_)=>continue,
+                        };
+                        if let Some(established)=reply.established {
+                            authenticated.insert(addr,established.session_id);
+                            sender.install_peer_crypto(addr,established.crypto);
+                        }
+                        sender.send_control(&ControlMessage::SessionHandshake(Box::new(reply.message)),addr).await?;
                     }
-                    MultiplexedPacket::Control(ControlMessage::Ping{client_send_ts},addr) if authenticated.contains_key(&addr)=>{
-                        let ts=now_unix_ms();sender.send_control(&ControlMessage::Pong{client_send_ts,host_recv_ts:ts,host_send_ts:ts},addr).await?;
+                    MultiplexedPacket::ClockProbe(probe,host_recv_us,addr)
+                        if authenticated.get(&addr)==Some(&probe.session_id)=>{
+                        sender.send_control(&ControlMessage::ClockReply(ClockReply {
+                            probe,host_recv_us,host_send_us:remote_core::quanta_now_us(),
+                        }),addr).await?;
                     }
                     MultiplexedPacket::Control(ControlMessage::Session(command),addr) if authenticated.contains_key(&addr)=>{
                         let command=*command; events.push(serde_json::json!({"at_ms":begun.elapsed().as_millis(),"command":format!("{command:?}")}));

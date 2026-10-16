@@ -1,6 +1,7 @@
+use crate::clock_sync::{ClockContinuity, ClockEstimate, ClockSyncState, ClockSynchronizer};
 use crate::jitter_buffer::JitterBuffer;
 use crate::media_plane::{audio_stream_config_from_envelope, realtime_data_to_rtp};
-use crate::net::{MultiplexedPacket, UdpReceiver};
+use crate::net::{MultiplexedPacket, UdpReceiver, UdpSender};
 use crate::stats::Statistics;
 use protocol::{
     AudioStreamConfig, ContentKind, FrameTimingCheckpoints, PayloadType, PipelineTelemetryReport,
@@ -8,7 +9,7 @@ use protocol::{
 };
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -20,7 +21,10 @@ pub trait EnvelopeIngress: Send + Sync {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioIngressEvent {
     /// Local payload boundary for this connection's playback consumers.
-    PayloadActivity { stream_id: u32, active: bool },
+    PayloadActivity {
+        stream_id: u32,
+        active: bool,
+    },
     StreamConfig(AudioStreamConfig),
     Packet(RtpPacket),
 }
@@ -86,6 +90,123 @@ struct HostStatsExtra {
     updated_at: Option<Instant>,
     pipeline_report: Option<PipelineTelemetryReport>,
     latest_timing: Option<FrameTimingCheckpoints>,
+    latest_host_timing: Option<FrameTimingCheckpoints>,
+    clock_estimate: Option<ClockEstimate>,
+    e2e_is_valid: bool,
+}
+
+// Cached estimates are refreshed by the receiver/workspace actor. This is a
+// conservative consumer limit, matching the default measurement freshness window.
+const MAX_CLOCK_SAMPLE_AGE_US: u64 = 10_000_000;
+
+fn clock_estimate_is_fresh(estimate: &ClockEstimate, now_us: u64) -> bool {
+    estimate.state == ClockSyncState::Synchronized
+        && now_us >= estimate.client_time_us
+        && estimate
+            .sample_age_us
+            .saturating_add(now_us - estimate.client_time_us)
+            <= MAX_CLOCK_SAMPLE_AGE_US
+        && estimate.offset_us.is_finite()
+        && estimate.drift_ppm.is_finite()
+}
+
+fn fresh_clock_offset_at(estimate: Option<&ClockEstimate>, now_us: u64) -> Option<i64> {
+    let estimate = estimate.filter(|estimate| clock_estimate_is_fresh(estimate, now_us))?;
+    let offset = estimate.offset_us
+        + (now_us - estimate.client_time_us) as f64 * estimate.drift_ppm / 1_000_000.0;
+    if offset.is_finite() && offset >= i64::MIN as f64 && offset < i64::MAX as f64 {
+        Some(offset.round() as i64)
+    } else {
+        None
+    }
+}
+
+fn mapped_receive_offset(
+    host_timing: &FrameTimingCheckpoints,
+    offset_us: i64,
+    now_us: u64,
+) -> Option<u32> {
+    let elapsed = now_us as i128 + offset_us as i128 - host_timing.capture_ts_us as i128;
+    // Zero is the existing "checkpoint missing" sentinel, so do not let a zero
+    // receive stage trigger JitterBuffer's unmapped fallback. Never fabricate 1us.
+    (host_timing.capture_ts_us > 0
+        && elapsed > 0
+        && elapsed >= host_timing.send_ts_us as i128
+        && elapsed < u32::MAX as i128)
+        .then_some(elapsed as u32)
+}
+
+fn clock_probe_period(paused: bool) -> Duration {
+    Duration::from_secs(if paused { 5 } else { 1 })
+}
+
+enum OutboundClockControl {
+    Probe(protocol::session_auth::ClockProbe),
+    Reply {
+        probe: protocol::session_auth::ClockProbe,
+        host_recv_us: u64,
+    },
+}
+
+struct ClockControlSender {
+    tx: mpsc::Sender<(OutboundClockControl, SocketAddr)>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ClockControlSender {
+    fn try_send(
+        &self,
+        message: (OutboundClockControl, SocketAddr),
+    ) -> Result<(), mpsc::error::TrySendError<(OutboundClockControl, SocketAddr)>> {
+        self.tx.try_send(message)
+    }
+}
+
+impl Drop for ClockControlSender {
+    fn drop(&mut self) {
+        // The receiver owns this guard. Return, cancellation and panic all abort
+        // the worker instead of detaching a task that can outlive the session.
+        self.task.abort();
+    }
+}
+
+/// A full/blocked clock-control queue must never hold the media receive pump.
+/// Queue/scheduling delay belongs to raw RTT and is rejected by low-RTT fitting.
+fn spawn_clock_control_sender(sender: UdpSender) -> ClockControlSender {
+    let (tx, mut rx) = mpsc::channel::<(OutboundClockControl, SocketAddr)>(8);
+    let task = tokio::spawn(async move {
+        while let Some((request, addr)) = rx.recv().await {
+            let session_id = match &request {
+                OutboundClockControl::Probe(probe) | OutboundClockControl::Reply { probe, .. } => {
+                    probe.session_id
+                }
+            };
+            if sender.peer_session_id(addr) != Some(session_id) {
+                continue;
+            }
+            let message = match request {
+                OutboundClockControl::Probe(probe) => protocol::ControlMessage::ClockProbe(probe),
+                OutboundClockControl::Reply {
+                    probe,
+                    host_recv_us,
+                } => protocol::ControlMessage::ClockReply(protocol::session_auth::ClockReply {
+                    probe,
+                    host_recv_us,
+                    host_send_us: crate::timing::quanta_now_us(),
+                }),
+            };
+            // Failure only drops this measurement. It does not touch connection
+            // liveness, peer authentication, or audio/video recovery state.
+            // An enqueued probe that fails here remains pending only until its
+            // normal bounded measurement timeout; it is never reused.
+            let _ = tokio::time::timeout(
+                Duration::from_millis(250),
+                sender.send_control(&message, addr),
+            )
+            .await;
+        }
+    });
+    ClockControlSender { tx, task }
 }
 
 /// Lock-free numeric telemetry with a mutex only for the occasional report/string fields.
@@ -101,7 +222,6 @@ pub struct SharedHostStats {
     packet_loss_rate: AtomicU32,
     jitter_buffer_depth: AtomicU32,
     decode_errors: AtomicU64,
-    clock_offset_us: AtomicI64,
     extra: Mutex<HostStatsExtra>,
 }
 
@@ -119,7 +239,6 @@ impl Default for SharedHostStats {
             packet_loss_rate: AtomicU32::new(0),
             jitter_buffer_depth: AtomicU32::new(0),
             decode_errors: AtomicU64::new(0),
-            clock_offset_us: AtomicI64::new(0),
             extra: Mutex::new(HostStatsExtra::default()),
         }
     }
@@ -128,13 +247,21 @@ impl Default for SharedHostStats {
 impl SharedHostStats {
     pub fn snapshot(&self) -> HostStats {
         let extra = self.extra.lock().unwrap_or_else(|err| err.into_inner());
+        let e2e_is_valid = extra.e2e_is_valid
+            && extra.clock_estimate.as_ref().is_some_and(|estimate| {
+                clock_estimate_is_fresh(estimate, crate::timing::quanta_now_us())
+            });
         HostStats {
             fps: f32::from_bits(self.fps.load(Relaxed)),
             latency: f32::from_bits(self.latency.load(Relaxed)),
             jitter: f32::from_bits(self.jitter.load(Relaxed)),
             bitrate_kbps: self.bitrate_kbps.load(Relaxed),
             rtt_ms: f32::from_bits(self.rtt_ms.load(Relaxed)),
-            e2e_latency_ms: f32::from_bits(self.e2e_latency_ms.load(Relaxed)),
+            e2e_latency_ms: if e2e_is_valid {
+                f32::from_bits(self.e2e_latency_ms.load(Relaxed))
+            } else {
+                0.0
+            },
             decode_latency_ms: f32::from_bits(self.decode_latency_ms.load(Relaxed)),
             packet_loss_rate: f32::from_bits(self.packet_loss_rate.load(Relaxed)),
             jitter_buffer_depth: self.jitter_buffer_depth.load(Relaxed) as usize,
@@ -167,12 +294,64 @@ impl SharedHostStats {
         self.rtt_ms.store(rtt_ms.to_bits(), Relaxed);
     }
 
-    pub fn set_clock_offset_us(&self, offset_us: i64) {
-        self.clock_offset_us.store(offset_us, Relaxed);
+    /// Most recent four-timestamp estimate, including raw RTT, host processing,
+    /// low-RTT fit diagnostics and separate asymmetry/holdover allowances.
+    /// Values remain evaluated at client_time_us; freshness is rechecked on read.
+    pub fn clock_estimate(&self) -> Option<ClockEstimate> {
+        let mut estimate = self
+            .extra
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clock_estimate?;
+        let now = crate::timing::quanta_now_us();
+        if now < estimate.client_time_us
+            || estimate
+                .sample_age_us
+                .saturating_add(now.saturating_sub(estimate.client_time_us))
+                > MAX_CLOCK_SAMPLE_AGE_US
+        {
+            estimate.state = ClockSyncState::Stale;
+        }
+        Some(estimate)
     }
 
-    pub fn clock_offset_us(&self) -> i64 {
-        self.clock_offset_us.load(Relaxed)
+    pub fn set_clock_estimate(&self, estimate: Option<ClockEstimate>) {
+        if let Ok(mut extra) = self.extra.lock() {
+            extra.clock_estimate = estimate;
+            if !estimate
+                .as_ref()
+                .is_some_and(|value| clock_estimate_is_fresh(value, crate::timing::quanta_now_us()))
+            {
+                extra.e2e_is_valid = false;
+                self.e2e_latency_ms.store(0, Relaxed);
+            }
+        }
+    }
+
+    /// Cross-machine latency is always an estimate, and unavailable without a
+    /// fresh synchronized mapping. Zero in the legacy snapshot means unavailable.
+    pub fn estimated_e2e_latency_ms(&self) -> Option<f32> {
+        let extra = self.extra.lock().unwrap_or_else(|err| err.into_inner());
+        (extra.e2e_is_valid
+            && extra.clock_estimate.as_ref().is_some_and(|estimate| {
+                clock_estimate_is_fresh(estimate, crate::timing::quanta_now_us())
+            }))
+        .then(|| f32::from_bits(self.e2e_latency_ms.load(Relaxed)))
+    }
+
+    /// Original host checkpoints for diagnostics, even when no cross-clock
+    /// mapping exists and the decoder receives timing marked unavailable.
+    pub fn latest_host_timing(&self) -> Option<FrameTimingCheckpoints> {
+        self.extra
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .latest_host_timing
+    }
+
+    fn set_latest_host_timing(&self, timing: FrameTimingCheckpoints) {
+        if let Ok(mut extra) = self.extra.lock() {
+            extra.latest_host_timing = Some(timing);
+        }
     }
 
     pub fn set_decode_latency(&self, decode_latency_ms: f32) {
@@ -203,7 +382,6 @@ impl SharedHostStats {
         self.packet_loss_rate.store(0, Relaxed);
         self.jitter_buffer_depth.store(0, Relaxed);
         self.decode_errors.store(0, Relaxed);
-        self.clock_offset_us.store(0, Relaxed);
         if let Ok(mut extra) = self.extra.lock() {
             *extra = HostStatsExtra::default();
         }
@@ -211,18 +389,20 @@ impl SharedHostStats {
 
     fn update_video_link(
         &self,
-        e2e_latency_ms: f32,
+        e2e_latency_ms: Option<f32>,
         rtt_ms: f32,
         packet_loss_rate: f32,
         jitter_buffer_depth: usize,
     ) {
-        self.e2e_latency_ms.store(e2e_latency_ms.to_bits(), Relaxed);
+        self.e2e_latency_ms
+            .store(e2e_latency_ms.unwrap_or(0.0).to_bits(), Relaxed);
         self.rtt_ms.store(rtt_ms.to_bits(), Relaxed);
         self.packet_loss_rate
             .store(packet_loss_rate.to_bits(), Relaxed);
         self.jitter_buffer_depth
             .store(jitter_buffer_depth as u32, Relaxed);
         if let Ok(mut extra) = self.extra.lock() {
+            extra.e2e_is_valid = e2e_latency_ms.is_some();
             if packet_loss_rate > 3.0 {
                 extra.link_status = "🟡 网络丢包波动";
                 extra.last_anomaly_reason = Some(format!("丢包率 {:.1}%", packet_loss_rate));
@@ -244,7 +424,7 @@ pub struct ClientSessionReceiverConfig {
     pub active_session_id: Arc<AtomicU32>,
     pub host_stats: Arc<SharedHostStats>,
     pub audio_tx: mpsc::Sender<AudioIngressEvent>,
-    pub decode_tx: mpsc::Sender<(RtpPacket, FrameTimingCheckpoints)>,
+    pub decode_tx: mpsc::Sender<VideoPacket>,
     pub clipboard_control: Option<Arc<dyn EnvelopeIngress>>,
     pub file_transfer_control: Option<Arc<dyn EnvelopeIngress>>,
     pub session_event_tx: Option<mpsc::UnboundedSender<ClientSessionEvent>>,
@@ -269,6 +449,7 @@ pub fn spawn_client_session_receiver(
 
         println!("Client listening on {}", bind_addr);
         let recovery_sender = udp_receiver.sender();
+        let clock_sender = spawn_clock_control_sender(recovery_sender.clone());
         let mut media_handler = MediaPacketHandler::new(
             stats,
             active_session_id,
@@ -277,6 +458,13 @@ pub fn spawn_client_session_receiver(
             decode_tx,
             session_event_tx.clone(),
         );
+        let mut clock_sync = ClockSynchronizer::new();
+        let mut clock_continuity = ClockContinuity::new();
+        let mut clock_peer: Option<(SocketAddr, [u8; 16])> = None;
+        let mut clock_session_id: Option<[u8; 16]> = None;
+        let mut next_probe_id = Some(1_u64);
+        let mut clock_tick = tokio::time::interval(Duration::from_secs(1));
+        clock_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             if let Some((message, target)) = host_stats.media_pause.take_request() {
@@ -305,8 +493,47 @@ pub fn spawn_client_session_receiver(
             .flatten()
             .min();
             let received = tokio::select! {
-                _ = host_stats.media_pause.changed.notified() => continue,
+                _ = host_stats.media_pause.changed.notified() => {
+                    clock_tick.reset_at(tokio::time::Instant::now());
+                    continue;
+                },
                 packet = udp_receiver.recv() => packet,
+                _ = clock_tick.tick() => {
+                    clock_tick.reset_after(clock_probe_period(host_stats.media_pause.is_paused()));
+                    if !clock_continuity.observe(crate::timing::quanta_now_us(), std::time::SystemTime::now()) {
+                        clock_sync.invalidate_measurements();
+                        media_handler.update_clock_estimate(None);
+                    }
+                    let peer = media_handler.video_source.and_then(|addr| {
+                        recovery_sender.peer_session_id(addr).map(|session_id| (addr, session_id))
+                    });
+                    if peer != clock_peer {
+                        let next_session_id = peer.map(|(_, session_id)| session_id);
+                        if next_session_id.is_some() && next_session_id != clock_session_id {
+                            clock_sync.reset();
+                            next_probe_id = Some(1);
+                            clock_session_id = next_session_id;
+                        } else {
+                            // Route loss/change within an authenticated session
+                            // cannot permit probe ID reuse, even across None.
+                            clock_sync.invalidate_measurements();
+                        }
+                        clock_peer = peer;
+                        media_handler.update_clock_estimate(None);
+                    }
+                    if let (Some((addr, session_id)), Some(probe_id)) = (clock_peer, next_probe_id) {
+                        let client_send_us = crate::timing::quanta_now_us();
+                        if clock_sync.begin_probe(probe_id, client_send_us).is_ok() {
+                            next_probe_id = probe_id.checked_add(1);
+                            let probe = protocol::session_auth::ClockProbe { session_id, probe_id, client_send_us };
+                            if clock_sender.try_send((OutboundClockControl::Probe(probe), addr)).is_err() {
+                                clock_sync.cancel_probe(probe_id);
+                            }
+                        }
+                    }
+                    media_handler.update_clock_estimate(clock_sync.estimate(crate::timing::quanta_now_us()));
+                    continue;
+                }
                 _ = async {
                     match wait {
                         Some(delay) => tokio::time::sleep(delay).await,
@@ -318,6 +545,33 @@ pub fn spawn_client_session_receiver(
                 }
             };
             match received {
+                Ok(MultiplexedPacket::ClockProbe(probe, host_recv_us, addr)) => {
+                    if recovery_sender.peer_session_id(addr) == Some(probe.session_id) {
+                        let _ = clock_sender.try_send((
+                            OutboundClockControl::Reply {
+                                probe,
+                                host_recv_us,
+                            },
+                            addr,
+                        ));
+                    }
+                }
+                Ok(MultiplexedPacket::ClockReply(reply, local_recv_us, addr)) => {
+                    if clock_peer == Some((addr, reply.probe.session_id))
+                        && recovery_sender.peer_session_id(addr) == Some(reply.probe.session_id)
+                        && clock_sync
+                            .complete_probe(
+                                reply.probe.probe_id,
+                                reply.probe.client_send_us,
+                                reply.host_recv_us,
+                                reply.host_send_us,
+                                local_recv_us,
+                            )
+                            .is_ok()
+                    {
+                        media_handler.update_clock_estimate(clock_sync.estimate(local_recv_us));
+                    }
+                }
                 Ok(MultiplexedPacket::Rtp(packet, addr)) => {
                     media_handler.remember_video_source(&packet, addr);
                     let packet_size = packet.payload.len() as u64 + 12;
@@ -333,18 +587,8 @@ pub fn spawn_client_session_receiver(
                             .media_pause
                             .acknowledge(addr, session_id, revision, paused);
                     }
-                    protocol::ControlMessage::Pong {
-                        client_send_ts,
-                        host_recv_ts,
-                        host_send_ts,
-                    } => {
-                        let now_ms = crate::session_crypto::now_unix_ms();
-                        let rtt = (now_ms.saturating_sub(client_send_ts) as f32).clamp(0.1, 1000.0);
-                        let offset = ((host_recv_ts as f64 - client_send_ts as f64)
-                            + (host_send_ts as f64 - now_ms as f64))
-                            / 2.0;
-                        media_handler.update_clock_sync(rtt, offset);
-                    }
+                    // Legacy wall-clock Pong data never authorizes a mapping or RTT update.
+                    protocol::ControlMessage::Pong { .. } => {}
                     protocol::ControlMessage::HostTelemetry {
                         fps,
                         encode_latency_ms,
@@ -514,12 +758,16 @@ fn route_reliable_envelope(
     }
 }
 
+/// Internal decoder ingress. The source epoch is fixed before enqueue, never
+/// inferred by a decoder after it has consumed a delayed source acknowledgement.
+pub type VideoPacket = (RtpPacket, FrameTimingCheckpoints, u64);
+
 pub(crate) struct MediaPacketHandler {
     stats_net: Arc<Statistics>,
     receiver_session_id: Arc<AtomicU32>,
     host_stats: Arc<SharedHostStats>,
     audio_tx: mpsc::Sender<AudioIngressEvent>,
-    decode_tx: mpsc::Sender<(RtpPacket, FrameTimingCheckpoints)>,
+    decode_tx: mpsc::Sender<VideoPacket>,
     session_event_tx: Option<mpsc::UnboundedSender<ClientSessionEvent>>,
     video_jitter_buffer: JitterBuffer,
     video_expected_seq_init: bool,
@@ -532,7 +780,7 @@ pub(crate) struct MediaPacketHandler {
     audio_stream_session_id: u32,
     audio_stream_ids: HashSet<u32>,
     pending_audio_configs: Vec<AudioStreamConfig>,
-    clock_offset_ms: f64,
+    clock_estimate: Option<ClockEstimate>,
     rtt_ms: f32,
     smooth_e2e_ms: f32,
     video_source: Option<SocketAddr>,
@@ -547,7 +795,7 @@ impl MediaPacketHandler {
         receiver_session_id: Arc<AtomicU32>,
         host_stats: Arc<SharedHostStats>,
         audio_tx: mpsc::Sender<AudioIngressEvent>,
-        decode_tx: mpsc::Sender<(RtpPacket, FrameTimingCheckpoints)>,
+        decode_tx: mpsc::Sender<VideoPacket>,
         session_event_tx: Option<mpsc::UnboundedSender<ClientSessionEvent>>,
     ) -> Self {
         Self {
@@ -568,7 +816,7 @@ impl MediaPacketHandler {
             audio_stream_session_id: 0,
             audio_stream_ids: HashSet::new(),
             pending_audio_configs: Vec::with_capacity(2),
-            clock_offset_ms: 0.0,
+            clock_estimate: None,
             rtt_ms: 0.0,
             smooth_e2e_ms: 0.0,
             video_source: None,
@@ -588,6 +836,21 @@ impl MediaPacketHandler {
         }
     }
 
+    /// Only the authenticated workspace actor calls this after accepting the
+    /// matching subscription/resume. Recovery must not depend on a first packet.
+    pub(crate) fn activate_video_source(&mut self, target: SocketAddr) {
+        self.reset_video_source();
+        self.video_source = Some(target);
+        self.last_video_ssrc = self.receiver_session_id.load(Relaxed);
+    }
+
+    pub(crate) fn suspend_video_source(&mut self) {
+        self.reset_video_source();
+        self.video_source = None;
+        self.last_video_ssrc = 0;
+        self.needs_keyframe = false;
+    }
+
     /// A matched source-switch acknowledgement starts a new local video epoch.
     /// Keep audio configuration and route ownership; discard only old video
     /// reorder state. V2 has no wire source revision, so this cannot identify a
@@ -602,13 +865,15 @@ impl MediaPacketHandler {
         self.smooth_e2e_ms = 0.0;
         self.needs_keyframe = true;
         self.last_keyframe_request = None;
-        self.stats_net
-            .video_decoder_needs_keyframe
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.stats_net.video_recovery.reset_source(|| ());
     }
 
     fn recovery_wait(&self) -> Option<Duration> {
-        (self.needs_keyframe && self.video_source.is_some()).then(|| {
+        ((self.needs_keyframe
+            || (self.stats_net.video_recovery.tracks_output()
+                && self.stats_net.video_recovery.is_waiting()))
+            && self.video_source.is_some())
+        .then(|| {
             Duration::from_millis(250).saturating_sub(
                 self.last_keyframe_request
                     .map_or(Duration::from_millis(250), |t| t.elapsed()),
@@ -618,19 +883,17 @@ impl MediaPacketHandler {
 
     pub(crate) fn take_keyframe_request(&mut self) -> Option<(SocketAddr, u32)> {
         let errors = self.stats_net.video_decode_errors.load(Relaxed);
-        if self
-            .stats_net
-            .video_decoder_needs_keyframe
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            self.needs_keyframe = true;
-        }
         if errors != self.observed_decode_errors {
             self.observed_decode_errors = errors;
-            self.needs_keyframe = true;
+            if !self.stats_net.video_recovery.tracks_output() {
+                self.needs_keyframe = true;
+            }
         }
-        if self.receiver_session_id.load(Relaxed) != self.last_video_ssrc {
+        let session = self.receiver_session_id.load(Relaxed);
+        if session == 0 || session != self.last_video_ssrc {
             self.needs_keyframe = false;
+            self.video_source = None;
+            self.last_keyframe_request = None;
             return None;
         }
         if self.recovery_wait()? != Duration::ZERO {
@@ -641,28 +904,37 @@ impl MediaPacketHandler {
         Some((self.video_source?, self.last_video_ssrc))
     }
 
-    pub fn update_clock_sync(&mut self, rtt: f32, offset: f64) {
-        if self.rtt_ms <= 0.01 {
-            self.rtt_ms = rtt;
-            self.clock_offset_ms = offset;
-        } else {
-            self.rtt_ms = self.rtt_ms * 0.8 + rtt * 0.2;
-            self.clock_offset_ms = self.clock_offset_ms * 0.8 + offset * 0.2;
-        }
+    pub fn update_clock_estimate(&mut self, estimate: Option<ClockEstimate>) {
+        self.clock_estimate = estimate;
+        self.rtt_ms = estimate.map_or(0.0, |value| {
+            value.latest_sample.network_rtt_us as f32 / 1_000.0
+        });
         self.host_stats.set_rtt(self.rtt_ms);
-        self.host_stats
-            .set_clock_offset_us((self.clock_offset_ms * 1000.0) as i64);
+        self.host_stats.set_clock_estimate(estimate);
+        if fresh_clock_offset_at(self.clock_estimate.as_ref(), crate::timing::quanta_now_us())
+            .is_none()
+        {
+            self.smooth_e2e_ms = 0.0;
+        }
     }
 
     pub async fn handle(&mut self, packet: RtpPacket, packet_size: u64) {
-        // Legacy RTP carries only the low 32 bits of epoch milliseconds.
-        // Expand near the synchronized host clock before deriving stage offsets.
-        let host_now_ms = (crate::timing::quanta_now_us() / 1000)
-            .saturating_add_signed(self.clock_offset_ms.round() as i64);
-        let capture_ts_us = expand_legacy_timestamp(packet.header.timestamp, host_now_ms) * 1000;
-        let host_timing = FrameTimingCheckpoints::new(capture_ts_us);
-        self.handle_with_host_timing(packet, packet_size, host_timing)
-            .await;
+        // The compact RTP timestamp can only be expanded with a valid mapping.
+        // Without one, do not fabricate host time from the local wall-clock epoch.
+        let now_us = crate::timing::quanta_now_us();
+        let capture_ts_us = fresh_clock_offset_at(self.clock_estimate.as_ref(), now_us)
+            .and_then(|offset| u64::try_from(now_us as i128 + offset as i128).ok())
+            .map(|host_now_us| {
+                expand_legacy_timestamp(packet.header.timestamp, host_now_us / 1_000)
+                    .saturating_mul(1_000)
+            })
+            .unwrap_or(0);
+        self.handle_with_host_timing(
+            packet,
+            packet_size,
+            FrameTimingCheckpoints::new(capture_ts_us),
+        )
+        .await;
     }
 
     pub async fn handle_with_host_timing(
@@ -672,14 +944,30 @@ impl MediaPacketHandler {
         host_timing: FrameTimingCheckpoints,
     ) {
         let current_session = self.receiver_session_id.load(Relaxed);
-        let clock_offset_us = (self.clock_offset_ms * 1000.0) as i64;
-        let tracker = crate::timing::ClientFrameTracker::start(
-            host_timing,
-            crate::timing::global_clock().clone(),
-            clock_offset_us,
-        );
-        let mut timing = tracker.finish();
-        timing.jitter_enter_ts_us = timing.recv_ts_us;
+        let now_us = crate::timing::quanta_now_us();
+        if packet.header.payload_type == PayloadType::VideoH265 as u8
+            && (current_session == 0 || packet.header.ssrc == current_session)
+        {
+            self.host_stats.set_latest_host_timing(host_timing);
+        }
+        let recv_offset = fresh_clock_offset_at(self.clock_estimate.as_ref(), now_us)
+            .and_then(|offset| mapped_receive_offset(&host_timing, offset, now_us));
+        let mut timing = if let Some(recv_offset) = recv_offset {
+            let mut timing = host_timing;
+            timing.recv_ts_us = recv_offset;
+            timing.jitter_enter_ts_us = recv_offset;
+            timing
+        } else {
+            // capture=0 is the existing unavailable-timing marker. Jitter queue
+            // residency and actual decoder costs still use local monotonic time.
+            FrameTimingCheckpoints::new(0)
+        };
+        // Receive is the first client checkpoint; never trust peer client stages.
+        timing.jitter_exit_ts_us = 0;
+        timing.decode_enter_ts_us = 0;
+        timing.decode_done_ts_us = 0;
+        timing.render_submit_ts_us = 0;
+        timing.render_done_ts_us = 0;
         self.handle_timed(packet, packet_size, timing, current_session)
             .await;
     }
@@ -829,7 +1117,7 @@ impl MediaPacketHandler {
     }
 
     pub(crate) fn drain_video(&mut self) {
-        while let Some((ordered_pkt, timing)) = self.video_jitter_buffer.pop_with_timing() {
+        while let Some((ordered_pkt, mut timing)) = self.video_jitter_buffer.pop_with_timing() {
             let seq = ordered_pkt.header.sequence_number;
             let advance = self
                 .last_seq
@@ -851,25 +1139,40 @@ impl MediaPacketHandler {
                 self.last_loss_calc = Instant::now();
             }
 
-            if self.rtt_ms > 0.0 && timing.recv_ts_us > 0 && timing.recv_ts_us < u32::MAX {
-                // Checkpoints already contain clock-corrected offsets from capture.
-                let sample_e2e = timing.recv_ts_us as f32 / 1000.0;
-                if self.smooth_e2e_ms <= 0.01 {
-                    self.smooth_e2e_ms = sample_e2e;
+            let mapping_fresh =
+                fresh_clock_offset_at(self.clock_estimate.as_ref(), crate::timing::quanta_now_us())
+                    .is_some();
+            let estimated_e2e =
+                if mapping_fresh && timing.capture_ts_us > 0 && timing.recv_ts_us < u32::MAX {
+                    // Capture -> receive is a cross-machine estimate, not a measured
+                    // presentation latency. Never infer validity from RTT > 0.
+                    let sample_e2e = timing.recv_ts_us as f32 / 1_000.0;
+                    if self.smooth_e2e_ms <= 0.01 {
+                        self.smooth_e2e_ms = sample_e2e;
+                    } else {
+                        self.smooth_e2e_ms = self.smooth_e2e_ms * 0.9 + sample_e2e * 0.1;
+                    }
+                    Some(self.smooth_e2e_ms)
                 } else {
-                    self.smooth_e2e_ms = self.smooth_e2e_ms * 0.9 + sample_e2e * 0.1;
-                }
-            }
-
+                    self.smooth_e2e_ms = 0.0;
+                    // A fit may expire while a packet waits in the jitter queue.
+                    timing = FrameTimingCheckpoints::new(0);
+                    None
+                };
             self.host_stats.update_video_link(
-                self.smooth_e2e_ms,
+                estimated_e2e,
                 self.rtt_ms,
                 self.loss_rate_pct,
                 self.video_jitter_buffer.len(),
             );
 
             self.stats_net.video_jitter_buffer_pop.fetch_add(1, Relaxed);
-            if self.decode_tx.try_send((ordered_pkt, timing)).is_err() {
+            let source_epoch = self.stats_net.video_recovery.snapshot().epoch.source;
+            if self
+                .decode_tx
+                .try_send((ordered_pkt, timing, source_epoch))
+                .is_err()
+            {
                 self.needs_keyframe = true;
                 self.stats_net
                     .video_decode_queue_dropped
@@ -914,12 +1217,25 @@ mod tests {
         }
     }
 
+    fn synchronized_estimate(offset_us: i64) -> ClockEstimate {
+        let now = crate::timing::quanta_now_us();
+        let mut sync = ClockSynchronizer::new();
+        for id in 0..6 {
+            let t1 = now - 6_000_000 + id * 1_000_000;
+            let t2 = (t1 as i128 + offset_us as i128 + 1_000) as u64;
+            sync.begin_probe(id, t1).unwrap();
+            sync.complete_probe(id, t1, t2, t2 + 100, t1 + 2_100)
+                .unwrap();
+        }
+        sync.estimate(now).unwrap()
+    }
+
     fn test_media_handler(
         active_session_id: Arc<AtomicU32>,
         session_event_tx: mpsc::UnboundedSender<ClientSessionEvent>,
     ) -> MediaPacketHandler {
         let (audio_tx, _audio_rx) = mpsc::channel(4);
-        let (decode_tx, _decode_rx) = mpsc::channel::<(RtpPacket, FrameTimingCheckpoints)>(4);
+        let (decode_tx, _decode_rx) = mpsc::channel::<VideoPacket>(4);
         let host_stats = Arc::new(SharedHostStats::default());
         MediaPacketHandler::new(
             Statistics::new(),
@@ -967,7 +1283,7 @@ mod tests {
         let sender_mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
         let (sender, _sender_rx) = sender_mux.split();
         let (audio_tx, _audio_rx) = mpsc::channel(4);
-        let (decode_tx, _decode_rx) = mpsc::channel::<(RtpPacket, FrameTimingCheckpoints)>(4);
+        let (decode_tx, _decode_rx) = mpsc::channel::<VideoPacket>(4);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let host_stats = Arc::new(SharedHostStats::default());
         let receiver = spawn_client_session_receiver(ClientSessionReceiverConfig {
@@ -983,6 +1299,17 @@ mod tests {
             session_event_tx: Some(event_tx),
         });
 
+        sender
+            .send_control(
+                &ControlMessage::Pong {
+                    client_send_ts: 1,
+                    host_recv_ts: 9_999_999,
+                    host_send_ts: 9_999_999,
+                },
+                client_addr,
+            )
+            .await
+            .unwrap();
         sender
             .send_control(
                 &ControlMessage::HostTelemetry {
@@ -1015,6 +1342,9 @@ mod tests {
             host_stats.snapshot().updated_at.is_some(),
             "receiving telemetry must record its local arrival time",
         );
+        assert!(host_stats.clock_estimate().is_none());
+        assert!(host_stats.estimated_e2e_latency_ms().is_none());
+        assert_eq!(host_stats.snapshot().rtt_ms, 0.0);
         receiver.abort();
     }
 
@@ -1023,18 +1353,20 @@ mod tests {
         let active_session_id = Arc::new(AtomicU32::new(7));
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (audio_tx, _audio_rx) = mpsc::channel(4);
-        let (decode_tx, mut decode_rx) = mpsc::channel::<(RtpPacket, FrameTimingCheckpoints)>(4);
+        let (decode_tx, mut decode_rx) = mpsc::channel::<VideoPacket>(4);
         let host_stats = Arc::new(SharedHostStats::default());
         let mut handler = MediaPacketHandler::new(
             Statistics::new(),
             active_session_id,
-            host_stats,
+            host_stats.clone(),
             audio_tx,
             decode_tx,
             Some(event_tx),
         );
 
-        let mut host_timing = FrameTimingCheckpoints::new(100_000_000);
+        handler.update_clock_estimate(Some(synchronized_estimate(5_000_000)));
+        let capture_us = crate::timing::quanta_now_us() + 5_000_000 - 10_000;
+        let mut host_timing = FrameTimingCheckpoints::new(capture_us);
         host_timing.encode_queue_ts_us = 1200;
         host_timing.encode_done_ts_us = 3400;
         host_timing.packetize_ts_us = 3800;
@@ -1045,14 +1377,17 @@ mod tests {
             .handle_with_host_timing(pkt, 1024, host_timing)
             .await;
 
-        let (received_pkt, received_timing) = decode_rx.try_recv().expect("decode packet received");
+        let (received_pkt, received_timing, _) =
+            decode_rx.try_recv().expect("decode packet received");
         assert_eq!(received_pkt.header.ssrc, 7);
-        assert_eq!(received_timing.capture_ts_us, 100_000_000);
+        assert_eq!(received_timing.capture_ts_us, capture_us);
         assert_eq!(received_timing.encode_queue_ts_us, 1200);
         assert_eq!(received_timing.encode_done_ts_us, 3400);
         assert_eq!(received_timing.packetize_ts_us, 3800);
         assert_eq!(received_timing.send_ts_us, 4200);
-        assert!(received_timing.recv_ts_us >= 4200);
+        assert!(received_timing.recv_ts_us >= 10_000);
+        assert!(host_stats.estimated_e2e_latency_ms().is_some());
+        assert_eq!(host_stats.latest_host_timing(), Some(host_timing));
         assert_eq!(
             received_timing.jitter_enter_ts_us,
             received_timing.recv_ts_us
@@ -1164,6 +1499,10 @@ mod tests {
         // Receiving an IDR does not prove it decoded. A decoder failure must
         // rearm recovery even without a sequence gap.
         handler.stats_net.video_decode_errors.fetch_add(1, Relaxed);
+        handler
+            .stats_net
+            .video_recovery
+            .require_keyframe(handler.stats_net.video_recovery.snapshot().epoch.source);
         handler.last_keyframe_request = Some(Instant::now() - Duration::from_millis(251));
         assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
         assert_eq!(handler.take_keyframe_request(), None);
@@ -1181,6 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn decoder_reference_loss_rearms_recovery_without_a_codec_error() {
         let stats = Statistics::new();
+        stats.video_recovery.track_output();
         let id = Arc::new(AtomicU32::new(7));
         let (audio_tx, _audio_rx) = mpsc::channel(2);
         let (decode_tx, mut decoded) = mpsc::channel(2);
@@ -1203,8 +1543,8 @@ mod tests {
         // A full decoder queue can discard the IDR after ingress saw it.
         // Skipping dependent frames need not increment video_decode_errors.
         stats
-            .video_decoder_needs_keyframe
-            .store(true, std::sync::atomic::Ordering::Release);
+            .video_recovery
+            .require_keyframe(stats.video_recovery.snapshot().epoch.source);
         assert_eq!(stats.video_decode_errors.load(Relaxed), 0);
         assert_eq!(h.take_keyframe_request(), Some((host, 7)));
         assert_eq!(h.take_keyframe_request(), None); // Existing 250 ms rate limit.
@@ -1225,6 +1565,71 @@ mod tests {
             None,
             "closed sessions cannot request recovery"
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_source_recovers_without_a_packet_and_stops_after_the_only_output() {
+        let stats = Statistics::new();
+        stats.video_recovery.track_output();
+        let session = Arc::new(AtomicU32::new(7));
+        let (audio, _) = mpsc::channel(1);
+        let (video, mut received) = mpsc::channel(4);
+        let mut handler = MediaPacketHandler::new(
+            stats.clone(),
+            session.clone(),
+            Arc::new(SharedHostStats::default()),
+            audio,
+            video,
+            None,
+        );
+        let host = "127.0.0.1:49373".parse().unwrap();
+        assert_eq!(handler.take_keyframe_request(), None, "unconfirmed route");
+        handler.activate_video_source(host);
+        assert_eq!(stats.udp_packets_recv.load(Relaxed), 0);
+        assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
+        assert_eq!(handler.take_keyframe_request(), None, "250ms throttle");
+        handler.last_keyframe_request = Some(Instant::now() - Duration::from_millis(251));
+        assert_eq!(handler.take_keyframe_request(), Some((host, 7)));
+
+        let mut idr = video_packet(7);
+        idr.payload = vec![0, 0, 1, 0x26, 1];
+        handler.handle(idr, 16).await;
+        let (_, _, source) = received.try_recv().unwrap();
+        let epoch = stats.video_recovery.snapshot().epoch;
+        assert_eq!(source, epoch.source);
+        handler.last_keyframe_request = None;
+        assert_eq!(
+            handler.take_keyframe_request(),
+            Some((host, 7)),
+            "IDR is not output"
+        );
+        assert!(stats.video_recovery.publish(epoch, || ()).is_some());
+        handler.last_keyframe_request = None;
+        assert_eq!(
+            handler.take_keyframe_request(),
+            None,
+            "no extra packet is needed to stop recovery"
+        );
+
+        handler.suspend_video_source();
+        assert_eq!(handler.take_keyframe_request(), None);
+        handler.activate_video_source(host);
+        assert_eq!(
+            handler.take_keyframe_request(),
+            Some((host, 7)),
+            "resume before first packet"
+        );
+        session.store(8, Relaxed);
+        assert_eq!(
+            handler.take_keyframe_request(),
+            None,
+            "replacement is not authorized by an old route"
+        );
+        let replacement = "127.0.0.1:49374".parse().unwrap();
+        handler.activate_video_source(replacement);
+        assert_eq!(handler.take_keyframe_request(), Some((replacement, 8)));
+        session.store(0, Relaxed);
+        assert_eq!(handler.take_keyframe_request(), None);
     }
 
     #[tokio::test]
@@ -1266,5 +1671,175 @@ mod tests {
         );
         task.abort();
         let _ = task.await;
+    }
+
+    #[test]
+    fn shared_stats_retain_measurement_diagnostics_and_expire_cached_estimates() {
+        let stats = SharedHostStats::default();
+        let estimate = synchronized_estimate(5_000_000);
+        stats.set_clock_estimate(Some(estimate));
+        let reported = stats.clock_estimate().unwrap();
+        assert_eq!(reported.latest_sample.raw_total_rtt_us, 2_100);
+        assert_eq!(reported.latest_sample.host_processing_us, 100);
+        assert_eq!(reported.latest_sample.network_rtt_us, 2_000);
+        assert!(reported.asymmetry_bound_us > 0.0);
+        assert!(reported.fit_ci95_us.is_some());
+        stats.update_video_link(Some(12.0), 2.0, 0.0, 0);
+        assert_eq!(stats.estimated_e2e_latency_ms(), Some(12.0));
+        let mut expired = estimate;
+        expired.sample_age_us = MAX_CLOCK_SAMPLE_AGE_US + 1;
+        stats.set_clock_estimate(Some(expired));
+        assert_eq!(stats.clock_estimate().unwrap().state, ClockSyncState::Stale);
+        assert_eq!(stats.estimated_e2e_latency_ms(), None);
+        assert_eq!(stats.snapshot().e2e_latency_ms, 0.0);
+        stats.reset();
+        assert!(stats.clock_estimate().is_none());
+    }
+
+    #[test]
+    fn only_fresh_synchronized_offsets_are_used_and_drift_is_evaluated_locally() {
+        let mut estimate = synchronized_estimate(5_000_000);
+        estimate.sample_age_us = 0;
+        estimate.drift_ppm = 100.0;
+        assert_eq!(
+            fresh_clock_offset_at(Some(&estimate), estimate.client_time_us + 1_000_000),
+            Some(5_000_100)
+        );
+        assert_eq!(
+            fresh_clock_offset_at(Some(&estimate), estimate.client_time_us - 1),
+            None
+        );
+        estimate.state = ClockSyncState::Acquiring;
+        assert_eq!(
+            fresh_clock_offset_at(Some(&estimate), estimate.client_time_us),
+            None
+        );
+        estimate.state = ClockSyncState::Stale;
+        assert_eq!(
+            fresh_clock_offset_at(Some(&estimate), estimate.client_time_us),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unsynchronized_and_stale_media_keep_raw_host_timing_without_fake_e2e() {
+        for estimate in [
+            None,
+            Some({
+                let mut stale = synchronized_estimate(5_000_000);
+                stale.state = ClockSyncState::Stale;
+                stale
+            }),
+        ] {
+            let (event_tx, _) = mpsc::unbounded_channel();
+            let mut handler = test_media_handler(Arc::new(AtomicU32::new(7)), event_tx);
+            let (decode_tx, mut decode_rx) = mpsc::channel(4);
+            handler.decode_tx = decode_tx;
+            handler.update_clock_estimate(estimate);
+            let mut host_timing = FrameTimingCheckpoints::new(1_000_000);
+            host_timing.send_ts_us = 4_000;
+            handler
+                .handle_with_host_timing(video_packet(7), 100, host_timing)
+                .await;
+            let (_, timing, _) = decode_rx.try_recv().unwrap();
+            assert_eq!(timing.capture_ts_us, 0);
+            assert_eq!(timing.recv_ts_us, 0);
+            assert_eq!(handler.host_stats.latest_host_timing(), Some(host_timing));
+            assert!(handler.host_stats.estimated_e2e_latency_ms().is_none());
+            assert_eq!(handler.host_stats.snapshot().e2e_latency_ms, 0.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn future_host_capture_is_unavailable_instead_of_clipped_to_send_stage() {
+        let (event_tx, _) = mpsc::unbounded_channel();
+        let mut handler = test_media_handler(Arc::new(AtomicU32::new(7)), event_tx);
+        let (decode_tx, mut decode_rx) = mpsc::channel(4);
+        handler.decode_tx = decode_tx;
+        handler.update_clock_estimate(Some(synchronized_estimate(0)));
+        let mut host_timing =
+            FrameTimingCheckpoints::new(crate::timing::quanta_now_us() + 60_000_000);
+        host_timing.send_ts_us = 4_000;
+        handler
+            .handle_with_host_timing(video_packet(7), 100, host_timing)
+            .await;
+        let (_, timing, _) = decode_rx.try_recv().unwrap();
+        assert_eq!(timing.capture_ts_us, 0);
+        assert!(handler.host_stats.estimated_e2e_latency_ms().is_none());
+    }
+
+    #[test]
+    fn zero_receive_offset_does_not_trigger_unmapped_jitter_fallback() {
+        let now = 1_700_000_000_000_000;
+        let host_timing = FrameTimingCheckpoints::new(now + 5_000_000);
+        assert_eq!(mapped_receive_offset(&host_timing, 5_000_000, now), None);
+        assert_eq!(
+            mapped_receive_offset(&host_timing, 5_000_000, now + 1),
+            Some(1)
+        );
+        assert_eq!(
+            mapped_receive_offset(&host_timing, 5_000_000, now - 1),
+            None
+        );
+    }
+
+    #[test]
+    fn paused_clock_probes_remain_sparse() {
+        assert_eq!(clock_probe_period(false), Duration::from_secs(1));
+        assert_eq!(clock_probe_period(true), Duration::from_secs(5));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_clock_send_queue_drops_measurements_without_waiting() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let addr = mux.local_addr().unwrap();
+        let (sender, _) = mux.split();
+        let clock = spawn_clock_control_sender(sender);
+        // No await after spawn: the worker cannot drain this current-thread
+        // fixture until the nonblocking queue-full assertion has completed.
+        for probe_id in 0..8 {
+            assert!(
+                clock
+                    .try_send((
+                        OutboundClockControl::Probe(protocol::session_auth::ClockProbe {
+                            session_id: [0; 16],
+                            probe_id,
+                            client_send_us: 1,
+                        }),
+                        addr
+                    ))
+                    .is_ok()
+            );
+        }
+        assert!(matches!(
+            clock.try_send((
+                OutboundClockControl::Probe(protocol::session_auth::ClockProbe {
+                    session_id: [0; 16],
+                    probe_id: 8,
+                    client_send_us: 1,
+                }),
+                addr
+            )),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        drop(clock);
+    }
+
+    #[tokio::test]
+    async fn clock_send_worker_is_aborted_with_its_receiver_owner() {
+        let mux = UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let (sender, _) = mux.split();
+        let clock = spawn_clock_control_sender(sender);
+        let abort = clock.task.abort_handle();
+        tokio::task::yield_now().await;
+        assert!(!abort.is_finished());
+        drop(clock);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned clock task must terminate with its receiver");
     }
 }

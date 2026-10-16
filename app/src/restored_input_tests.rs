@@ -131,18 +131,15 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
         // state before simulating a successful decode; otherwise it races the
         // fake displayed frame and correctly prevents all input.
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !recovery
-                .video_decoder_needs_keyframe
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
+            while !recovery.video_recovery.is_waiting() {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("local decoder task did not initialize");
         recovery
-            .video_decoder_needs_keyframe
-            .store(false, std::sync::atomic::Ordering::Release);
+            .video_recovery
+            .publish(recovery.video_recovery.snapshot().epoch, || ());
         (runtime, session, recorder, recovery)
     });
     cx.update(|cx| {
@@ -328,8 +325,8 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
         "recovery fixture drag never began"
     );
     recovery
-        .video_decoder_needs_keyframe
-        .store(true, std::sync::atomic::Ordering::Release);
+        .video_recovery
+        .require_keyframe(recovery.video_recovery.snapshot().epoch.source);
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     std::thread::sleep(Duration::from_millis(60));
@@ -360,8 +357,8 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
         "recovering video accepted remote input"
     );
     recovery
-        .video_decoder_needs_keyframe
-        .store(false, std::sync::atomic::Ordering::Release);
+        .video_recovery
+        .publish(recovery.video_recovery.snapshot().epoch, || ());
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     cx.simulate_click(pos, Modifiers::none());
