@@ -5,6 +5,10 @@ use remote_core::{SharedHostStats, Statistics, workspace_session::{WorkspaceConn
 use serde_json::{Value, json};
 use std::{net::SocketAddr, path::PathBuf, sync::{Arc, atomic::Ordering::Relaxed}, time::{Duration, Instant}};
 use tokio::sync::watch;
+#[path = "portal_receiver.rs"]
+mod portal_receiver;
+#[path = "hevc_diagnostic.rs"]
+mod hevc_diagnostic;
 
 fn new_private_receipt(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut options=std::fs::OpenOptions::new();options.write(true).create_new(true);
@@ -56,6 +60,8 @@ trait Link {
     async fn subscribe(&mut self, source: CaptureSource) -> Result<()>;
     async fn next(&mut self, wait: Duration) -> Option<SessionCommand>;
     fn video(&self) -> (u64, u64, u64);
+    fn reset_video(&mut self) {}
+    fn export_frame(&self, _path: &std::path::Path) -> Result<bool> { Ok(false) }
 }
 
 struct Wire {
@@ -79,6 +85,8 @@ impl Link for Wire {
     fn video(&self) -> (u64,u64,u64) {
         (self.stats.video_frames_decoded.load(Relaxed) as u64, self.stats.video_decode_errors.load(Relaxed) as u64, self.stats.udp_packets_recv.load(Relaxed) as u64)
     }
+    fn reset_video(&mut self) { if let Some(media)=&self.media { media.reset_video(); } }
+    fn export_frame(&self,path:&std::path::Path)->Result<bool> { portal_receiver::export_luma(self,path) }
 }
 
 async fn normal_ack<L:Link>(link:&mut L, budget:Duration, accepts:impl Fn(&SessionCommand)->bool) -> Result<SessionCommand> {
@@ -206,7 +214,12 @@ async fn cleanup_ack<L:Link>(link:&mut L, command:SessionCommand, budget:Duratio
 }
 
 async fn cleanup<L:Link>(link:&mut L, owned:bool, budgets:Budgets, report:&mut Value) {
+    cleanup_with_input_requirement(link,owned,budgets,report,true).await;
+}
+
+async fn cleanup_with_input_requirement<L:Link>(link:&mut L, owned:bool, budgets:Budgets, report:&mut Value, require_input_release:bool) {
     let mut errors=Vec::new();
+    report["input_release_required"]=require_input_release.into();
     if owned {
         let released=cleanup_ack(link,SessionCommand::ReleaseInput{id:ID},budgets.acknowledgement,
             |c|matches!(c,SessionCommand::InputReleased{id:ID}),&mut errors).await;
@@ -220,10 +233,10 @@ async fn cleanup<L:Link>(link:&mut L, owned:bool, budgets:Budgets, report:&mut V
         |c|matches!(c,SessionCommand::Closed{connection_id:id,reason} if *id==connection_id && reason==STOPPED),&mut errors).await;
     report["closed_and_workers_stopped_acknowledged"]=closed.into();
     report["cleanup_errors"]=json!(errors);
-    if report["cleanup_errors"].as_array().is_some_and(|errors|errors.iter().any(|e|e.as_str().is_some_and(|s|s.starts_with("INPUT_UNAVAILABLE:")))) {
+    if require_input_release && report["cleanup_errors"].as_array().is_some_and(|errors|errors.iter().any(|e|e.as_str().is_some_and(|s|s.starts_with("INPUT_UNAVAILABLE:")))) {
         report["operation_succeeded"]=false.into();report["error"]="host rejected input during cleanup".into();
     }
-    report["cleanup_complete"]=json!(closed && (!owned || (report["input_released_acknowledged"]==true && report["unsubscribed_acknowledged"]==true)));
+    report["cleanup_complete"]=json!(closed && (!owned || ((!require_input_release || report["input_released_acknowledged"]==true) && report["unsubscribed_acknowledged"]==true)));
 }
 
 async fn drive_mode<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>,suite:bool) -> Value {
@@ -317,6 +330,11 @@ async fn drive_hold_loss(link:&mut Wire,target:Target,budgets:Budgets,mut cancel
 }
 
 pub fn main_cli(args:&[String]) {
+    if args.get(1).is_some_and(|mode|mode=="replay-hevc") { hevc_diagnostic::replay_cli(&args); return; }
+    if args.get(1).is_some_and(|mode|matches!(mode.as_str(),"inspect-hevc"|"inspect-hevc-input")) { hevc_diagnostic::main_cli(&args); return; }
+    if args.get(1).is_some_and(|mode|mode=="wait-shared-display") {
+        return portal_receiver::main_cli(args);
+    }
     let hold_loss=args.get(1).is_some_and(|mode|matches!(mode.as_str(),"hold-loss"|"hold-focus"));
     let suite=args.get(1).is_some_and(|mode|mode=="input-suite");
     if args.len()!=7 || !matches!(args[1].as_str(),"input-window"|"input-suite"|"hold-loss"|"hold-focus") { eprintln!("usage: probe input-window|input-suite|hold-loss|hold-focus LOOPBACK_TARGET FIXTURE_PID WINDOW_ID FIXTURE_NONCE NEW_ABSOLUTE_OUTPUT_JSON");std::process::exit(2); }
