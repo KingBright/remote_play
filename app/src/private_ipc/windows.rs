@@ -187,9 +187,10 @@ fn validate_acl(path: &Path) -> io::Result<()> {
         let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
         let sid = sid_string((&allowed.SidStart as *const u32).cast_mut().cast())?;
         if sid != own && sid != "S-1-5-18" && sid != "S-1-5-32-544" {
-            return Err(denied(
-                "Profile grants another principal access; nothing changed",
-            ));
+            return Err(denied(&format!(
+                "Profile grants another principal access; nothing changed (path={}, sid={}, mask=0x{:08x}, ace_flags=0x{:02x}; principal name not established)",
+                path.display(), sid, allowed.Mask, header.AceFlags,
+            )));
         }
     }
     Ok(())

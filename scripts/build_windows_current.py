@@ -11,17 +11,74 @@ import sys
 
 import build_identity_gate as gate
 
+def packaging_environment(build_env, inherited=None):
+    """Respect an already chosen process policy; never choose or change one."""
+    result = dict(build_env)
+    inherited = os.environ if inherited is None else inherited
+    policy = inherited.get('PSExecutionPolicyPreference')
+    if policy:
+        gate.require(policy in ('Restricted', 'AllSigned', 'RemoteSigned',
+                     'Unrestricted', 'Bypass', 'Undefined', 'Default'),
+                     'Invalid inherited PowerShell process policy')
+        result['PSExecutionPolicyPreference'] = policy
+    return result
+
+
+def validate_packaging_policy(report):
+    gate.require(isinstance(report, dict) and isinstance(report.get('scripts'), list) and len(report['scripts']) == 2,
+                 'PowerShell packaging policy observation unavailable')
+    policy = report.get('effective')
+    gate.require(policy in ('Restricted', 'AllSigned', 'RemoteSigned', 'Unrestricted', 'Bypass'),
+                 'Unknown effective PowerShell execution policy')
+    gate.require(policy != 'Restricted',
+                 'PowerShell Restricted blocks the formal package scripts. No settings changed. '
+                 'Use --build-only for a build receipt, or obtain approval for the package process policy.')
+    for script in report['scripts']:
+        gate.require(isinstance(script, dict) and isinstance(script.get('path'), str)
+                     and isinstance(script.get('signature'), str)
+                     and type(script.get('zone')) is int and 0 <= script['zone'] <= 4,
+                     'Incomplete package script policy observation')
+        signed = script.get('signature') == 'Valid'
+        gate.require(policy != 'AllSigned' or signed,
+                     'AllSigned requires trusted signatures; no policy override attempted')
+        gate.require(policy != 'RemoteSigned' or script.get('zone', 0) < 3 or signed,
+                     'RemoteSigned blocks an unsigned Internet-zone package script; nothing unblocked')
+    return report
+
+
+def packaging_preflight(repo, env):
+    scripts = [repo/'scripts/package_windows_unified.ps1', repo/'scripts/verify_desktop_gui.ps1']
+    for path in scripts:
+        gate.regular(path)
+    literals = ','.join("'" + str(path).replace("'", "''") + "'" for path in scripts)
+    command = (
+        "$ErrorActionPreference='Stop';$items=@();foreach($p in @(" + literals + ")){"
+        "$zone=0;$lines=Get-Content -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue;"
+        "foreach($line in $lines){if($line -match '^ZoneId=(\\d+)$'){$zone=[int]$Matches[1]}};"
+        "$items+=@{path=$p;signature=(Get-AuthenticodeSignature -LiteralPath $p).Status.ToString();zone=$zone}};"
+        "@{effective=(Get-ExecutionPolicy).ToString();scripts=$items}|ConvertTo-Json -Depth 4 -Compress")
+    result = subprocess.run(['powershell.exe', '-NoProfile', '-Command', command],
+                            env=env, cwd=repo, capture_output=True, text=True, timeout=30)
+    gate.require(result.returncode == 0, 'Cannot inspect the existing packaging policy; no build started')
+    return validate_packaging_policy(json.loads(result.stdout))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--expected-commit', required=True)
     parser.add_argument('--expected-patch')
-    parser.add_argument('--ffmpeg', type=Path, required=True)
+    parser.add_argument('--ffmpeg', type=Path)
+    parser.add_argument('--build-only', action='store_true', help='Compile and verify identity without invoking a package script')
     parser.add_argument('--with-input-helper', action='store_true')
     args = parser.parse_args()
     gate.require(sys.platform == 'win32', 'Native Windows only')
     repo = Path(__file__).resolve().parents[1]
     gate.require(gate.git(repo, 'branch', '--show-current').strip() == b'main', 'Primary main required')
     env = gate.build_environment()
+    package_env = packaging_environment(env)
+    if not args.build_only:
+        gate.require(args.ffmpeg is not None, '--ffmpeg is required for a formal package')
+        packaging_preflight(repo, package_env)  # Fail before expensive compilation.
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--locked', '--offline', '--no-deps', '--format-version=1'], cwd=repo, env=env))
     target = Path(metadata['target_directory']).resolve(strict=True)
@@ -29,7 +86,8 @@ def main():
                  and Path(metadata.get('build_directory') or target).resolve() == target,
                  'Preserve the existing native Windows project-local cache')
     gate.require(shutil.disk_usage(target).free >= 4 * 1024**3, 'Four GiB reserve required')
-    gate.regular(args.ffmpeg)
+    if args.ffmpeg is not None:
+        gate.regular(args.ffmpeg)
     source = gate.source_snapshot(repo, args.expected_commit, expected_patch=args.expected_patch)
     config = gate.configuration('windows', 'x86_64', (repo/'VERSION').read_text().strip(),
         'x86_64-pc-windows-msvc', 'release', gate.toolchain_digest(), gate.environment_digest())
@@ -85,8 +143,12 @@ def main():
         with pending.open('x',encoding='utf-8') as output:
             json.dump(receipt,output,indent=2);output.write('\n')
         os.replace(pending,receipt_path)
+        if args.build_only:
+            print(json.dumps({'stage':'build-only','package_generated':False,
+                'commit':args.expected_commit,'binary_sha256':binary_hash,'receipt':str(receipt_path)}))
+            return
         subprocess.run(['powershell.exe','-NoProfile','-File',str(repo/'scripts/package_windows_unified.ps1'),
-            '-SkipBuild','-BuildReceipt',str(receipt_path),'-FfmpegPath',str(args.ffmpeg)],cwd=repo,env=env,check=True)
+            '-SkipBuild','-BuildReceipt',str(receipt_path),'-FfmpegPath',str(args.ffmpeg)],cwd=repo,env=package_env,check=True)
         gate.require(gate.source_snapshot(repo,args.expected_commit,expected_patch=args.expected_patch)==source,
                      'Source changed during packaging')
         print(json.dumps({'build_identity_sha256':expected['identity_sha256'],'commit':args.expected_commit,
