@@ -23,6 +23,7 @@ HELPER = Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storag
 AUTHORITY = 'docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json'
 LOCK_ENV = 'WEAVELO_RELEASE_LOCK_FD'
 PID_ENV = 'WEAVELO_RELEASE_PRODUCER_PID'
+TRANSITION_ENV = 'WEAVELO_TRANSITION_INTENT_SHA256'
 ANDROID_SIGNER = '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5'
 ENTRIES = {'macos': 'package_macos_unified.sh', 'android-release': 'build_android_release.sh',
            'android-native': 'build_android_native.sh'}
@@ -106,7 +107,41 @@ def check_lock(kind):
     state = json.loads(os.pread(fd, 65536, 0))
     require(state['project'] == str(ROOT) and (state['kind'] == kind or
             (state['kind'] == 'android-release' and kind == 'android-native')), 'Wrong producer lock scope')
+    require(state.get('transition') == transition_config(kind), 'Inherited transition environment differs from producer lock')
     return fd, state
+
+
+def transition_config(kind):
+    intent = os.environ.get(TRANSITION_ENV)
+    if intent is None:
+        return None
+    require(kind == 'macos', 'Identity transition is supported only by the macOS signed-pair producer')
+    require(bool(re.fullmatch('[0-9a-f]{64}', intent)), 'Exact transition intent digest is required')
+    pins = {key: os.environ.get(env, '') for key, env in (
+        ('commit', 'WEAVELO_EXPECTED_COMMIT'),
+        ('identity_sha256', 'WEAVELO_EXPECTED_IDENTITY_SHA256'),
+        ('manifest_sha256', 'WEAVELO_EXPECTED_MANIFEST_SHA256'))}
+    require(all(re.fullmatch('[0-9a-f]{40}' if key == 'commit' else '[0-9a-f]{64}', value)
+                for key, value in pins.items()), 'Independent transition source/identity/manifest pins are required')
+    return {'intent_sha256': intent, 'candidate_expectations': pins}
+
+
+def verify_transition_producer(state, admission):
+    transition = state.get('transition')
+    if transition is None:
+        return
+    regular(HELPER)
+    spec = importlib.util.spec_from_file_location('weavelo_transition_helper', HELPER)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    result = module.companion('rust_release').validate_producer(
+        module.release_api(), str(ROOT), admission['component'], admission['files'], state['producer_pid'],
+        transition_intent_sha256=transition['intent_sha256'])
+    require(result.get('transition_intent_sha256') == transition['intent_sha256']
+            and result.get('candidate_expectations') == transition['candidate_expectations']
+            and result.get('files') == admission['files']
+            and result.get('staged_files') == admission['staged_files']
+            and result.get('owned_aux_stages') == admission.get('owned_aux_stages', []),
+            'Official transition reservation differs from the pinned producer contract')
 
 
 def write_state(fd, state):
@@ -120,6 +155,7 @@ def producer(kind):
     if LOCK_ENV in os.environ:
         yield check_lock(kind)
         return
+    transition = transition_config(kind)  # Reject incomplete intent before any lifecycle mutation.
     state_dir = ROOT / '.rust-storage'
     require(ROOT == ROOT.resolve(strict=True) and not state_dir.is_symlink(), 'Unsafe producer metadata path')
     state_dir.mkdir(mode=0o700, exist_ok=True)
@@ -127,6 +163,8 @@ def producer(kind):
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     prepared = False
     state = {'project': str(ROOT), 'kind': kind, 'producer_pid': os.getpid()}
+    if transition is not None:
+        state['transition'] = transition
     try:
         info = os.fstat(fd)
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
@@ -158,7 +196,12 @@ def admit(state, component, files, current=None, aux_stage=None):
     for path in files:
         require(path.parent == path.parent.resolve(), 'Linked default output parent rejected')
         path.parent.mkdir(parents=True, exist_ok=True)
+    transition = state.get('transition')
+    require(transition is None or (component == 'macos-arm64-release' and current is None),
+            'Identity transition cannot adopt an existing/new output or change component')
     args = ['--component', component, '--producer-pid', state['producer_pid']]
+    if transition is not None:
+        args.extend(['--transition-intent-sha256', transition['intent_sha256']])
     for path in files:
         args.extend(['--file', path])
     if aux_stage:
@@ -172,6 +215,9 @@ def admit(state, component, files, current=None, aux_stage=None):
     require(result.get('admission') == 'reserved' and result.get('files') == list(map(str, files))
             and result.get('staged_files') == list(map(str, stage_paths(files))), 'Exact current-output reservation was not confirmed')
     require(result.get('owned_aux_stages', []) == ([str(aux_stage)] if aux_stage else []), 'Unexpected packaging workspace ownership')
+    require(result.get('transition_intent_sha256') == (transition['intent_sha256'] if transition else None),
+            'Official admission did not confirm the exact transition intent')
+    verify_transition_producer(state, result)
     return result
 
 
@@ -183,6 +229,12 @@ def publish(state, admission, expected):
             '--validation-file', admission['staged_files'][1]]
     for path, value in zip(admission['files'], expected):
         args.extend(['--file', path, '--expected-sha256', value])
+    transition = state.get('transition')
+    if transition is not None:
+        require(admission.get('transition_intent_sha256') == transition['intent_sha256'], 'Publication intent changed')
+        args.extend(['--transition-intent-sha256', transition['intent_sha256'],
+                     '--expected-identity-sha256', transition['candidate_expectations']['identity_sha256'],
+                     '--expected-manifest-sha256', transition['candidate_expectations']['manifest_sha256']])
     result = public('release-publish', *args)
     require(result.get('current_committed') is True and result.get('paths') == admission['files'],
             'Current output commit was not confirmed; preserve the public transaction for recovery')
@@ -203,6 +255,9 @@ def publish_macos(state, admission, report):
     archive, receipt = map(Path, admission['staged_files'])
     recorded, expected = macos_evidence(archive, receipt, admission['files'][0])
     require(recorded == report, 'macOS receipt changed after signing verification')
+    if state.get('transition') is not None:
+        require(recorded.get('build_identity_expectations') == state['transition']['candidate_expectations'],
+                'Signed candidate source/identity/manifest differs from the accepted transition')
     return publish(state, admission, expected)
 
 

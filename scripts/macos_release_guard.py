@@ -396,6 +396,11 @@ def main() -> None:
         gate.validate_identity(observed.get('build_identity'), args.expected_commit, args.expected_identity_sha256)
         import release_artifact_lifecycle as lifecycle
         with lifecycle.producer('macos') as (_, delivery):
+            if delivery.get('transition') is not None:
+                pins = delivery['transition']['candidate_expectations']
+                lifecycle.require(pins['commit'] == args.expected_commit
+                                  and pins['identity_sha256'] == args.expected_identity_sha256,
+                                  'Observed build differs from the pinned transition candidate')
             version_key(args.version); build_key(args.build)
             if not args.binary.is_file() or args.binary.is_symlink():
                 raise ReleaseRejected('Missing build output')
