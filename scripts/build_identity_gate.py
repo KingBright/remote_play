@@ -336,14 +336,22 @@ def compiled_module(expected: dict) -> bytes:
     return text.encode()
 
 
-def shared_target(repo: Path, requested: Path | None = None) -> Path:
+def shared_target(repo: Path, requested: Path | None = None, *, lifecycle_binding: Path | None = None) -> Path:
+    require(lifecycle_binding is None or sys.platform == 'linux', 'Explicit observation binding is Linux only')
     if sys.platform == 'linux':
         # Linux already owns a project-local cache. Reconcile its original
         # observe-only authority, never create/migrate to the Mac cache path.
         import check_artifact_lifecycle as lifecycle
+        original_binding = repo / lifecycle.BINDING
+        binding = lifecycle_binding if lifecycle_binding is not None else original_binding
+        if binding != original_binding:
+            original = read_json(original_binding)
+            selected = read_json(binding)
+            envelope = dict(selected, contract_sha256=original.get('contract_sha256'))
+            require(envelope == original, 'Observation refresh must preserve authority, cache, budgets and coverage')
         try:
             report = lifecycle.check('check', repo,
-                repo / lifecycle.AUTHORITY, repo / lifecycle.BINDING,
+                repo / lifecycle.AUTHORITY, binding,
                 Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py')
         except (lifecycle.Refusal, OSError, ValueError, KeyError) as error:
             raise IdentityRejected('Existing Linux cache contract unavailable: ' + str(error)) from error
@@ -482,7 +490,7 @@ class BuildInputs:
                     REMOTEPLAY_BUILD_IDENTITY_RS=str(self.module))
 
 
-def observed_build(repo: Path, expected: dict, target: Path | None = None) -> dict:
+def observed_build(repo: Path, expected: dict, target: Path | None = None, *, lifecycle_binding: Path | None = None) -> dict:
     """Only this fixed build path may mint a build receipt; no loose-binary import.
 
     The app must embed the exact generated identity in ProductInfo. Shared-cache
@@ -494,7 +502,9 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None) -> di
     require(toolchain_digest() == expected['configuration']['toolchain_sha256'], 'Toolchain changed')
     require(environment_digest() == expected['configuration']['environment_sha256'], 'Build environment changed')
     repo = repo.absolute()
-    target = shared_target(repo, target)
+    binding_sha256 = hash_file(lifecycle_binding) if lifecycle_binding is not None else None
+    target = (shared_target(repo, target, lifecycle_binding=lifecycle_binding)
+              if lifecycle_binding is not None else shared_target(repo, target))
     require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Four GiB free-space reserve required')
     config = expected['configuration']
     command = ['cargo', 'build', '-p', 'remote_play_app', '--bin', 'remote_play',
@@ -511,6 +521,8 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None) -> di
         require(environment_digest() == config['environment_sha256'] and
                 toolchain_digest() == config['toolchain_sha256'], 'Compiler environment/toolchain changed during build')
         require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Build exhausted required disk reserve')
+        if lifecycle_binding is not None:
+            require(hash_file(lifecycle_binding) == binding_sha256, 'Observation binding changed during build')
         profile = 'debug' if config['profile'] == 'dev' else 'release'
         binary = target / config['target'] / profile / ('remote_play.exe' if config['platform'] == 'windows' else 'remote_play')
         value = hash_file(binary)
@@ -519,7 +531,9 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None) -> di
                 'compiler_binary_sha256': value, 'compiler_binary_bytes': binary.stat().st_size,
                 'product_info': info, 'build_command': command, 'fresh_target': False,
                 'build_storage': {'mode': 'shared-incremental', 'target_directory': str(target),
-                                  'source_directory': str(repo)},
+                                  'source_directory': str(repo),
+                                  **({'observation_binding': {'path': str(lifecycle_binding), 'sha256': binding_sha256}}
+                                     if lifecycle_binding is not None else {})},
                 'visual_acceptance': 'not_evaluated', 'stream_acceptance': 'not_evaluated'}
 
 
@@ -813,6 +827,7 @@ def main() -> None:
     build.add_argument('--identity', type=Path, required=True)
     build.add_argument('--identity-sha256', required=True, help='SHA-256 of the prepared JSON file from independent handoff')
     build.add_argument('--target', type=Path, help='Must resolve to the existing platform cache contract')
+    build.add_argument('--lifecycle-binding', type=Path, help='Linux only: refreshed observation binding; original authority/cache/budgets remain fixed')
     build.add_argument('--output', type=Path, required=True)
     candidate = commands.add_parser('verify-candidate')
     candidate.add_argument('--repo', type=Path, required=True)
@@ -860,7 +875,8 @@ def main() -> None:
             output_sha = write_new(args.output, result)
             result = {'identity_file_sha256': output_sha, 'build_identity': result, 'compiled': False}
         elif args.command == 'build':
-            result = observed_build(args.repo, read_json(args.identity, args.identity_sha256), args.target)
+            result = observed_build(args.repo, read_json(args.identity, args.identity_sha256), args.target,
+                                    lifecycle_binding=args.lifecycle_binding)
             result = {'build_receipt_sha256': write_new(args.output, result), 'build': result}
         elif args.command == 'verify-candidate':
             result = verify_candidate(args.repo, args.binary,

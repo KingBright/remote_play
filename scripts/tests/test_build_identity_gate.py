@@ -76,6 +76,36 @@ class BuildIdentityGateTests(unittest.TestCase):
                 gate.shared_target(self.repo)
             execute.assert_not_called()
 
+    def test_linux_observation_refresh_preserves_the_original_authority_and_cache(self):
+        import check_artifact_lifecycle as lifecycle
+        target = self.repo / 'target'; target.mkdir()
+        original = self.repo / lifecycle.BINDING; original.parent.mkdir(exist_ok=True)
+        binding = original.with_name('version-observation.json')
+        before = {'authority_inventory': {'path': 'same-authority', 'sha256': 'a' * 64},
+                  'selected_artifact_refs': [str(target)], 'owned_budget_refs': [],
+                  'coverage': {'build_lock': False}, 'contract_sha256': {'Cargo.lock': 'b' * 64}}
+        original.write_text(json.dumps(before))
+        selected = dict(before, contract_sha256={'Cargo.lock': 'c' * 64})
+        binding.write_text(json.dumps(selected))
+        report = {'binding': selected}
+        metadata = subprocess.CompletedProcess([], 0, json.dumps({'target_directory': str(target)}), '')
+        with patch.object(gate.sys, 'platform', 'linux'), patch.object(lifecycle, 'check', return_value=report) as check, patch.object(gate.subprocess, 'run', return_value=metadata), patch.object(gate, 'build_environment', return_value={}):
+            self.assertEqual(gate.shared_target(self.repo, lifecycle_binding=binding), target)
+            self.assertEqual(check.call_args.args[2:4], (self.repo / lifecycle.AUTHORITY, binding))
+        self.assertEqual(json.loads(original.read_text()), before)
+        for field, value in [('selected_artifact_refs', ['/different-cache']), ('owned_budget_refs', ['new-owner']), ('coverage', {'build_lock': True}), ('authority_inventory', {'path': 'different-authority'})]:
+            binding.write_text(json.dumps(dict(selected, **{field: value})))
+            with self.subTest(field=field), patch.object(gate.sys, 'platform', 'linux'), patch.object(lifecycle, 'check') as check, patch.object(gate.subprocess, 'run') as cargo:
+                with self.assertRaisesRegex(gate.IdentityRejected, 'preserve authority'):
+                    gate.shared_target(self.repo, lifecycle_binding=binding)
+                check.assert_not_called(); cargo.assert_not_called()
+
+    def test_non_linux_builder_cannot_select_an_observation_binding(self):
+        with patch.object(gate.sys, 'platform', 'darwin'), patch.object(gate.subprocess, 'run') as cargo:
+            with self.assertRaisesRegex(gate.IdentityRejected, 'Linux only'):
+                gate.shared_target(self.repo, lifecycle_binding=self.repo / 'untrusted.json')
+            cargo.assert_not_called()
+
     def run_git(self, *args):
         return subprocess.check_output(['git', '-C', str(self.repo), *args], text=True)
 

@@ -25,11 +25,11 @@ async fn inspect(target:SocketAddr,output:&std::path::Path,nonce:&str,inputs:boo
     let stats=Statistics::new();
     let media=client::ClientMediaRuntime::start_video_only(stats.clone()).map_err(|e|e.to_string())?;
     let status=media.decode_status.clone();
-    let (tx,mut rx)=mpsc::channel::<(protocol::RtpPacket,protocol::FrameTimingCheckpoints)>(32);
+    let (tx,mut rx)=mpsc::channel::<remote_core::client_session::VideoPacket>(32);
     let decoder=media.decode_tx.clone();let samples=Arc::new(Mutex::new(Samples::default()));
     let captured=samples.clone();
     let tee=tokio::spawn(async move{
-        while let Some((packet,timing))=rx.recv().await{
+        while let Some((packet,timing,generation))=rx.recv().await{
             {let mut s=captured.lock().unwrap();
                 if s.rows.len()<96{
                     let types=nal_types(&packet.payload);
@@ -42,7 +42,7 @@ async fn inspect(target:SocketAddr,output:&std::path::Path,nonce:&str,inputs:boo
                     s.bytes.extend_from_slice(&packet.payload);s.units+=1;
                 }
             }
-            if decoder.send((packet,timing)).await.is_err(){break;}
+            if decoder.send((packet,timing,generation)).await.is_err(){break;}
         }
     });
     let mut link=Wire{conn,events,stats:stats.clone(),media:Some(media)};
@@ -179,7 +179,7 @@ pub(super) fn replay_cli(args:&[String]){
   let rt=tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
   rt.block_on(async{
    let stats=Statistics::new();let media=client::ClientMediaRuntime::start_video_only(stats.clone()).map_err(|e|e.to_string())?;
-   for packet in packets.into_iter().skip(1){media.decode_tx.send((packet,protocol::FrameTimingCheckpoints::default())).await.map_err(|_|"decoder closed")?;tokio::time::sleep(Duration::from_millis(80)).await;}
+   for packet in packets.into_iter().skip(1){media.decode_tx.send((packet,protocol::FrameTimingCheckpoints::default(),stats.video_recovery.snapshot().epoch.source)).await.map_err(|_|"decoder closed")?;tokio::time::sleep(Duration::from_millis(80)).await;}
    tokio::time::sleep(Duration::from_millis(600)).await;
    let result=json!({"kind":"offline-native-HEVC-boundary-replay","network_or_input_used":false,"initial_access_unit_omitted":true,
     "decoded_frames":stats.video_frames_decoded.load(Relaxed),"decode_errors":stats.video_decode_errors.load(Relaxed),"decoder_status":media.decode_status.lock().unwrap().clone()});
