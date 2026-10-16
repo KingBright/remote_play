@@ -11,7 +11,7 @@ cd android
 ./gradlew :app:assembleDebug :app:lintDebug
 ```
 
-Set `JAVA_HOME`, `ANDROID_HOME` and, if necessary, `ANDROID_NDK_HOME` for your machine. `CARGO_TARGET_DIR` is supported by the native build script. Check its output: the fallback path skips x86_64 when that Rust target is absent. The APK needs a newly built `libremote_play_android.so` for every ABI being tested, especially after JNI interface changes. The Kotlin-only build does not regenerate native libraries.
+Set `JAVA_HOME`, `ANDROID_HOME` and, if necessary, `ANDROID_NDK_HOME` for your machine. `CARGO_TARGET_DIR` is supported by the native build script. Check its output: the fallback path skips x86_64 when that Rust target is absent. The APK needs a newly built `libweavelo_android.so` for every ABI being tested, especially after JNI interface changes. The Kotlin-only build does not regenerate native libraries.
 
 The verified macOS build used HotSpot JDK 17 and these Gradle resource limits:
 
@@ -21,7 +21,7 @@ The verified macOS build used HotSpot JDK 17 and these Gradle resource limits:
   :app:assembleDebug :app:lintDebug
 ```
 
-Pair Android into the same RemotePlay device group with the QR flow, then connect using a discovered host or enter `IP:port`. Discovery and routing use the same product order as desktop: **LAN direct → RemotePlay P2P direct → NAS Relay**. Only one best route is exposed per device, and reconnect resolves the latest best endpoint so a lost LAN route can fall through to P2P or Relay without pinning the stale address. Device-group metadata and secret are stored under the app-private `filesDir/remote-play/device-group` directory.
+Pair Android into the same Weavelo device group with the QR flow, then connect using a discovered host or enter `IP:port`. Discovery and routing use the same product order as desktop: **LAN direct → Weavelo P2P direct → NAS Relay**. Only one best route is exposed per device, and reconnect resolves the latest best endpoint so a lost LAN route can fall through to P2P or Relay without pinning the stale address. Device-group metadata and secret are stored under the app-private `filesDir/weavelo/device-group` directory.
 
 The default host port is 39271. An Android emulator reaches its development host at `10.0.2.2:39271`; `127.0.0.1` refers to the Android device itself. The native bridge uses UDP for LAN/P2P and local UDP tunnel endpoints for WSS Relay. The media path remains HEVC. HEVC initialization failure is displayed explicitly; AVC requires sender-side codec negotiation and is not an automatic decoder fallback.
 
@@ -31,7 +31,7 @@ See `docs/reviews/2026-09-12/FOLLOWUP.md` in the repository root for verificatio
 
 ## Signed Release APK
 
-Official NAS releases must be non-debuggable APKs signed with the persistent RemotePlay Android release identity. The signing key is kept outside Git under the user's application-support directory and its password is stored in macOS Keychain.
+Official NAS releases must be non-debuggable APKs signed with the persistent Weavelo Android release identity. The signing key is kept outside Git under the user's application-support directory and its password is stored in macOS Keychain.
 
 One-time setup on the release Mac:
 

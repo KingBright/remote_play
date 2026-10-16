@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
-pub(crate) const FFMPEG_ENV: &str = "REMOTE_PLAY_FFMPEG_BIN";
-pub(crate) const ALLOW_SYSTEM_FFMPEG_ENV: &str = "REMOTE_PLAY_ALLOW_SYSTEM_FFMPEG";
+pub(crate) const FFMPEG_ENV: &str = "WEAVELO_FFMPEG_BIN";
+pub(crate) const ALLOW_SYSTEM_FFMPEG_ENV: &str = "WEAVELO_ALLOW_SYSTEM_FFMPEG";
 static VALIDATED_FFMPEG: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,12 +104,12 @@ fn looks_like_virtual_display(description: &str, device_id: &str) -> bool {
 
 pub(crate) fn ffmpeg_program() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
-        .map_err(|error| format!("Cannot locate the RemotePlay installation: {error}"))?;
+        .map_err(|error| format!("Cannot locate the Weavelo installation: {error}"))?;
     let path = resolve_ffmpeg(
         std::env::var_os(FFMPEG_ENV),
         executable
             .parent()
-            .ok_or("RemotePlay installation has no parent directory")?,
+            .ok_or("Weavelo installation has no parent directory")?,
         std::env::var_os("PATH"),
         std::env::var_os(ALLOW_SYSTEM_FFMPEG_ENV)
             .is_some_and(|value| matches!(value.to_string_lossy().as_ref(), "1" | "true" | "TRUE")),
@@ -152,7 +152,7 @@ fn resolve_ffmpeg(
         }
     }
     Err(format!(
-        "Windows screen capture unavailable: the private ffmpeg.exe bundle is missing. Install RemotePlay with its FFmpeg bundle, or set {FFMPEG_ENV} to an absolute validated path. System PATH fallback is disabled unless {ALLOW_SYSTEM_FFMPEG_ENV}=1. No capture or microphone was started."
+        "Windows screen capture unavailable: the private ffmpeg.exe bundle is missing. Install Weavelo with its FFmpeg bundle, or set {FFMPEG_ENV} to an absolute validated path. System PATH fallback is disabled unless {ALLOW_SYSTEM_FFMPEG_ENV}=1. No capture or microphone was started."
     ))
 }
 
@@ -169,14 +169,14 @@ fn validate_ffmpeg(path: &Path) -> Result<(), String> {
     let devices = ffmpeg_listing(path, "-devices")?;
     if !devices.to_ascii_lowercase().contains("gdigrab") {
         return Err(
-            "Windows screen capture unavailable: RemotePlay's FFmpeg bundle does not provide gdigrab. No capture or microphone was started."
+            "Windows screen capture unavailable: Weavelo's FFmpeg bundle does not provide gdigrab. No capture or microphone was started."
                 .into(),
         );
     }
     let encoders = ffmpeg_listing(path, "-encoders")?;
     if !encoders.to_ascii_lowercase().contains("libx265") {
         return Err(
-            "Windows screen capture unavailable: RemotePlay's FFmpeg bundle does not provide libx265 HEVC encoding. No capture or microphone was started."
+            "Windows screen capture unavailable: Weavelo's FFmpeg bundle does not provide libx265 HEVC encoding. No capture or microphone was started."
                 .into(),
         );
     }
@@ -194,10 +194,10 @@ fn ffmpeg_listing(path: &Path, flag: &str) -> Result<String, String> {
         .args(["-hide_banner", flag])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|error| format!("Cannot run RemotePlay's FFmpeg bundle: {error}"))?;
+        .map_err(|error| format!("Cannot run Weavelo's FFmpeg bundle: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "RemotePlay's FFmpeg bundle failed capability probe {flag} with status {}",
+            "Weavelo's FFmpeg bundle failed capability probe {flag} with status {}",
             output.status
         ));
     }
@@ -217,7 +217,7 @@ mod tests {
     impl Directory {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "remoteplay-readiness-{}-{}",
+                "weavelo-readiness-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));

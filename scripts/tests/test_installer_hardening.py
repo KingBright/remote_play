@@ -22,8 +22,8 @@ class InstallerFixture(unittest.TestCase):
         self.home = Path(self.temp.name) / 'home'
         self.applications = self.home / 'Applications'
         self.applications.mkdir(parents=True)
-        self.target = self.applications / 'RemotePlay.app'
-        self.source = Path(self.temp.name) / 'source' / 'RemotePlay.app'
+        self.target = self.applications / 'Weavelo.app'
+        self.source = Path(self.temp.name) / 'source' / 'Weavelo.app'
         policy = load_policy()
         self.old = dict(version='2.0.0-alpha.7', build='20260930.7',
                         bundle_id=policy.bundle_id, certificate_sha1=policy.certificate_sha1,
@@ -33,16 +33,16 @@ class InstallerFixture(unittest.TestCase):
                         executable_sha256='new', info_sha256='new-info')
         self.make_app(self.target, self.old)
         self.make_app(self.source, self.new)
-        self.plist = self.home / 'Library/LaunchAgents/com.remoteplay.host.plist'
+        self.plist = self.home / 'Library/LaunchAgents/fun.hackerlife.weavelo.host.plist'
         self.plist.parent.mkdir(parents=True)
-        self.executable = self.target / 'Contents/MacOS/remote_play'
+        self.executable = self.target / 'Contents/MacOS/weavelo'
         self.plist.write_bytes(plistlib.dumps({'Label': installer.LABEL,
                                              'ProgramArguments': [str(self.executable)]}))
         self.state = {'loaded': True, 'running': True, 'pid': 100, 'program': str(self.executable)}
         self.commands = []
         self.system_states = []
         self.system = {'status': 'not_loaded', 'loaded': False, 'running': False,
-                       'pid': None, 'domain': 'system', 'label': 'com.remoteplay.mesh'}
+                       'pid': None, 'domain': 'system', 'label': 'fun.hackerlife.weavelo.mesh'}
         self.states = []
         self.verify_count = 0
         self.verify_hook = None
@@ -66,7 +66,7 @@ class InstallerFixture(unittest.TestCase):
         path.mkdir(parents=True)
         (path / '.fixture-info.json').write_text(json.dumps(info))
         (path / 'Contents/MacOS').mkdir(parents=True)
-        (path / 'Contents/MacOS/remote_play').write_bytes(b'fixture, not executable')
+        (path / 'Contents/MacOS/weavelo').write_bytes(b'fixture, not executable')
 
     def verify(self, path, policy, **kwargs):
         self.verify_count += 1
@@ -102,7 +102,7 @@ class InstallerFixture(unittest.TestCase):
         return dict(self.state)
 
     def journal(self):
-        return json.loads((self.applications / '.remoteplay-install-journal.json').read_text())
+        return json.loads((self.applications / '.weavelo-install-journal.json').read_text())
 
     def target_info(self):
         return json.loads((self.target / '.fixture-info.json').read_text())
@@ -121,11 +121,11 @@ class InstallerFixture(unittest.TestCase):
 
 class ExistingProtections(InstallerFixture):
     def test_concurrent_rejection_preserves_lock_inode_and_target(self):
-        path = self.applications / '.remoteplay-install.lock'
+        path = self.applications / '.weavelo-install.lock'
         with path.open('w') as owner:
             fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
             before = path.stat().st_ino
-            with self.assertRaisesRegex(ReleaseRejected, 'Another RemotePlay installer'):
+            with self.assertRaisesRegex(ReleaseRejected, 'Another Weavelo installer'):
                 installer.install(self.archive, True)
             self.assertEqual(path.stat().st_ino, before)
         self.assertEqual(self.target_info(), self.old)
@@ -157,7 +157,7 @@ class HardeningGaps(InstallerFixture):
         self.assertFalse(self.mutations())
 
     def test_unknown_journal_is_not_ignored(self):
-        path = self.applications / '.remoteplay-install-journal.json'
+        path = self.applications / '.weavelo-install-journal.json'
         path.write_text(json.dumps({'schema': 1, 'phase': 'unrecognized', 'operation_id': 'unknown'}))
         path.chmod(0o600)
         with self.assertRaisesRegex(ReleaseRejected, 'journal|Journal'):
@@ -179,7 +179,7 @@ class HardeningGaps(InstallerFixture):
         self.assertEqual(journal['phase'], 'completed')
         self.assertEqual(journal['candidate']['build'], self.new['build'])
         self.assertNotIn('preserved', journal)
-        path = self.applications / '.remoteplay-install-journal.json'
+        path = self.applications / '.weavelo-install-journal.json'
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_first_rename_interruption_recovers_old_signed_app(self):
@@ -285,7 +285,7 @@ class RecoveryBoundaries(InstallerFixture):
 
     def test_lock_inode_survives_success_and_next_noop(self):
         installer.install(self.archive, True)
-        lock = self.applications / '.remoteplay-install.lock'
+        lock = self.applications / '.weavelo-install.lock'
         inode = lock.stat().st_ino
         commands = len(self.mutations())
         result = installer.install(self.archive, True)
@@ -303,7 +303,7 @@ class RecoveryBoundaries(InstallerFixture):
     def test_journal_symlink_rejects_without_touching_destination(self):
         outside = Path(self.temp.name) / 'outside.json'
         outside.write_text('keep')
-        (self.applications / '.remoteplay-install-journal.json').symlink_to(outside)
+        (self.applications / '.weavelo-install-journal.json').symlink_to(outside)
         with self.assertRaises(ReleaseRejected): installer.install(self.archive, True)
         self.assertEqual(outside.read_text(), 'keep')
         self.assertFalse(self.commands)
@@ -339,7 +339,7 @@ class CommandBudgets(unittest.TestCase):
 
     def test_launchctl_observation_uses_remaining_budget(self):
         from types import SimpleNamespace
-        output = SimpleNamespace(returncode=0, stdout='state = running\npid = 123\nprogram = /fixture/remote_play\n', stderr='')
+        output = SimpleNamespace(returncode=0, stdout='state = running\npid = 123\nprogram = /fixture/weavelo\n', stderr='')
         with patch.object(installer.time, 'monotonic', side_effect=[10.0, 10.5]):
             deadline = installer.Deadline(1)
             with patch.object(installer.subprocess, 'run', return_value=output) as command:
@@ -359,8 +359,8 @@ class CommandBudgets(unittest.TestCase):
 class SystemServiceGaps(InstallerFixture):
     def loaded_root_service(self):
         return {'status': 'observed', 'loaded': True, 'running': True, 'pid': 18849,
-                'domain': 'system', 'label': 'com.remoteplay.mesh',
-                'program': '/fixture/Old RemotePlay.app/Contents/MacOS/remote_play'}
+                'domain': 'system', 'label': 'fun.hackerlife.weavelo.mesh',
+                'program': '/fixture/Old Weavelo.app/Contents/MacOS/weavelo'}
 
     def test_dry_plan_classifies_root_service_without_private_hashes(self):
         self.system = self.loaded_root_service()
@@ -368,29 +368,29 @@ class SystemServiceGaps(InstallerFixture):
             plan = installer.install(self.archive, False)
         self.assertTrue(plan['system_mesh']['loaded'])
         self.assertEqual(plan['apply_blockers'], ['system_mesh_loaded'])
-        self.assertFalse(plan['will_restart_only_remoteplay'])
+        self.assertFalse(plan['will_restart_only_weavelo'])
         self.assertFalse(self.commands)
 
     def test_quit_ineffective_root_service_blocks_apply_without_signals(self):
         # A GUI Quit acknowledgement does not unload a launchd system service.
         self.system = self.loaded_root_service()
         with patch.object(installer, 'preserve_hashes', side_effect=AssertionError('private preflight read')):
-            with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+            with self.assertRaisesRegex(ReleaseRejected, 'system/fun.hackerlife.weavelo.mesh'):
                 installer.install(self.archive, True)
         self.assertEqual(self.target_info(), self.old)
         self.assertFalse(self.commands)
-        self.assertFalse((self.applications / '.remoteplay-install-journal.json').exists())
+        self.assertFalse((self.applications / '.weavelo-install-journal.json').exists())
 
     def test_unknown_system_state_blocks_apply(self):
         self.system = {'status': 'unavailable', 'loaded': None, 'reason': 'timeout',
-                       'domain': 'system', 'label': 'com.remoteplay.mesh'}
-        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/com.remoteplay.mesh'):
+                       'domain': 'system', 'label': 'fun.hackerlife.weavelo.mesh'}
+        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/fun.hackerlife.weavelo.mesh'):
             installer.install(self.archive, True)
         self.assertFalse(self.commands)
 
     def test_system_service_appearing_under_lock_blocks_apply(self):
         self.system_states = [dict(self.system), self.loaded_root_service()]
-        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+        with self.assertRaisesRegex(ReleaseRejected, 'system/fun.hackerlife.weavelo.mesh'):
             installer.install(self.archive, True)
         self.assertFalse(self.mutations())
         self.assertEqual(self.target_info(), self.old)
@@ -407,7 +407,7 @@ class SystemServiceGaps(InstallerFixture):
         self.crash_after_phase('old_moved')
         self.system = self.loaded_root_service()
         commands = len(self.commands)
-        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+        with self.assertRaisesRegex(ReleaseRejected, 'system/fun.hackerlife.weavelo.mesh'):
             installer.recover_interrupted()
         self.assertEqual(len(self.commands), commands)
         self.assertFalse(self.target.exists())
@@ -421,7 +421,7 @@ class SystemServiceGaps(InstallerFixture):
                 return f'100 {self.executable}\n999 {self.executable}\n'
             return original(args, timeout)
         with patch.object(installer, 'run', observe):
-            with self.assertRaisesRegex(ReleaseRejected, 'duplicate RemotePlay'):
+            with self.assertRaisesRegex(ReleaseRejected, 'duplicate Weavelo'):
                 installer.install(self.archive, True)
         self.assertFalse(self.mutations())
         self.assertEqual(sum(a[0] == '/bin/ps' for a in self.commands), 1)
@@ -433,10 +433,10 @@ class SystemMeshObservation(unittest.TestCase):
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
     def test_loaded_system_service_is_external_and_raw_arguments_are_not_echoed(self):
-        output = 'system/com.remoteplay.mesh = {\n state = running\n pid = 18849\n program = /fixture/old-wrapper\n arguments = { synthetic-private-marker }\n environment = { synthetic-env-marker }\n}'
+        output = 'system/fun.hackerlife.weavelo.mesh = {\n state = running\n pid = 18849\n program = /fixture/old-wrapper\n arguments = { synthetic-private-marker }\n environment = { synthetic-env-marker }\n}'
         with patch.object(installer.subprocess, 'run', return_value=self.result(stdout=output)) as command:
             state = installer.system_mesh_state()
-        self.assertEqual(command.call_args.args[0], ['/bin/launchctl', 'print', 'system/com.remoteplay.mesh'])
+        self.assertEqual(command.call_args.args[0], ['/bin/launchctl', 'print', 'system/fun.hackerlife.weavelo.mesh'])
         self.assertTrue(state['loaded'])
         self.assertTrue(state['running'])
         self.assertEqual(state['management'], 'not_managed_by_user_installer')
@@ -445,7 +445,7 @@ class SystemMeshObservation(unittest.TestCase):
         self.assertNotIn('synthetic-env-marker', json.dumps(state))
 
     def test_documented_not_found_is_absence(self):
-        output = self.result(113, stderr='Could not find service "com.remoteplay.mesh" in domain for system')
+        output = self.result(113, stderr='Could not find service "fun.hackerlife.weavelo.mesh" in domain for system')
         with patch.object(installer.subprocess, 'run', return_value=output):
             state = installer.system_mesh_state()
         self.assertEqual(state['status'], 'not_loaded')
@@ -489,25 +489,25 @@ class SystemMeshRecoveryBoundaries(InstallerFixture):
     loaded_root_service = SystemServiceGaps.loaded_root_service
     def test_loaded_nonrunning_service_blocks_because_it_can_restart(self):
         self.system = dict(self.loaded_root_service(), running=False, pid=None)
-        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+        with self.assertRaisesRegex(ReleaseRejected, 'system/fun.hackerlife.weavelo.mesh'):
             installer.install(self.archive, True)
         self.assertFalse(self.commands)
 
     def test_late_root_service_before_stop_keeps_old_app_and_no_journal(self):
         self.system_states = [dict(self.system), dict(self.system), self.loaded_root_service()]
-        with self.assertRaisesRegex(ReleaseRejected, 'system/com.remoteplay.mesh'):
+        with self.assertRaisesRegex(ReleaseRejected, 'system/fun.hackerlife.weavelo.mesh'):
             installer.install(self.archive, True)
         self.assertEqual(self.target_info(), self.old)
         self.assertFalse(self.mutations())
-        self.assertFalse((self.applications / '.remoteplay-install-journal.json').exists())
-        self.assertFalse(list(self.applications.glob('.remoteplay-update-*')))
+        self.assertFalse((self.applications / '.weavelo-install-journal.json').exists())
+        self.assertFalse(list(self.applications.glob('.weavelo-update-*')))
 
     def test_unknown_system_state_blocks_recovery_without_renames(self):
         self.crash_after_phase('old_moved')
         self.system = {'status': 'unavailable', 'loaded': None, 'reason': 'query_failed'}
         before = len(self.commands)
         backup = Path(self.journal()['backup'])
-        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/com.remoteplay.mesh'):
+        with self.assertRaisesRegex(ReleaseRejected, 'Cannot determine.*system/fun.hackerlife.weavelo.mesh'):
             installer.recover_interrupted()
         self.assertFalse(self.target.exists())
         self.assertTrue(backup.exists())

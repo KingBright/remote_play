@@ -1,4 +1,4 @@
-//! Development-only generated-texture check; never starts the RemotePlay runtime.
+//! Development-only generated-texture check; never starts the Weavelo runtime.
 #[cfg(target_os="windows")]
 fn main() {
     if let Err(error)=gpui::native_video::validate_windows_gpu() {

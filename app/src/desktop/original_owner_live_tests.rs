@@ -115,7 +115,7 @@ async fn run_sequence(run: &str, report: &mut serde_json::Value) -> Result<(), E
             return Err("Old image appeared in the new connection before subscribing".into());
         }
         owner.request_capture_sources().await?;
-        let title = format!("RemotePlay Switch {run} {label}");
+        let title = format!("Weavelo Switch {run} {label}");
         let deadline = Instant::now() + Duration::from_secs(10);
         let source = loop {
             owner.poll();

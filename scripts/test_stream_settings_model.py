@@ -36,7 +36,7 @@ SESSION_CLOCK_TESTS = {
     "clock-host-rotation": ("host", "service::failure_admission_tests::key_rotation_same_address_hello_keeps_pending_native_budget_until_release"),
     "transport-replay": ("remote_core", "net::tests"),
     "routed-auth": ("remote_core", "p2p::routed_p2p_tests"),
-    "clock-display": ("remote_play_app", "telemetry_display::tests"),
+    "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
     "bridge-auth": ("remote_client_bridge", "publisher_bridge::tests"),
     "bridge-telemetry": ("remote_client_bridge", "tests::telemetry_defaults_are_zero_not_marketing_numbers"),
@@ -45,7 +45,7 @@ SESSION_CLOCK_TESTS = {
 
 
 PLATFORM_CHECKS = {
-    "platform-macos-check": ("--bin", "remote_play", "--features", "gpui-native-video"),
+    "platform-macos-check": ("--bin", "weavelo", "--features", "gpui-native-video"),
     "platform-windows-check": ("--tests", "--target", "x86_64-pc-windows-gnu", "--features", "native-windows-video"),
     "platform-linux-check": ("--tests", "--target", LINUX_TARGET),
 }
@@ -54,20 +54,20 @@ PLATFORM_CHECKS = {
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
     if mode in PLATFORM_CHECKS:
-        return [cargo, "check", *shared, "-p", "remote_play_app", *PLATFORM_CHECKS[mode]]
+        return [cargo, "check", *shared, "-p", "weavelo_app", *PLATFORM_CHECKS[mode]]
     if mode in SESSION_CLOCK_TESTS:
         package, test_filter = SESSION_CLOCK_TESTS[mode]
         return [cargo, "test", *shared, "-p", package, "--lib",
                 test_filter, "--", "--nocapture"]
     if mode == "service-contract":
-        return [cargo, "test", *shared, "-p", "remote_play_app", "--lib",
+        return [cargo, "test", *shared, "-p", "weavelo_app", "--lib",
                 "service_contract", "--", "--nocapture"]
     if mode == "gui-input-status":
-        return [cargo, "test", *shared, "-p", "remote_play_app", "--lib", "--no-default-features",
+        return [cargo, "test", *shared, "-p", "weavelo_app", "--lib", "--no-default-features",
                 "--features", "gpui-restoration", "restored_ui::input_tests::", "--", "--nocapture"]
     if mode in ("input-loss-build", "input-loss-tests"):
         return [cargo, "test" if mode.endswith("tests") else "build", *shared,
-                "-p", "remote_play_app", "--example", "window_scoped_acceptance_guarded",
+                "-p", "weavelo_app", "--example", "window_scoped_acceptance_guarded",
                 "--no-default-features", "--features", "gpui-restoration"]
     if mode == "host-control":
         return [cargo, "test", *shared, "-p", "host", "--lib", "service::", "--", "--nocapture"]
@@ -77,7 +77,7 @@ def validation_command(cargo, target, mode):
         return [cargo, "test", *shared, "-p", "remote_core", "--lib",
                 "workspace_session::tests", "--", "--nocapture"]
     if mode == "media-acceptance-build":
-        return [cargo, "build", *shared, "-p", "remote_play_app",
+        return [cargo, "build", *shared, "-p", "weavelo_app",
                 "--example", "restored_gui_acceptance",
                 "--no-default-features", "--features", "gpui-restoration"]
     if mode == "media-lifecycle-boundaries":
@@ -85,7 +85,7 @@ def validation_command(cargo, target, mode):
                 "--lib", "payload_boundary", "--", "--nocapture"]
     if mode in ("media-lifecycle", "media-lifecycle-check"):
         return [cargo, "check" if mode.endswith("check") else "test", *shared,
-                "-p", "remote_core", "-p", "client", "-p", "host", "-p", "remote_play_app",
+                "-p", "remote_core", "-p", "client", "-p", "host", "-p", "weavelo_app",
                 "--tests" if mode.endswith("check") else "--lib"]
     if mode == "linux-x11-check":
         return [cargo, "check", *shared, "-p", "gpui-ce", "--lib", "--tests",
@@ -99,7 +99,7 @@ def validation_environment(mode):
     env.pop("RUST_LOG", None)
     env["CARGO_TERM_COLOR"] = "never"
     if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
-            "REMOTEPLAY_BUILD_IDENTITY_FILE", "REMOTEPLAY_BUILD_IDENTITY_RS")):
+            "WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
     if mode in ("linux-x11-check", "platform-linux-check"):
         zig = shutil.which("zig")

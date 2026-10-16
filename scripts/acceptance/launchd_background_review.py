@@ -48,20 +48,20 @@ def main():
     if sys.platform != 'darwin': parser.error('This real launchd review requires macOS')
     evidence = args.evidence_dir.resolve(); evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
     root = Path(tempfile.mkdtemp(prefix='rp-ld.', dir='/tmp')).resolve()
-    label = 'com.remoteplay.lifecycle-test.' + uuid.uuid4().hex
+    label = 'fun.hackerlife.weavelo.lifecycle-test.' + uuid.uuid4().hex
     scope = installer_scope.initialize(root, label)
     profile = installer.profile_directory(scope.home); profile.mkdir(mode=0o700, parents=True)
     workdir = root / 'work'; workdir.mkdir(mode=0o700)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.bind(('127.0.0.1', 0))
     port = sock.getsockname()[1]; sock.close()
-    target = scope.home/'Applications/RemotePlay.app'; executable = target/'Contents/MacOS/remote_play'
+    target = scope.home/'Applications/Weavelo.app'; executable = target/'Contents/MacOS/weavelo'
     plist = scope.home/('Library/LaunchAgents/'+label+'.plist'); plist.parent.mkdir(mode=0o700, parents=True)
-    environment = {'REMOTE_PLAY_DEVICE_GROUP_DIR': str(profile), 'REMOTE_PLAY_DISPLAY_NAME': 'Private lifecycle fixture',
-                   'REMOTE_PLAY_HEADLESS': '1', 'REMOTE_PLAY_HOST_BIND_ADDR': f'127.0.0.1:{port}',
-                   'REMOTE_PLAY_CLIENT_BIND_ADDR': '127.0.0.1:0', 'REMOTE_PLAY_DISCOVERY_PORT': '49157',
-                   'REMOTE_PLAY_P2P': '0', 'REMOTE_PLAY_RELAY': '0', 'REMOTE_PLAY_DISCOVERY': '0',
-                   'REMOTE_PLAY_CLIENT_RECEIVER': '0', 'REMOTE_PLAY_VIEWER_MEDIA': '0',
-                   'REMOTE_PLAY_CLIPBOARD_SYNC': '0', 'REMOTE_PLAY_FILE_TRANSFER': '0', 'REMOTE_PLAY_TALKBACK': '0'}
+    environment = {'WEAVELO_DEVICE_GROUP_DIR': str(profile), 'WEAVELO_DISPLAY_NAME': 'Private lifecycle fixture',
+                   'WEAVELO_HEADLESS': '1', 'WEAVELO_HOST_BIND_ADDR': f'127.0.0.1:{port}',
+                   'WEAVELO_CLIENT_BIND_ADDR': '127.0.0.1:0', 'WEAVELO_DISCOVERY_PORT': '49157',
+                   'WEAVELO_P2P': '0', 'WEAVELO_RELAY': '0', 'WEAVELO_DISCOVERY': '0',
+                   'WEAVELO_CLIENT_RECEIVER': '0', 'WEAVELO_VIEWER_MEDIA': '0',
+                   'WEAVELO_CLIPBOARD_SYNC': '0', 'WEAVELO_FILE_TRANSFER': '0', 'WEAVELO_TALKBACK': '0'}
     original = plistlib.dumps({'Label': label, 'ProgramArguments': [str(executable)],
                               'KeepAlive': True, 'RunAtLoad': True, 'ThrottleInterval': 3,
                               'WorkingDirectory': str(workdir), 'EnvironmentVariables': environment,
@@ -96,9 +96,9 @@ def main():
             time.sleep(.2)
         raise RuntimeError('Owned launchd fixture did not become running')
     def run(*arguments, timeout=20):
-        env={k:v for k,v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}; env.update(environment)
+        env={k:v for k,v in os.environ.items() if not k.startswith('WEAVELO_')}; env.update(environment)
         # A manual GUI launch does not inherit the launch agent's headless role.
-        if not arguments: env.pop('REMOTE_PLAY_HEADLESS', None)
+        if not arguments: env.pop('WEAVELO_HEADLESS', None)
         return subprocess.run([str(executable),*arguments],cwd=workdir,env=env,capture_output=True,text=True,timeout=timeout)
     def connection():
         p=run('--check-loopback-host',f'127.0.0.1:{port}')
@@ -122,7 +122,7 @@ def main():
         negative=evidence/'manifest-only-negative.zip'
         with verified_archive(args.new_archive.resolve(),load_policy()) as (app,signed):
             app=app.resolve()
-            metadata=subprocess.run([str(app/'Contents/MacOS/remote_play'),'--product-info-json'],
+            metadata=subprocess.run([str(app/'Contents/MacOS/weavelo'),'--product-info-json'],
                                     capture_output=True,check=True,timeout=15)
             info=json.loads(metadata.stdout)
             config=identity_gate.configuration('macos',info['architecture'],signed['version'],
@@ -130,8 +130,8 @@ def main():
             synthetic=identity_gate.identity(dict(commit='c'*40,git_tree='d'*40,state='clean',
                     patch_sha256=None,snapshot_sha256='e'*64,file_count=1),config)
             info['build_identity']=synthetic
-            manifest=dict(schema=1,kind='remoteplay-release',build_identity=synthetic,
-                    artifact_root='RemotePlay.app',executable='Contents/MacOS/remote_play',
+            manifest=dict(schema=1,kind='weavelo-release',build_identity=synthetic,
+                    artifact_root='Weavelo.app',executable='Contents/MacOS/weavelo',
                     product_info=info,files=identity_gate.files_in(app),
                     binary_sha256=signed['executable_sha256'],compiler_binary_sha256=signed['executable_sha256'],
                     signing={k:signed[k] for k in ('bundle_id','certificate_sha1','designated_requirement','version','signature_verified')})
@@ -141,7 +141,7 @@ def main():
             # rejection cannot mask the missing compiled identity assertion.
             with zipfile.ZipFile(negative,'x') as output:
                 for path in app.rglob('*'):
-                    if path.is_file():output.write(path,'RemotePlay.app/'+path.relative_to(app).as_posix())
+                    if path.is_file():output.write(path,'Weavelo.app/'+path.relative_to(app).as_posix())
                 output.writestr(identity_gate.MANIFEST,raw)
         expected=identity_adapter.Expectations('c'*40,synthetic['identity_sha256'],identity_gate.digest(raw),
                                               str(args.native_observer),args.native_observer_sha256)
@@ -179,8 +179,8 @@ def main():
             receipt['checks']['second_host_rejected']=duplicate.returncode!=0
             # Existing integration hook exits the real GPUI loop normally. It is
             # not a substitute for a manually clicked close button.
-            gui_env={k:v for k,v in os.environ.items() if not k.startswith('REMOTE_PLAY_')};gui_env.update(environment)
-            gui_env.update(REMOTE_PLAY_RESTORED_TEST_OUTPUT=str(evidence/'gui-render.json'),REMOTE_PLAY_RESTORED_TEST_SECONDS='5')
+            gui_env={k:v for k,v in os.environ.items() if not k.startswith('WEAVELO_')};gui_env.update(environment)
+            gui_env.update(WEAVELO_RESTORED_TEST_OUTPUT=str(evidence/'gui-render.json'),WEAVELO_RESTORED_TEST_SECONDS='5')
             with (evidence/'gui.log').open('wb') as log:
                 os.chmod(evidence/'gui.log',0o600)
                 gui=subprocess.Popen([str(executable),'--gui'],cwd=workdir,env=gui_env,stdout=log,stderr=subprocess.STDOUT)

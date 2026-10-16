@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let source = AppPrivateMeshConfigStore::new(&args[2]).load()?.ok_or("source identity missing")?;
             let target = PathBuf::from(&args[3]);
             if target.exists() { return Err("test profile already exists".into()); }
-            let identity = MeshConfig::from_invite_code(&source.invite_code(), "RemotePlay GUI acceptance")?;
+            let identity = MeshConfig::from_invite_code(&source.invite_code(), "Weavelo GUI acceptance")?;
             AppPrivateMeshConfigStore::new(&target).save(&identity)?;
             println!("ISOLATED_PROFILE_READY");
         }
@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let identity = AppPrivateMeshConfigStore::new(&args[2]).load()?.ok_or("test identity missing")?;
             remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
             let dir = PathBuf::from(&args[3]); std::fs::create_dir_all(&dir)?;
-            let path = dir.join("remoteplay-acceptance-512k.bin");
+            let path = dir.join("weavelo-acceptance-512k.bin");
             let data: Vec<_> = (0..524288).map(|n| (n % 251) as u8).collect();
             if path.exists() {
                 if std::fs::read(&path)? != data { return Err("fixture path already contains other data".into()); }

@@ -1,14 +1,14 @@
 {
-  "name": "remote-play-web",
+  "name": "weavelo-web",
   "version": "1.0.0",
-  "description": "RemotePlay Ultra-Low-Latency Web Client powered by Rust WASM and WebCodecs",
+  "description": "Weavelo Ultra-Low-Latency Web Client powered by Rust WASM and WebCodecs",
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "dev": "python3 -m http.server 3000 --directory .",
     "build:wasm": "wasm-pack build ../remote_client_bridge --target web --out-dir ./pkg -- --features wasm"
   },
-  "keywords": ["remote-play", "webcodecs", "webrtc", "wasm", "gpui"],
-  "author": "RemotePlay Team",
+  "keywords": ["weavelo", "webcodecs", "webrtc", "wasm", "gpui"],
+  "author": "Weavelo Team",
   "license": "MIT"
 }

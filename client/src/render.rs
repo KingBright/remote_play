@@ -57,7 +57,7 @@ pub async fn run_client(
                 size(px(1280.0), px(720.0)),
             ))),
             titlebar: Some(TitlebarOptions {
-                title: Some("RemotePlay Client".into()),
+                title: Some("Weavelo Client".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -73,7 +73,7 @@ pub async fn run_client(
             let active_session_id_clone = active_session_id.clone();
             let controls = controls.clone();
             let view = cx.new(|cx| {
-                RemotePlayView::new(
+                WeaveloView::new(
                     udp_sender.clone(),
                     active_session_id_clone,
                     host_stats,
@@ -159,7 +159,7 @@ pub async fn run_client(
     Ok(())
 }
 
-pub struct RemotePlayView {
+pub struct WeaveloView {
     _udp_sender: UdpSender,
     _host_addr: SocketAddr,
     active_session_id: Arc<std::sync::atomic::AtomicU32>,
@@ -196,7 +196,7 @@ pub struct RemotePlayView {
     telemetry_engine: remote_core::PipelineTelemetryEngine,
 }
 
-impl RemotePlayView {
+impl WeaveloView {
     pub fn new(
         udp_sender: UdpSender,
         active_session_id: Arc<std::sync::atomic::AtomicU32>,
@@ -452,7 +452,7 @@ struct DeviceRow {
     badge: String,
 }
 
-impl RemotePlayView {
+impl WeaveloView {
     fn device_rows(&self) -> Vec<DeviceRow> {
         let mut rows = Vec::new();
         if let Some(discovery) = &self.discovery {
@@ -530,7 +530,7 @@ struct ToggleStats;
 #[derive(Clone, PartialEq, gpui::Action)]
 struct TogglePanel;
 
-impl Render for RemotePlayView {
+impl Render for WeaveloView {
     fn render(
         &mut self,
         _window: &mut gpui::Window,
@@ -559,7 +559,7 @@ impl Render for RemotePlayView {
                                 .text_2xl()
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xf4f7fb))
-                                .child("RemotePlay"),
+                                .child("Weavelo"),
                         )
                         .child(
                             div()
@@ -828,7 +828,7 @@ impl Render for RemotePlayView {
                 };
 
                 let mut layout = div()
-                    .key_context("RemotePlayView")
+                    .key_context("WeaveloView")
                     .track_focus(&self.focus_handle)
                     .on_action(cx.listener(|this, _action: &ToggleStats, _window, cx| {
                         this.show_stats = !this.show_stats;
@@ -2132,7 +2132,7 @@ fn render_transfer_entry(
     entry: TransferEntrySnapshot,
     index: usize,
     control: Option<crate::FileTransferRuntimeControl>,
-    cx: &mut gpui::Context<RemotePlayView>,
+    cx: &mut gpui::Context<WeaveloView>,
 ) -> AnyElement {
     let fill_width = 216.0 * entry.progress();
     let direction = match entry.direction {

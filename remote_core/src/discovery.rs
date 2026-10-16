@@ -12,8 +12,8 @@ pub const DEFAULT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 pub const DEFAULT_PEER_TTL: Duration = Duration::from_secs(8);
 pub const MAX_DISCOVERY_PACKET_LEN: usize = 1200;
 pub const DISCOVERY_RECV_BUFFER_LEN: usize = MAX_DISCOVERY_PACKET_LEN + 256;
-pub const REMOTE_PLAY_DISCOVERY_ENV: &str = "REMOTE_PLAY_DISCOVERY";
-pub const REMOTE_PLAY_DISCOVERY_PORT_ENV: &str = "REMOTE_PLAY_DISCOVERY_PORT";
+pub const WEAVELO_DISCOVERY_ENV: &str = "WEAVELO_DISCOVERY";
+pub const WEAVELO_DISCOVERY_PORT_ENV: &str = "WEAVELO_DISCOVERY_PORT";
 
 const DISCOVERY_VERSION: u8 = 1;
 const CAP_CAN_STREAM: u32 = 1 << 0;
@@ -597,7 +597,7 @@ pub async fn run_discovery_runtime(
 
 pub fn discovery_port_from_env() -> Result<u16, DiscoveryError> {
     parse_discovery_port(
-        std::env::var(REMOTE_PLAY_DISCOVERY_PORT_ENV)
+        std::env::var(WEAVELO_DISCOVERY_PORT_ENV)
             .ok()
             .as_deref(),
     )
@@ -774,7 +774,7 @@ mod tests {
 
     fn sample_announcement() -> DiscoveryAnnouncement {
         DiscoveryAnnouncement {
-            network_name: "remote-play-test".to_string(),
+            network_name: "weavelo-test".to_string(),
             device_id: "device-123".to_string(),
             display_name: "Desk".to_string(),
             control_port: DEFAULT_CONTROL_PORT,
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn peer_cache_filters_other_networks_and_self_then_updates_existing_peer() {
-        let mut cache = DiscoveryPeerCache::new("remote-play-test", "local");
+        let mut cache = DiscoveryPeerCache::new("weavelo-test", "local");
         let source = "127.0.0.1:38117".parse().unwrap();
 
         assert!(
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn peer_cache_keeps_direct_and_relay_routes_for_same_device() {
-        let mut cache = DiscoveryPeerCache::new("remote-play-test", "local");
+        let mut cache = DiscoveryPeerCache::new("weavelo-test", "local");
         let source = "192.168.1.20:38117".parse().unwrap();
         let relay_source = "127.0.0.1:48117".parse().unwrap();
         let relay_endpoint = "127.0.0.1:49171".parse().unwrap();

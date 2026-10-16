@@ -1,6 +1,6 @@
 //! Generated GPU patterns in a real GPUI window with the original product capsule.
 //! This development probe never creates a device network, media session or input injector.
-use remote_play_app::product_components;
+use weavelo_app::product_components;
 #[cfg(target_os = "windows")]
 #[path = "../src/design_system.rs"]
 mod design_system;
@@ -25,7 +25,7 @@ mod probe {
         },
         time::Duration,
     };
-    use remote_play_app::product_components::{
+    use weavelo_app::product_components::{
         assets::UiAsset,
         component,
         theme::{ActiveTheme},
@@ -111,7 +111,7 @@ mod probe {
                         .flex()
                         .justify_center()
                         .child(stream_status_capsule_card(
-                            "RemotePlay".into(),
+                            "Weavelo".into(),
                             false,
                             "Native video validation · original controls".into(),
                             false,
@@ -148,9 +148,9 @@ mod probe {
         let view_tick = tick.clone();
         let out = path.clone();
         Application::new().with_assets(UiAsset).run(move |cx:&mut App| {
-            component::init(cx).expect("Ely native acceptance assets");remote_play_app::product_components::theme::install(WindowAppearance::Dark,remote_play_themes(), cx);
+            component::init(cx).expect("Ely native acceptance assets");weavelo_app::product_components::theme::install(WindowAppearance::Dark,weavelo_themes(), cx);
             cx.open_window(WindowOptions{window_bounds:Some(WindowBounds::Windowed(bounds(point(px(100.),px(100.)),size(px(1120.),px(740.))))),
-                titlebar:Some(TitlebarOptions{title:Some("RemotePlay native-video development check".into()),..Default::default()}),..Default::default()},
+                titlebar:Some(TitlebarOptions{title:Some("Weavelo native-video development check".into()),..Default::default()}),..Default::default()},
                 move |_,cx|cx.new(|_|NativeWindow{frames,tick:view_tick,renders:view_renders})).expect("native window creation");
             cx.spawn(async move |cx| {
                 for i in 0..40 {

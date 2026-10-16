@@ -21,7 +21,7 @@ for (index, size) in [NSSize(width: 720, height: 340), NSSize(width: 380, height
     let window = NSWindow(contentRect: NSRect(x: CGFloat(120 + index * 180), y: 120, width: size.width, height: size.height), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.level = .floating
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    window.title = "RemotePlay V2 Probe \(index + 1)"
+    window.title = "Weavelo V2 Probe \(index + 1)"
     let view = ProbeView(frame: NSRect(origin: .zero, size: size), hue: CGFloat(index) * 0.5 + 0.1)
     window.contentView = view
     window.makeKeyAndOrderFront(nil)

@@ -60,7 +60,7 @@ def fixture_package(h, build, output, number):
     signed = package(Path(h['compiler_binary']), output, h['signing']['version'], number, load_policy())
     stage = output / 'sealed'; stage.mkdir(mode=0o700)
     with verified_archive(Path(signed['archive']), load_policy()) as (app, _):
-        shutil.copytree(app, stage / 'RemotePlay.app')
+        shutil.copytree(app, stage / 'Weavelo.app')
     sealed = gate.seal_tree(stage, build, h['source_commit'], h['build_identity_sha256'],
                             compiler_binary=Path(h['compiler_binary']))
     archive = output / 'manifest-fixture.zip'
@@ -109,21 +109,21 @@ def main():
     # The real installer profile suffix is fixed, so keep the temporary root
     # short enough for its authenticated background socket.
     root = Path(tempfile.mkdtemp(prefix='rpj.', dir='/tmp')).resolve()
-    label = 'com.remoteplay.lifecycle-test.' + uuid.uuid4().hex
+    label = 'fun.hackerlife.weavelo.lifecycle-test.' + uuid.uuid4().hex
     scope = installer_scope.initialize(root, label)
-    target = scope.home / 'Applications/RemotePlay.app'; executable = target / 'Contents/MacOS/remote_play'
+    target = scope.home / 'Applications/Weavelo.app'; executable = target / 'Contents/MacOS/weavelo'
     profile = installer.profile_directory(scope.home); profile.mkdir(mode=0o700, parents=True)
     gate.require(len(os.fsencode(profile / 'background.sock')) < 104,
                  'Fixture socket path exceeds the Darwin native limit')
     work = root / 'work'; work.mkdir(mode=0o700)
     plist = scope.home / ('Library/LaunchAgents/' + label + '.plist'); plist.parent.mkdir(mode=0o700, parents=True)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]; sock.close()
-    env = dict(REMOTE_PLAY_DEVICE_GROUP_DIR=str(profile), REMOTE_PLAY_DISPLAY_NAME='Private joint identity fixture',
-               REMOTE_PLAY_HOST_BIND_ADDR=f'127.0.0.1:{port}', REMOTE_PLAY_CLIENT_BIND_ADDR='127.0.0.1:0',
-               REMOTE_PLAY_DISCOVERY_PORT='49158', REMOTE_PLAY_HEADLESS='1')
-    env.update({key:'0' for key in ('REMOTE_PLAY_P2P','REMOTE_PLAY_RELAY','REMOTE_PLAY_DISCOVERY',
-                  'REMOTE_PLAY_CLIENT_RECEIVER','REMOTE_PLAY_VIEWER_MEDIA','REMOTE_PLAY_CLIPBOARD_SYNC',
-                  'REMOTE_PLAY_FILE_TRANSFER','REMOTE_PLAY_TALKBACK')})
+    env = dict(WEAVELO_DEVICE_GROUP_DIR=str(profile), WEAVELO_DISPLAY_NAME='Private joint identity fixture',
+               WEAVELO_HOST_BIND_ADDR=f'127.0.0.1:{port}', WEAVELO_CLIENT_BIND_ADDR='127.0.0.1:0',
+               WEAVELO_DISCOVERY_PORT='49158', WEAVELO_HEADLESS='1')
+    env.update({key:'0' for key in ('WEAVELO_P2P','WEAVELO_RELAY','WEAVELO_DISCOVERY',
+                  'WEAVELO_CLIENT_RECEIVER','WEAVELO_VIEWER_MEDIA','WEAVELO_CLIPBOARD_SYNC',
+                  'WEAVELO_FILE_TRANSFER','WEAVELO_TALKBACK')})
     (evidence / 'background.log').touch(mode=0o600)
     document = dict(Label=label, ProgramArguments=[str(executable),'--background-service'], KeepAlive=True,
                     RunAtLoad=True, ThrottleInterval=3, WorkingDirectory=str(work), EnvironmentVariables=env,
@@ -148,7 +148,7 @@ def main():
             time.sleep(.1)
         raise RuntimeError('Owned fixture backend did not become running')
     def clean_env():
-        result = {k:v for k,v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}; result.update(env); return result
+        result = {k:v for k,v in os.environ.items() if not k.startswith('WEAVELO_')}; result.update(env); return result
     def connection():
         result = subprocess.run([str(probe),'--check-loopback-host',f'127.0.0.1:{port}'], env=clean_env(),
                                 cwd=work, capture_output=True, timeout=15)
@@ -196,7 +196,7 @@ def main():
         stopped_pid = None; start = None; resumed = False
         try:
             until=time.monotonic()+120
-            journal=target.parent/'.remoteplay-install-journal.json'
+            journal=target.parent/'.weavelo-install-journal.json'
             while time.monotonic()<until and not fault_done.is_set():
                 try: phase=json.loads(journal.read_text())['phase']
                 except (OSError,ValueError,KeyError): phase=None
@@ -259,8 +259,8 @@ def main():
             except gate.IdentityRejected as error:receipt['checks']['wrong_manifest_rejected']='independently pinned' in str(error)
             else:receipt['checks']['wrong_manifest_rejected']=False
             receipt['checks']['rejections_preserve_running_release_tuple']=state()['pid']==upgraded['pid'] and adapter.private_bytes(installer.release_state_path(target))==good_state and plist.read_bytes()==good_plist and verify_app(target,load_policy())==good_app
-            gui_env=clean_env();gui_env.pop('REMOTE_PLAY_HEADLESS',None)
-            gui_env.update(REMOTE_PLAY_RESTORED_TEST_OUTPUT=str(evidence/'gui-render.json'),REMOTE_PLAY_RESTORED_TEST_SECONDS='5')
+            gui_env=clean_env();gui_env.pop('WEAVELO_HEADLESS',None)
+            gui_env.update(WEAVELO_RESTORED_TEST_OUTPUT=str(evidence/'gui-render.json'),WEAVELO_RESTORED_TEST_SECONDS='5')
             with (evidence/'gui.log').open('wb') as log:
                 os.chmod(evidence/'gui.log',0o600)
                 gui=subprocess.Popen([str(executable),'--gui'],cwd=work,env=gui_env,stdout=log,stderr=subprocess.STDOUT)

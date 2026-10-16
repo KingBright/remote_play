@@ -25,9 +25,9 @@ class MigrationFixture(InstallerFixture):
             path.write_bytes(b'synthetic fixture identity'); path.chmod(0o600)
         self.before = {'Label': installer.LABEL, 'ProgramArguments': [str(self.executable)],
                        'KeepAlive': True, 'RunAtLoad': True,
-                       'EnvironmentVariables': {'REMOTE_PLAY_HEADLESS': '0',
-                                                'REMOTE_PLAY_DEVICE_GROUP_DIR': str(self.profile),
-                                                'REMOTE_PLAY_DISPLAY_NAME': 'Existing fixture'}}
+                       'EnvironmentVariables': {'WEAVELO_HEADLESS': '0',
+                                                'WEAVELO_DEVICE_GROUP_DIR': str(self.profile),
+                                                'WEAVELO_DISPLAY_NAME': 'Existing fixture'}}
         self.original = plistlib.dumps(self.before)
         self.plist.write_bytes(self.original)
         self.info = {'separated_lifecycle': True, 'background_entry': '--background-service',
@@ -67,7 +67,7 @@ class BackgroundMigrationTransactions(MigrationFixture):
         after = plistlib.loads(self.plist.read_bytes())
         self.assertEqual(after['ProgramArguments'], [str(self.executable), '--background-service'])
         self.assertTrue(after['KeepAlive']); self.assertTrue(after['RunAtLoad'])
-        self.assertEqual(after['EnvironmentVariables']['REMOTE_PLAY_DISPLAY_NAME'], 'Existing fixture')
+        self.assertEqual(after['EnvironmentVariables']['WEAVELO_DISPLAY_NAME'], 'Existing fixture')
         backup = Path(self.journal()['lifecycle']['backup_plist'])
         self.assertEqual(backup.read_bytes(), self.original)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
@@ -174,11 +174,11 @@ class FixtureScopeBoundaries(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             with self.assertRaises((OSError, ReleaseRejected)):
-                with installer_scope.isolated(root, 'com.remoteplay.lifecycle-test.' + 'a'*32): pass
+                with installer_scope.isolated(root, 'fun.hackerlife.weavelo.lifecycle-test.' + 'a'*32): pass
 
     def test_fixture_is_explicit_independent_and_cannot_fall_back_to_production(self):
         with tempfile.TemporaryDirectory() as temp:
-            scope = installer_scope.initialize(Path(temp), 'com.remoteplay.lifecycle-test.'+'b'*32)
+            scope = installer_scope.initialize(Path(temp), 'fun.hackerlife.weavelo.lifecycle-test.'+'b'*32)
             with installer_scope.isolated(scope.root, scope.label):
                 home, target, plist, domain = installer.canonical_paths()
                 self.assertEqual(home, scope.home)

@@ -5,22 +5,22 @@ use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let relay_addr = required_socket_addr("REMOTE_PLAY_RELAY_SERVER_ADDR")?;
-    let group_id = required_env("REMOTE_PLAY_RELAY_GROUP")?;
-    let peer_id = required_env("REMOTE_PLAY_RELAY_PEER_ID")?;
+    let relay_addr = required_socket_addr("WEAVELO_RELAY_SERVER_ADDR")?;
+    let group_id = required_env("WEAVELO_RELAY_GROUP")?;
+    let peer_id = required_env("WEAVELO_RELAY_PEER_ID")?;
     let bind_addr = env_socket_addr(
-        "REMOTE_PLAY_RELAY_BIND_ADDR",
+        "WEAVELO_RELAY_BIND_ADDR",
         SocketAddr::from(([127, 0, 0, 1], 0)),
     )?;
 
     let mut config = UdpRelayTunnelConfig::new(bind_addr, relay_addr, group_id, peer_id)?;
-    if let Some(target) = optional_socket_addr("REMOTE_PLAY_RELAY_LOCAL_TARGET_ADDR")? {
+    if let Some(target) = optional_socket_addr("WEAVELO_RELAY_LOCAL_TARGET_ADDR")? {
         config = config.with_local_target_addr(target);
     }
 
     let tunnel = BoundUdpRelayTunnel::bind(config).await?;
     println!(
-        "RemotePlay UDP relay tunnel listening on {}",
+        "Weavelo UDP relay tunnel listening on {}",
         tunnel.local_addr()?
     );
     println!("Relay server: {relay_addr}");

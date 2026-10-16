@@ -52,7 +52,7 @@ pub(crate) fn full_idle_canvas_stage<T: 'static>(cx: &mut Context<T>) -> Div {
                         .text_size(px(18.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(theme.content.primary)
-                        .child("RemotePlay"),
+                        .child("Weavelo"),
                 )
                 .child(
                     div()

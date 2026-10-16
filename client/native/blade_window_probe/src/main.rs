@@ -1,5 +1,5 @@
 //! Explicit generated HEVC -> VAAPI -> DMA-BUF -> actual GPUI/Blade window.
-//! No RemotePlay connection, screen capture, keyboard injection or deployment.
+//! No Weavelo connection, screen capture, keyboard injection or deployment.
 #[path = "../../../../app/src/design_system.rs"]
 mod design_system;
 #[path = "../../../../app/src/original_design.rs"]
@@ -203,7 +203,7 @@ impl Render for WindowView {
                 .flex()
                 .justify_center()
                 .child(original_design::stream_status_capsule_card(
-                    "RemotePlay".into(),
+                    "Weavelo".into(),
                     false,
                     "Linux hardware HEVC · native Blade · original controls".into(),
                     false,
@@ -450,7 +450,7 @@ fn main() -> Result<(), E> {
             component::init(cx);
             cx.set_global(GlobalTheme::new_with_themes(
                 WindowAppearance::Dark,
-                design_system::remote_play_themes(),
+                design_system::weavelo_themes(),
             ));
             let view_state = ui.clone();
             let view = cx
@@ -461,7 +461,7 @@ fn main() -> Result<(), E> {
                             size(px(1120.), px(740.)),
                         ))),
                         titlebar: Some(TitlebarOptions {
-                            title: Some("RemotePlay native Linux validation".into()),
+                            title: Some("Weavelo native Linux validation".into()),
                             ..Default::default()
                         }),
                         ..Default::default()

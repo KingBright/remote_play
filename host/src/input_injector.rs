@@ -489,7 +489,7 @@ fn require_post_event_access(allowed: bool) -> Result<(), Box<dyn Error + Send +
     if allowed {
         Ok(())
     } else {
-        Err("The running signed RemotePlay host lacks input-posting permission. Verify its App identity and enable RemotePlay in System Settings > Privacy & Security > Accessibility".into())
+        Err("The running signed Weavelo host lacks input-posting permission. Verify its App identity and enable Weavelo in System Settings > Privacy & Security > Accessibility".into())
     }
 }
 
@@ -714,7 +714,7 @@ mod tests {
     fn missing_or_revoked_post_access_is_an_error_not_injection_success() {
         assert!(require_post_event_access(true).is_ok());
         let error = require_post_event_access(false).unwrap_err().to_string();
-        assert!(error.contains("running signed RemotePlay host"));
+        assert!(error.contains("running signed Weavelo host"));
         assert!(error.contains("Accessibility"));
     }
 

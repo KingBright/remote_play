@@ -87,7 +87,7 @@ class FixtureView:NSView {
 let app=NSApplication.shared;app.setActivationPolicy(.regular)
 for (label,x) in [("A",150.0),("B",800.0)] {
     let w=NSWindow(contentRect:NSRect(x:x,y:220,width:540,height:380),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
-    w.title = mediaMode ? "RemotePlay Media Fixture \(mediaNonce) \(label)" : "RemotePlay scoped-window acceptance " + (ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_NONCE"] ?? "missing-nonce")
+    w.title = mediaMode ? "Weavelo Media Fixture \(mediaNonce) \(label)" : "Weavelo scoped-window acceptance " + (ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_NONCE"] ?? "missing-nonce")
     w.acceptsMouseMovedEvents=true;w.isReleasedWhenClosed=false;w.contentView=FixtureView(label);w.makeKeyAndOrderFront(nil);windows[label]=w
 }
 if mediaMode {

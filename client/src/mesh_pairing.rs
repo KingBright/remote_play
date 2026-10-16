@@ -133,7 +133,7 @@ impl MeshPairingControl {
         if let Some(backend) = &self.delegate { return backend.request_runtime_reload(message); }
         let Some(tx) = &self.mesh_reload_tx else {
             return self.update_message(
-                format!("{message} Restart RemotePlay to use it."),
+                format!("{message} Restart Weavelo to use it."),
                 MeshPairingMessageKind::Warning,
                 true,
             );
@@ -146,7 +146,7 @@ impl MeshPairingControl {
                 false,
             ),
             Err(_) => self.update_message(
-                format!("{message} Restart RemotePlay to use it."),
+                format!("{message} Restart Weavelo to use it."),
                 MeshPairingMessageKind::Warning,
                 true,
             ),
@@ -341,7 +341,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "remote-play-client-mesh-pairing-{name}-{}",
+            "weavelo-client-mesh-pairing-{name}-{}",
             rand::random::<u64>()
         ));
         let mut builder = fs::DirBuilder::new();

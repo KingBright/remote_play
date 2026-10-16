@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-SIGN_DIR="${REMOTEPLAY_ANDROID_SIGNING_DIR:-$HOME/Library/Application Support/RemotePlay/Signing}"
-KEYSTORE="${REMOTEPLAY_ANDROID_KEYSTORE:-$SIGN_DIR/remoteplay-release.p12}"
-ALIAS="${REMOTEPLAY_ANDROID_KEY_ALIAS:-remoteplay}"
+SIGN_DIR="${WEAVELO_ANDROID_SIGNING_DIR:-$HOME/Library/Application Support/RemotePlay/Signing}"
+KEYSTORE="${WEAVELO_ANDROID_KEYSTORE:-$SIGN_DIR/remoteplay-release.p12}"
+ALIAS="${WEAVELO_ANDROID_KEY_ALIAS:-remoteplay}"
 SERVICE="com.remoteplay.android.release.signing"
 ACCOUNT="${USER:-remoteplay}"
 command -v keytool >/dev/null 2>&1 || { echo 'keytool is required' >&2; exit 1; }
@@ -16,10 +16,10 @@ if [ -f "$KEYSTORE" ]; then
 fi
 PASSWORD="$(openssl rand -hex 32)"
 umask 077
-keytool -genkeypair -storetype PKCS12 -keystore "$KEYSTORE" -storepass "$PASSWORD" -keypass "$PASSWORD" -alias "$ALIAS" -keyalg RSA -keysize 4096 -sigalg SHA256withRSA -validity 10000 -dname 'CN=RemotePlay Android Release, O=RemotePlay'
+keytool -genkeypair -storetype PKCS12 -keystore "$KEYSTORE" -storepass "$PASSWORD" -keypass "$PASSWORD" -alias "$ALIAS" -keyalg RSA -keysize 4096 -sigalg SHA256withRSA -validity 10000 -dname 'CN=Weavelo Android Release, O=Hackerlife'
 chmod 600 "$KEYSTORE"
 security add-generic-password -U -a "$ACCOUNT" -s "$SERVICE" -w "$PASSWORD" >/dev/null
 unset PASSWORD
-echo "Created RemotePlay Android release signing identity."
+echo "Created Weavelo Android release signing identity."
 echo "Keystore: $KEYSTORE"
 echo "Password stored in macOS Keychain service: $SERVICE"

@@ -6,7 +6,7 @@ use client::decoded_video_frame_surface_with_fit;
 // This preview is feature gated until preservation and platform performance acceptance.
 use crate::design_system::{
     color_accent_amber, color_accent_cyan, color_accent_emerald, color_accent_purple,
-    color_border_fine, color_glass_card, remote_play_themes,
+    color_border_fine, color_glass_card, weavelo_themes,
 };
 use crate::desktop::instance::Instance;
 use crate::desktop::device_list::{
@@ -110,7 +110,7 @@ fn run_original_dashboard(
                 }
                 crate::product_components::theme::install(
                     product_window_appearance(),
-                    remote_play_themes(), cx);
+                    weavelo_themes(), cx);
                 open_restored_window(runtime, instance, activation, None, cx);
             })
     })?;
@@ -129,6 +129,7 @@ fn open_restored_window(
     let primary = instance.is_some();
     let attached = instance.as_ref().is_some_and(|i| i.is_frontend());
     let options = WindowOptions {
+            app_id: Some("fun.hackerlife.weavelo".into()),
         window_bounds: Some(WindowBounds::Windowed(bounds(
             point(px(80.), px(60.)),
             size(px(1280.), px(800.)),
@@ -136,10 +137,10 @@ fn open_restored_window(
         window_min_size: Some(size(px(800.), px(560.))),
         titlebar: Some(TitlebarOptions {
             title: Some(
-                if std::env::var_os("REMOTE_PLAY_RESTORED_TEST_OUTPUT").is_some() {
-                    "RemotePlay restored GUI review"
+                if std::env::var_os("WEAVELO_RESTORED_TEST_OUTPUT").is_some() {
+                    "Weavelo restored GUI review"
                 } else {
-                    "RemotePlay"
+                    "Weavelo"
                 }
                 .into(),
             ),
@@ -227,7 +228,7 @@ fn open_restored_window(
         .detach();
         view
     })
-    .expect("failed to open restored RemotePlay window");
+    .expect("failed to open restored Weavelo window");
 }
 
 fn product_window_appearance() -> WindowAppearance {
@@ -717,6 +718,7 @@ impl RestoredDashboard {
         let host_stats = self.host_stats.clone();
 
         let window_options = WindowOptions {
+            app_id: Some("fun.hackerlife.weavelo".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(200.0), px(120.0)),
                 size(px(854.0), px(480.0)),
@@ -725,7 +727,7 @@ impl RestoredDashboard {
             titlebar: Some(TitlebarOptions {
                 title: Some(
                     format!(
-                        "RemotePlay PiP - {}",
+                        "Weavelo PiP - {}",
                         snapshot
                             .role
                             .session()
@@ -1141,14 +1143,14 @@ impl RestoredDashboard {
     }
 
     fn acceptance_tick(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(seconds) = std::env::var("REMOTE_PLAY_RESTORED_TEST_SECONDS")
+        let Some(seconds) = std::env::var("WEAVELO_RESTORED_TEST_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|s| (5..=180).contains(s))
         else {
             return false;
         };
-        let Ok(output) = std::env::var("REMOTE_PLAY_RESTORED_TEST_OUTPUT") else {
+        let Ok(output) = std::env::var("WEAVELO_RESTORED_TEST_OUTPUT") else {
             return false;
         };
         if self.quitting {
@@ -1171,7 +1173,7 @@ impl RestoredDashboard {
             return self.media_acceptance_tick(&output,seconds,cx);
         }
         if !self.test_connect_started
-            && let Ok(key) = std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE")
+            && let Ok(key) = std::env::var("WEAVELO_RESTORED_TEST_DEVICE")
             && self
                 .runtime
                 .owner
@@ -1205,7 +1207,7 @@ impl RestoredDashboard {
         }
         if self.test_connect_started && !self.test_source_started {
             let state = self.owner.snapshot();
-            let requested_device = std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").ok();
+            let requested_device = std::env::var("WEAVELO_RESTORED_TEST_DEVICE").ok();
             if state.role.session().is_some_and(|session| Some(&session.peer.device_id) == requested_device.as_ref()) {
                 match self.test_source_request.clone() {
                     Some(Ok(request)) => if let Some(source) = request.select(&state.sources) {
@@ -1221,7 +1223,7 @@ impl RestoredDashboard {
         }
         // Explicit bounded visual-review state only; never active in normal usage.
         if self.test_source_started
-            && let Ok(panel) = std::env::var("REMOTE_PLAY_RESTORED_TEST_PANEL")
+            && let Ok(panel) = std::env::var("WEAVELO_RESTORED_TEST_PANEL")
         {
             match panel.as_str() {
                 "devices" => {
@@ -1281,7 +1283,7 @@ impl RestoredDashboard {
                 let callbacks=s["audio_output_callback_evidence"]["callbacks"].as_u64().unwrap_or(0);
                 let revision=s["activity_revision"].as_u64().unwrap_or(0);
                 let expected=self.test_selected_source.as_ref().map(|source|format!("{:?}",source.source));
-                let device=std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").unwrap_or_default();
+                let device=std::env::var("WEAVELO_RESTORED_TEST_DEVICE").unwrap_or_default();
                 if s["device_id"]!=device || s["source"].as_str()!=expected.as_deref()
                     || cycle.identity.is_some_and(|old|old!=id) {cycle.error=Some("media connection/subscription/source identity changed".into());}
                 if s["connected"]!=true || !s["video_error"].is_null() || s["audio_output_callback_evidence"]["errors"].as_u64().unwrap_or(0)>0 {cycle.error=Some("media connection or output failed".into());}
@@ -1627,7 +1629,7 @@ impl Render for PopoutStreamView {
 
         let content = stream_video_canvas_surface(
             current_frame.as_deref(),
-            "RemotePlay PiP",
+            "Weavelo PiP",
             "Waiting for decoded video stream...",
             self.scale_mode,
             &theme,
@@ -1691,7 +1693,7 @@ impl Render for PopoutStreamView {
                         cx.stop_propagation();
                     }))
                     .child(stream_status_capsule_card(
-                        "RemotePlay PiP".to_string(),
+                        "Weavelo PiP".to_string(),
                         current_frame.is_some(),
                         compact_telemetry_label(stats.as_ref()),
                         true,
@@ -2245,7 +2247,7 @@ fn floating_control_island(
         .map(|s| s.peer.display_name.clone())
         .unwrap_or_else(|| {
             if status == "Ready" {
-                "RemotePlay".to_string()
+                "Weavelo".to_string()
             } else {
                 status.to_string()
             }
@@ -3418,7 +3420,7 @@ impl RestoredDashboard {
                 match result {
                     Ok(command) => {
                         cx.write_to_clipboard(ClipboardItem::new_string(command));
-                        self.status = format!("macOS receive command copied for {}. Open its RemotePlay GUI, then run the command through your remote-host connection. Delivery has not started.", compact_device_id(&device_id));
+                        self.status = format!("macOS receive command copied for {}. Open its Weavelo GUI, then run the command through your remote-host connection. Delivery has not started.", compact_device_id(&device_id));
                     }
                     Err(error) => self.status = error,
                 }
@@ -4455,7 +4457,7 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDas
     let message_color = status_color(message_tone, cx);
     let restart_text = snapshot
         .restart_required
-        .then_some("Restart RemotePlay to activate this group.");
+        .then_some("Restart Weavelo to activate this group.");
     let copy_view = cx.weak_entity();
     let join_view = cx.weak_entity();
     let create_view = cx.weak_entity();
@@ -4486,7 +4488,9 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDas
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.content.primary)
-                                .child("RemotePlay Device Group"),
+                                .flex().items_center().gap_2()
+                                .child(svg().path("weavelo-brand/mark-mono.svg").size(px(18.0)).text_color(theme.content.primary))
+                                .child("Weavelo Device Group"),
                         )
                         .child(
                             div()
@@ -5126,7 +5130,7 @@ mod input_tests {
     }
     #[test]
     fn blocked_input_reason_remains_visible_without_enabling_control() {
-        for reason in ["View only: click Enable control", "Host source is view-only", "RemotePlay needs Accessibility"] {
+        for reason in ["View only: click Enable control", "Host source is view-only", "Weavelo needs Accessibility"] {
             assert_eq!(super::remote_input_hint(reason, false, true, false).as_deref(), Some(reason));
         }
         assert!(super::remote_input_hint("enabled", true, false, false).unwrap().contains("Click the remote picture"));
@@ -5573,7 +5577,7 @@ fn owned_gui_stage(stage: u8) {
     }
 }
 fn start_owned_gui_trace() {
-    let Ok(path) = std::env::var("REMOTE_PLAY_RESTORED_TEST_OUTPUT") else {
+    let Ok(path) = std::env::var("WEAVELO_RESTORED_TEST_OUTPUT") else {
         return;
     };
     if OWN_GUI_TRACE_ENABLED.swap(true, Ordering::Relaxed) {

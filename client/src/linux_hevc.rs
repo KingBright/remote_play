@@ -259,7 +259,7 @@ impl LinuxHevcDecoder {
 /// Never silently choose another adapter on a hybrid-GPU machine. The importer
 /// also checks the actual render node. Single-GPU systems need no configuration.
 pub fn render_node() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("REMOTE_PLAY_LINUX_RENDER_NODE") {
+    if let Some(path) = std::env::var_os("WEAVELO_LINUX_RENDER_NODE") {
         let path = PathBuf::from(path);
         ensure!(
             path.is_absolute()

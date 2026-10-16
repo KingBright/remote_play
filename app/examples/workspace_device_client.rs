@@ -10,13 +10,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sync::{Arc, atomic::Ordering::Relaxed},
         time::Duration,
     };
-    let group = std::env::var_os("REMOTE_PLAY_TEST_GROUP_DIR")
-        .ok_or("set REMOTE_PLAY_TEST_GROUP_DIR to a paired test group")?;
+    let group = std::env::var_os("WEAVELO_TEST_GROUP_DIR")
+        .ok_or("set WEAVELO_TEST_GROUP_DIR to a paired test group")?;
     let identity =
         remote_core::mesh::AppPrivateMeshConfigStore::new(std::path::PathBuf::from(group))
             .load_or_generate("Device acceptance client")?;
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
-    let target = std::env::var("REMOTE_PLAY_TEST_TARGET")?.parse()?;
+    let target = std::env::var("WEAVELO_TEST_TARGET")?.parse()?;
     let directory = tempfile::tempdir()?;
     let (connection, mut events) =
         WorkspaceConnection::connect(target, directory.path().into()).await?;
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "AUTHENTICATED max_subscriptions={} files={}",
         connection.max_subscriptions, connection.files_available
     );
-    if let Some(path) = std::env::var_os("REMOTE_PLAY_TEST_FILE") {
+    if let Some(path) = std::env::var_os("WEAVELO_TEST_FILE") {
         connection
             .file_commands
             .send(FileTransferCommand::SendFile {
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await??;
         println!("FILE_RECEIVER_CONFIRMED capture_subscriptions=0");
     }
-    if std::env::var("REMOTE_PLAY_TEST_FILE_ONLY").as_deref() == Ok("1") {
+    if std::env::var("WEAVELO_TEST_FILE_ONLY").as_deref() == Ok("1") {
         close(&connection, &mut events.control).await?;
         return Ok(());
     }

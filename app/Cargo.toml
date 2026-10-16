@@ -1,5 +1,5 @@
 [package]
-name = "remote_play_app"
+name = "weavelo_app"
 version = "2.0.0-alpha.9"
 edition = "2024"
 
@@ -32,7 +32,7 @@ gpui-ce = { version = "0.3.3", features = ["runtime_shaders", "test-support"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [[bin]]
-name = "remote_play"
+name = "weavelo"
 path = "src/main.rs"
 
 [target.'cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))'.dependencies]

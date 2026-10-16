@@ -4,10 +4,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val releaseKeystorePath = providers.environmentVariable("REMOTEPLAY_ANDROID_KEYSTORE").orNull
-val releaseKeystorePassword = providers.environmentVariable("REMOTEPLAY_ANDROID_KEYSTORE_PASSWORD").orNull
-val releaseKeyAlias = providers.environmentVariable("REMOTEPLAY_ANDROID_KEY_ALIAS").orNull
-val releaseKeyPassword = providers.environmentVariable("REMOTEPLAY_ANDROID_KEY_PASSWORD").orNull
+val releaseKeystorePath = providers.environmentVariable("WEAVELO_ANDROID_KEYSTORE").orNull
+val releaseKeystorePassword = providers.environmentVariable("WEAVELO_ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("WEAVELO_ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("WEAVELO_ANDROID_KEY_PASSWORD").orNull
 val releaseSigningReady = listOf(
     releaseKeystorePath,
     releaseKeystorePassword,
@@ -16,11 +16,11 @@ val releaseSigningReady = listOf(
 ).all { !it.isNullOrBlank() }
 
 android {
-    namespace = "com.remoteplay.client"
+    namespace = "fun.hackerlife.weavelo"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.remoteplay.client"
+        applicationId = "fun.hackerlife.weavelo"
         minSdk = 26
         targetSdk = 35
         versionCode = 10
@@ -64,6 +64,7 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    packaging { jniLibs.excludes.add("**/libremote_play_android.so") }
     buildFeatures {
         compose = true
     }

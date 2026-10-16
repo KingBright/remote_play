@@ -21,8 +21,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
 AUTHORITY = 'docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json'
-LOCK_ENV = 'REMOTEPLAY_RELEASE_LOCK_FD'
-PID_ENV = 'REMOTEPLAY_RELEASE_PRODUCER_PID'
+LOCK_ENV = 'WEAVELO_RELEASE_LOCK_FD'
+PID_ENV = 'WEAVELO_RELEASE_PRODUCER_PID'
 ANDROID_SIGNER = '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5'
 ENTRIES = {'macos': 'package_macos_unified.sh', 'android-release': 'build_android_release.sh',
            'android-native': 'build_android_native.sh'}
@@ -91,7 +91,7 @@ def stage_paths(files):
 
 
 def android_workspace():
-    return android_files()[0].parent / '.remoteplay-android-package.pending'
+    return android_files()[0].parent / '.weavelo-android-package.pending'
 
 
 def check_lock(kind):
@@ -134,7 +134,7 @@ def producer(kind):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise Refusal('Another RemotePlay release/JNI producer is active') from error
+            raise Refusal('Another Weavelo release/JNI producer is active') from error
         # Existing authority remains mandatory; never create an independent current ledger.
         macos_root = macos_output_root() if kind == 'macos' else (Path.home() / 'rust-target/package/macos').resolve()
         public('release-setup', '--authority', ROOT / AUTHORITY, '--output-root', macos_root,

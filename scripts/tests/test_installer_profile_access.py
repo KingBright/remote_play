@@ -18,7 +18,7 @@ class InstallerProfileAccessTests(unittest.TestCase):
         self.home = Path(self.temp.name) / 'home'
         self.home.mkdir()
         (self.home / 'Applications').mkdir()
-        self.profile = self.home / 'Library/Application Support/RemotePlay/NativeMesh'
+        self.profile = self.home / 'Library/Application Support/Weavelo/NativeMesh'
         self.uid = os.getuid()
 
     def fixture_profile(self):
@@ -37,7 +37,7 @@ class InstallerProfileAccessTests(unittest.TestCase):
         with patch.object(installer.Path, 'home', return_value=self.home):
             home, target, _, domain = installer.canonical_paths()
         self.assertEqual(home, self.home)
-        self.assertEqual(target, self.home / 'Applications/RemotePlay.app')
+        self.assertEqual(target, self.home / 'Applications/Weavelo.app')
         self.assertEqual(domain, f'gui/{self.uid}')
         self.assertFalse(self.profile.exists())
 

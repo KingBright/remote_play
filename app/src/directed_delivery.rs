@@ -103,7 +103,7 @@ async fn receive(
         }
         let mut child = std::process::Command::new(std::env::current_exe()?)
             .arg("--gui")
-            .env(remote_core::mesh::REMOTE_PLAY_DEVICE_GROUP_DIR_ENV, profile)
+            .env(remote_core::mesh::WEAVELO_DEVICE_GROUP_DIR_ENV, profile)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

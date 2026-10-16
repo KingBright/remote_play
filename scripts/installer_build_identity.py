@@ -18,7 +18,7 @@ import zipfile
 import build_identity_gate as gate
 from macos_release_guard import ReleaseRejected, verified_archive
 
-STATE_NAME = '.remoteplay-release-identity.json'
+STATE_NAME = '.weavelo-release-identity.json'
 MAX_STATE = 4 * 1024 ** 2
 
 
@@ -80,7 +80,7 @@ def contract(raw_manifest: bytes, expectations: Expectations) -> dict:
 
 
 def state_bytes(value: dict) -> bytes:
-    raw = json.dumps({'schema': 1, 'kind': 'remoteplay-installed-release',
+    raw = json.dumps({'schema': 1, 'kind': 'weavelo-installed-release',
                       'expectations': asdict(value['expectations']),
                       'manifest_base64': base64.b64encode(value['raw_manifest']).decode('ascii')},
                      sort_keys=True, indent=2).encode() + b'\n'
@@ -98,7 +98,7 @@ def parse_state(raw: bytes) -> dict:
     data = json.loads(raw, object_pairs_hook=unique)
     gate.require(type(data) is dict and set(data) == {'schema', 'kind', 'expectations', 'manifest_base64'}
                  and type(data['schema']) is int and data['schema'] == 1
-                 and data['kind'] == 'remoteplay-installed-release'
+                 and data['kind'] == 'weavelo-installed-release'
                  and type(data['expectations']) is dict
                  and set(data['expectations']) == set(Expectations.__dataclass_fields__),
                  'Invalid installed release-state contract')
@@ -125,7 +125,7 @@ def replace_state(path: Path, raw: bytes | None, expected_sha256: str | None):
         if current is not None: path.unlink()
     else:
         parse_state(raw)
-        fd, name = tempfile.mkstemp(prefix='.remoteplay-identity-', dir=path.parent)
+        fd, name = tempfile.mkstemp(prefix='.weavelo-identity-', dir=path.parent)
         try:
             with os.fdopen(fd, 'wb') as output:
                 output.write(raw); output.flush(); os.fsync(output.fileno())

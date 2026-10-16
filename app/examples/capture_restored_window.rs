@@ -15,7 +15,7 @@ async fn main() -> Result<(), E> {
     let title = std::env::var("RP_GUI_CAPTURE_TITLE")?;
     let output = PathBuf::from(std::env::var("RP_GUI_CAPTURE_OUTPUT")?);
     if pid <= 0
-        || title != "RemotePlay restored GUI review"
+        || title != "Weavelo restored GUI review"
         || !output.is_absolute()
         || output.exists()
     {

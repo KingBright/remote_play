@@ -1,7 +1,7 @@
 //! A bounded native window for the production recovery controls. No network,
 //! profile, media, device permissions or input forwarding is constructed.
 #[cfg(target_os = "macos")]
-use remote_play_app::product_components;
+use weavelo_app::product_components;
 #[cfg(target_os = "macos")]
 #[path = "../src/design_system.rs"]
 mod design_system;
@@ -15,7 +15,7 @@ mod native {
     use ely_gpui_component::{buttons::Button, primitives::FocusScope};
     use gpui::{prelude::*, *};
     use remote_core::session_tabs::{SessionPeer, SessionTabsAction, SessionTabsState};
-    use remote_play_app::product_components::{self, assets::UiAsset, theme::ActiveTheme};
+    use weavelo_app::product_components::{self, assets::UiAsset, theme::ActiveTheme};
     use std::{path::PathBuf, time::Duration};
 
     struct Smoke {
@@ -97,7 +97,7 @@ mod native {
                     .gap_3()
                     .bg(cx.theme().surface.canvas)
                     .text_color(cx.theme().content.primary)
-                    .child("RemotePlay · production recovery controls")
+                    .child("Weavelo · production recovery controls")
                     .child("Offline fixture · no remote connection or capture")
                     .child(ConnectionRecoveryControls::new(self.state.project([]), {
                         let view = cx.weak_entity();
@@ -145,7 +145,7 @@ mod native {
         }
     }
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-        let output = PathBuf::from("/tmp/remoteplay-session-recovery-native");
+        let output = PathBuf::from("/tmp/weavelo-session-recovery-native");
         std::fs::create_dir_all(&output)?;
         Application::new()
             .with_assets(UiAsset)
@@ -153,7 +153,7 @@ mod native {
                 product_components::component::init(cx).expect("production Ely fonts/assets");
                 product_components::theme::install(
                     WindowAppearance::Dark,
-                    design_system::remote_play_themes(),
+                    design_system::weavelo_themes(),
                     cx,
                 );
                 cx.open_window(
@@ -163,7 +163,7 @@ mod native {
                             size(px(760.), px(490.)),
                         ))),
                         titlebar: Some(TitlebarOptions {
-                            title: Some("RemotePlay connection recovery offline validation".into()),
+                            title: Some("Weavelo connection recovery offline validation".into()),
                             ..Default::default()
                         }),
                         ..Default::default()

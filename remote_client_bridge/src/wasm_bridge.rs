@@ -9,13 +9,13 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-pub struct RemotePlayWasmClient {
+pub struct WeaveloWasmClient {
     inner: Arc<RemoteBridgeClient>,
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
-impl RemotePlayWasmClient {
+impl WeaveloWasmClient {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {

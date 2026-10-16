@@ -42,7 +42,7 @@ class ReleaseGateTests(unittest.TestCase):
             with guard.verified_archive(self.archive(entries), self.policy): pass
 
     def test_pinned_identity_is_not_a_friendly_name(self):
-        with patch.object(guard, 'run', return_value='1) ' + 'f'*40 + ' "RemotePlay Local"\n'):
+        with patch.object(guard, 'run', return_value='1) ' + 'f'*40 + ' "Weavelo Local"\n'):
             with self.assertRaises(guard.ReleaseRejected): guard.preflight(self.policy)
 
     def test_missing_signer_fails_before_touching_artifact(self):
@@ -54,11 +54,11 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(list(output.iterdir()), [old])
 
     def test_exact_signer_fingerprint_works(self):
-        with patch.object(guard, 'run', return_value=' 1) ' + self.policy.certificate_sha1.upper() + ' "RemotePlay Local"\n'):
+        with patch.object(guard, 'run', return_value=' 1) ' + self.policy.certificate_sha1.upper() + ' "Weavelo Local"\n'):
             self.assertEqual(guard.preflight(self.policy), self.policy.certificate_sha1.upper())
 
     def test_invalid_policy_rejected(self):
-        data = json.loads(guard.POLICY_FILE.read_text()); data['certificate_sha1'] = 'RemotePlay Local'
+        data = json.loads(guard.POLICY_FILE.read_text()); data['certificate_sha1'] = 'Weavelo Local'
         path=self.root/'policy.json'; path.write_text(json.dumps(data))
         with self.assertRaises(guard.ReleaseRejected): guard.load_policy(path)
 
@@ -91,20 +91,20 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_requirement_parser_checks_real_designated_line(self):
         self.assertEqual(guard.designated_requirement('Executable=/tmp/app\n# designated => '+self.policy.requirement+'\n'), self.policy.requirement)
-        with self.assertRaises(guard.ReleaseRejected): guard.designated_requirement('Identifier=com.remoteplay.unified')
+        with self.assertRaises(guard.ReleaseRejected): guard.designated_requirement('Identifier=fun.hackerlife.weavelo')
 
     def test_zip_traversal_rejected(self): self.reject_archive([('../outside',b'x')])
     def test_zip_absolute_rejected(self): self.reject_archive([('/tmp/outside',b'x')])
-    def test_zip_backslash_rejected(self): self.reject_archive([('RemotePlay.app\\..\\bad',b'x')])
-    def test_zip_collision_rejected(self): self.reject_archive([('RemotePlay.app/A',b'x'),('remoteplay.app/a',b'y')])
+    def test_zip_backslash_rejected(self): self.reject_archive([('Weavelo.app\\..\\bad',b'x')])
+    def test_zip_collision_rejected(self): self.reject_archive([('Weavelo.app/A',b'x'),('weavelo.app/a',b'y')])
     def test_zip_extra_app_rejected(self): self.reject_archive([('Other.app/Contents/Info.plist',b'x')])
     def test_external_manifest_requires_independent_expectations(self):
-        self.reject_archive([('RemotePlay.app/payload', b'x'),
-                             ('remoteplay-release-manifest.json', b'{}')])
+        self.reject_archive([('Weavelo.app/payload', b'x'),
+                             ('weavelo-release-manifest.json', b'{}')])
 
     def test_external_manifest_cannot_supply_its_own_identity(self):
-        archive = self.archive([('RemotePlay.app/payload', b'x'),
-                                ('remoteplay-release-manifest.json', b'{}')])
+        archive = self.archive([('Weavelo.app/payload', b'x'),
+                                ('weavelo-release-manifest.json', b'{}')])
         pins = {'commit': 'a' * 40, 'identity_sha256': 'b' * 64, 'manifest_sha256': 'c' * 64}
         with patch.object(guard, 'verify_app') as verify:
             with self.assertRaises(guard.identity_gate.IdentityRejected):
@@ -112,8 +112,8 @@ class ReleaseGateTests(unittest.TestCase):
         verify.assert_not_called()
 
     def test_identity_archive_change_during_signature_check_is_rejected(self):
-        archive = self.archive([('RemotePlay.app/payload', b'x'),
-                                ('remoteplay-release-manifest.json', b'{}')])
+        archive = self.archive([('Weavelo.app/payload', b'x'),
+                                ('weavelo-release-manifest.json', b'{}')])
         before = guard.sha256(archive)
         pins = {'commit': 'a' * 40, 'identity_sha256': 'b' * 64, 'manifest_sha256': 'c' * 64}
         def mutate(*args, **kwargs):
@@ -124,11 +124,11 @@ class ReleaseGateTests(unittest.TestCase):
             with self.assertRaisesRegex(guard.ReleaseRejected, 'changed during signature'):
                 with guard.verified_archive(archive, self.policy, identity_expectations=pins): pass
     def test_zip_symlink_rejected(self):
-        entry=zipfile.ZipInfo('RemotePlay.app/link');entry.create_system=3;entry.external_attr=(stat.S_IFLNK|0o777)<<16
+        entry=zipfile.ZipInfo('Weavelo.app/link');entry.create_system=3;entry.external_attr=(stat.S_IFLNK|0o777)<<16
         self.reject_archive([(entry,b'/Applications')])
 
     def test_stage_hash_is_not_accepted_as_signature(self):
-        archive=self.archive([('RemotePlay.app/invalid',b'not signed')])
+        archive=self.archive([('Weavelo.app/invalid',b'not signed')])
         (self.root/'desktop-releases.json').write_text(json.dumps({'releases':[dict(file='candidate-macos.zip',version='2.0.0-alpha.4',sha256=guard.sha256(archive),size_bytes=archive.stat().st_size)]}))
         archive.rename(self.root/'candidate-macos.zip')
         with self.assertRaises(guard.ReleaseRejected): guard.verify_stage(self.root,self.policy)
@@ -151,8 +151,8 @@ class ReleaseGateTests(unittest.TestCase):
             guard.verify_stage(self.root, self.policy, macos_only=True)
 
     def test_loaded_wrong_service_rejected(self):
-        path=self.root/'agent.plist';exe=self.root/'RemotePlay.app/Contents/MacOS/remote_play'
-        path.write_bytes(plistlib.dumps({'Label':'com.remoteplay.host','ProgramArguments':['/tmp/other']}))
+        path=self.root/'agent.plist';exe=self.root/'Weavelo.app/Contents/MacOS/weavelo'
+        path.write_bytes(plistlib.dumps({'Label':'fun.hackerlife.weavelo.host','ProgramArguments':['/tmp/other']}))
         with self.assertRaises(guard.ReleaseRejected): installer.validate_service(path,exe,{'loaded':True,'program':str(exe)})
 
     def test_publish_guard_precedes_network(self):
@@ -207,7 +207,7 @@ class UpgradeTransactionTests(unittest.TestCase):
 class PreservedConfigurationTests(unittest.TestCase):
     def test_restarted_activation_endpoint_is_not_network_identity(self):
         with tempfile.TemporaryDirectory() as directory:
-            home=Path(directory);mesh=home/'Library/Application Support/RemotePlay/NativeMesh';mesh.mkdir(parents=True)
+            home=Path(directory);mesh=home/'Library/Application Support/Weavelo/NativeMesh';mesh.mkdir(parents=True)
             (mesh/'mesh.conf').write_text('synthetic-device')
             (mesh/'mesh.secret').write_text('synthetic-test-key')
             (mesh/'desktop-instance.addr').write_text('127.0.0.1:30001')
@@ -217,14 +217,14 @@ class PreservedConfigurationTests(unittest.TestCase):
             self.assertEqual(before,installer.preserve_hashes(home,home/'not-present.plist'))
     def test_persistent_secret_still_detects_changes(self):
         with tempfile.TemporaryDirectory() as directory:
-            home=Path(directory);mesh=home/'Library/Application Support/RemotePlay/NativeMesh';mesh.mkdir(parents=True)
+            home=Path(directory);mesh=home/'Library/Application Support/Weavelo/NativeMesh';mesh.mkdir(parents=True)
             (mesh/'mesh.secret').write_text('synthetic-old')
             before=installer.preserve_hashes(home,home/'not-present.plist')
             (mesh/'mesh.secret').write_text('synthetic-new')
             self.assertNotEqual(before,installer.preserve_hashes(home,home/'not-present.plist'))
     def test_unknown_persistent_config_remains_protected(self):
         with tempfile.TemporaryDirectory() as directory:
-            home=Path(directory);mesh=home/'Library/Application Support/RemotePlay/NativeMesh';mesh.mkdir(parents=True)
+            home=Path(directory);mesh=home/'Library/Application Support/Weavelo/NativeMesh';mesh.mkdir(parents=True)
             (mesh/'settings.json').write_text('{}')
             before=installer.preserve_hashes(home,home/'not-present.plist')
             (mesh/'settings.json').write_text('{"new":true}')
@@ -254,13 +254,13 @@ class NativeSignatureTests(unittest.TestCase):
             (app/'Contents/Resources/unapproved.txt').write_text('modified after signing')
             with self.assertRaises(guard.ReleaseRejected):guard.verify_app(app,self.policy)
     def test_published_good_archive_passes_same_policy(self):
-        path=guard.ROOT.parent/'Workspace/.rp-four-gui-20260929/artifacts/RemotePlay-macos-arm64-2.0.0-alpha.4.zip'
+        path=guard.ROOT.parent/'Workspace/.rp-four-gui-20260929/artifacts/Weavelo-macos-arm64-2.0.0-alpha.4.zip'
         with guard.verified_archive(path,self.policy) as (_,report):self.assertEqual(report['version'],'2.0.0-alpha.4')
     def test_rehashed_ad_hoc_archive_is_rejected_before_publication(self):
         with guard.verified_archive(self.archive,self.policy) as (app,_):
             guard.run(['/usr/bin/codesign','--force','--sign','-',str(app)])
             with tempfile.TemporaryDirectory() as directory:
-                stage=Path(directory);bad=stage/'RemotePlay-macos-bad.zip'
+                stage=Path(directory);bad=stage/'Weavelo-macos-bad.zip'
                 guard.run(['/usr/bin/ditto','-c','-k','--sequesterRsrc','--keepParent',str(app),str(bad)])
                 metadata={'releases':[{'file':bad.name,'version':'2.0.0-alpha.99',
                     'sha256':guard.sha256(bad),'size_bytes':bad.stat().st_size}]}

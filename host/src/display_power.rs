@@ -28,7 +28,7 @@ pub(crate) struct DisplayPowerGuard {
 
 impl DisplayPowerGuard {
     pub(crate) fn activate() -> Self {
-        let assertion_name = CFString::new("RemotePlay active streaming session");
+        let assertion_name = CFString::new("Weavelo active streaming session");
         let assertion_name_ref = assertion_name.as_concrete_TypeRef() as *const c_void;
         let mut assertion_ids = Vec::with_capacity(2);
 
@@ -78,7 +78,7 @@ impl Drop for DisplayPowerGuard {
             let status = unsafe { IOPMAssertionRelease(assertion_id) };
             if status != IO_SUCCESS {
                 eprintln!(
-                    "Unable to release RemotePlay display assertion {assertion_id}: IOKit status {status}"
+                    "Unable to release Weavelo display assertion {assertion_id}: IOKit status {status}"
                 );
             }
         }

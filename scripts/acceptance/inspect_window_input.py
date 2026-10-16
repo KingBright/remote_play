@@ -18,7 +18,7 @@ def verify(before, after, sender, backend_pid):
     require(after.get("pid") == before.get("pid") == sender.get("fixture_pid"), "fixture process changed")
     for state in (before, after):
         require(state["A"]["id"] == sender.get("fixture_window")
-                and state["A"]["title"] == "RemotePlay scoped-window acceptance " + sender["fixture_nonce"],
+                and state["A"]["title"] == "Weavelo scoped-window acceptance " + sender["fixture_nonce"],
                 "exact fixture window/title required")
     start = before.get("input_events", [])
     events = after.get("input_events", [])
@@ -53,7 +53,7 @@ def verify(before, after, sender, backend_pid):
             "fixture_pid":after["pid"], "window":after["A"]["id"], "backend_pid":backend_pid,
             "native_drag":True,"native_scroll":True,"native_text":"abcA","native_key_down_up":True,
             "held_state_empty":True,"host_per_event_ack_exposed":False,
-            "boundary":"fixture received OS events attributed to the verified RemotePlay backend"}
+            "boundary":"fixture received OS events attributed to the verified Weavelo backend"}
 
 
 
@@ -64,7 +64,7 @@ def verify_focus_release(before, after, sender, backend_pid):
     require(before.get("pid") == after.get("pid") == sender.get("fixture_pid"), "fixture process changed")
     require(before["A"]["id"] == after["A"]["id"] == sender.get("fixture_window"), "window changed")
     require(before["A"]["title"] == after["A"]["title"]
-            == "RemotePlay scoped-window acceptance " + sender["fixture_nonce"], "fixture nonce changed")
+            == "Weavelo scoped-window acceptance " + sender["fixture_nonce"], "fixture nonce changed")
     require(before["A"]["held_keys"] == [0] and before["A"]["held_buttons"] == [0], "native held baseline absent")
     require(before["A"].get("key_window") is True and after["B"].get("key_window") is True, "own A to B focus transition absent")
     require(all(not after[label][key] for label in ("A","B") for key in ("held_keys","held_buttons")), "native presses remain held")

@@ -9,13 +9,13 @@ use tokio::sync::{broadcast, watch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let rendezvous_name = std::env::var("REMOTE_PLAY_P2P_RENDEZVOUS_ADDR")
+    let rendezvous_name = std::env::var("WEAVELO_P2P_RENDEZVOUS_ADDR")
         .unwrap_or_else(|_| "p.hackerlife.fun:3478".to_string());
     let bind_addr = "0.0.0.0:0".parse::<SocketAddr>()?;
     let rendezvous_addrs = resolve_p2p_rendezvous_addrs(&rendezvous_name, bind_addr).await?;
-    let group_id = required_env("REMOTE_PLAY_P2P_GROUP_ID")?;
-    let peer_id = required_env("REMOTE_PLAY_P2P_PEER_ID")?;
-    let initiator = env_flag("REMOTE_PLAY_P2P_PROBE_INITIATOR");
+    let group_id = required_env("WEAVELO_P2P_GROUP_ID")?;
+    let peer_id = required_env("WEAVELO_P2P_PEER_ID")?;
+    let initiator = env_flag("WEAVELO_P2P_PROBE_INITIATOR");
     let timeout = Duration::from_secs(20);
 
     let echo_socket = UdpSocket::bind("127.0.0.1:0").await?;

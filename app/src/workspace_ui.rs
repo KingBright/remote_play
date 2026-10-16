@@ -69,7 +69,7 @@ pub fn open(target: SocketAddr, name: String, cx: &mut App) {
     let result = cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some(format!("RemotePlay · {name}").into()),
+                title: Some(format!("Weavelo · {name}").into()),
                 ..Default::default()
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds(
@@ -121,7 +121,7 @@ impl WorkspaceView {
         let receive_dir = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join("Downloads/RemotePlay");
+            .join("Downloads/Weavelo");
         let (audio_tx, audio_rx) = mpsc::channel(64);
         let audio_player = match AudioPlayer::new(audio_rx) {
             Ok(player) => Some(player),

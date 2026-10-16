@@ -13,7 +13,7 @@ spec.loader.exec_module(gate)
 
 class DesktopGuiIdentityTests(unittest.TestCase):
     def info(self):
-        return dict(schema=1, product='RemotePlay', version='2.0.0-alpha.8',
+        return dict(schema=1, product='Weavelo', version='2.0.0-alpha.8',
                     platform='linux', architecture='x86_64', default_gui='restored-original-gpui',
                     original_gui_compiled=True, native_video_compiled=True)
     def test_original_with_native_renderer_is_accepted(self):
@@ -38,12 +38,12 @@ class DesktopGuiIdentityTests(unittest.TestCase):
         with self.assertRaises(gate.GuiReleaseRejected):gate.validate(data,'linux','2.0.0-alpha.8')
     def test_missing_old_binary_report_is_not_success(self):
         with tempfile.TemporaryDirectory() as tmp:
-            binary=Path(tmp)/'remote_play';binary.write_bytes(b'fixture')
+            binary=Path(tmp)/'weavelo';binary.write_bytes(b'fixture')
             with patch.object(gate.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='old program started')):
                 with self.assertRaises(gate.GuiReleaseRejected):gate.verify(binary,'linux','2.0.0-alpha.8')
     def test_identity_check_does_not_claim_visual_or_functional_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:
-            binary=Path(tmp)/'remote_play';binary.write_bytes(b'fixture')
+            binary=Path(tmp)/'weavelo';binary.write_bytes(b'fixture')
             with patch.object(gate.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=json.dumps(self.info()))) as execute:
                 result=gate.verify(binary,'linux','2.0.0-alpha.8')
                 self.assertEqual(execute.call_args.args[0],[str(binary.resolve()),'--product-info-json'])

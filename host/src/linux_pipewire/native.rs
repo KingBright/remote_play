@@ -205,7 +205,7 @@ fn run(
     if let Some(serial) = serial {
         properties.insert("target.object", serial.to_string());
     }
-    let stream = pw::stream::StreamBox::new(&core, "RemotePlay local share", properties)?;
+    let stream = pw::stream::StreamBox::new(&core, "Weavelo local share", properties)?;
     let _listener = stream
         .add_local_listener_with_user_data(Data {
             contract: CopyContract::new(generation, mailbox.clone()).with_budget(budget),

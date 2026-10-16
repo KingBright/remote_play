@@ -221,7 +221,7 @@ impl MobilePublisher {
                                 }
                             }
                             MultiplexedPacket::Control(ControlMessage::SessionHello{..}|ControlMessage::SessionAccept{..},addr)=>{
-                                let _=sender.send_control(&ControlMessage::SessionReject{reason:"RemotePlay authentication protocol mismatch: version 3 required".into()},addr).await;
+                                let _=sender.send_control(&ControlMessage::SessionReject{reason:"Weavelo authentication protocol mismatch: version 3 required".into()},addr).await;
                             }
                             MultiplexedPacket::Control(ControlMessage::SessionReject{..},_)=>{}
                             MultiplexedPacket::ClockProbe(probe,host_recv_us,addr)=>{
@@ -476,7 +476,7 @@ mod tests {
     async fn publisher_requires_pairing_and_preserves_pause_revision_and_closed_ids() {
         let key = b"projection-test-key".to_vec();
         let directory =
-            std::env::temp_dir().join(format!("remote-play-publisher-{}", std::process::id()));
+            std::env::temp_dir().join(format!("weavelo-publisher-{}", std::process::id()));
         let publisher = MobilePublisher::start_with_key(
             "127.0.0.1:0".parse().unwrap(),
             directory,
@@ -633,7 +633,7 @@ mod tests {
     impl ReceiverTestDir {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
-                "remote-play-receiver-{:032x}",
+                "weavelo-receiver-{:032x}",
                 u128::from_le_bytes(random_bytes_16())
             ));
             std::fs::create_dir_all(&path).unwrap();

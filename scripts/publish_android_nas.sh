@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 APK="${1:-$ROOT/android/app/build/outputs/apk/release/app-release.apk}"
-NAS_HOST="${REMOTEPLAY_NAS_HOST:-root@hackerlife.fun}"
-NAS_PORT="${REMOTEPLAY_NAS_PORT:-222}"
-REMOTE_DIR="${REMOTEPLAY_NAS_DOWNLOAD_DIR:-/opt/remoteplay/downloads}"
-PUBLIC_BASE_URL="${REMOTEPLAY_DOWNLOAD_BASE_URL:-https://relay.hackerlife.fun:8443/download}"
-CHANNEL="${REMOTEPLAY_RELEASE_CHANNEL:-release}"
-RELEASE_NOTES="${REMOTEPLAY_RELEASE_NOTES:-RemotePlay Android release}"
+NAS_HOST="${WEAVELO_NAS_HOST:-root@hackerlife.fun}"
+NAS_PORT="${WEAVELO_NAS_PORT:-222}"
+REMOTE_DIR="${WEAVELO_NAS_DOWNLOAD_DIR:-/opt/weavelo/downloads}"
+PUBLIC_BASE_URL="${WEAVELO_DOWNLOAD_BASE_URL:-https://relay.hackerlife.fun:8443/download}"
+CHANNEL="${WEAVELO_RELEASE_CHANNEL:-release}"
+RELEASE_NOTES="${WEAVELO_RELEASE_NOTES:-Weavelo Android release}"
 INDEX_TEMPLATE="$ROOT/deploy/nas/download/index.html"
 
 SSH=(ssh -p "$NAS_PORT" -o BatchMode=yes -o ConnectTimeout=10)
@@ -32,14 +32,14 @@ MIN_SDK="$(sed -n 's/^[[:space:]]*minSdk = \([0-9][0-9]*\)/\1/p' "$GRADLE" | hea
 
 COMMIT="$(git -C "$ROOT" rev-parse --short=7 HEAD)"
 PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-APK_NAME="RemotePlay-Android-${VERSION}-${COMMIT}-${CHANNEL}.apk"
+APK_NAME="Weavelo-Android-${VERSION}-${COMMIT}-${CHANNEL}.apk"
 SHA256="$(shasum -a 256 "$APK" | awk '{print $1}')"
 SIZE_BYTES="$(stat -f %z "$APK" 2>/dev/null || stat -c %s "$APK")"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL%/}"
-REMOTE_ARCHIVE="/tmp/remoteplay-download-${COMMIT}.$$.tgz"
+REMOTE_ARCHIVE="/tmp/weavelo-download-${COMMIT}.$$.tgz"
 
-STAGE="$(mktemp -d "${TMPDIR:-/tmp}/remoteplay-publish.XXXXXX")"
-VERIFY_APK="$(mktemp "${TMPDIR:-/tmp}/remoteplay-verify.XXXXXX.apk")"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/weavelo-publish.XXXXXX")"
+VERIFY_APK="$(mktemp "${TMPDIR:-/tmp}/weavelo-verify.XXXXXX.apk")"
 cleanup() { rm -rf "$STAGE" "$VERIFY_APK"; }
 trap cleanup EXIT
 
@@ -47,7 +47,7 @@ cp "$APK" "$STAGE/$APK_NAME"
 cp "$INDEX_TEMPLATE" "$STAGE/index.html"
 
 export VERSION VERSION_CODE MIN_SDK COMMIT PUBLISHED_AT APK_NAME SHA256 SIZE_BYTES CHANNEL RELEASE_NOTES
-export RELEASE_SOURCE_ID="${REMOTEPLAY_RELEASE_SOURCE_ID:-unknown}"
+export RELEASE_SOURCE_ID="${WEAVELO_RELEASE_SOURCE_ID:-unknown}"
 export RELEASE_VERIFICATION_JSON="${APK%.apk}.verification.json"
 python3 - "$STAGE" <<'PY'
 import json, os, sys
@@ -66,12 +66,12 @@ entry = {
     "sha256": os.environ["SHA256"],
 }
 release = {
-    "product": "RemotePlay",
+    "product": "Weavelo",
     "platform": "android",
     **entry,
     "min_sdk": int(os.environ["MIN_SDK"]),
     "url": f'/download/{entry["file"]}',
-    "latest_url": "/download/RemotePlay-Android-latest.apk",
+    "latest_url": "/download/Weavelo-Android-latest.apk",
     "notes": os.environ["RELEASE_NOTES"].split("\n"),
     "validation": json.loads(Path(os.environ["RELEASE_VERIFICATION_JSON"]).read_text()),
 }
@@ -81,7 +81,7 @@ PY
 
 tar -C "$STAGE" -czf "$STAGE/bundle.tgz" "$APK_NAME" index.html release.json entry.json
 
-printf 'Publishing RemotePlay Android %s (%s)\n' "$VERSION" "$COMMIT"
+printf 'Publishing Weavelo Android %s (%s)\n' "$VERSION" "$COMMIT"
 "${SCP[@]}" "$STAGE/bundle.tgz" "$NAS_HOST:$REMOTE_ARCHIVE"
 "${SSH[@]}" "$NAS_HOST" "bash -s -- '$REMOTE_ARCHIVE' '$REMOTE_DIR' '$APK_NAME' '$SHA256'" <<'REMOTE'
 set -euo pipefail
@@ -89,7 +89,7 @@ archive="$1"
 root="$2"
 apk_name="$3"
 expected_sha="$4"
-tmp="$(mktemp -d /tmp/remoteplay-release.XXXXXX)"
+tmp="$(mktemp -d /tmp/weavelo-release.XXXXXX)"
 cleanup() { rm -rf "$tmp" "$archive"; }
 trap cleanup EXIT
 mkdir -p "$root"
@@ -119,7 +119,7 @@ releases = doc.get("releases", []) if isinstance(doc.get("releases", []), list) 
 releases = [r for r in releases if r.get("file") != entry["file"]]
 releases.insert(0, entry)
 new_doc = {
-    "product": "RemotePlay",
+    "product": "Weavelo",
     "platform": "android",
     "latest": entry["version"],
     "latest_commit": entry["commit"],
@@ -136,12 +136,12 @@ for file in index.html release.json; do
     mv -f "$root/$file.new" "$root/$file"
 done
 
-ln -sfn "$apk_name" "$root/.RemotePlay-Android-latest.apk.new"
-mv -f "$root/.RemotePlay-Android-latest.apk.new" "$root/RemotePlay-Android-latest.apk"
+ln -sfn "$apk_name" "$root/.Weavelo-Android-latest.apk.new"
+mv -f "$root/.Weavelo-Android-latest.apk.new" "$root/Weavelo-Android-latest.apk"
 REMOTE
 
 printf 'Verifying public landing page and metadata\n'
-curl -fsS "$PUBLIC_BASE_URL/" | grep -F 'RemotePlay / Android' >/dev/null
+curl -fsS "$PUBLIC_BASE_URL/" | grep -F 'Weavelo / Android' >/dev/null
 PUBLIC_RELEASE="$(curl -fsS "$PUBLIC_BASE_URL/release.json")"
 printf '%s' "$PUBLIC_RELEASE" | python3 -c 'import json,sys,os; d=json.load(sys.stdin); assert d["sha256"]==os.environ["SHA256"]; assert d["file"]==os.environ["APK_NAME"]'
 curl -fsS "$PUBLIC_BASE_URL/$APK_NAME" -o "$VERIFY_APK"

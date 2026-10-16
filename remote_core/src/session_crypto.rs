@@ -289,7 +289,7 @@ pub fn derive_key(psk: &[u8], salt: &[u8]) -> [u8; 32] {
 }
 
 pub fn load_session_psk() -> Option<Vec<u8>> {
-    std::env::var("REMOTE_PLAY_SESSION_PSK")
+    std::env::var("WEAVELO_SESSION_PSK")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -299,7 +299,7 @@ pub fn load_session_psk() -> Option<Vec<u8>> {
 
 pub fn require_session_auth() -> bool {
     load_session_psk().is_some()
-        || std::env::var("REMOTE_PLAY_REQUIRE_AUTH")
+        || std::env::var("WEAVELO_REQUIRE_AUTH")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 

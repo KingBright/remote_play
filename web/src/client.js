@@ -1,6 +1,6 @@
 import { WebCodecsPlayer, isHevcKeyFrame } from './decoder.js';
 
-export class RemotePlayWebClient {
+export class WeaveloWebClient {
   constructor(canvasElement) {
     this.canvas = canvasElement;
     this.player = null;

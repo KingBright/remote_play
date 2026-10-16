@@ -232,7 +232,7 @@ fn pipe_name(directory: &Path, name: &str) -> io::Result<String> {
     }
     digest.update([0]);
     digest.update(name.as_bytes());
-    Ok(format!(r"\\.\pipe\RemotePlay-{:x}", digest.finalize()))
+    Ok(format!(r"\\.\pipe\Weavelo-{:x}", digest.finalize()))
 }
 fn create(name: &str, first: bool) -> io::Result<NamedPipeServer> {
     let sid = current()?.sid;

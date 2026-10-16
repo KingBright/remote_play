@@ -57,7 +57,7 @@ impl std::fmt::Display for AuthError {
         match self {
             Self::ProtocolMismatch => write!(
                 f,
-                "RemotePlay authentication protocol mismatch (required version {AUTH_VERSION}, suite {AUTH_SUITE}); update both endpoints"
+                "Weavelo authentication protocol mismatch (required version {AUTH_VERSION}, suite {AUTH_SUITE}); update both endpoints"
             ),
             Self::Expired => write!(
                 f,

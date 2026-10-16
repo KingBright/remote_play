@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let result = run();
     if let Err(error) = &result {
         let path = format!(
-            "/tmp/remoteplay-product-loopback-{}/startup-error.json",
+            "/tmp/weavelo-product-loopback-{}/startup-error.json",
             std::process::id()
         );
         let _ = std::fs::write(
@@ -25,10 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 #[cfg(target_os = "macos")]
 fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use remote_core::{discovery::*, mesh::MeshConfig};
-    use remote_play_app::{UnifiedRuntimeHandle, UnifiedServiceOwner, UnifiedServiceOwnerConfig};
+    use weavelo_app::{UnifiedRuntimeHandle, UnifiedServiceOwner, UnifiedServiceOwnerConfig};
     use std::{path::PathBuf, sync::Arc, time::Duration};
     let root = PathBuf::from(format!(
-        "/tmp/remoteplay-product-loopback-{}",
+        "/tmp/weavelo-product-loopback-{}",
         std::process::id()
     ));
     std::fs::create_dir(&root)?;
@@ -40,20 +40,20 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let profile = root.join("mesh");
     // Set only task-specific configuration before creating any runtime threads.
     unsafe {
-        std::env::set_var("REMOTE_PLAY_DEVICE_GROUP_DIR", &profile);
-        std::env::set_var("REMOTE_PLAY_RESTORED_TEST_OUTPUT", root.join("gui.json"));
-        std::env::set_var("REMOTE_PLAY_RESTORED_TEST_SECONDS", "180");
+        std::env::set_var("WEAVELO_DEVICE_GROUP_DIR", &profile);
+        std::env::set_var("WEAVELO_RESTORED_TEST_OUTPUT", root.join("gui.json"));
+        std::env::set_var("WEAVELO_RESTORED_TEST_SECONDS", "180");
         std::env::set_var("RP_LOOPBACK_PRODUCT_OBSERVATIONS", "1");
     }
-    let mut preferences = remote_play_app::preferences::UserPreferences::default();
+    let mut preferences = weavelo_app::preferences::UserPreferences::default();
     preferences.ui.pause_when_inactive = false;
-    preferences.stream = remote_play_app::preferences::StreamPreferences {
+    preferences.stream = weavelo_app::preferences::StreamPreferences {
         width: 640,
         height: 360,
         fps: 20,
         bitrate_kbps: 2500,
     };
-    preferences.side_services = remote_play_app::preferences::SideServicePreferences {
+    preferences.side_services = weavelo_app::preferences::SideServicePreferences {
         clipboard_sync: false,
         file_transfer: false,
         talkback: false,
@@ -62,12 +62,12 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "receive_dir".into(),
         serde_json::json!(root.join("received")),
     );
-    let preferences_path = remote_play_app::preferences::UserPreferences::default_path();
+    let preferences_path = weavelo_app::preferences::UserPreferences::default_path();
     if preferences_path != root.join("preferences.json") {
         return Err("loopback preferences escaped the isolated fixture directory".into());
     }
     preferences.save_to_path(&preferences_path)?;
-    let identity = MeshConfig::generate("RemotePlay product loopback acceptance");
+    let identity = MeshConfig::generate("Weavelo product loopback acceptance");
     remote_core::init_crypto_provider();
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
     // Only this newly generated in-memory test identity is used. It is not
@@ -129,7 +129,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "version":env!("CARGO_PKG_VERSION"),"executable":std::env::current_exe()?.display().to_string()
         }))?,
     )?;
-    let result = remote_play_app::restored_ui::run_restored_workspace_runtime(handle, &profile);
+    let result = weavelo_app::restored_ui::run_restored_workspace_runtime(handle, &profile);
     drop(controls);
     drop(_entered);
     drop(runtime);

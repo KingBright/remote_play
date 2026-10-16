@@ -221,7 +221,7 @@ impl WindowTarget {
         }
         if !permission_available() {
             return Err(
-                "This signed RemotePlay app needs Accessibility permission on the host".into(),
+                "This signed Weavelo app needs Accessibility permission on the host".into(),
             );
         }
         current(id, pid)?;

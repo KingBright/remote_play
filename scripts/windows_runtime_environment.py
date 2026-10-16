@@ -11,12 +11,12 @@ def production_environment(inherited: Mapping[str, str], *, profile: str,
     """Restore the product's default host/viewer role, including from a test parent."""
     result = dict(inherited)
     for name in tuple(result):
-        if name.startswith(("REMOTE_PLAY_RESTORED_TEST_", "RP_MEDIA_ACCEPTANCE")):
+        if name.startswith(("WEAVELO_RESTORED_TEST_", "RP_MEDIA_ACCEPTANCE")):
             del result[name]
-    result.update(REMOTE_PLAY_HEADLESS="0", REMOTE_PLAY_PASSIVE_HOST="1",
-                  REMOTE_PLAY_DEVICE_GROUP_DIR=profile)
+    result.update(WEAVELO_HEADLESS="0", WEAVELO_PASSIVE_HOST="1",
+                  WEAVELO_DEVICE_GROUP_DIR=profile)
     if receive_directory is not None:
-        result["REMOTE_PLAY_FILE_RECEIVE_DIR"] = receive_directory
+        result["WEAVELO_FILE_RECEIVE_DIR"] = receive_directory
     return result
 
 
@@ -25,5 +25,5 @@ def receive_test_environment(production: Mapping[str, str],
     """Isolate the receive-only child; leave the restoration environment intact."""
     result = dict(production)
     result.update(test_settings)
-    result["REMOTE_PLAY_PASSIVE_HOST"] = "0"
+    result["WEAVELO_PASSIVE_HOST"] = "0"
     return result

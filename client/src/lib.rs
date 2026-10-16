@@ -39,7 +39,7 @@ use remote_core::clipboard_file_runtime::{ClipboardFileSyncConfig, run_clipboard
 use remote_core::clipboard_runtime::{ClipboardSyncRunnerConfig, run_clipboard_sync};
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
-    DiscoveryPeerSnapshot, DiscoveryRuntimeConfig, DiscoveryScope, REMOTE_PLAY_DISCOVERY_ENV,
+    DiscoveryPeerSnapshot, DiscoveryRuntimeConfig, DiscoveryScope, WEAVELO_DISCOVERY_ENV,
     discovery_port_from_env, run_discovery_runtime,
 };
 use remote_core::file_transfer::FileReceivePolicy;
@@ -182,10 +182,10 @@ impl FileTransferRuntimeSettings {
     fn from_env() -> Self {
         Self {
             receive_dir: env_path_or_temp(
-                "REMOTE_PLAY_FILE_RECEIVE_DIR",
-                "remote-play-client-received-files",
+                "WEAVELO_FILE_RECEIVE_DIR",
+                "weavelo-client-received-files",
             ),
-            allow_overwrite: env_flag_enabled("REMOTE_PLAY_FILE_ALLOW_OVERWRITE"),
+            allow_overwrite: env_flag_enabled("WEAVELO_FILE_ALLOW_OVERWRITE"),
         }
     }
 
@@ -801,7 +801,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Client starting...");
     let mesh_pairing = match MeshPairingControl::load_or_create(
         default_app_private_mesh_dir(),
-        "RemotePlay Viewer",
+        "Weavelo Viewer",
     ) {
         Ok(control) => Some(control),
         Err(err) => {
@@ -810,15 +810,15 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     };
     let discovery = maybe_start_discovery_runtime(
-        "RemotePlay Viewer",
+        "Weavelo Viewer",
         0,
         DiscoveryCapabilities {
             can_view: true,
             can_stream: false,
-            file_transfer: env_flag_enabled("REMOTE_PLAY_FILE_TRANSFER")
-                || env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD"),
-            clipboard_sync: env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC"),
-            talkback: env_flag_enabled("REMOTE_PLAY_TALKBACK"),
+            file_transfer: env_flag_enabled("WEAVELO_FILE_TRANSFER")
+                || env_flag_enabled("WEAVELO_FILE_CLIPBOARD"),
+            clipboard_sync: env_flag_enabled("WEAVELO_CLIPBOARD_SYNC"),
+            talkback: env_flag_enabled("WEAVELO_TALKBACK"),
         },
     )
     .await;
@@ -833,22 +833,22 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
     let multiplexer = UdpMultiplexer::bind(&bind_addr.to_string()).await?;
     let (udp_sender, udp_receiver) = multiplexer.split();
-    let clipboard_control = if env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC") {
+    let clipboard_control = if env_flag_enabled("WEAVELO_CLIPBOARD_SYNC") {
         println!("Clipboard data-plane sync enabled.");
         Some(start_clipboard_runtime_controller(udp_sender.clone()))
     } else {
         None
     };
-    let file_transfer_control = if env_flag_enabled("REMOTE_PLAY_FILE_TRANSFER")
-        || env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD")
-        || std::env::var_os("REMOTE_PLAY_SEND_FILE").is_some()
+    let file_transfer_control = if env_flag_enabled("WEAVELO_FILE_TRANSFER")
+        || env_flag_enabled("WEAVELO_FILE_CLIPBOARD")
+        || std::env::var_os("WEAVELO_SEND_FILE").is_some()
     {
         println!("File transfer data-plane runtime enabled.");
         Some(start_file_transfer_runtime_controller(udp_sender.clone()))
     } else {
         None
     };
-    let talkback_control = if env_flag_enabled("REMOTE_PLAY_TALKBACK") {
+    let talkback_control = if env_flag_enabled("WEAVELO_TALKBACK") {
         println!("Viewer microphone talkback enabled.");
         Some(start_talkback_runtime_controller(udp_sender.clone()))
     } else {
@@ -975,7 +975,7 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     });
 
-    if env_flag_enabled("REMOTE_PLAY_LEGACY_VIEWER") {
+    if env_flag_enabled("WEAVELO_LEGACY_VIEWER") {
         render::run_client(
             udp_sender,
             render_shared_frame,
@@ -993,9 +993,9 @@ pub async fn run_client_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
         .await?;
     } else {
         println!(
-            "Product GUI is the unified `remote_play` app. This process is a headless viewer."
+            "Product GUI is the unified `weavelo` app. This process is a headless viewer."
         );
-        println!("Set REMOTE_PLAY_LEGACY_VIEWER=1 to open the standalone GPUI viewer.");
+        println!("Set WEAVELO_LEGACY_VIEWER=1 to open the standalone GPUI viewer.");
         tokio::signal::ctrl_c().await?;
     }
 
@@ -1007,7 +1007,7 @@ async fn maybe_start_discovery_runtime(
     control_port: u16,
     capabilities: DiscoveryCapabilities,
 ) -> Option<DiscoveryRuntimeHandle> {
-    if !env_flag_enabled(REMOTE_PLAY_DISCOVERY_ENV) {
+    if !env_flag_enabled(WEAVELO_DISCOVERY_ENV) {
         return None;
     }
 
@@ -1391,7 +1391,7 @@ fn start_file_transfer_runtime_controller(
                     let (file_command_tx, file_command_rx) = mpsc::channel(16);
                     active_file_command_tx = Some(file_command_tx.clone());
                     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-                    let file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
+                    let file_clipboard_enabled = env_flag_enabled("WEAVELO_FILE_CLIPBOARD");
                     let (cancel_tx, cancel_rx) = broadcast::channel(1);
                     active_cancel_tx = Some(cancel_tx);
                     active_addr = Some(target);
@@ -1475,7 +1475,7 @@ fn start_file_transfer_runtime_controller(
                         });
                     }
 
-                    if let Some(path) = std::env::var_os("REMOTE_PLAY_SEND_FILE").map(PathBuf::from)
+                    if let Some(path) = std::env::var_os("WEAVELO_SEND_FILE").map(PathBuf::from)
                     {
                         let _ = file_command_tx
                             .send(FileTransferCommand::SendFile {
@@ -1562,7 +1562,7 @@ mod tests {
     #[test]
     fn file_transfer_runtime_settings_build_receive_config() {
         let settings = FileTransferRuntimeSettings {
-            receive_dir: PathBuf::from("/tmp/remote-play-receive"),
+            receive_dir: PathBuf::from("/tmp/weavelo-receive"),
             allow_overwrite: true,
         };
 
@@ -1570,7 +1570,7 @@ mod tests {
 
         assert_eq!(
             config.receive_dir,
-            PathBuf::from("/tmp/remote-play-receive")
+            PathBuf::from("/tmp/weavelo-receive")
         );
         assert!(config.receive_policy.allow_overwrite);
     }

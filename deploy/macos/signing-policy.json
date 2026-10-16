@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "bundle_id": "com.remoteplay.unified",
-  "executable": "remote_play",
-  "app_name": "RemotePlay",
+  "bundle_id": "fun.hackerlife.weavelo",
+  "executable": "weavelo",
+  "app_name": "Weavelo",
   "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
-  "purpose": "Existing user-authorized RemotePlay Local release identity. Public certificate fingerprint only; never generate a replacement automatically."
+  "purpose": "Existing user-authorized Weavelo Local release identity. Public certificate fingerprint only; never generate a replacement automatically."
 }

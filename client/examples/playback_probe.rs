@@ -19,16 +19,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
     use std::time::{Duration, Instant};
 
-    let target = std::env::var("REMOTE_PLAY_PROBE_HOST")
+    let target = std::env::var("WEAVELO_PROBE_HOST")
         .unwrap_or_else(|_| "127.0.0.1:49373".into())
         .parse()?;
-    let duration = Duration::from_secs(env_u32("REMOTE_PLAY_PROBE_SECONDS", 15) as u64);
-    let same_host = std::env::var("REMOTE_PLAY_PROBE_SAME_HOST").as_deref() == Ok("1");
-    let pause_at = std::env::var("REMOTE_PLAY_PROBE_PAUSE_AT")
+    let duration = Duration::from_secs(env_u32("WEAVELO_PROBE_SECONDS", 15) as u64);
+    let same_host = std::env::var("WEAVELO_PROBE_SAME_HOST").as_deref() == Ok("1");
+    let pause_at = std::env::var("WEAVELO_PROBE_PAUSE_AT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
-    let pause_seconds = u64::from(env_u32("REMOTE_PLAY_PROBE_PAUSE_SECONDS", 20));
-    let update_at = std::env::var("REMOTE_PLAY_PROBE_UPDATE_AT")
+    let pause_seconds = u64::from(env_u32("WEAVELO_PROBE_PAUSE_SECONDS", 20));
+    let update_at = std::env::var("WEAVELO_PROBE_UPDATE_AT")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
     if pause_at.is_some_and(|at| duration.as_secs() <= at + pause_seconds + 1) {
@@ -66,10 +66,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     sender
         .send_control(
             &ControlMessage::StartStream {
-                width: env_u32("REMOTE_PLAY_PROBE_WIDTH", 1920),
-                height: env_u32("REMOTE_PLAY_PROBE_HEIGHT", 1080),
-                fps: env_u32("REMOTE_PLAY_PROBE_FPS", 60),
-                bitrate_kbps: env_u32("REMOTE_PLAY_PROBE_BITRATE", 8000),
+                width: env_u32("WEAVELO_PROBE_WIDTH", 1920),
+                height: env_u32("WEAVELO_PROBE_HEIGHT", 1080),
+                fps: env_u32("WEAVELO_PROBE_FPS", 60),
+                bitrate_kbps: env_u32("WEAVELO_PROBE_BITRATE", 8000),
                 session_id,
             },
             target,
@@ -120,10 +120,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 if !rates_updated && update_at.is_some_and(|at| started.elapsed().as_secs() >= at) {
                     sender.send_control(&ControlMessage::UpdateStreamSettings {
-                        width: env_u32("REMOTE_PLAY_PROBE_WIDTH", 1920),
-                        height: env_u32("REMOTE_PLAY_PROBE_HEIGHT", 1080),
-                        fps: env_u32("REMOTE_PLAY_PROBE_NEXT_FPS", 37),
-                        bitrate_kbps: env_u32("REMOTE_PLAY_PROBE_NEXT_BITRATE", 3500),
+                        width: env_u32("WEAVELO_PROBE_WIDTH", 1920),
+                        height: env_u32("WEAVELO_PROBE_HEIGHT", 1080),
+                        fps: env_u32("WEAVELO_PROBE_NEXT_FPS", 37),
+                        bitrate_kbps: env_u32("WEAVELO_PROBE_NEXT_BITRATE", 3500),
                         session_id,
                     }, target).await?;
                     rates_updated = true;

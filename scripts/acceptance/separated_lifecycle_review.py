@@ -12,20 +12,20 @@ fixture.chmod(0o700)
 profile = fixture / 'mesh'; profile.mkdir(mode=0o700)
 review = args.evidence_dir.resolve(); review.mkdir(mode=0o700, parents=True, exist_ok=False)
 timed_exit = args.timed_gui_exit
-bundle = fixture / 'RemotePlayLifecycle.app'; binary = bundle / 'Contents/MacOS/background_lifecycle_review'
+bundle = fixture / 'WeaveloLifecycle.app'; binary = bundle / 'Contents/MacOS/background_lifecycle_review'
 binary.parent.mkdir(parents=True)
 shutil.copy2(args.binary, binary)
-(bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'com.remoteplay.lifecycle-review',
-    'CFBundleName':'RemotePlay Lifecycle Review', 'CFBundleExecutable':binary.name,
+(bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier':'fun.hackerlife.weavelo.lifecycle-review',
+    'CFBundleName':'Weavelo Lifecycle Review', 'CFBundleExecutable':binary.name,
     'CFBundlePackageType':'APPL', 'CFBundleVersion':'1', 'NSHighResolutionCapable':True}))
-env = {k:v for k,v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}
-env.update(REMOTE_PLAY_DEVICE_GROUP_DIR=str(profile), REMOTE_PLAY_DISPLAY_NAME='Isolated lifecycle fixture',
-           REMOTE_PLAY_HOST_BIND_ADDR='127.0.0.1:49163', REMOTE_PLAY_CLIENT_BIND_ADDR='127.0.0.1:0',
-           REMOTE_PLAY_DISCOVERY_PORT='49157', REMOTE_PLAY_P2P='0', REMOTE_PLAY_RELAY='0',
-           REMOTE_PLAY_DISCOVERY='0', REMOTE_PLAY_CLIENT_RECEIVER='0', REMOTE_PLAY_VIEWER_MEDIA='0',
-           REMOTE_PLAY_CLIPBOARD_SYNC='0', REMOTE_PLAY_FILE_TRANSFER='0', REMOTE_PLAY_TALKBACK='0')
+env = {k:v for k,v in os.environ.items() if not k.startswith('WEAVELO_')}
+env.update(WEAVELO_DEVICE_GROUP_DIR=str(profile), WEAVELO_DISPLAY_NAME='Isolated lifecycle fixture',
+           WEAVELO_HOST_BIND_ADDR='127.0.0.1:49163', WEAVELO_CLIENT_BIND_ADDR='127.0.0.1:0',
+           WEAVELO_DISCOVERY_PORT='49157', WEAVELO_P2P='0', WEAVELO_RELAY='0',
+           WEAVELO_DISCOVERY='0', WEAVELO_CLIENT_RECEIVER='0', WEAVELO_VIEWER_MEDIA='0',
+           WEAVELO_CLIPBOARD_SYNC='0', WEAVELO_FILE_TRANSFER='0', WEAVELO_TALKBACK='0')
 if timed_exit:
-    env.update(REMOTE_PLAY_RESTORED_TEST_OUTPUT=str(review / 'gui-render-receipt.json'), REMOTE_PLAY_RESTORED_TEST_SECONDS='5')
+    env.update(WEAVELO_RESTORED_TEST_OUTPUT=str(review / 'gui-render-receipt.json'), WEAVELO_RESTORED_TEST_SECONDS='5')
 test_socket = socket.socket(socket.AF_INET,socket.SOCK_DGRAM); test_socket.bind(('127.0.0.1',49163)); test_socket.close()
 receipt = {'fixture':str(fixture),'bundle':str(bundle),'profile':str(profile),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
            'system_launch_agent_modified':False,'other_devices_touched':False,'processes':[],'checks':{}}

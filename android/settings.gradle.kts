@@ -17,5 +17,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "RemotePlayAndroid"
+rootProject.name = "WeaveloAndroid"
 include(":app")

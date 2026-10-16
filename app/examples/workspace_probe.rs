@@ -45,9 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             _ => {}
         }
     }
-    let received_file = std::env::var_os("REMOTE_PLAY_FILE_RECEIVE_DIR")
+    let received_file = std::env::var_os("WEAVELO_FILE_RECEIVE_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("remote-play-host-received-files"))
+        .unwrap_or_else(|| std::env::temp_dir().join("weavelo-host-received-files"))
         .join(source_file.file_name().unwrap());
     assert_eq!(tokio::fs::read(&received_file).await?, bytes);
     println!(
@@ -70,11 +70,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     let sources: Vec<_> = sources
         .into_iter()
-        .filter(|s| s.title.starts_with("RemotePlay V2 Probe"))
+        .filter(|s| s.title.starts_with("Weavelo V2 Probe"))
         .take(2)
         .collect();
     if sources.len() != 2 {
-        return Err("two generated RemotePlay V2 Probe windows are required".into());
+        return Err("two generated Weavelo V2 Probe windows are required".into());
     }
     let mut views = Vec::new();
     for (i, source) in sources.iter().enumerate() {

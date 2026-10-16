@@ -373,7 +373,7 @@ pub fn confirmation_timeout_affects_media(reason:&str) -> Option<bool> {
 /// Opt-in scalar diagnostics; never serialize a command or its private payload.
 pub fn trace_control_event(connection_id: u32, stage: &str, command: &SessionCommand,
     elapsed: Option<Duration>, gui_pending: Option<bool>) {
-    if std::env::var("REMOTE_PLAY_SESSION_TRACE").as_deref() != Ok("1") { return; }
+    if std::env::var("WEAVELO_SESSION_TRACE").as_deref() != Ok("1") { return; }
     let Some((category, request_id)) = request_key(command).or_else(|| match command {
         SessionCommand::Error { request_id, .. } => Some((0,*request_id)), _=>None }) else { return; };
     let category = match category {0=>"error",1=>"sources",2=>"subscribe",3=>"unsubscribe",4=>"activity",

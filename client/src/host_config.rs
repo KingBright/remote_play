@@ -2,7 +2,7 @@ use remote_core::net::DEFAULT_CONTROL_PORT;
 use std::net::SocketAddr;
 
 pub fn configured_hosts() -> Vec<SocketAddr> {
-    let mut hosts = std::env::var("REMOTE_PLAY_HOSTS")
+    let mut hosts = std::env::var("WEAVELO_HOSTS")
         .ok()
         .map(|value| parse_configured_hosts(&value))
         .unwrap_or_default();

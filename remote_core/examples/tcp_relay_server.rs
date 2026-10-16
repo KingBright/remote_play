@@ -7,25 +7,25 @@ use tokio::sync::broadcast;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind_addr = env_socket_addr(
-        "REMOTE_PLAY_RELAY_BIND_ADDR",
+        "WEAVELO_RELAY_BIND_ADDR",
         SocketAddr::from(([127, 0, 0, 1], 39491)),
     )?;
     let config = TcpRelayServerConfig::new(bind_addr)
-        .with_event_logging(env_flag_or("REMOTE_PLAY_RELAY_LOG", false))
+        .with_event_logging(env_flag_or("WEAVELO_RELAY_LOG", false))
         .with_limits(
-            env_usize_or("REMOTE_PLAY_RELAY_MAX_CONNECTIONS", 128)?,
-            env_usize_or("REMOTE_PLAY_RELAY_MAX_PEERS_PER_GROUP", 8)?,
-            env_usize_or("REMOTE_PLAY_RELAY_WRITER_QUEUE_CAPACITY", 16)?,
+            env_usize_or("WEAVELO_RELAY_MAX_CONNECTIONS", 128)?,
+            env_usize_or("WEAVELO_RELAY_MAX_PEERS_PER_GROUP", 8)?,
+            env_usize_or("WEAVELO_RELAY_WRITER_QUEUE_CAPACITY", 16)?,
         )
         .with_idle_timeout(Duration::from_secs(env_u64_or(
-            "REMOTE_PLAY_RELAY_IDLE_TIMEOUT_SECONDS",
+            "WEAVELO_RELAY_IDLE_TIMEOUT_SECONDS",
             30,
         )?));
     let server = BoundTcpRelayServer::bind(config).await?;
     let local_addr = server.local_addr()?;
-    let websocket = env_flag_or("REMOTE_PLAY_RELAY_WEBSOCKET", false);
+    let websocket = env_flag_or("WEAVELO_RELAY_WEBSOCKET", false);
     println!(
-        "RemotePlay {} relay listening on {local_addr}",
+        "Weavelo {} relay listening on {local_addr}",
         if websocket { "WebSocket" } else { "TCP" }
     );
 

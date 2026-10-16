@@ -59,10 +59,10 @@ pub(super) async fn run(config: ConnectionServicesConfig) -> Result<(), String> 
                 .await;
             });
             event_rx = forward_rx;
-            let _file_clipboard_enabled = env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD");
+            let _file_clipboard_enabled = env_flag_enabled("WEAVELO_FILE_CLIPBOARD");
             let receive_dir = env_path_or_temp(
-                "REMOTE_PLAY_FILE_RECEIVE_DIR",
-                "remote-play-host-received-files",
+                "WEAVELO_FILE_RECEIVE_DIR",
+                "weavelo-host-received-files",
             );
             let runtime_cancel_rx = cancel_rx.resubscribe();
             let runtime_task = tasks.spawn(async move {

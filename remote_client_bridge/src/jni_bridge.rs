@@ -36,7 +36,7 @@ fn refresh_network_ownership() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
+pub extern "system" fn Java_fun_hackerlife_weavelo_PublisherClient_nativeAction(
     mut env: JNIEnv,
     _class: JClass,
     operation: jint,
@@ -166,7 +166,7 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeAction(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeFrame(
+pub extern "system" fn Java_fun_hackerlife_weavelo_PublisherClient_nativeFrame(
     env: JNIEnv,
     _class: JClass,
     bytes: jni::objects::JByteArray,
@@ -184,7 +184,7 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativeFrame(
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativePcm(
+pub extern "system" fn Java_fun_hackerlife_weavelo_PublisherClient_nativePcm(
     env: JNIEnv,
     _class: JClass,
     samples: jni::objects::JShortArray,
@@ -219,7 +219,7 @@ pub extern "system" fn Java_com_remoteplay_client_PublisherClient_nativePcm(
 
 /// JSON control stays off Android's main thread; media uses separate bounded queues.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeAction(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WorkspaceClient_nativeAction(
     mut env: JNIEnv,
     _class: JClass,
     operation: jint,
@@ -299,7 +299,7 @@ pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeAction(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeMedia(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WorkspaceClient_nativeMedia(
     env: JNIEnv,
     _class: JClass,
     id: jint,
@@ -320,7 +320,7 @@ pub extern "system" fn Java_com_remoteplay_client_WorkspaceClient_nativeMedia(
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetNetworkEnabled(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSetNetworkEnabled(
     _env: JNIEnv,
     _class: JClass,
     enabled: jboolean,
@@ -338,7 +338,7 @@ fn client() -> Arc<RemoteBridgeClient> {
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInit(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeInit(
     mut env: JNIEnv,
     _class: JClass,
     storage_dir: JString,
@@ -348,14 +348,14 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInit(
         Err(_) => return 0,
     };
     let device_group_dir = std::path::PathBuf::from(storage_dir)
-        .join("remote-play")
+        .join("weavelo")
         .join("device-group");
     if configure_device_group_dir(device_group_dir).is_err() && GLOBAL_CLIENT.get().is_none() {
         return 0;
     }
     let _ = client();
     let store = remote_core::mesh::AppPrivateMeshConfigStore::new(crate::bridge_device_group_dir());
-    let Ok(identity) = store.load_or_generate("RemotePlay Android") else {
+    let Ok(identity) = store.load_or_generate("Weavelo Android") else {
         return 0;
     };
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
@@ -364,7 +364,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInit(
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeConnect(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeConnect(
     mut env: JNIEnv,
     _class: JClass,
     device_id: JString,
@@ -383,7 +383,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeConnect
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeDisconnect(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeDisconnect(
     _env: JNIEnv,
     _class: JClass,
 ) {
@@ -392,7 +392,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeDisconn
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetMediaPaused(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSetMediaPaused(
     _env: JNIEnv,
     _class: JClass,
     paused: jboolean,
@@ -402,7 +402,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetMedi
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeMediaPausePending(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeMediaPausePending(
     _env: JNIEnv,
     _class: JClass,
 ) -> jboolean {
@@ -411,7 +411,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeMediaPa
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeUpdateStreamRates(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeUpdateStreamRates(
     env: JNIEnv,
     _class: JClass,
     fps: jint,
@@ -433,18 +433,18 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeUpdateS
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeInputIntentToken(_env:JNIEnv,_class:JClass)->jni::sys::jlong {
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeInputIntentToken(_env:JNIEnv,_class:JClass)->jni::sys::jlong {
     client().input_intent_token() as jni::sys::jlong
 }
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeRefreshInputIntent(_env:JNIEnv,_class:JClass,token:jni::sys::jlong)->jboolean {
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeRefreshInputIntent(_env:JNIEnv,_class:JClass,token:jni::sys::jlong)->jboolean {
     client().refresh_input_intent(token as u64) as jboolean
 }
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSendTouch(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSendTouch(
     _env: JNIEnv,
     _class: JClass,
     action_code: jint,
@@ -464,7 +464,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSendTou
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSendVirtualKey(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSendVirtualKey(
     mut env: JNIEnv,
     _class: JClass,
     key_name: JString,
@@ -479,7 +479,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSendVir
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetTouchMode(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSetTouchMode(
     _env: JNIEnv,
     _class: JClass,
     mode_code: jint,
@@ -494,7 +494,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetTouc
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetScreenBounds(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeSetScreenBounds(
     _env: JNIEnv,
     _class: JClass,
     width: jint,
@@ -505,7 +505,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeSetScre
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetTelemetryJson(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetTelemetryJson(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -522,7 +522,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetTele
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollVideoFrame(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativePollVideoFrame(
     env: JNIEnv,
     _class: JClass,
 ) -> jbyteArray {
@@ -543,7 +543,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollVid
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeRequestKeyframe(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeRequestKeyframe(
     _env: JNIEnv,
     _class: JClass,
 ) {
@@ -552,7 +552,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeRequest
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSessionState(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetSessionState(
     _env: JNIEnv,
     _class: JClass,
 ) -> jint {
@@ -567,7 +567,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSess
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSessionError(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetSessionError(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -579,7 +579,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetSess
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollAudioPacket(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativePollAudioPacket(
     env: JNIEnv,
     _class: JClass,
 ) -> jbyteArray {
@@ -600,7 +600,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativePollAud
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetDevicesJson(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetDevicesJson(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
@@ -612,7 +612,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetDevi
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeJoinPairingPayload(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeJoinPairingPayload(
     mut env: JNIEnv,
     _class: JClass,
     payload: JString,
@@ -640,7 +640,7 @@ pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeJoinPai
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_remoteplay_client_RemotePlayClient_nativeGetNetworkIdentityJson(
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetNetworkIdentityJson(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {

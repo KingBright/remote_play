@@ -18,7 +18,7 @@ mod telemetry_display;
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveredPeer, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
     DiscoveryPeerSnapshot, DiscoveryRouteOverride, DiscoveryRuntimeConfig, DiscoveryScope,
-    REMOTE_PLAY_DISCOVERY_ENV, discovery_port_from_env, run_discovery_runtime,
+    WEAVELO_DISCOVERY_ENV, discovery_port_from_env, run_discovery_runtime,
 };
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshStoreError, default_app_private_mesh_dir};
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
@@ -525,16 +525,16 @@ pub struct UnifiedRuntimeReloadConfig {
     pub reload_rx: mpsc::UnboundedReceiver<()>,
 }
 
-pub const REMOTE_PLAY_P2P_ENV: &str = "REMOTE_PLAY_P2P";
-pub const REMOTE_PLAY_P2P_RENDEZVOUS_ENV: &str = "REMOTE_PLAY_P2P_RENDEZVOUS";
-pub const REMOTE_PLAY_P2P_BIND_ADDR_ENV: &str = "REMOTE_PLAY_P2P_BIND_ADDR";
-pub const REMOTE_PLAY_P2P_LOG_ENV: &str = "REMOTE_PLAY_P2P_LOG";
+pub const WEAVELO_P2P_ENV: &str = "WEAVELO_P2P";
+pub const WEAVELO_P2P_RENDEZVOUS_ENV: &str = "WEAVELO_P2P_RENDEZVOUS";
+pub const WEAVELO_P2P_BIND_ADDR_ENV: &str = "WEAVELO_P2P_BIND_ADDR";
+pub const WEAVELO_P2P_LOG_ENV: &str = "WEAVELO_P2P_LOG";
 pub const DEFAULT_P2P_RENDEZVOUS: &str = "p.hackerlife.fun:3478";
-pub const REMOTE_PLAY_RELAY_ENV: &str = "REMOTE_PLAY_RELAY";
-pub const REMOTE_PLAY_RELAY_SERVER_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_SERVER_ADDR";
-pub const REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR";
-pub const REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR_ENV: &str = "REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR";
-pub const REMOTE_PLAY_RELAY_LOG_ENV: &str = "REMOTE_PLAY_RELAY_LOG";
+pub const WEAVELO_RELAY_ENV: &str = "WEAVELO_RELAY";
+pub const WEAVELO_RELAY_SERVER_ADDR_ENV: &str = "WEAVELO_RELAY_SERVER_ADDR";
+pub const WEAVELO_RELAY_CONTROL_BIND_ADDR_ENV: &str = "WEAVELO_RELAY_CONTROL_BIND_ADDR";
+pub const WEAVELO_RELAY_DISCOVERY_BIND_ADDR_ENV: &str = "WEAVELO_RELAY_DISCOVERY_BIND_ADDR";
+pub const WEAVELO_RELAY_LOG_ENV: &str = "WEAVELO_RELAY_LOG";
 pub const DEFAULT_RELAY_SERVER_URL: &str = "wss://relay.hackerlife.fun:8443/v1/relay";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -830,7 +830,7 @@ pub struct UnifiedRuntimeConfig {
 impl UnifiedRuntimeConfig {
     pub fn app_defaults() -> Self {
         Self {
-            display_name: "RemotePlay".to_string(),
+            display_name: "Weavelo".to_string(),
             mesh_dir: default_app_private_mesh_dir(),
             host_bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_CONTROL_PORT)),
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -859,58 +859,58 @@ impl UnifiedRuntimeConfig {
 
     pub fn from_env() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut config = Self::app_defaults();
-        if let Ok(display_name) = std::env::var("REMOTE_PLAY_DISPLAY_NAME")
+        if let Ok(display_name) = std::env::var("WEAVELO_DISPLAY_NAME")
             && !display_name.trim().is_empty()
         {
             config.display_name = display_name.trim().to_string();
         }
         config.mesh_dir = default_app_private_mesh_dir();
         config.host_bind_addr =
-            env_socket_addr("REMOTE_PLAY_HOST_BIND_ADDR", config.host_bind_addr)?;
+            env_socket_addr("WEAVELO_HOST_BIND_ADDR", config.host_bind_addr)?;
         config.client_bind_addr =
-            env_socket_addr("REMOTE_PLAY_CLIENT_BIND_ADDR", config.client_bind_addr)?;
+            env_socket_addr("WEAVELO_CLIENT_BIND_ADDR", config.client_bind_addr)?;
         config.discovery_port = discovery_port_from_env()?;
-        config.enable_p2p = env_flag_or(REMOTE_PLAY_P2P_ENV, true);
-        if let Ok(value) = std::env::var(REMOTE_PLAY_P2P_RENDEZVOUS_ENV)
+        config.enable_p2p = env_flag_or(WEAVELO_P2P_ENV, true);
+        if let Ok(value) = std::env::var(WEAVELO_P2P_RENDEZVOUS_ENV)
             && !value.trim().is_empty()
         {
             config.p2p_rendezvous = value.trim().to_string();
         }
         config.p2p_bind_addr =
-            env_socket_addr(REMOTE_PLAY_P2P_BIND_ADDR_ENV, config.p2p_bind_addr)?;
-        config.p2p_log_events = env_flag_or(REMOTE_PLAY_P2P_LOG_ENV, false);
-        config.relay_endpoint = if env_flag_or(REMOTE_PLAY_RELAY_ENV, true) {
-            env_optional_relay_endpoint(REMOTE_PLAY_RELAY_SERVER_ADDR_ENV)?
+            env_socket_addr(WEAVELO_P2P_BIND_ADDR_ENV, config.p2p_bind_addr)?;
+        config.p2p_log_events = env_flag_or(WEAVELO_P2P_LOG_ENV, false);
+        config.relay_endpoint = if env_flag_or(WEAVELO_RELAY_ENV, true) {
+            env_optional_relay_endpoint(WEAVELO_RELAY_SERVER_ADDR_ENV)?
                 .or(config.relay_endpoint)
         } else {
             None
         };
         config.relay_control_bind_addr = env_socket_addr(
-            REMOTE_PLAY_RELAY_CONTROL_BIND_ADDR_ENV,
+            WEAVELO_RELAY_CONTROL_BIND_ADDR_ENV,
             config.relay_control_bind_addr,
         )?;
         config.relay_discovery_bind_addr = env_socket_addr(
-            REMOTE_PLAY_RELAY_DISCOVERY_BIND_ADDR_ENV,
+            WEAVELO_RELAY_DISCOVERY_BIND_ADDR_ENV,
             config.relay_discovery_bind_addr,
         )?;
-        config.relay_log_events = env_flag_or(REMOTE_PLAY_RELAY_LOG_ENV, false);
-        config.enable_discovery = env_flag_or(REMOTE_PLAY_DISCOVERY_ENV, true);
-        config.enable_passive_host = env_flag_or("REMOTE_PLAY_PASSIVE_HOST", true);
-        config.enable_client_receiver = env_flag_or("REMOTE_PLAY_CLIENT_RECEIVER", true);
+        config.relay_log_events = env_flag_or(WEAVELO_RELAY_LOG_ENV, false);
+        config.enable_discovery = env_flag_or(WEAVELO_DISCOVERY_ENV, true);
+        config.enable_passive_host = env_flag_or("WEAVELO_PASSIVE_HOST", true);
+        config.enable_client_receiver = env_flag_or("WEAVELO_CLIENT_RECEIVER", true);
         let prefs = crate::preferences::UserPreferences::load_or_default();
         config.enable_clipboard_sync = env_flag_or(
-            "REMOTE_PLAY_CLIPBOARD_SYNC",
+            "WEAVELO_CLIPBOARD_SYNC",
             prefs.side_services.clipboard_sync,
         );
         config.enable_file_transfer = env_flag_or(
-            "REMOTE_PLAY_FILE_TRANSFER",
+            "WEAVELO_FILE_TRANSFER",
             prefs.side_services.file_transfer,
-        ) || env_flag_or("REMOTE_PLAY_FILE_CLIPBOARD", false)
-            || std::env::var_os("REMOTE_PLAY_SEND_FILE").is_some();
-        config.enable_talkback = env_flag_or("REMOTE_PLAY_TALKBACK", prefs.side_services.talkback);
-        config.enable_viewer_media = env_flag_or("REMOTE_PLAY_VIEWER_MEDIA", true);
+        ) || env_flag_or("WEAVELO_FILE_CLIPBOARD", false)
+            || std::env::var_os("WEAVELO_SEND_FILE").is_some();
+        config.enable_talkback = env_flag_or("WEAVELO_TALKBACK", prefs.side_services.talkback);
+        config.enable_viewer_media = env_flag_or("WEAVELO_VIEWER_MEDIA", true);
         config.enable_session_timeout_monitor =
-            env_flag_or("REMOTE_PLAY_SESSION_TIMEOUT_MONITOR", true);
+            env_flag_or("WEAVELO_SESSION_TIMEOUT_MONITOR", true);
         Ok(config)
     }
 }
@@ -1194,7 +1194,7 @@ fn build_unified_discovery_config(
         match host::video_capture_readiness() {
             Ok(()) => true,
             Err(reason) => {
-                eprintln!("RemotePlay host will stay available for non-video services: {reason}");
+                eprintln!("Weavelo host will stay available for non-video services: {reason}");
                 false
             }
         }
@@ -1472,7 +1472,7 @@ impl UnifiedServiceOwner {
                     Ok(runtime) => Some(runtime),
                     Err(err) => {
                         eprintln!(
-                            "RemotePlay P2P unavailable; relay fallback remains active: {err}"
+                            "Weavelo P2P unavailable; relay fallback remains active: {err}"
                         );
                         None
                     }
@@ -1489,7 +1489,7 @@ impl UnifiedServiceOwner {
                 let runtime = match start_unified_relay_runtime(relay_config).await {
                     Ok(runtime) => Some(runtime),
                     Err(err) => {
-                        eprintln!("RemotePlay relay unavailable; LAN/P2P remain active: {err}");
+                        eprintln!("Weavelo relay unavailable; LAN/P2P remain active: {err}");
                         None
                     }
                 };
@@ -2429,9 +2429,9 @@ async fn reload_unified_runtime_components(
                     Ok(new_p2p) => {
                         *p2p_state.runtime.lock().expect("p2p runtime lock") = Some(new_p2p);
                     }
-                    Err(err) => eprintln!("RemotePlay P2P reload failed: {err}"),
+                    Err(err) => eprintln!("Weavelo P2P reload failed: {err}"),
                 },
-                Err(err) => eprintln!("RemotePlay P2P reload config failed: {err}"),
+                Err(err) => eprintln!("Weavelo P2P reload config failed: {err}"),
             }
         }
     }
@@ -2461,10 +2461,10 @@ async fn reload_unified_runtime_components(
                     }
                     *relay_state.runtime.lock().expect("relay runtime lock") = Some(new_relay);
                 }
-                Err(err) => eprintln!("RemotePlay relay reload failed: {err}"),
+                Err(err) => eprintln!("Weavelo relay reload failed: {err}"),
             },
             Ok(None) => {}
-            Err(err) => eprintln!("RemotePlay relay reload config failed: {err}"),
+            Err(err) => eprintln!("Weavelo relay reload config failed: {err}"),
         }
     }
 
@@ -2911,7 +2911,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("remote-play-{name}-{unique}"))
+        std::env::temp_dir().join(format!("weavelo-{name}-{unique}"))
     }
 
     #[test]

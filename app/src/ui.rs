@@ -1,6 +1,6 @@
 use crate::design_system::{
     color_accent_amber, color_accent_cyan, color_accent_emerald, color_accent_purple,
-    color_border_fine, color_glass_card, remote_play_themes,
+    color_border_fine, color_glass_card, weavelo_themes,
 };
 use crate::original_design::{full_idle_canvas_stage, stream_status_capsule_card};
 use crate::telemetry_display::UiHostStats;
@@ -41,15 +41,16 @@ pub async fn run_unified_gui(
         component::init(cx).expect("Ely legacy reference assets");
         crate::product_components::theme::install(
             appearance,
-            remote_play_themes(), cx);
+            weavelo_themes(), cx);
         let window_options = WindowOptions {
+            app_id: Some("fun.hackerlife.weavelo".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(80.0), px(60.0)),
                 size(px(1280.0), px(800.0)),
             ))),
             window_min_size: Some(size(px(960.0), px(640.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("RemotePlay".into()),
+                title: Some("Weavelo".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -72,7 +73,7 @@ pub async fn run_unified_gui(
                 async move |cx| {
                     loop {
                         let Ok(refresh_interval) = view.update(&mut *cx, |view, cx| {
-                            // Count all RemotePlay windows, including PiP, as foreground.
+                            // Count all Weavelo windows, including PiP, as foreground.
                             view.window_active = cx.active_window().is_some();
                             view.sync_media_pause();
                             view.check_toolbar_auto_hide(cx);
@@ -92,7 +93,7 @@ pub async fn run_unified_gui(
 
             view
         })
-        .expect("failed to open RemotePlay window");
+        .expect("failed to open Weavelo window");
     });
 
     Ok(())
@@ -435,6 +436,7 @@ impl UnifiedDashboard {
         let host_stats = self.host_stats.clone();
 
         let window_options = WindowOptions {
+            app_id: Some("fun.hackerlife.weavelo".into()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(200.0), px(120.0)),
                 size(px(854.0), px(480.0)),
@@ -443,7 +445,7 @@ impl UnifiedDashboard {
             titlebar: Some(TitlebarOptions {
                 title: Some(
                     format!(
-                        "RemotePlay PiP - {}",
+                        "Weavelo PiP - {}",
                         snapshot
                             .role
                             .session()
@@ -913,7 +915,7 @@ impl Render for PopoutStreamView {
 
         let content = stream_video_canvas_surface(
             current_frame.as_deref(),
-            "RemotePlay PiP",
+            "Weavelo PiP",
             "Waiting for decoded video stream...",
             self.scale_mode,
             &theme,
@@ -977,7 +979,7 @@ impl Render for PopoutStreamView {
                         cx.stop_propagation();
                     }))
                     .child(stream_status_capsule_card(
-                        "RemotePlay PiP".to_string(),
+                        "Weavelo PiP".to_string(),
                         current_frame.is_some(),
                         compact_telemetry_label(stats.as_ref()),
                         true,
@@ -1467,7 +1469,7 @@ fn floating_control_island(
         .map(|s| s.peer.display_name.clone())
         .unwrap_or_else(|| {
             if status == "Ready" {
-                "RemotePlay".to_string()
+                "Weavelo".to_string()
             } else {
                 status.to_string()
             }
@@ -3529,7 +3531,7 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
     let message_color = status_color(message_tone, cx);
     let restart_text = snapshot
         .restart_required
-        .then_some("Restart RemotePlay to activate this group.");
+        .then_some("Restart Weavelo to activate this group.");
     let copy_view = cx.weak_entity();
     let join_view = cx.weak_entity();
     let create_view = cx.weak_entity();
@@ -3560,7 +3562,7 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<UnifiedDash
                                 .text_size(px(12.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.content.primary)
-                                .child("RemotePlay Device Group"),
+                                .child("Weavelo Device Group"),
                         )
                         .child(
                             div()

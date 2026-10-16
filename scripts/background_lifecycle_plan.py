@@ -16,7 +16,7 @@ class LifecyclePlanRejected(ValueError):
     pass
 
 
-def plan(document: dict, executable: str, product_info: dict, *, expected_label='com.remoteplay.host') -> dict:
+def plan(document: dict, executable: str, product_info: dict, *, expected_label='fun.hackerlife.weavelo.host') -> dict:
     if (document.get('Label') != expected_label
             or document.get('ProgramArguments') not in
             ([executable], [executable, '--background-service'])
@@ -29,13 +29,13 @@ def plan(document: dict, executable: str, product_info: dict, *, expected_label=
             or product_info.get('original_gui_compiled') is not True):
         raise LifecyclePlanRejected('Candidate has no explicit background service and attached GPUI entry')
     environment = document.get('EnvironmentVariables', {})
-    if not isinstance(environment, dict) or not environment.get('REMOTE_PLAY_DEVICE_GROUP_DIR'):
+    if not isinstance(environment, dict) or not environment.get('WEAVELO_DEVICE_GROUP_DIR'):
         raise LifecyclePlanRejected('Preserve the explicitly bound existing device profile')
     after = copy.deepcopy(document)
     after['ProgramArguments'] = [executable, '--background-service']
     after['KeepAlive'] = True
     after['RunAtLoad'] = True
-    after['EnvironmentVariables'] = dict(environment, REMOTE_PLAY_HEADLESS='1')
+    after['EnvironmentVariables'] = dict(environment, WEAVELO_HEADLESS='1')
     before_bytes = plistlib.dumps(document, sort_keys=False)
     after_bytes = plistlib.dumps(after, sort_keys=False)
     return {'before': copy.deepcopy(document), 'after': after,

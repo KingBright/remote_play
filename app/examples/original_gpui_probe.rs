@@ -1,7 +1,7 @@
 //! Real native-window probe of the existing design, not a replacement app.
 //! Reuses the original design system and two original visual functions verbatim.
 //! No networking, capture, recording, account state or input injection is started.
-use remote_play_app::product_components;
+use weavelo_app::product_components;
 #[path = "../src/design_system.rs"]
 mod design_system;
 #[path = "../src/original_design.rs"]
@@ -17,7 +17,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use remote_play_app::product_components::{
+use weavelo_app::product_components::{
     assets::UiAsset,
     component::{self, IconName, icon},
     theme::{ActiveTheme},
@@ -60,7 +60,7 @@ impl Render for OriginalDesignProbe {
                 .flex()
                 .justify_center()
                 .child(stream_status_capsule_card(
-                    "RemotePlay".into(),
+                    "Weavelo".into(),
                     false,
                     "Original GPUI design · compatibility probe".into(),
                     false,
@@ -138,9 +138,9 @@ fn main() {
         .with_assets(UiAsset)
         .run(move |cx: &mut App| {
             component::init(cx).expect("Ely native acceptance assets");
-            remote_play_app::product_components::theme::install(
+            weavelo_app::product_components::theme::install(
                 WindowAppearance::Dark,
-                remote_play_themes(), cx);
+                weavelo_themes(), cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds(
@@ -148,7 +148,7 @@ fn main() {
                         size(px(1120.), px(740.)),
                     ))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("RemotePlay original design compatibility".into()),
+                        title: Some("Weavelo original design compatibility".into()),
                         ..Default::default()
                     }),
                     ..Default::default()

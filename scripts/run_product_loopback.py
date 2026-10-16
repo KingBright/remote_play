@@ -35,7 +35,7 @@ def main():
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
     hashes = {name: digest(root / name) for name in sources}
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-    evidence = Path(tempfile.mkdtemp(prefix=f"remoteplay-product-{args.mode}-"))
+    evidence = Path(tempfile.mkdtemp(prefix=f"weavelo-product-{args.mode}-"))
     log_path = evidence / "process.log"
     # Keep a caller-supplied .app/Contents/MacOS path for NSBundle identity;
     # resolve only for byte verification, never collapse the launch path.
@@ -47,7 +47,7 @@ def main():
     with log_path.open("w") as log:
         process = subprocess.Popen(command, cwd=root, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
-        fixture_root = Path(f"/tmp/remoteplay-product-loopback-{process.pid}")
+        fixture_root = Path(f"/tmp/weavelo-product-loopback-{process.pid}")
         receipt = {"mode": args.mode, "pid": process.pid, "head": head,
                    "fixture_root": str(fixture_root), "log": str(log_path),
                    "binary": str(binary), "launch_path": str(launch_path), "binary_sha256": digest(binary),

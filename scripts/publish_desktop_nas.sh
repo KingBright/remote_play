@@ -41,10 +41,10 @@ for name in metadata:
  assert Path(name).name==name and (stage/name).is_file() and not (stage/name).is_symlink(),'missing/linked publication metadata'
 PREFLIGHT
 
-NAS_HOST="${REMOTEPLAY_NAS_HOST:-root@hackerlife.fun}"
-NAS_PORT="${REMOTEPLAY_NAS_PORT:-222}"
-REMOTE_DIR="${REMOTEPLAY_NAS_DOWNLOAD_DIR:-/opt/remoteplay/downloads}"
-BASE="${REMOTEPLAY_DOWNLOAD_BASE_URL:-https://relay.hackerlife.fun:8443/download}"
+NAS_HOST="${WEAVELO_NAS_HOST:-root@hackerlife.fun}"
+NAS_PORT="${WEAVELO_NAS_PORT:-222}"
+REMOTE_DIR="${WEAVELO_NAS_DOWNLOAD_DIR:-/opt/weavelo/downloads}"
+BASE="${WEAVELO_DOWNLOAD_BASE_URL:-https://relay.hackerlife.fun:8443/download}"
 if [[ "$MODE" == --dry-run ]]; then
   python3 - "$STAGE" "$SCOPE" <<'PLAN'
 import hashlib,json,sys
@@ -76,7 +76,7 @@ with tarfile.open(sys.argv[2],'w') as archive:
   assert Path(name).name==name
   archive.add(stage/name,arcname=name,recursive=False)
 PY
-REMOTE_ARCHIVE="/tmp/remoteplay-desktop-$(basename "$ARCHIVE")"
+REMOTE_ARCHIVE="/tmp/weavelo-desktop-$(basename "$ARCHIVE")"
 if [[ "$MODE" != --verify-only ]]; then
 scp -O -P "$NAS_PORT" -o BatchMode=yes -o ConnectTimeout=10 "$ARCHIVE" "$NAS_HOST:$REMOTE_ARCHIVE"
 ssh -p "$NAS_PORT" -o BatchMode=yes -o ConnectTimeout=10 "$NAS_HOST" "python3 - '$REMOTE_ARCHIVE' '$REMOTE_DIR' '$SCOPE'" <<'PY'
@@ -109,7 +109,7 @@ def install(source,target):
   Path(part).unlink(missing_ok=True)
  return True
 try:
- with tempfile.TemporaryDirectory(prefix='remoteplay-desktop-') as temp:
+ with tempfile.TemporaryDirectory(prefix='weavelo-desktop-') as temp:
   temp=Path(temp)
   with tarfile.open(archive) as tar:
    names=set()

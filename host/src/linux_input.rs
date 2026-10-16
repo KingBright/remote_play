@@ -143,7 +143,7 @@ impl LinuxUinputInjector {
 
             // Setup uinput device setup
             let mut uidev: UinputUserDev = std::mem::zeroed();
-            let dev_name = b"RemotePlay Virtual Controller\0";
+            let dev_name = b"Weavelo Virtual Controller\0";
             std::ptr::copy_nonoverlapping(
                 dev_name.as_ptr() as *const c_char,
                 uidev.name.as_mut_ptr(),

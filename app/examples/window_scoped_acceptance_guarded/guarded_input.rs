@@ -16,17 +16,17 @@ fn new_private_receipt(path: &std::path::Path) -> std::io::Result<std::fs::File>
     options.open(path)
 }
 fn existing_profile() -> Result<PathBuf> {
-    let profile=if let Some(value)=std::env::var_os("REMOTE_PLAY_DEVICE_GROUP_DIR") {PathBuf::from(value)}
-    else if cfg!(target_os="windows") {PathBuf::from(std::env::var_os("APPDATA").ok_or("appdata unavailable")?).join("RemotePlay/Mesh")}
-    else if cfg!(target_os="macos") {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join("Library/Application Support/RemotePlay/NativeMesh")}
-    else {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join(".config/remote-play/mesh")};
+    let profile=if let Some(value)=std::env::var_os("WEAVELO_DEVICE_GROUP_DIR") {PathBuf::from(value)}
+    else if cfg!(target_os="windows") {PathBuf::from(std::env::var_os("APPDATA").ok_or("appdata unavailable")?).join("Weavelo/Mesh")}
+    else if cfg!(target_os="macos") {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join("Library/Application Support/Weavelo/NativeMesh")}
+    else {PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?).join(".config/weavelo/mesh")};
     if !profile.is_absolute() || !profile.is_dir() {return Err("existing absolute paired profile required".into());}
     Ok(profile)
 }
 
 const ID: u32 = 256;
 const LIST: u32 = 900_120;
-const TITLE: &str = "RemotePlay scoped-window acceptance";
+const TITLE: &str = "Weavelo scoped-window acceptance";
 const STOPPED: &str = "all capture and connection workers stopped";
 type Result<T> = std::result::Result<T, String>;
 

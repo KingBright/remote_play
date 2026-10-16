@@ -51,7 +51,7 @@ def load_policy(path: Path = POLICY_FILE) -> Policy:
         raise ReleaseRejected('Invalid bundle identifier')
     if not re.fullmatch(r'[0-9a-f]{40}', policy.certificate_sha1):
         raise ReleaseRejected('Expected a pinned public certificate fingerprint')
-    if policy.executable != 'remote_play' or policy.app_name != 'RemotePlay':
+    if policy.executable != 'weavelo' or policy.app_name != 'Weavelo':
         raise ReleaseRejected('Unexpected product name or executable')
     return policy
 
@@ -110,7 +110,7 @@ def verify_app(app: Path, policy: Policy, *, runner=None, check=None) -> dict:
     execute = runner or run
     if check: check()
     if app.is_symlink() or not app.is_dir() or app.name != policy.app_name + '.app':
-        raise ReleaseRejected('Expected a real RemotePlay.app directory, not a symlink or other product')
+        raise ReleaseRejected('Expected a real Weavelo.app directory, not a symlink or other product')
     info_path = app / 'Contents/Info.plist'
     executable = app / 'Contents/MacOS' / policy.executable
     if info_path.is_symlink() or executable.is_symlink() or not executable.is_file():
@@ -120,8 +120,8 @@ def verify_app(app: Path, policy: Policy, *, runner=None, check=None) -> dict:
     except (OSError, plistlib.InvalidFileException) as error:
         raise ReleaseRejected(f'Invalid Info.plist: {error}') from error
     if info.get('CFBundleIdentifier') != policy.bundle_id or info.get('CFBundleExecutable') != policy.executable:
-        raise ReleaseRejected('Bundle identity or executable is not the authorized RemotePlay product')
-    version = str(info.get('RemotePlayReleaseVersion', ''))
+        raise ReleaseRejected('Bundle identity or executable is not the authorized Weavelo product')
+    version = str(info.get('WeaveloReleaseVersion', ''))
     version_key(version)
     build = str(info.get('CFBundleVersion', ''))
     build_key(build)
@@ -277,7 +277,7 @@ def packaging_workspace(output: Path, owned: Path | None):
         yield owned  # The shared transaction owns its cleanup, including crash recovery.
         return
     # Direct function callers are isolated acceptance fixtures, not the production CLI.
-    stage = output / '.remoteplay-macos-package.pending'
+    stage = output / '.weavelo-macos-package.pending'
     stage.mkdir(mode=0o700)
     try:
         yield stage
@@ -295,22 +295,27 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
     if not binary.is_file() or binary.is_symlink():
         raise ReleaseRejected('Missing build output')
     output.mkdir(parents=True, exist_ok=True)
-    archive = archive or output / 'RemotePlay-macos-arm64.zip'
+    archive = archive or output / 'Weavelo-macos-arm64.zip'
     receipt = receipt or archive.with_suffix('.verification.json')
     if archive.exists() or archive.is_symlink() or receipt.exists() or receipt.is_symlink():
         raise ReleaseRejected('Output already exists; update current through the production entrypoint')
     with packaging_workspace(output, workspace) as stage:
-        app = stage / 'RemotePlay.app'
+        app = stage / 'Weavelo.app'
         macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
         macos.mkdir(parents=True); resources.mkdir(parents=True)
         shutil.copy2(binary, macos / policy.executable); os.chmod(macos / policy.executable, 0o755)
         info = {'CFBundleExecutable': policy.executable, 'CFBundleIdentifier': policy.bundle_id,
                 'CFBundleName': policy.app_name, 'CFBundleDisplayName': policy.app_name,
                 'CFBundleShortVersionString': version.split('-')[0], 'CFBundleVersion': build,
-                'RemotePlayReleaseVersion': version, 'CFBundlePackageType': 'APPL',
+                'WeaveloReleaseVersion': version, 'CFBundlePackageType': 'APPL',
                 'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
-                'NSMicrophoneUsageDescription': 'RemotePlay uses the microphone when talkback is enabled.',
-                'NSScreenCaptureUsageDescription': 'RemotePlay captures your screen only for authorized remote viewing.'}
+                'NSMicrophoneUsageDescription': 'Weavelo uses the microphone when talkback is enabled.',
+                'NSScreenCaptureUsageDescription': 'Weavelo captures your screen only for authorized remote viewing.'}
+        icon = Path(__file__).resolve().parents[1] / 'assets/brand/weavelo/AppIcon.icns'
+        if not icon.is_file() or icon.is_symlink():
+            raise ReleaseRejected('Final Weavelo icon is required before signing')
+        shutil.copyfile(icon, resources / 'AppIcon.icns')
+        info['CFBundleIconFile'] = 'AppIcon'
         (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
         (resources / 'VERSION').write_text(version + '\n')
         (resources / 'release-identity.json').write_text(json.dumps({
@@ -396,7 +401,7 @@ def main() -> None:
                 raise ReleaseRejected('Missing build output')
             output = args.output.resolve()
             lifecycle.require(output == lifecycle.macos_output_root(), 'Use the configured default macOS package directory')
-            archive = output / 'RemotePlay-macos-arm64.zip'
+            archive = output / 'Weavelo-macos-arm64.zip'
             files = [archive, archive.with_suffix('.verification.json')]
             current = None
             if any(path.exists() or path.is_symlink() for path in files):
@@ -406,7 +411,7 @@ def main() -> None:
                     lifecycle.require(all(recorded.get(key) == value for key, value in checked.items()),
                                       'Existing current archive differs from its original verified receipt')
             admission = lifecycle.admit(delivery, 'macos-arm64-release', files, current=current,
-                                        aux_stage=output / '.remoteplay-macos-package.pending')
+                                        aux_stage=output / '.weavelo-macos-package.pending')
             staged_archive, staged_receipt = map(Path, admission['staged_files'])
             result = package(args.binary, output, args.version, args.build, policy,
                              archive=staged_archive, receipt=staged_receipt,

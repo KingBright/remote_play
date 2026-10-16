@@ -43,7 +43,7 @@ impl Default for FileTransferRuntimeConfig {
             chunk_payload_len: crate::file_transfer::DEFAULT_FILE_CHUNK_PAYLOAD_LEN,
             send_policy: FileTransferPolicy::default(),
             receive_policy: FileReceivePolicy::default(),
-            receive_dir: std::env::temp_dir().join("remote-play-received-files"),
+            receive_dir: std::env::temp_dir().join("weavelo-received-files"),
             active: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1709,7 +1709,7 @@ mod tests {
     }
 
     async fn udp_file_roundtrip(inject_faults: bool) {
-        let base = unique_temp_dir("remote-play-file-runtime");
+        let base = unique_temp_dir("weavelo-file-runtime");
         let source_dir = base.join("source");
         let receive_dir = base.join("received");
         tokio::fs::create_dir_all(&source_dir)
@@ -1918,7 +1918,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_sender_prioritizes_media_while_file_transfer_completes() {
-        let base = unique_temp_dir("remote-play-file-runtime-media-mix");
+        let base = unique_temp_dir("weavelo-file-runtime-media-mix");
         let source_dir = base.join("source");
         let receive_dir = base.join("received");
         tokio::fs::create_dir_all(&source_dir)
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_publishes_group_completion_after_all_files_materialize() {
-        let base = unique_temp_dir("remote-play-file-runtime-group");
+        let base = unique_temp_dir("weavelo-file-runtime-group");
         let source_dir = base.join("source");
         let receive_dir = base.join("received");
         tokio::fs::create_dir_all(&source_dir)
@@ -2281,7 +2281,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_expands_directory_groups_and_publishes_top_level_path() {
-        let base = unique_temp_dir("remote-play-file-runtime-directory-group");
+        let base = unique_temp_dir("weavelo-file-runtime-directory-group");
         let source_dir = base.join("source");
         let receive_dir = base.join("received");
         let project_dir = source_dir.join("Project");
@@ -2440,7 +2440,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_cleans_partial_file_on_remote_cancel_transfer() {
-        let base = unique_temp_dir("remote-play-file-runtime-cancel-file");
+        let base = unique_temp_dir("weavelo-file-runtime-cancel-file");
         let receive_dir = base.join("received");
         let mut inbound = InboundFileTransfers::new(
             receive_dir.clone(),
@@ -2506,7 +2506,7 @@ mod tests {
 
     #[tokio::test]
     async fn outgoing_cancel_transfer_sends_remote_control_and_stops_reader() {
-        let base = unique_temp_dir("remote-play-file-runtime-outgoing-cancel");
+        let base = unique_temp_dir("weavelo-file-runtime-outgoing-cancel");
         tokio::fs::create_dir_all(&base)
             .await
             .expect("temp dir should be created");
@@ -2602,7 +2602,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_cancel_group_removes_completed_and_partial_files_without_publish() {
-        let base = unique_temp_dir("remote-play-file-runtime-cancel-group");
+        let base = unique_temp_dir("weavelo-file-runtime-cancel-group");
         let receive_dir = base.join("received");
         let mut inbound = InboundFileTransfers::new(
             receive_dir.clone(),
@@ -2732,7 +2732,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_completes_zero_byte_file_after_manifest() {
-        let base = unique_temp_dir("remote-play-file-runtime-empty");
+        let base = unique_temp_dir("weavelo-file-runtime-empty");
         let receive_dir = base.join("received");
         tokio::fs::create_dir_all(&base)
             .await

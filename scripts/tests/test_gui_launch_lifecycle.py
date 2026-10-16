@@ -5,10 +5,10 @@ from scripts.gui_launch_lifecycle import LifecycleRejected, validate
 
 class GuiLifecycleTests(unittest.TestCase):
     def setUp(self):
-        self.path = '/Users/example/Applications/RemotePlay.app/Contents/MacOS/remote_play'
-        self.gui = {'Label': 'com.remoteplay.host', 'ProgramArguments': [self.path],
+        self.path = '/Users/example/Applications/Weavelo.app/Contents/MacOS/weavelo'
+        self.gui = {'Label': 'fun.hackerlife.weavelo.host', 'ProgramArguments': [self.path],
                     'RunAtLoad': True, 'KeepAlive': True,
-                    'EnvironmentVariables': {'REMOTE_PLAY_HEADLESS': '0'}}
+                    'EnvironmentVariables': {'WEAVELO_HEADLESS': '0'}}
 
     def test_reported_old_gui_reopen_configuration_is_rejected(self):
         before = copy.deepcopy(self.gui)
@@ -40,14 +40,14 @@ class GuiLifecycleTests(unittest.TestCase):
                     validate(self.gui, self.path)
 
     def test_a_background_host_can_restart_but_cannot_be_named_as_gui(self):
-        self.gui['EnvironmentVariables']['REMOTE_PLAY_HEADLESS'] = '1'
+        self.gui['EnvironmentVariables']['WEAVELO_HEADLESS'] = '1'
         self.assertEqual(validate(self.gui, self.path, role='host')['role'], 'host')
         with self.assertRaises(LifecycleRejected):
             validate(self.gui, self.path, role='gui')
 
     def test_wrong_executable_missing_role_and_integer_flags_fail_closed(self):
-        for changes in ({'Program': '/wrong/remote_play'}, {'ProgramArguments': []},
-                        {'EnvironmentVariables': {'REMOTE_PLAY_HEADLESS': 1}},
+        for changes in ({'Program': '/wrong/weavelo'}, {'ProgramArguments': []},
+                        {'EnvironmentVariables': {'WEAVELO_HEADLESS': 1}},
                         {'KeepAlive': 1}, {'KeepAlive': {}},
                         {'KeepAlive': {'SuccessfulExit': 0}}):
             with self.subTest(changes=changes):

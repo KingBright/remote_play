@@ -211,7 +211,7 @@ fn mac_input_status(target: InputTarget) -> Result<(), String> {
         InputTarget::Display { id } => crate::input_injector::display_input_status(id),
         InputTarget::Window { .. } => {
             if crate::window_input::permission_available() { Ok(()) }
-            else { Err("The running RemotePlay host needs Accessibility permission for selected-window control; verify its signed App identity, then reselect the source".into()) }
+            else { Err("The running Weavelo host needs Accessibility permission for selected-window control; verify its signed App identity, then reselect the source".into()) }
         }
         #[cfg(test)]
         InputTarget::Portal => return Err("Portal input requires its exact consented session".into()),
@@ -844,8 +844,8 @@ impl Connection {
             ScheduledDataSender::spawn(udp, addr, ScheduledDataSenderConfig::default());
         let (files, file_inbound_rx) = channel_if(
             config.enable_file_transfer
-                || env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD")
-                || std::env::var_os("REMOTE_PLAY_HOST_SEND_FILE").is_some(),
+                || env_flag_enabled("WEAVELO_FILE_CLIPBOARD")
+                || std::env::var_os("WEAVELO_HOST_SEND_FILE").is_some(),
         );
         let (talkback, talkback_inbound_rx) =
             channel_if(config.enable_talkback && cfg!(target_os = "macos"));
@@ -870,7 +870,7 @@ impl Connection {
                 file_inbound_rx,
                 talkback_inbound_rx,
                 talkback_settings_rx,
-                host_send_file: std::env::var_os("REMOTE_PLAY_HOST_SEND_FILE").map(Into::into),
+                host_send_file: std::env::var_os("WEAVELO_HOST_SEND_FILE").map(Into::into),
             },
         ));
         let resources = Arc::new(crate::lifecycle::Resources::default());
@@ -1185,7 +1185,7 @@ impl Connection {
         #[cfg(target_os = "windows")]
         let task_reservation = capture_reservation.clone();
         let wants_audio_group = request.audio
-            || (legacy && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"));
+            || (legacy && env_flag_enabled("WEAVELO_MICROPHONE_CAPTURE"));
         let audio_key = if wants_audio_group {
             Some(
                 selected
@@ -1212,7 +1212,7 @@ impl Connection {
                     include_audio: request.audio,
                     // Legacy screen viewing is not consent to capture the host microphone.
                     include_microphone: legacy
-                        && env_flag_enabled("REMOTE_PLAY_MICROPHONE_CAPTURE"),
+                        && env_flag_enabled("WEAVELO_MICROPHONE_CAPTURE"),
                 });
                 let bridge=forward_delivery_cancel(self.delivery_cancel.clone(),cancel.clone(),tasks.iter().map(tokio::task::JoinHandle::abort_handle).collect());
                 AudioGroup {
@@ -1913,7 +1913,7 @@ async fn run_host_service_inner(
                     }
                     // Retired and wrong-role handshakes never refresh peer liveness.
                     MultiplexedPacket::Control(ControlMessage::SessionHello{..}|ControlMessage::SessionAccept{..},addr)=>{
-                        let _=input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject{reason:"RemotePlay authentication protocol mismatch: version 3 is required; update both endpoints".into()},addr)).await;
+                        let _=input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject{reason:"Weavelo authentication protocol mismatch: version 3 is required; update both endpoints".into()},addr)).await;
                     }
                     MultiplexedPacket::Control(ControlMessage::SessionReject{..},_)=>{}
                     MultiplexedPacket::ClockProbe(probe,received_us,addr)=>{
@@ -1952,7 +1952,7 @@ async fn run_host_service_inner(
                                     if input_owner.owner.is_some_and(|(owner,_)| owner == addr) { let _ = input_owner.release(&injector).await; }
                                     peer.subscriptions.clear(); peer.refresh_audio();
                                 }
-                                if let Err(reason) = input_owner.during_control(&injector,peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("REMOTE_PLAY_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true)).await {
+                                if let Err(reason) = input_owner.during_control(&injector,peer.subscribe(SubscriptionRequest { id: session_id, source: CaptureSource::MainDisplay, width, height, fps, bitrate_kbps, audio: env_flag_enabled("WEAVELO_SYSTEM_AUDIO") }, addr, udp_sender.clone(), config.stats.clone(), true)).await {
                                     input_owner.during_control(&injector,send_session(&udp_sender, addr, SessionCommand::Error { request_id: session_id, reason })).await;
                                 }
                             }

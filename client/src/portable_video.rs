@@ -55,12 +55,12 @@ impl remote_core::VideoFrame for DecodedFrame {
 }
 
 pub fn decoder_program() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
-    if let Some(p) = std::env::var_os("REMOTE_PLAY_FFMPEG_BIN") {
+    if let Some(p) = std::env::var_os("WEAVELO_FFMPEG_BIN") {
         let p = PathBuf::from(p);
         if p.is_absolute() && p.is_file() {
             return Ok(p);
         }
-        return Err("REMOTE_PLAY_FFMPEG_BIN must name an existing absolute file".into());
+        return Err("WEAVELO_FFMPEG_BIN must name an existing absolute file".into());
     }
     let exe = std::env::current_exe()?;
     let dir = exe.parent().ok_or("application directory is unavailable")?;
@@ -78,7 +78,7 @@ pub fn decoder_program() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
     if PathBuf::from("/usr/bin/ffmpeg").is_file() {
         return Ok(PathBuf::from("/usr/bin/ffmpeg"));
     }
-    Err("HEVC playback runtime is missing. Install the complete RemotePlay bundle (Linux: FFmpeg), not only its executable.".into())
+    Err("HEVC playback runtime is missing. Install the complete Weavelo bundle (Linux: FFmpeg), not only its executable.".into())
 }
 
 async fn header_line<R: AsyncBufRead + Unpin>(input: &mut R) -> Result<Option<String>, String> {

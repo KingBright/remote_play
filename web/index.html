@@ -3,7 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>RemotePlay - Ultra-Low-Latency Web Console</title>
+  <link rel="icon" href="./favicon.ico" sizes="any">
+  <link rel="icon" href="./icons/mark-light.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <meta name="theme-color" content="#087F8C">
+  <title>Weavelo - Ultra-Low-Latency Web Console</title>
   <link rel="stylesheet" href="./src/styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,6 +24,7 @@
   <!-- 2. 左上角管理触发胶囊 -->
   <div id="drawer-trigger">
     <button class="glass-btn">
+      <img src="./icons/mark-dark.svg" alt="" width="20" height="20">
       <span class="status-dot"></span>
       <span>Connection</span>
     </button>
@@ -27,7 +33,7 @@
   <!-- 3. 顶部微型悬浮 Dynamic Island -->
   <div id="floating-island">
     <span class="status-dot"></span>
-    <span class="island-title" id="island-title">RemotePlay Ready</span>
+    <span class="island-title" id="island-title">Weavelo Ready</span>
     <span class="telemetry-badge" id="telemetry-badge" hidden>—</span>
     
     <div class="island-divider"></div>
@@ -58,7 +64,7 @@
   <div id="drawer-overlay">
     <div class="drawer-header">
       <div style="display: flex; align-items: center; gap: 8px;">
-        <span style="font-weight: 700; font-size: 14px;">RemotePlay Console</span>
+        <span style="font-weight: 700; font-size: 14px;">Weavelo Console</span>
       </div>
       <button class="glass-btn" id="close-drawer-btn" aria-label="Close connection panel" style="padding: 4px 8px;">✕</button>
     </div>
@@ -72,7 +78,7 @@
       <label for="endpoint">WebSocket endpoint</label>
       <input id="endpoint" type="url" value="ws://localhost:9002/relay" spellcheck="false" autocomplete="off">
       <button class="cyan-btn" id="btn-connect">Connect / Reconnect</button>
-      <p id="connection-status" role="status">Enter an HEVC Annex B video gateway endpoint. The native RemotePlay relay requires a protocol adapter. Discovery, audio and clipboard are not connected in this web client.</p>
+      <p id="connection-status" role="status">Enter an HEVC Annex B video gateway endpoint. The native Weavelo relay requires a protocol adapter. Discovery, audio and clipboard are not connected in this web client.</p>
 
       <!-- 5 信道遥测 -->
       <div style="font-size: 11px; font-weight: 700; color: var(--color-text-secondary); font-family: var(--font-mono); margin-top: 8px;">

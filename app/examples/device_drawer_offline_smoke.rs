@@ -1,7 +1,7 @@
 //! Bounded native drawer smoke. Reuses production source and records actions only.
 //! No runtime, profile, mesh, capture, input forwarding, or Owner is constructed.
 #[cfg(target_os = "macos")]
-use remote_play_app::{AppDevice, product_components};
+use weavelo_app::{AppDevice, product_components};
 #[cfg(target_os = "macos")]
 #[path = "../src/design_system.rs"]
 mod design_system;
@@ -27,7 +27,7 @@ mod native {
     };
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use remote_core::{discovery::DiscoveryScope, role::RoleState};
-    use remote_play_app::product_components::{self, assets::UiAsset, theme::ActiveTheme};
+    use weavelo_app::product_components::{self, assets::UiAsset, theme::ActiveTheme};
     use serde_json::{Value, json};
     use std::{path::PathBuf, time::Duration};
 
@@ -155,7 +155,7 @@ mod native {
                 role: &RoleState::Idle,
             }
             .project(self.state.filter);
-            let data = json!({"pid":std::process::id(),"window_number":self.window_number,"title":"RemotePlay Ely drawer offline smoke", "render_calls":self.renders,
+            let data = json!({"pid":std::process::id(),"window_number":self.window_number,"title":"Weavelo Ely drawer offline smoke", "render_calls":self.renders,
                 "command_id":self.command_id,"mode":format!("{:?}",ElyTheme::global(cx).mode()),"empty":self.empty,"filter":format!("{:?}",self.state.filter),
                 "rows":rows.rows.iter().map(|r|json!({"id":r.device_id,"can_connect":r.can_connect,"can_open_files":r.can_open_files})).collect::<Vec<_>>(),
                 "selected":self.selected,"actions":self.actions,"focused":window.focused(cx).map(|f|format!("{f:?}")),"scale_factor":window.scale_factor(),"bounds":format!("{:?}",window.bounds()),"gpu":gpu,"last_error":self.last_error,
@@ -343,7 +343,7 @@ mod native {
                 product_components::component::init(cx).expect("real Ely assets/fonts");
                 product_components::theme::install(
                     WindowAppearance::Dark,
-                    design_system::remote_play_themes(),
+                    design_system::weavelo_themes(),
                     cx,
                 );
                 let view = cx
@@ -354,7 +354,7 @@ mod native {
                                 size(px(620.), px(800.)),
                             ))),
                             titlebar: Some(TitlebarOptions {
-                                title: Some("RemotePlay Ely drawer offline smoke".into()),
+                                title: Some("Weavelo Ely drawer offline smoke".into()),
                                 ..Default::default()
                             }),
                             ..Default::default()

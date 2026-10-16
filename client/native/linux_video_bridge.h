@@ -1,5 +1,5 @@
-#ifndef REMOTEPLAY_LINUX_VIDEO_BRIDGE_H
-#define REMOTEPLAY_LINUX_VIDEO_BRIDGE_H
+#ifndef WEAVELO_LINUX_VIDEO_BRIDGE_H
+#define WEAVELO_LINUX_VIDEO_BRIDGE_H
 #include <stdint.h>
 #include <stddef.h>
 /* The bridge is only an ABI boundary. Rust owns scheduling, generations, queues,

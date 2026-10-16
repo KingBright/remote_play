@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Weavelo
+Exec=weavelo
+Icon=fun.hackerlife.weavelo
+StartupWMClass=fun.hackerlife.weavelo
+Terminal=false
+Categories=Network;RemoteAccess;

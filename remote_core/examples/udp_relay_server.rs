@@ -6,15 +6,15 @@ use tokio::sync::broadcast;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind_addr = env_socket_addr(
-        "REMOTE_PLAY_RELAY_BIND_ADDR",
+        "WEAVELO_RELAY_BIND_ADDR",
         SocketAddr::from(([0, 0, 0, 0], 39490)),
     )?;
     let server = BoundUdpRelayServer::bind(
         UdpRelayServerConfig::new(bind_addr)
-            .with_event_logging(env_flag_or("REMOTE_PLAY_RELAY_LOG", false)),
+            .with_event_logging(env_flag_or("WEAVELO_RELAY_LOG", false)),
     )
     .await?;
-    println!("RemotePlay UDP relay listening on {}", server.local_addr()?);
+    println!("Weavelo UDP relay listening on {}", server.local_addr()?);
 
     let (cancel_tx, cancel_rx) = broadcast::channel(1);
     let server_task = tokio::spawn(server.run(cancel_rx));

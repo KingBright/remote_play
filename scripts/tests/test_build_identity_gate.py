@@ -36,10 +36,10 @@ class BuildIdentityGateTests(unittest.TestCase):
                                          'x86_64-unknown-linux-gnu', 'dev', 'a' * 64, 'b' * 64)
         self.identity = gate.identity(self.source, self.config)
         self.stage = self.root / 'stage'; self.stage.mkdir()
-        self.app = self.stage / 'RemotePlay'; self.app.mkdir()
-        self.binary = self.app / 'remote_play'; self.binary.write_bytes(b'compiled fixture bytes')
+        self.app = self.stage / 'Weavelo'; self.app.mkdir()
+        self.binary = self.app / 'weavelo'; self.binary.write_bytes(b'compiled fixture bytes')
         self.binary.chmod(0o755)
-        self.info = dict(schema=1, product='RemotePlay', version='2.0.0-alpha.8',
+        self.info = dict(schema=1, product='Weavelo', version='2.0.0-alpha.8',
                          platform='linux', architecture='x86_64', default_gui=gate.RENDERER,
                          original_gui_compiled=True, native_video_compiled=True,
                          build_identity=self.identity)
@@ -293,19 +293,19 @@ class BuildIdentityGateTests(unittest.TestCase):
 
     def test_zip_traversal_extra_file_and_case_alias_rejected(self):
         self.seal()
-        for name in ('../outside', 'RemotePlay/unknown.dll', 'remoteplay/remote_play', 'RemotePlay/CON'):
+        for name in ('../outside', 'Weavelo/unknown.dll', 'weavelo/weavelo', 'Weavelo/CON'):
             with self.subTest(name=name), self.assertRaises(gate.IdentityRejected):
                 self.verify_package(self.zip({name: b'x'}))
 
     def test_case_alias_in_ancestor_is_rejected(self):
         self.seal()
         with self.assertRaises(gate.IdentityRejected):
-            self.verify_package(self.zip({'RemotePlay/sub/a': b'x', 'RemotePlay/Sub/b': b'y'}))
+            self.verify_package(self.zip({'Weavelo/sub/a': b'x', 'Weavelo/Sub/b': b'y'}))
 
     def test_tar_link_is_not_extracted_or_followed(self):
         self.seal(); archive = self.root / 'linked.tar'
         with tarfile.open(archive, 'w') as t:
-            item = tarfile.TarInfo('RemotePlay/remote_play'); item.type = tarfile.SYMTYPE
+            item = tarfile.TarInfo('Weavelo/weavelo'); item.type = tarfile.SYMTYPE
             item.linkname = '/private/never-read'; t.addfile(item)
         with self.assertRaises(gate.IdentityRejected): self.verify_package(archive)
 
@@ -316,7 +316,7 @@ class BuildIdentityGateTests(unittest.TestCase):
             gate.validate_identity(fake, self.commit, self.identity['identity_sha256'])
 
     def test_old_app_cannot_keep_the_daily_entry_even_with_same_bytes(self):
-        self.seal(); old = self.root / 'old_remote_play'; shutil.copy2(self.binary, old)
+        self.seal(); old = self.root / 'old_weavelo'; shutil.copy2(self.binary, old)
         with self.assertRaises(gate.IdentityRejected):
             gate.verify_install(self.app, self.stage / gate.MANIFEST, self.manifest_sha,
                                 self.commit, self.identity['identity_sha256'], self.binary, old)
@@ -374,7 +374,7 @@ class BuildIdentityGateTests(unittest.TestCase):
     def observed_fixture(self, changed=False):
         self.run_git('branch', '-M', 'main')
         target = self.root / 'rust-target'; target.mkdir()
-        binary = target / self.config['target'] / 'debug/remote_play'
+        binary = target / self.config['target'] / 'debug/weavelo'
         binary.parent.mkdir(parents=True); binary.write_bytes(b'compiled fixture bytes')
         after = deepcopy(self.source)
         if changed: after['snapshot_sha256'] = 'f' * 64
@@ -397,9 +397,9 @@ class BuildIdentityGateTests(unittest.TestCase):
         self.assertEqual(result['build_storage']['mode'], 'shared-incremental')
         env = execute.call_args.kwargs['env']
         self.assertNotIn('CARGO_INCREMENTAL', env); self.assertNotIn('CARGO_TARGET_DIR', env)
-        self.assertEqual(Path(env['REMOTEPLAY_BUILD_IDENTITY_FILE']).parent, target)
-        self.assertFalse((target / '.remoteplay-build-identity.json').exists())
-        self.assertFalse((target / '.remoteplay-build-identity.rs').exists())
+        self.assertEqual(Path(env['WEAVELO_BUILD_IDENTITY_FILE']).parent, target)
+        self.assertFalse((target / '.weavelo-build-identity.json').exists())
+        self.assertFalse((target / '.weavelo-build-identity.rs').exists())
         self.receipt = result
         self.seal()  # The ordinary signing/product gate accepts the truthful new receipt.
 
@@ -408,7 +408,7 @@ class BuildIdentityGateTests(unittest.TestCase):
         with self.assertRaises(gate.IdentityRejected): gate.observed_build(self.repo, self.identity, target)
         metadata.assert_not_called()
         self.assertEqual(execute.call_args.args[0][0:2], ['cargo', 'build'])
-        self.assertFalse((target / '.remoteplay-build-identity.json').exists())
+        self.assertFalse((target / '.weavelo-build-identity.json').exists())
 
     def test_fixed_input_recovery_preserves_unknown_and_active_files(self):
         target = self.root / 'rust-target'; target.mkdir()
@@ -515,7 +515,7 @@ class IndependentNativeIdentityTests(unittest.TestCase):
                                     'aarch64-apple-darwin', 'release', 'a' * 64, 'b' * 64)
         expected = gate.identity(self.source, config)
         binary = self.root / 'fixture'; binary.write_bytes(b'not executed')
-        info = dict(schema=1, product='RemotePlay', version=config['version'], platform='macos',
+        info = dict(schema=1, product='Weavelo', version=config['version'], platform='macos',
                     architecture='aarch64', default_gui=gate.RENDERER, original_gui_compiled=True,
                     native_video_compiled=True, build_identity=expected, separated_lifecycle=True,
                     frontend_entry='--gui', background_entry='--background-service')

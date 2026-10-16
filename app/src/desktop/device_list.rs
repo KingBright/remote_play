@@ -174,7 +174,7 @@ pub(crate) fn receive_command(source: &str, receiver: &str) -> Result<String, &'
         || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))) {
         return Err("Device identity cannot be represented in a receive command");
     }
-    Ok(format!("\"$HOME/Applications/RemotePlay.app/Contents/MacOS/remote_play\" --gui-receive '{source}' 60 --receiver '{receiver}'"))
+    Ok(format!("\"$HOME/Applications/Weavelo.app/Contents/MacOS/weavelo\" --gui-receive '{source}' 60 --receiver '{receiver}'"))
 }
 
 fn matches_filter(filter: DeviceFilterKind, scope: DiscoveryScope) -> bool {
@@ -287,7 +287,7 @@ mod tests {
         assert!(receive_command("source", "$(other)").is_err());
         assert!(receive_command("source", "").is_err());
         let command = receive_command("source-1", "receiver-2").unwrap();
-        assert_eq!(command, "\"$HOME/Applications/RemotePlay.app/Contents/MacOS/remote_play\" --gui-receive 'source-1' 60 --receiver 'receiver-2'");
+        assert_eq!(command, "\"$HOME/Applications/Weavelo.app/Contents/MacOS/weavelo\" --gui-receive 'source-1' 60 --receiver 'receiver-2'");
     }
 
 }

@@ -7,7 +7,7 @@ effects=importlib.util.module_from_spec(spec);spec.loader.exec_module(effects)
 
 class NativeInputEffects(unittest.TestCase):
     def fixture(self):
-        window={"id":7,"title":"RemotePlay scoped-window acceptance "+"a"*32,"held_keys":[],"held_buttons":[]}
+        window={"id":7,"title":"Weavelo scoped-window acceptance "+"a"*32,"held_keys":[],"held_buttons":[]}
         before={"pid":9,"A":copy.deepcopy(window),"B":copy.deepcopy(window),"input_events":[],"text":{"B":""}}
         after=copy.deepcopy(before)
         events=[]

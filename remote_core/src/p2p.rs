@@ -584,7 +584,7 @@ impl BoundP2pTunnel {
     }
 
     /// Public/NAT-facing UDP socket. All peers share this socket so the observed
-    /// rendezvous candidate is the same socket that carries RemotePlay traffic.
+    /// rendezvous candidate is the same socket that carries Weavelo traffic.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -1614,7 +1614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn p2p_tunnels_forward_raw_remoteplay_datagrams_both_ways() {
+    async fn p2p_tunnels_forward_raw_weavelo_datagrams_both_ways() {
         let server = BoundP2pRendezvousServer::bind(P2pRendezvousServerConfig::new(
             "127.0.0.1:0".parse().unwrap(),
         ))

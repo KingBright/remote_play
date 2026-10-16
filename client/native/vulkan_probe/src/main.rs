@@ -34,7 +34,7 @@ struct Image<'a>{gpu:&'a Gpu,image:vk::Image,memory:vk::DeviceMemory,view:vk::Im
 impl Drop for Image<'_>{fn drop(&mut self){unsafe{self.gpu.device.destroy_image_view(self.view,None);self.gpu.device.destroy_image(self.image,None);self.gpu.device.free_memory(self.memory,None);}}}
 impl Gpu {
  unsafe fn new(node:&Path)->Result<Self,E>{unsafe{
-    let entry=Entry::load()?;let app=CString::new("RemotePlay generated native video validation")?;
+    let entry=Entry::load()?;let app=CString::new("Weavelo generated native video validation")?;
     let api=entry.try_enumerate_instance_version()?.unwrap_or(vk::API_VERSION_1_0);require(api>=vk::API_VERSION_1_2,"Vulkan 1.2 required")?;
     let application=vk::ApplicationInfo::default().application_name(&app).api_version(vk::API_VERSION_1_2);
     let instance=entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&application),None)?;

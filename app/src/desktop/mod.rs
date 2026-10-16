@@ -44,7 +44,7 @@ fn default_receive_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("Downloads/RemotePlay")
+        .join("Downloads/Weavelo")
 }
 
 fn prefs_path() -> PathBuf {

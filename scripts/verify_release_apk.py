@@ -109,7 +109,7 @@ def verify(apk: Path, root: Path) -> dict:
     manifest = compiled_manifest_attributes(run([
         str(tools / 'aapt'), 'dump', 'xmltree', str(apk), 'AndroidManifest.xml'
     ]))
-    if manifest['package'] != 'com.remoteplay.client':
+    if manifest['package'] != 'fun.hackerlife.weavelo':
         raise ValueError('Unexpected application identity')
     gradle = (root / 'android/app/build.gradle.kts').read_text()
     expected_code = re.search(r'versionCode\s*=\s*(\d+)', gradle)[1]
@@ -126,9 +126,11 @@ def verify(apk: Path, root: Path) -> dict:
         raise ValueError('Release signer differs from the previously published app')
     run([str(tools / 'zipalign'), '-c', '-P', '16', '4', str(apk)])
     expected_jni = set()
-    for source in (root / 'android/app/src/main/java/com/remoteplay/client').glob('*.kt'):
+    for source in (root / 'android/app/src/main/java/fun/hackerlife/weavelo').glob('*.kt'):
         for method in re.findall(r'external\s+fun\s+(\w+)', source.read_text()):
-            expected_jni.add(f'Java_com_remoteplay_client_{source.stem}_{method}')
+            expected_jni.add(f'Java_fun_hackerlife_weavelo_{source.stem}_{method}')
+    if not expected_jni:
+        raise ValueError("Weavelo JNI declarations are missing; cannot verify native linkage")
     libraries = {}
     with zipfile.ZipFile(apk) as archive:
         abis = set()
@@ -156,14 +158,14 @@ def verify(apk: Path, root: Path) -> dict:
         if abis != {'arm64-v8a'}:
             raise ValueError(f'Release ABI set must be exactly the supported ARM64 target: {abis}')
         for abi in abis:
-            name = f'lib/{abi}/libremote_play_android.so'
+            name = f'lib/{abi}/libweavelo_android.so'
             data = archive.read(name)
             missing = sorted(expected_jni - exported_symbols(data))
             if missing:
                 raise ValueError(f'Missing current JNI entry points in {abi}: {missing}')
-            staged = root / 'android/app/src/main/jniLibs' / abi / 'libremote_play_android.so'
+            staged = root / 'android/app/src/main/jniLibs' / abi / 'libweavelo_android.so'
             if hashlib.sha256(staged.read_bytes()).hexdigest() != libraries[name]:
-                raise ValueError('APK contains stale RemotePlay native code')
+                raise ValueError('APK contains stale Weavelo native code')
     return dict(version=manifest['version'], version_code=manifest['version_code'],
                 min_sdk=manifest['min_sdk'], target_sdk=manifest['target_sdk'], debuggable=False,
                 signer_sha256=fingerprint[1], abi=sorted(abis), native_16kb_aligned=True,

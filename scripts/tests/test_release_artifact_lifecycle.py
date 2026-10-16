@@ -83,7 +83,7 @@ class ReleaseHookTests(unittest.TestCase):
 
     def test_second_producer_refused_without_work(self):
         with hook.producer('android-native'):
-            with self.assertRaisesRegex(hook.Refusal, 'Another RemotePlay'):
+            with self.assertRaisesRegex(hook.Refusal, 'Another Weavelo'):
                 with hook.producer('android-native'): self.fail('overlap')
         self.assertEqual(len(self.calls), 2)
 
@@ -249,7 +249,7 @@ class ReleaseHookTests(unittest.TestCase):
         self.assertIn('CLEANUP_DEFERRED', output.getvalue())
 
     def test_mac_receipt_binds_eventual_current_path_and_exact_stage(self):
-        files = [self.root/'RemotePlay-macos-arm64.zip', self.root/'RemotePlay-macos-arm64.verification.json']
+        files = [self.root/'Weavelo-macos-arm64.zip', self.root/'Weavelo-macos-arm64.verification.json']
         admission = hook.admit(self.state, 'macos-arm64-release', files, aux_stage=self.root/'.mac-work')
         archive, receipt = map(Path, admission['staged_files']); archive.write_bytes(b'zip')
         report = {'signature_verified': True, 'archive': str(files[0]), 'archive_sha256': hook.hashed(archive)[0], 'size_bytes': 3}

@@ -29,7 +29,7 @@ def run(repo: Path, target: Path, stage: Path, commit: str,
     # Remote agent verbosity is a runtime setting, not a compiler override.
     os.environ.pop('RUST_LOG', None)
     target = gate.shared_target(repo, target)
-    gate.require(old_binary.resolve() != target / 'debug/remote_play',
+    gate.require(old_binary.resolve() != target / 'debug/weavelo',
                  'Old-binary evidence must be separate from the compiler output being replaced')
     gate.require(gate.hash_file(old_binary) == gate.sha(old_sha256), 'Old-binary evidence changed')
     product_platform = 'macos' if sys.platform == 'darwin' else 'linux'
@@ -50,7 +50,7 @@ def run(repo: Path, target: Path, stage: Path, commit: str,
         identity_file_sha = gate.hash_file(identity_file)
         module = inputs.module
         original_module_sha = gate.hash_file(module)
-        command = ['cargo', 'build', '-p', 'remote_play_app', '--bin', 'remote_play',
+        command = ['cargo', 'build', '-p', 'weavelo_app', '--bin', 'weavelo',
                    '--no-default-features', '--features', ','.join(config['features']),
                    '--profile', 'dev', '--locked', '--offline', '-j', '2',
                    '--message-format=json-render-diagnostics']
@@ -66,12 +66,12 @@ def run(repo: Path, target: Path, stage: Path, commit: str,
             try: messages.append(json.loads(line))
             except ValueError: continue
         artifacts = [m for m in messages if m.get('reason') == 'compiler-artifact' and
-                     m.get('target', {}).get('name') == 'remote_play' and
+                     m.get('target', {}).get('name') == 'weavelo' and
                      'bin' in m.get('target', {}).get('kind', [])]
         gate.require(len(artifacts) == 1 and artifacts[0].get('fresh') is False,
                      'Product must actually be rebuilt; cached completion is insufficient')
         binary = Path(artifacts[0]['executable'])
-        gate.require(binary == target / 'debug' / 'remote_play', 'Unexpected compiled product entry')
+        gate.require(binary == target / 'debug' / 'weavelo', 'Unexpected compiled product entry')
         gate.require(gate.source_snapshot(repo, commit) == source and
                      gate.read_json(identity_file, identity_file_sha) == expected and
                      gate.hash_file(module) == original_module_sha, 'Build source/identity changed')
@@ -110,19 +110,19 @@ def run(repo: Path, target: Path, stage: Path, commit: str,
             folder = stage / name; folder.mkdir(mode=0o700)
             document = folder / 'compiled-build-identity.json'; gate.write_new(document, record)
             generated = folder / 'compiled-build-identity.rs'; generated.write_bytes(gate.compiled_module(record))
-            environment = dict(hook_env, OUT_DIR=str(folder), REMOTEPLAY_BUILD_IDENTITY_FILE=str(document),
-                               REMOTEPLAY_BUILD_IDENTITY_RS=str(generated))
+            environment = dict(hook_env, OUT_DIR=str(folder), WEAVELO_BUILD_IDENTITY_FILE=str(document),
+                               WEAVELO_BUILD_IDENTITY_RS=str(generated))
             result = subprocess.run([str(hook)], env=environment, capture_output=True)
             (folder / 'stdout.log').write_bytes(result.stdout)
             (folder / 'stderr.log').write_bytes(result.stderr)
-            gate.require(result.returncode != 0 and b'RemotePlay build identity rejected:' in result.stderr,
+            gate.require(result.returncode != 0 and b'Weavelo build identity rejected:' in result.stderr,
                          'Native build script accepted a forbidden product configuration')
             cases[name] = True
         wrong_gui = deepcopy(expected); wrong_gui['configuration']['gui_entry'] = 'egui-diagnostic'
         hook_case('wrong_gui_native_build_script', wrong_gui)
         wrong_features = deepcopy(expected); wrong_features['configuration']['features'] = []
         hook_case('wrong_features_native_build_script', wrong_features)
-        sidecar_env = dict(env, REMOTEPLAY_BUILD_IDENTITY_FILE=str(stage / 'wrong_gui_native_build_script' / 'compiled-build-identity.json'))
+        sidecar_env = dict(env, WEAVELO_BUILD_IDENTITY_FILE=str(stage / 'wrong_gui_native_build_script' / 'compiled-build-identity.json'))
         changed_runtime = subprocess.run([str(candidate), '--product-info-json'], env=sidecar_env, capture_output=True)
         gate.require(changed_runtime.returncode == 0 and gate.json_bytes(changed_runtime.stdout) == receipt['product_info'],
                      'Runtime sidecar changed compiled identity')
@@ -130,7 +130,7 @@ def run(repo: Path, target: Path, stage: Path, commit: str,
         gate.require(gate.hash_file(candidate) == binary_sha and gate.hash_file(hook) == hook_sha and
                      gate.source_snapshot(repo, commit) == source, 'Acceptance altered source/artifacts')
         receipt.update(rejection_cases=cases, native_build_script_sha256=hook_sha)
-        manifest_sha = gate.write_new(stage / 'remoteplay-build-candidate-manifest.json', receipt)
+        manifest_sha = gate.write_new(stage / 'weavelo-build-candidate-manifest.json', receipt)
         return {'source_commit': commit, 'source_snapshot_sha256': source['snapshot_sha256'],
                 'configuration_sha256': expected['configuration_sha256'], 'identity_sha256': expected['identity_sha256'],
                 'binary_sha256': binary_sha, 'candidate_manifest_sha256': manifest_sha,

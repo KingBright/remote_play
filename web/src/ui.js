@@ -1,9 +1,9 @@
-import { RemotePlayWebClient } from './client.js';
+import { WeaveloWebClient } from './client.js';
 import { canvasPoint } from './input.js';
 
 document.addEventListener('DOMContentLoaded', () => {
   const canvas = document.getElementById('remote-canvas');
-  const client = new RemotePlayWebClient(canvas);
+  const client = new WeaveloWebClient(canvas);
 
   const islandTitle = document.getElementById('island-title');
   const telemetryBadge = document.getElementById('telemetry-badge');
@@ -18,8 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 状态与遥测更新
   client.onStateChange = (state) => {
-    const labels = { disconnected: 'RemotePlay Ready', connecting: 'Connecting…',
-      connected: 'Waiting for video…', streaming: 'RemotePlay Live', error: 'Connection failed' };
+    const labels = { disconnected: 'Weavelo Ready', connecting: 'Connecting…',
+      connected: 'Waiting for video…', streaming: 'Weavelo Live', error: 'Connection failed' };
     islandTitle.textContent = labels[state];
     telemetryBadge.hidden = !['connected', 'streaming'].includes(state);
     btnDisconnect.disabled = !['connecting', 'connected', 'streaming'].includes(state);

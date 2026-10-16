@@ -25,14 +25,14 @@ import zipfile
 
 from verify_desktop_gui import GuiReleaseRejected, validate as validate_gui
 
-MANIFEST = 'remoteplay-release-manifest.json'
+MANIFEST = 'weavelo-release-manifest.json'
 RENDERER = 'restored-original-gpui'
 LIMIT = 1024 ** 3
 MAX_FILES = 20000
 LAYOUTS = {
-    'macos': ('RemotePlay.app', 'Contents/MacOS/remote_play'),
-    'linux': ('RemotePlay', 'remote_play'),
-    'windows': ('RemotePlay', 'remote_play.exe'),
+    'macos': ('Weavelo.app', 'Contents/MacOS/weavelo'),
+    'linux': ('Weavelo', 'weavelo'),
+    'windows': ('Weavelo', 'weavelo.exe'),
 }
 FEATURES = {'macos': ['gpui-restoration'],
             'linux': ['gpui-restoration', 'native-linux-video'],
@@ -216,7 +216,7 @@ def configuration(platform: str, architecture: str, version: str, target: str, p
     return {'platform': platform, 'architecture': architecture, 'version': version,
             'target': target, 'profile': profile, 'features': list(FEATURES[platform]),
             'default_features': False, 'locked': True, 'offline': True,
-            'gui_entry': RENDERER, 'binary': 'remote_play', 'package': 'remote_play_app',
+            'gui_entry': RENDERER, 'binary': 'weavelo', 'package': 'weavelo_app',
             'gui_arguments': ['--gui'] if platform == 'macos' else [],
             'toolchain_sha256': sha(toolchain_sha256),
             'environment_sha256': sha(environment_sha256)}
@@ -387,8 +387,8 @@ class BuildInputs:
     """
     def __init__(self, repo: Path, target: Path, expected: dict):
         self.repo, self.target, self.expected = repo, target, expected
-        self.document = target / '.remoteplay-build-identity.json'
-        self.module = target / '.remoteplay-build-identity.rs'
+        self.document = target / '.weavelo-build-identity.json'
+        self.module = target / '.weavelo-build-identity.rs'
         self.paths = (self.document, self.module)
         self.fd = self.release_fd = None
         self.state = None
@@ -422,7 +422,7 @@ class BuildInputs:
         folder.mkdir(mode=0o700, exist_ok=True)
         try:
             # Same finite operation lock as formal packaging; do not call its authority setup.
-            for name in (folder / 'release-producer.lock', self.target / '.remoteplay-build-identity.lock'):
+            for name in (folder / 'release-producer.lock', self.target / '.weavelo-build-identity.lock'):
                 fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
                 if self.release_fd is None: self.release_fd = fd
                 else: self.fd = fd
@@ -486,8 +486,8 @@ class BuildInputs:
             self.fd = self.release_fd = None
 
     def environment(self):
-        return dict(build_environment(), REMOTEPLAY_BUILD_IDENTITY_FILE=str(self.document),
-                    REMOTEPLAY_BUILD_IDENTITY_RS=str(self.module))
+        return dict(build_environment(), WEAVELO_BUILD_IDENTITY_FILE=str(self.document),
+                    WEAVELO_BUILD_IDENTITY_RS=str(self.module))
 
 
 def observed_build(repo: Path, expected: dict, target: Path | None = None, *, lifecycle_binding: Path | None = None) -> dict:
@@ -507,7 +507,7 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None, *, li
               if lifecycle_binding is not None else shared_target(repo, target))
     require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Four GiB free-space reserve required')
     config = expected['configuration']
-    command = ['cargo', 'build', '-p', 'remote_play_app', '--bin', 'remote_play',
+    command = ['cargo', 'build', '-p', 'weavelo_app', '--bin', 'weavelo',
                '--no-default-features', '--features', ','.join(config['features']),
                '--profile', config['profile'], '--target', config['target'], '--locked', '--offline', '-j', '2']
     with BuildInputs(repo, target, expected) as inputs:
@@ -524,7 +524,7 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None, *, li
         if lifecycle_binding is not None:
             require(hash_file(lifecycle_binding) == binding_sha256, 'Observation binding changed during build')
         profile = 'debug' if config['profile'] == 'dev' else 'release'
-        binary = target / config['target'] / profile / ('remote_play.exe' if config['platform'] == 'windows' else 'remote_play')
+        binary = target / config['target'] / profile / ('weavelo.exe' if config['platform'] == 'windows' else 'weavelo')
         value = hash_file(binary)
         info = product_info(binary, expected, value)
         return {'schema': 2, 'kind': 'observed-build', 'build_identity': expected,
@@ -591,7 +591,7 @@ def seal_tree(stage: Path, build_receipt: dict, expected_commit: str, expected_i
         require(final_sha == compiler_sha, 'Staged binary differs from observed compiler output')
     info = product_info(binary, expected, final_sha)
     records = files_in(app)
-    manifest = {'schema': 1, 'kind': 'remoteplay-release', 'build_identity': expected,
+    manifest = {'schema': 1, 'kind': 'weavelo-release', 'build_identity': expected,
                 'artifact_root': top, 'executable': executable, 'files': records,
                 'compiler_binary_sha256': compiler_sha, 'binary_sha256': final_sha,
                 'product_info': info, 'signing': signing,
@@ -606,7 +606,7 @@ def seal_tree(stage: Path, build_receipt: dict, expected_commit: str, expected_i
 def manifest_document(raw: bytes, expected_sha: str, expected_commit: str, expected_identity: str) -> dict:
     require(digest(raw) == sha(expected_sha), 'Package manifest differs from independently pinned release receipt')
     m = json_bytes(raw)
-    require(type(m.get('schema')) is int and m['schema'] == 1 and m.get('kind') == 'remoteplay-release',
+    require(type(m.get('schema')) is int and m['schema'] == 1 and m.get('kind') == 'weavelo-release',
             'Missing release manifest contract')
     expected = validate_identity(m.get('build_identity'), expected_commit, expected_identity)
     platform = expected['configuration']['platform']

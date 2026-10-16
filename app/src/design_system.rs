@@ -11,7 +11,7 @@ pub(crate) const fn product_mono_font() -> &'static str {
     if cfg!(target_os="windows"){"Consolas"}else{"monospace"}
 }
 
-pub fn remote_play_themes() -> ThemeSet {
+pub fn weavelo_themes() -> ThemeSet {
     ThemeSet::new(light_theme()).dark(dark_theme())
 }
 

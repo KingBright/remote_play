@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a built RemotePlay GUI before packaging; does not start a GUI or mesh.
+"""Verify a built Weavelo GUI before packaging; does not start a GUI or mesh.
 
 The binary's --product-info-json path returns before profile creation. This gate
 checks compiled presentation identity, not visual, functional or performance QA.
@@ -18,7 +18,7 @@ class GuiReleaseRejected(RuntimeError):
 def validate(info: dict, platform: str, version: str) -> None:
     if 'diagnostic_gui_requires_opt_in' in info:
         raise GuiReleaseRejected('Build metadata still advertises the legacy diagnostic GUI')
-    required = {'schema': 1, 'product': 'RemotePlay', 'platform': platform,
+    required = {'schema': 1, 'product': 'Weavelo', 'platform': platform,
                 'version': version, 'default_gui': 'restored-original-gpui',
                 'original_gui_compiled': True, 'native_video_compiled': True}
     for key, value in required.items():
@@ -33,7 +33,7 @@ def verify(binary: Path, platform: str, version: str) -> dict:
         raise GuiReleaseRejected('Product binary is not a regular file')
     before = hashlib.sha256(binary.read_bytes()).hexdigest()
     env = os.environ.copy()
-    for key in ('REMOTE_PLAY_LEGACY_MAC_GUI',):
+    for key in ('WEAVELO_LEGACY_MAC_GUI',):
         env.pop(key, None)
     run = subprocess.run([str(binary), '--product-info-json'], env=env,
                          capture_output=True, text=True, timeout=15)

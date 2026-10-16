@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-if [[ -z "${REMOTEPLAY_RELEASE_LOCK_FD:-}" ]]; then
+if [[ -z "${WEAVELO_RELEASE_LOCK_FD:-}" ]]; then
     exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" run android-release "$@"
 fi
 python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" check-lock android-release
-SIGN_DIR="${REMOTEPLAY_ANDROID_SIGNING_DIR:-$HOME/Library/Application Support/RemotePlay/Signing}"
-KEYSTORE="${REMOTEPLAY_ANDROID_KEYSTORE:-$SIGN_DIR/remoteplay-release.p12}"
-ALIAS="${REMOTEPLAY_ANDROID_KEY_ALIAS:-remoteplay}"
+# Existing signing material: location/service/alias are intentionally not recreated.
+SIGN_DIR="${WEAVELO_ANDROID_SIGNING_DIR:-$HOME/Library/Application Support/RemotePlay/Signing}"
+KEYSTORE="${WEAVELO_ANDROID_KEYSTORE:-$SIGN_DIR/remoteplay-release.p12}"
+ALIAS="${WEAVELO_ANDROID_KEY_ALIAS:-remoteplay}"
 SERVICE="com.remoteplay.android.release.signing"
 ACCOUNT="${USER:-remoteplay}"
 SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Library/Android/sdk}}"
@@ -23,12 +24,12 @@ fi
 [ -d "$SDK/build-tools" ] || { echo "Android SDK not found: $SDK" >&2; exit 1; }
 PASSWORD="$(security find-generic-password -a "$ACCOUNT" -s "$SERVICE" -w)" || { echo 'Release signing password missing from macOS Keychain' >&2; exit 1; }
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK"
-export REMOTEPLAY_ANDROID_KEYSTORE="$KEYSTORE" REMOTEPLAY_ANDROID_KEYSTORE_PASSWORD="$PASSWORD" REMOTEPLAY_ANDROID_KEY_ALIAS="$ALIAS" REMOTEPLAY_ANDROID_KEY_PASSWORD="$PASSWORD"
-trap 'unset PASSWORD REMOTEPLAY_ANDROID_KEYSTORE_PASSWORD REMOTEPLAY_ANDROID_KEY_PASSWORD' EXIT
+export WEAVELO_ANDROID_KEYSTORE="$KEYSTORE" WEAVELO_ANDROID_KEYSTORE_PASSWORD="$PASSWORD" WEAVELO_ANDROID_KEY_ALIAS="$ALIAS" WEAVELO_ANDROID_KEY_PASSWORD="$PASSWORD"
+trap 'unset PASSWORD WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_PASSWORD' EXIT
 cd "$ROOT"
 ./scripts/build_android_native.sh
 cd android
-APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/.remoteplay-android-package.pending"
+APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/.weavelo-android-package.pending"
 ./gradlew --no-daemon --no-configuration-cache --max-workers=2 -Pandroid.injected.apk.location="$APK_WORKSPACE" -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
 APK="$APK_WORKSPACE/release/app-release.apk"
 [ -f "$APK" ] || { echo "Signed release APK not found: $APK" >&2; exit 1; }

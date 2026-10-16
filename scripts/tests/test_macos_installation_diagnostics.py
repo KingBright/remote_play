@@ -19,10 +19,10 @@ class InstallationDiagnosticsTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.home = Path(self.temporary.name)
-        self.app = self.home / 'Applications/RemotePlay.app'
-        self.exe = self.app / 'Contents/MacOS/remote_play'
-        self.profile = self.home / 'Library/Application Support/RemotePlay/NativeMesh'
-        self.plist = self.home / 'Library/LaunchAgents/com.remoteplay.host.plist'
+        self.app = self.home / 'Applications/Weavelo.app'
+        self.exe = self.app / 'Contents/MacOS/weavelo'
+        self.profile = self.home / 'Library/Application Support/Weavelo/NativeMesh'
+        self.plist = self.home / 'Library/LaunchAgents/fun.hackerlife.weavelo.host.plist'
         self.write_bundle(self.app, '2.0.0-alpha.8', '20261004.80')
         self.plist.parent.mkdir(parents=True)
         self.plist.write_bytes(plistlib.dumps({'Label': diagnostics.LABEL, 'ProgramArguments': [str(self.exe)]}))
@@ -35,15 +35,15 @@ class InstallationDiagnosticsTests(unittest.TestCase):
     def write_bundle(self, app, version, build):
         app.joinpath('Contents').mkdir(parents=True, exist_ok=True)
         app.joinpath('Contents/Info.plist').write_bytes(plistlib.dumps({
-            'CFBundleIdentifier': 'com.remoteplay.unified', 'CFBundleExecutable': 'remote_play',
-            'RemotePlayReleaseVersion': version, 'CFBundleVersion': build}))
+            'CFBundleIdentifier': 'fun.hackerlife.weavelo', 'CFBundleExecutable': 'weavelo',
+            'WeaveloReleaseVersion': version, 'CFBundleVersion': build}))
 
     def run_command(self, argv, **kwargs):
         self.calls.append(argv)
         self.assertEqual(kwargs, dict(capture_output=True, text=True, timeout=10))
         if argv == ['/bin/ps', '-axo', 'pid=,comm=']:
             return SimpleNamespace(returncode=0, stdout=self.process_output, stderr='')
-        if argv == ['/bin/launchctl', 'print', f'gui/{self.uid}/com.remoteplay.host']:
+        if argv == ['/bin/launchctl', 'print', f'gui/{self.uid}/fun.hackerlife.weavelo.host']:
             return SimpleNamespace(returncode=0, stdout=self.service_output, stderr='')
         self.fail(f'Unexpected execution: {argv}')
 
@@ -56,13 +56,13 @@ class InstallationDiagnosticsTests(unittest.TestCase):
 
     def test_old_install_and_development_copy_are_reported_separately(self):
         self.write_bundle(self.app, '2.0.0-alpha.7', '20260930.7')
-        other = self.home / 'target/package/RemotePlay Unified.app'
+        other = self.home / 'target/package/Weavelo Unified.app'
         self.write_bundle(other, '2.0.0-alpha.5', '20260929.5')
-        self.process_output += f'18849 {other}/Contents/MacOS/remote_play\n'
+        self.process_output += f'18849 {other}/Contents/MacOS/weavelo\n'
         report = self.collect()
         self.assertIn('installed_version_differs_from_expected', report['findings'])
-        self.assertIn('multiple_remoteplay_processes', report['findings'])
-        self.assertIn('noncanonical_remoteplay_process', report['findings'])
+        self.assertIn('multiple_weavelo_processes', report['findings'])
+        self.assertIn('noncanonical_weavelo_process', report['findings'])
         self.assertEqual(report['processes'][1]['on_disk_bundle']['version'], '2.0.0-alpha.5')
         self.assertEqual(len(self.calls), 2)
 
@@ -115,7 +115,7 @@ class InstallationDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_ARGUMENT', json.dumps(report))
 
     def test_loaded_service_is_compared_independently_from_plist(self):
-        self.service_output = ' program = /old/remote_play\n state = running\n pid = 77\n'
+        self.service_output = ' program = /old/weavelo\n state = running\n pid = 77\n'
         report = self.collect()
         self.assertTrue(report['launcher']['canonical'])
         self.assertIn('loaded_service_does_not_match_canonical_app', report['findings'])
@@ -175,7 +175,7 @@ class InstallationDiagnosticsTests(unittest.TestCase):
     def test_service_absence_requires_documented_response(self):
         for error, expected in [('Could not find service', 'not_loaded'), ('Operation not permitted', 'command_failed')]:
             with self.subTest(error=error):
-                result = diagnostics.observe_command(['/bin/launchctl', 'print', 'gui/501/com.remoteplay.host'],
+                result = diagnostics.observe_command(['/bin/launchctl', 'print', 'gui/501/fun.hackerlife.weavelo.host'],
                     lambda *a, **kw: SimpleNamespace(returncode=1, stdout='', stderr=error))
                 self.assertEqual(result['status'], expected)
 

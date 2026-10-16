@@ -92,8 +92,8 @@ def main():
     config = gate.configuration('windows', 'x86_64', (repo/'VERSION').read_text().strip(),
         'x86_64-pc-windows-msvc', 'release', gate.toolchain_digest(), gate.environment_digest())
     expected = gate.identity(source, config)
-    lock = target / '.remoteplay-windows-current.lock'
-    inputs = [target/'.remoteplay-build-identity.json', target/'.remoteplay-build-identity.rs']
+    lock = target / '.weavelo-windows-current.lock'
+    inputs = [target/'.weavelo-build-identity.json', target/'.weavelo-build-identity.rs']
     payloads = [json.dumps(expected, sort_keys=True, indent=2).encode()+b'\n', gate.compiled_module(expected)]
     gate.require(not any(p.exists() or p.is_symlink() for p in [lock, *inputs]),
                  'Existing producer/input state must be reconciled; never overwrite it')
@@ -107,8 +107,8 @@ def main():
                 output.write(raw)
             owned[path] = hashlib.sha256(raw).hexdigest()
         compiler_path = lambda path: '\\\\?\\' + str(path)
-        build_env = dict(env, REMOTEPLAY_BUILD_IDENTITY_FILE=compiler_path(inputs[0]), REMOTEPLAY_BUILD_IDENTITY_RS=compiler_path(inputs[1]))
-        command = ['cargo','build','--release','-p','remote_play_app','--bin','remote_play',
+        build_env = dict(env, WEAVELO_BUILD_IDENTITY_FILE=compiler_path(inputs[0]), WEAVELO_BUILD_IDENTITY_RS=compiler_path(inputs[1]))
+        command = ['cargo','build','--release','-p','weavelo_app','--bin','weavelo',
             '--no-default-features','--features','gpui-restoration,native-windows-video','--locked','--offline','-j','2']
         settled = False
         child = subprocess.Popen(command, cwd=repo, env=build_env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
@@ -118,12 +118,12 @@ def main():
                      'Source changed during compilation')
         gate.require(gate.toolchain_digest()==config['toolchain_sha256']
                      and gate.environment_digest()==config['environment_sha256'], 'Compiler environment changed')
-        binary = target/'release/remote_play.exe'
+        binary = target/'release/weavelo.exe'
         binary_hash = gate.hash_file(binary)
         info = gate.product_info(binary, expected, binary_hash)
         helper_hash = None
         if args.with_input_helper:
-            helper_command = ['cargo','build','--release','-p','remote_play_app','--example',
+            helper_command = ['cargo','build','--release','-p','weavelo_app','--example',
                 'window_scoped_acceptance_guarded','--no-default-features','--features',
                 'gpui-restoration,native-windows-video','--locked','--offline','-j','2']
             settled = False
@@ -152,7 +152,7 @@ def main():
         gate.require(gate.source_snapshot(repo,args.expected_commit,expected_patch=args.expected_patch)==source,
                      'Source changed during packaging')
         print(json.dumps({'build_identity_sha256':expected['identity_sha256'],'commit':args.expected_commit,
-            'binary_sha256':binary_hash,'receipt':str(receipt_path),'package':str(package/'RemotePlay-Windows-x64.zip')}))
+            'binary_sha256':binary_hash,'receipt':str(receipt_path),'package':str(package/'Weavelo-Windows-x64.zip')}))
     finally:
         if child is not None and child.poll() is None:
             subprocess.run(['taskkill.exe','/PID',str(child.pid),'/T','/F'],capture_output=True)

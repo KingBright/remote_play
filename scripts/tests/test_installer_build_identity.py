@@ -31,8 +31,8 @@ class IdentityInstallerFixture(InstallerFixture):
         self.profile.mkdir(parents=True, mode=0o700)
         self.before = {'Label': installer.LABEL, 'ProgramArguments': [str(self.executable)],
                        'KeepAlive': True, 'RunAtLoad': True,
-                       'EnvironmentVariables': {'REMOTE_PLAY_DEVICE_GROUP_DIR': str(self.profile),
-                                                'REMOTE_PLAY_DISPLAY_NAME': 'Synthetic fixture'}}
+                       'EnvironmentVariables': {'WEAVELO_DEVICE_GROUP_DIR': str(self.profile),
+                                                'WEAVELO_DISPLAY_NAME': 'Synthetic fixture'}}
         self.original_plist = plistlib.dumps(self.before)
         self.plist.write_bytes(self.original_plist)
         self.state.update(program=str(self.executable), arguments=[str(self.executable)])
@@ -40,7 +40,7 @@ class IdentityInstallerFixture(InstallerFixture):
         self.observer.write_bytes(b'synthetic observer, never executed')
         self.infos = {}
         for app, info in ((self.target, self.old), (self.source, self.new)):
-            info['executable_sha256'] = gate.hash_file(app / 'Contents/MacOS/remote_play')
+            info['executable_sha256'] = gate.hash_file(app / 'Contents/MacOS/weavelo')
             (app / '.fixture-info.json').write_text(json.dumps(info))
         self.value = self.make_contract(self.source, self.new, 'a' * 40)
         self.expected = self.value['expectations']
@@ -60,13 +60,13 @@ class IdentityInstallerFixture(InstallerFixture):
         config = gate.configuration('macos', 'aarch64', signed['version'],
                                     'aarch64-apple-darwin', 'dev', 'd' * 64, 'e' * 64)
         identity = gate.identity(source, config)
-        info = dict(schema=1, product='RemotePlay', version=signed['version'], platform='macos',
+        info = dict(schema=1, product='Weavelo', version=signed['version'], platform='macos',
                     architecture='aarch64', default_gui=gate.RENDERER, original_gui_compiled=True,
                     native_video_compiled=True, separated_lifecycle=True, frontend_entry='--gui',
                     background_entry='--background-service', build_identity=identity)
         self.infos[signed['version']] = info
-        manifest = dict(schema=1, kind='remoteplay-release', build_identity=identity,
-                        artifact_root='RemotePlay.app', executable='Contents/MacOS/remote_play',
+        manifest = dict(schema=1, kind='weavelo-release', build_identity=identity,
+                        artifact_root='Weavelo.app', executable='Contents/MacOS/weavelo',
                         product_info=deepcopy(info), files=gate.files_in(app),
                         binary_sha256=signed['executable_sha256'],
                         compiler_binary_sha256=signed['executable_sha256'],
@@ -80,7 +80,7 @@ class IdentityInstallerFixture(InstallerFixture):
     def zip_candidate(self):
         with zipfile.ZipFile(self.archive, 'w') as output:
             for p in self.source.rglob('*'):
-                if p.is_file(): output.write(p, 'RemotePlay.app/' + p.relative_to(self.source).as_posix())
+                if p.is_file(): output.write(p, 'Weavelo.app/' + p.relative_to(self.source).as_posix())
             output.writestr(gate.MANIFEST, self.value['raw_manifest'])
 
     def metadata(self, binary, expected, expected_hash):
@@ -145,7 +145,7 @@ class IdentityBoundTransactions(IdentityInstallerFixture):
                                      self.expected.observer,self.expected.observer_sha256)
         with self.assertRaises(gate.IdentityRejected):
             installer.install(self.archive,True,separate_background=True,expected_release=wrong)
-        with zipfile.ZipFile(self.archive,'a') as output: output.writestr('RemotePlay.app/unlisted',b'changed')
+        with zipfile.ZipFile(self.archive,'a') as output: output.writestr('Weavelo.app/unlisted',b'changed')
         with self.assertRaises(gate.IdentityRejected): self.migrate()
         self.assertFalse(self.mutations())
 

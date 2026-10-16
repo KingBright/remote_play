@@ -26,8 +26,8 @@ import installer_build_identity as release_identity
 from background_lifecycle_plan import plan as background_plan, LifecyclePlanRejected
 from macos_release_guard import ReleaseRejected, check_upgrade, load_policy, run, sha256, verified_archive, verify_app
 
-LABEL = 'com.remoteplay.host'
-SYSTEM_MESH = 'system/com.remoteplay.mesh'
+LABEL = 'fun.hackerlife.weavelo.host'
+SYSTEM_MESH = 'system/fun.hackerlife.weavelo.mesh'
 
 
 def service_label():
@@ -57,7 +57,7 @@ def system_mesh_state(*, deadline=None) -> dict:
     if installer_scope.current():
         return {'status': 'not_applicable', 'loaded': False, 'running': False, 'pid': None,
                 'scope': 'independent_fixture_profile_and_loopback_ports', 'management': 'not_managed'}
-    base = {'domain': 'system', 'label': 'com.remoteplay.mesh',
+    base = {'domain': 'system', 'label': 'fun.hackerlife.weavelo.mesh',
             'management': 'not_managed_by_user_installer'}
     unknown = dict(base, status='unavailable', loaded=None, running=None, pid=None)
     try:
@@ -102,7 +102,7 @@ def require_system_mesh_absent(deadline, observation=None) -> dict:
 
 def preserve_hashes(home: Path, plist: Path, *, deadline=None, lifecycle_change=False) -> dict:
     paths = [plist] if plist.is_file() and not lifecycle_change else []
-    directory = home / 'Library/Application Support/RemotePlay/NativeMesh'
+    directory = home / 'Library/Application Support/Weavelo/NativeMesh'
     # The single-instance lock and UDP activation endpoint belong to a process,
     # so a legitimate restart recreates them. Everything else remains protected.
     runtime_files = {'desktop-instance.addr', 'desktop-instance.lock', 'desktop-instance.renderer.json'}
@@ -135,7 +135,7 @@ def wait_running(domain: str, executable: Path, old_pid: int | None, *, deadline
             if second == state:
                 return state
         deadline.sleep(0.5) if deadline else time.sleep(0.5)
-    raise ReleaseRejected('Updated RemotePlay did not become a stable running service')
+    raise ReleaseRejected('Updated Weavelo did not become a stable running service')
 
 
 def replace_with_rollback(candidate: Path, target: Path, backup: Path, verify, stop, start, health) -> dict:
@@ -276,7 +276,7 @@ def checkpoint(path: Path, document: dict, phase: str, **fields) -> None:
 
 @contextmanager
 def installation_lock(applications: Path):
-    path = applications / '.remoteplay-install.lock'
+    path = applications / '.weavelo-install.lock'
     if path.is_symlink(): raise ReleaseRejected('Installer lock is a symlink')
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'r+') as lock:
@@ -286,7 +286,7 @@ def installation_lock(applications: Path):
             raise ReleaseRejected('Installer lock path changed or is unsafe')
         try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise ReleaseRejected('Another RemotePlay installer is active') from error
+            raise ReleaseRejected('Another Weavelo installer is active') from error
         if info.st_ino != path.lstat().st_ino:
             raise ReleaseRejected('Installer lock path changed after locking')
         # Keep the inode stable forever; the journal is a separate atomic file.
@@ -299,14 +299,14 @@ def canonical_paths() -> tuple[Path, Path, Path, str]:
     if os.getuid() == 0 or os.geteuid() == 0 or applications.is_symlink() or not applications.is_dir():
         raise ReleaseRejected('Use the logged-in user and their ordinary Applications directory')
     validate_user_profile(home, os.getuid())
-    target = applications / 'RemotePlay.app'
+    target = applications / 'Weavelo.app'
     plist = home / ('Library/LaunchAgents/' + service_label() + '.plist')
     return home, target, plist, f'gui/{os.getuid()}'
 
 
 def validate_user_profile(home: Path, uid: int) -> None:
     """Metadata-only gate. An installer never creates or repairs user credentials."""
-    profile = home / 'Library/Application Support/RemotePlay/NativeMesh'
+    profile = home / 'Library/Application Support/Weavelo/NativeMesh'
     if '..' in home.parts:
         raise ReleaseRejected('User home contains parent traversal; configuration was not changed')
     for path in (home, home / 'Applications', home / 'Library',
@@ -338,7 +338,7 @@ def validate_processes(executable: Path, state: dict, deadline: Deadline) -> Non
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and parts[1] == str(executable): owners.append(int(parts[0]))
     if owners and (not state['loaded'] or owners != [state['pid']]):
-        raise ReleaseRejected('Close manually started/duplicate RemotePlay processes before upgrading')
+        raise ReleaseRejected('Close manually started/duplicate Weavelo processes before upgrading')
 
 
 def journal_paths(document: dict, target: Path) -> tuple[Path, Path]:
@@ -349,17 +349,17 @@ def journal_paths(document: dict, target: Path) -> tuple[Path, Path]:
         backup = Path(document['backup']); candidate = Path(document['staging'])
         tag = backup.parent.name
         if not re.fullmatch(r'\d{8}T\d{6}Z-[0-9a-f]{8}', tag): raise ValueError('tag')
-        if backup != applications / '.remoteplay-backups' / tag / 'RemotePlay.app': raise ValueError('backup')
-        if (candidate.name != 'RemotePlay.app' or candidate.parent.parent != applications
-                or not candidate.parent.name.startswith('.remoteplay-update-')): raise ValueError('staging')
-        for item in [applications / '.remoteplay-backups', backup.parent, candidate.parent,
+        if backup != applications / '.weavelo-backups' / tag / 'Weavelo.app': raise ValueError('backup')
+        if (candidate.name != 'Weavelo.app' or candidate.parent.parent != applications
+                or not candidate.parent.name.startswith('.weavelo-update-')): raise ValueError('staging')
+        for item in [applications / '.weavelo-backups', backup.parent, candidate.parent,
                      target, backup, candidate]:
             if item.is_symlink(): raise ValueError('symlink')
         for name in ['previous', 'candidate']:
             if identity(document[name]) != document[name]: raise ValueError('identity')
         before = document['service_before']
         if not isinstance(before.get('loaded'), bool): raise ValueError('service')
-        if before['loaded'] and before.get('program') != str(target / 'Contents/MacOS/remote_play'):
+        if before['loaded'] and before.get('program') != str(target / 'Contents/MacOS/weavelo'):
             raise ValueError('service path')
         if document.get('service_label', LABEL) != service_label(): raise ValueError('service label')
         if 'lifecycle' in document: validate_lifecycle_journal(document, plist_path=canonical_paths()[2])
@@ -384,13 +384,13 @@ def stop_service(domain: str, plist: Path, executable: Path, deadline: Deadline)
 
 
 def profile_directory(home: Path) -> Path:
-    return home / 'Library/Application Support/RemotePlay/NativeMesh'
+    return home / 'Library/Application Support/Weavelo/NativeMesh'
 
 
 def product_capabilities(executable: Path, version: str, deadline: Deadline) -> dict:
     # The caller must verify the app under the pinned signing policy first.
     before = sha256(executable, check=deadline.check)
-    env = {k: v for k, v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}
+    env = {k: v for k, v in os.environ.items() if not k.startswith('WEAVELO_')}
     result = subprocess.run([str(executable), '--product-info-json'], env=env,
                             capture_output=True, text=True, timeout=deadline.timeout(15))
     if result.returncode or len(result.stdout) > 16384:
@@ -430,9 +430,9 @@ def lifecycle_migration(plist: Path, executable: Path, source: Path,
         kind_ok = stat.S_ISREG(meta.st_mode) and meta.st_size == 0 if name.endswith('enabled') else stat.S_ISSOCK(meta.st_mode)
         if not kind_ok or meta.st_uid != os.getuid() or meta.st_nlink != 1 or stat.S_IMODE(meta.st_mode) != 0o600:
             raise ReleaseRejected('Existing lifecycle process state is unsafe; no repair attempted')
-    if data.get('EnvironmentVariables', {}).get('REMOTE_PLAY_DEVICE_GROUP_DIR') != str(profile):
+    if data.get('EnvironmentVariables', {}).get('WEAVELO_DEVICE_GROUP_DIR') != str(profile):
         raise ReleaseRejected('Launch-agent device profile is not canonical; reconcile explicitly')
-    info = product_capabilities(source / 'Contents/MacOS/remote_play', candidate_info['version'], deadline)
+    info = product_capabilities(source / 'Contents/MacOS/weavelo', candidate_info['version'], deadline)
     try: proposal = background_plan(data, str(executable), info, expected_label=service_label())
     except LifecyclePlanRejected as error: raise ReleaseRejected(str(error)) from error
     after = plistlib.dumps(proposal['after'], sort_keys=False)
@@ -447,7 +447,7 @@ def atomic_plist(path: Path, data: bytes, expected_sha256: str, mode: int, gid: 
             or meta.st_gid != gid or meta.st_nlink != 1
             or stat.S_IMODE(meta.st_mode) != mode or sha256(path) != expected_sha256):
         raise ReleaseRejected('Launch agent changed outside migration; refusing replacement')
-    fd, temporary = tempfile.mkstemp(prefix='.remoteplay-agent-', dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.weavelo-agent-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as output:
             if os.fstat(output.fileno()).st_gid != gid:
@@ -550,8 +550,8 @@ def restore_lifecycle(document: dict, plist: Path, deadline: Deadline) -> None:
 
 
 def background_health(executable: Path, profile: Path, expected_pid: int, expected_sha256: str, deadline: Deadline) -> dict:
-    env = {k: v for k, v in os.environ.items() if not k.startswith('REMOTE_PLAY_')}
-    env['REMOTE_PLAY_DEVICE_GROUP_DIR'] = str(profile)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('WEAVELO_')}
+    env['WEAVELO_DEVICE_GROUP_DIR'] = str(profile)
     for attempt in range(20):
         result = subprocess.run([str(executable), '--background-status-json'], env=env,
                                 capture_output=True, text=True, timeout=deadline.timeout(10))
@@ -627,7 +627,7 @@ def restore_release_identity(document: dict, target: Path) -> None:
 
 def verified_backend_identity(target: Path, value: dict, state: dict, plist: Path, profile: Path, deadline):
     installed = release_identity.verify_app_contract(target, value, verify_with_budget(target, load_policy(), deadline))
-    authenticated = background_health(target / 'Contents/MacOS/remote_play', profile, state['pid'],
+    authenticated = background_health(target / 'Contents/MacOS/weavelo', profile, state['pid'],
                                        value['manifest']['binary_sha256'], deadline)
     observed = release_identity.verify_backend(target, value, state, plistlib.loads(plist.read_bytes()),
                                                service_label(), authenticated)
@@ -673,8 +673,8 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
     if phase != 'prepared':
         # Read-only query first. Every external mutation gets a durable intent.
         current = service_state(domain, deadline=deadline)
-        validate_service(plist, target / 'Contents/MacOS/remote_play', current)
-        validate_processes(target / 'Contents/MacOS/remote_play', current, deadline)
+        validate_service(plist, target / 'Contents/MacOS/weavelo', current)
+        validate_processes(target / 'Contents/MacOS/weavelo', current, deadline)
         if current['loaded'] and (observed['target'] != old or 'lifecycle' in document or 'release_identity' in document):
             checkpoint(journal, document, 'rollback_stop_requested')
             deadline.run(['/bin/launchctl', 'bootout', domain + '/' + service_label()])
@@ -702,12 +702,12 @@ def rollback_locked(document: dict, journal: Path, target: Path, plist: Path,
             release_identity.verify_app_contract(target, previous_release, verify_with_budget(target, policy, deadline))
     if phase != 'prepared' and document['service_before']['loaded']:
         current = service_state(domain, deadline=deadline)
-        validate_service(plist, target / 'Contents/MacOS/remote_play', current)
+        validate_service(plist, target / 'Contents/MacOS/weavelo', current)
         if not current['loaded']:
             checkpoint(journal, document, 'rollback_start_requested')
             deadline.run(['/bin/launchctl', 'bootstrap', domain, str(plist)])
             checkpoint(journal, document, 'started')
-        restored = wait_running(domain, target / 'Contents/MacOS/remote_play', None, deadline=deadline)
+        restored = wait_running(domain, target / 'Contents/MacOS/weavelo', None, deadline=deadline)
         if previous_release is not None:
             verified_backend_identity(target, previous_release, restored, plist, profile_directory(plist.parents[2]), deadline)
     receipt = {'action': 'recovered_previous', 'target': str(target), 'applied': False,
@@ -734,7 +734,7 @@ def recover_interrupted(*, deadline_seconds: float = 120) -> dict:
     """Explicit conservative rollback, under the same inode lock; never forward replay."""
     deadline = Deadline(deadline_seconds); policy = load_policy()
     _, target, plist, domain = canonical_paths()
-    journal = target.parent / '.remoteplay-install-journal.json'
+    journal = target.parent / '.weavelo-install-journal.json'
     with installation_lock(target.parent):
         document = read_journal(journal)
         if document is None:
@@ -756,8 +756,8 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             separate_background: bool = False, expected_release=None) -> dict:
     deadline = Deadline(deadline_seconds); policy = load_policy()
     home, target, plist, domain = canonical_paths()
-    applications = target.parent; executable = target / 'Contents/MacOS/remote_play'
-    journal = applications / '.remoteplay-install-journal.json'
+    applications = target.parent; executable = target / 'Contents/MacOS/weavelo'
+    journal = applications / '.weavelo-install-journal.json'
     state_path = release_state_path(target)
     release_identity.require_context(expected_release, state_path, separate_background=separate_background,
                                       isolated_fixture=installer_scope.current() is not None, apply=apply)
@@ -779,7 +779,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
         if candidate_release is not None and not (migration is not None or background_mode):
             raise ReleaseRejected('Identity-bound installation requires an explicit backend migration or the existing backend role')
         if background_mode and migration is None:
-            product_capabilities(source / 'Contents/MacOS/remote_play', candidate_info['version'], deadline)
+            product_capabilities(source / 'Contents/MacOS/weavelo', candidate_info['version'], deadline)
         if action == 'already_installed' and migration is not None and migration['before_bytes'] != migration['after_bytes']:
             action = 'migrate_background_lifecycle'
         if candidate_release is not None and previous['build'] == candidate_info['build']:
@@ -788,7 +788,7 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
         system = system_mesh_state(deadline=deadline)
         blocker = system_mesh_blocker(system) if action != 'already_installed' else None
         plan = {'action': action, 'target': str(target), 'previous': previous, 'candidate': candidate_info,
-                'will_restart_only_remoteplay': state['loaded'] and action != 'already_installed' and not blocker, 'permissions_modified': False,
+                'will_restart_only_weavelo': state['loaded'] and action != 'already_installed' and not blocker, 'permissions_modified': False,
                 'capture_health': 'not_tested_by_installer', 'applied': False,
                 'system_mesh': system, 'apply_blockers': [blocker] if blocker else [],
                 'lifecycle_migration_requested': separate_background,
@@ -830,14 +830,14 @@ def install(archive: Path, apply: bool = False, *, deadline_seconds: float = 300
             validate_user_profile(home, os.getuid())
             preserved = preserve_hashes(home, plist, deadline=deadline, lifecycle_change=migration is not None)
             tag = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8]
-            backup_root = applications / '.remoteplay-backups' / tag
+            backup_root = applications / '.weavelo-backups' / tag
             if backup_root.parent.is_symlink(): raise ReleaseRejected('Backup directory is a symlink')
             backup_root.mkdir(parents=True, mode=0o700)
-            backup = backup_root / 'RemotePlay.app'
+            backup = backup_root / 'Weavelo.app'
             lifecycle = prepare_lifecycle_backup(migration, backup_root, plist) if migration is not None else None
             release_backup = prepare_release_backup(candidate_release, target, backup_root) if candidate_release is not None else None
-            staging_root = Path(tempfile.mkdtemp(prefix='.remoteplay-update-', dir=applications))
-            candidate = staging_root / 'RemotePlay.app'
+            staging_root = Path(tempfile.mkdtemp(prefix='.weavelo-update-', dir=applications))
+            candidate = staging_root / 'Weavelo.app'
             def copy_file(source_path, destination_path):
                 deadline.check(); result = shutil.copy2(source_path, destination_path); deadline.check(); return result
             try:
@@ -929,7 +929,7 @@ if __name__ == '__main__':
     parser.add_argument('--recover', action='store_true', help='Explicitly restore the pinned previous app from an interrupted transaction')
     parser.add_argument('--separate-background', action='store_true', help='Journal an explicit background-only launch-agent migration and app+plist rollback')
     parser.add_argument('--isolated-fixture-root', type=Path, help='Explicit private disposable fixture scope; never changes production paths')
-    parser.add_argument('--test-service-label', help='Independent com.remoteplay.lifecycle-test.<uuid> label; requires the fixture root')
+    parser.add_argument('--test-service-label', help='Independent fun.hackerlife.weavelo.lifecycle-test.<uuid> label; requires the fixture root')
     parser.add_argument('--expected-commit')
     parser.add_argument('--expected-identity-sha256')
     parser.add_argument('--expected-manifest-sha256')

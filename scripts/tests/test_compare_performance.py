@@ -5,7 +5,7 @@ import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from compare_performance import CONDITIONS, Incomparable, compare
 
-# Deliberately synthetic data: validates the comparator, not RemotePlay speed.
+# Deliberately synthetic data: validates the comparator, not Weavelo speed.
 def sample(build='a'):
     conditions={key:'synthetic' for key in CONDITIONS}
     conditions.update(workload_sha256='c'*64,width=1920,height=1080,fps=60,bitrate_kbps=8000,hdr=False,audio=True,concurrent_sessions=1)

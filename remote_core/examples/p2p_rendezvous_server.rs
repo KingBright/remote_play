@@ -6,18 +6,18 @@ use tokio::sync::broadcast;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind_addr = env_socket_addr(
-        "REMOTE_PLAY_P2P_RENDEZVOUS_BIND_ADDR",
+        "WEAVELO_P2P_RENDEZVOUS_BIND_ADDR",
         SocketAddr::from(([0, 0, 0, 0], 3478)),
     )?;
     let config = P2pRendezvousServerConfig::new(bind_addr)
-        .with_event_logging(env_flag_or("REMOTE_PLAY_P2P_RENDEZVOUS_LOG", false))
+        .with_event_logging(env_flag_or("WEAVELO_P2P_RENDEZVOUS_LOG", false))
         .with_limits(
-            env_usize_or("REMOTE_PLAY_P2P_MAX_PEERS_PER_GROUP", 16)?,
-            env_usize_or("REMOTE_PLAY_P2P_MAX_TOTAL_PEERS", 4096)?,
+            env_usize_or("WEAVELO_P2P_MAX_PEERS_PER_GROUP", 16)?,
+            env_usize_or("WEAVELO_P2P_MAX_TOTAL_PEERS", 4096)?,
         );
     let server = BoundP2pRendezvousServer::bind(config).await?;
     println!(
-        "RemotePlay P2P rendezvous listening on {}",
+        "Weavelo P2P rendezvous listening on {}",
         server.local_addr()?
     );
 

@@ -1,6 +1,6 @@
 // Derived from Yororen UI 0.2.0, commit 31005a92286067b56dcc45e7833b91e428533274.
 // Copyright 2026 MeowLynxSea; Apache-2.0. See LICENSE-APACHE and NOTICE.
-// Modified by RemotePlay: local module paths and product style adapter; editing/IME retained.
+// Modified by Weavelo: local module paths and product style adapter; editing/IME retained.
 use std::ops::Range;
 use std::sync::Arc;
 

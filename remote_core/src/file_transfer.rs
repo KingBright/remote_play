@@ -587,7 +587,7 @@ impl IncomingFileTransfer {
             );
         }
         let temporary_path =
-            path.with_file_name(format!(".remote-play-{:016x}.part", rand::random::<u64>()));
+            path.with_file_name(format!(".weavelo-{:016x}.part", rand::random::<u64>()));
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -944,7 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_receive_removes_only_its_partial_file() {
-        let base = unique_temp_dir("remote-play-partial-cleanup");
+        let base = unique_temp_dir("weavelo-partial-cleanup");
         tokio::fs::create_dir_all(&base).await.unwrap();
         let source = base.join("source.bin");
         tokio::fs::write(&source, b"preserved source")
@@ -976,7 +976,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn incoming_group_rejects_symlink_parent() {
-        let base = unique_temp_dir("remote-play-symlink-parent");
+        let base = unique_temp_dir("weavelo-symlink-parent");
         let target = base.join("target");
         let outside = base.join("outside");
         tokio::fs::create_dir_all(&target).await.unwrap();
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_streams_manifest_then_raw_file_chunks_without_loading_whole_file() {
-        let base = unique_temp_dir("remote-play-file-transfer");
+        let base = unique_temp_dir("weavelo-file-transfer");
         tokio::fs::create_dir_all(&base)
             .await
             .expect("temp dir should be created");
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[tokio::test]
     async fn incoming_file_transfer_writes_chunks_out_of_order_and_verifies_checksum() {
-        let base = unique_temp_dir("remote-play-file-transfer");
+        let base = unique_temp_dir("weavelo-file-transfer");
         let source_dir = base.join("source");
         let target_dir = base.join("target");
         tokio::fs::create_dir_all(&source_dir)
@@ -1145,7 +1145,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_transfer_roundtrips_over_udp_data_path() {
-        let base = unique_temp_dir("remote-play-file-transfer");
+        let base = unique_temp_dir("weavelo-file-transfer");
         let source_dir = base.join("source");
         let target_dir = base.join("target");
         tokio::fs::create_dir_all(&source_dir)
@@ -1286,7 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn reader_rejects_unsafe_file_names_and_size_limit() {
-        let base = unique_temp_dir("remote-play-file-transfer");
+        let base = unique_temp_dir("weavelo-file-transfer");
         tokio::fs::create_dir_all(&base)
             .await
             .expect("temp dir should be created");

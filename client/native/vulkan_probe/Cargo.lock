@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remoteplay-native-drm-validation"
+name = "weavelo-native-drm-validation"
 version = "0.1.0"
 dependencies = [
  "ash",

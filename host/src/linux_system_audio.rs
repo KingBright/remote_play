@@ -114,11 +114,11 @@ fn run(tx: mpsc::Sender<LinuxAudioFrame>, stop: Arc<AtomicBool>) -> Result<(), B
         .register();
     let stream = pw::stream::StreamBox::new(
         &core,
-        "RemotePlay system audio",
+        "Weavelo system audio",
         properties! {
             *pw::keys::MEDIA_TYPE => "Audio", *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_ROLE => "Screen", "media.class" => "Stream/Input/Audio",
-            "stream.capture.sink" => "true", "node.name" => "remoteplay-system-audio",
+            "stream.capture.sink" => "true", "node.name" => "weavelo-system-audio",
             "audio.position" => "[ FL FR ]",
         },
     )?;

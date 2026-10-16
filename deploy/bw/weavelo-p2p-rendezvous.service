@@ -1,0 +1,28 @@
+[Unit]
+Description=Weavelo P2P Rendezvous
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+Environment=WEAVELO_P2P_RENDEZVOUS_BIND_ADDR=0.0.0.0:3478
+Environment=WEAVELO_P2P_MAX_PEERS_PER_GROUP=16
+Environment=WEAVELO_P2P_MAX_TOTAL_PEERS=4096
+Environment=WEAVELO_P2P_RENDEZVOUS_LOG=0
+ExecStart=/opt/weavelo-p2p/weavelo-p2p-rendezvous
+Restart=always
+RestartSec=1
+LimitNOFILE=16384
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

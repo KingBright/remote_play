@@ -107,7 +107,7 @@ fn actual_ely_share_buttons_dispatch_selection_disable_repeat_and_cancel(cx: &mu
         crate::product_components::component::init(cx).unwrap();
         crate::product_components::theme::install(
             WindowAppearance::Dark,
-            crate::design_system::remote_play_themes(),
+            crate::design_system::weavelo_themes(),
             cx,
         );
     });

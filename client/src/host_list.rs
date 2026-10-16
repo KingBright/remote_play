@@ -39,7 +39,7 @@ impl Render for HostListView {
                 .text_xl()
                 .text_color(rgb(0xf4f7fb))
                 .mb_6()
-                .child("RemotePlay"),
+                .child("Weavelo"),
         );
 
         for host in &self.hosts {

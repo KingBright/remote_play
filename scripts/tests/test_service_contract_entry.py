@@ -34,7 +34,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         'hevc-access-units': ('host', 'ffmpeg_hevc::tests'),
         'transport-replay': ('remote_core', 'net::tests'),
         'routed-auth': ('remote_core', 'p2p::routed_p2p_tests'),
-        'clock-display': ('remote_play_app', 'telemetry_display::tests'),
+        'clock-display': ('weavelo_app', 'telemetry_display::tests'),
         'clock-renderer': ('client', 'render_timing::tests'),
         'bridge-auth': ('remote_client_bridge', 'publisher_bridge::tests'),
         'bridge-telemetry': ('remote_client_bridge', 'tests::telemetry_defaults_are_zero_not_marketing_numbers'),
@@ -43,7 +43,7 @@ class ServiceContractEntryTests(unittest.TestCase):
 
     def test_platform_checks_keep_fixed_targets_and_source_identity_guards(self):
         expected = {
-            "platform-macos-check": ("--bin", "remote_play", "--features", "gpui-native-video"),
+            "platform-macos-check": ("--bin", "weavelo", "--features", "gpui-native-video"),
             "platform-windows-check": ("--tests", "--target", "x86_64-pc-windows-gnu", "--features", "native-windows-video"),
             "platform-linux-check": ("--tests", "--target", "x86_64-unknown-linux-gnu"),
         }
@@ -52,9 +52,9 @@ class ServiceContractEntryTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual(validation_command("/cargo", Path("/existing/target"), mode),
                     ["/cargo", "check", "--offline", "--locked", "--target-dir", "/existing/target",
-                     "-p", "remote_play_app", *arguments])
+                     "-p", "weavelo_app", *arguments])
                 self.assertTrue(requires_workspace_source_guard(mode))
-                with patch.dict(os.environ, {"REMOTEPLAY_BUILD_IDENTITY_FILE": "/fixture/identity"}):
+                with patch.dict(os.environ, {"WEAVELO_BUILD_IDENTITY_FILE": "/fixture/identity"}):
                     with self.assertRaisesRegex(ValueError, "product identity inputs"):
                         validation_environment(mode)
 
@@ -97,7 +97,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         for mode in self.SESSION_CLOCK_CASES:
             with self.subTest(mode=mode), patch.dict(os.environ, {'RUST_LOG': 'trace'}):
                 self.assertNotIn('RUST_LOG', validation_environment(mode))
-            for key in ('REMOTEPLAY_BUILD_IDENTITY_FILE', 'REMOTEPLAY_BUILD_IDENTITY_RS'):
+            for key in ('WEAVELO_BUILD_IDENTITY_FILE', 'WEAVELO_BUILD_IDENTITY_RS'):
                 with self.subTest(mode=mode, key=key), patch.dict(os.environ, {key: '/fixture/identity'}):
                     with self.assertRaisesRegex(ValueError, 'product identity inputs'):
                         validation_environment(mode)
@@ -107,7 +107,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         command = validation_command('/existing/cargo', target, 'service-contract')
         self.assertEqual(command, [
             '/existing/cargo', 'test', '--offline', '--locked', '--target-dir',
-            str(target), '-p', 'remote_play_app', '--lib', 'service_contract',
+            str(target), '-p', 'weavelo_app', '--lib', 'service_contract',
             '--', '--nocapture',
         ])
         self.assertNotIn('--release', command)
@@ -177,7 +177,7 @@ class ServiceContractEntryTests(unittest.TestCase):
             self.assertEqual(signal.getsignal(sig), handler)
 
     def test_service_contract_refuses_inherited_product_identity_inputs(self):
-        for key in ('REMOTEPLAY_BUILD_IDENTITY_FILE', 'REMOTEPLAY_BUILD_IDENTITY_RS'):
+        for key in ('WEAVELO_BUILD_IDENTITY_FILE', 'WEAVELO_BUILD_IDENTITY_RS'):
             with self.subTest(key=key), patch.dict(os.environ, {key: '/fixture/identity'}):
                 with self.assertRaisesRegex(ValueError, 'product identity inputs'):
                     validation_environment('service-contract')

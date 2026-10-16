@@ -122,7 +122,7 @@ def main():
 
     preserve()
     before = hashes()
-    output = Path(tempfile.mkdtemp(prefix="remoteplay-gui-slices-"))
+    output = Path(tempfile.mkdtemp(prefix="weavelo-gui-slices-"))
     assert root not in output.parents, "temporary output must stay outside the repository"
     assert shutil.disk_usage(output).free >= RESERVE
 

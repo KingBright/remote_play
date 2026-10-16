@@ -28,19 +28,19 @@ struct SmokeStats {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let host_addr = env_socket_addr(
-        "REMOTE_PLAY_SMOKE_HOST_ADDR",
+        "WEAVELO_SMOKE_HOST_ADDR",
         SocketAddr::from(([127, 0, 0, 1], DEFAULT_CONTROL_PORT)),
     )?;
-    let duration = Duration::from_secs(env_u64("REMOTE_PLAY_SMOKE_SECONDS", 8));
+    let duration = Duration::from_secs(env_u64("WEAVELO_SMOKE_SECONDS", 8));
     let receive_dir = env_path_or_temp(
-        "REMOTE_PLAY_SMOKE_RECEIVE_DIR",
-        "remote-play-headless-smoke-received-files",
+        "WEAVELO_SMOKE_RECEIVE_DIR",
+        "weavelo-headless-smoke-received-files",
     );
-    let expect_data_plane_media = env_flag_enabled("REMOTE_PLAY_EXPECT_DATA_PLANE_MEDIA");
-    let expect_audio = env_flag_enabled("REMOTE_PLAY_EXPECT_AUDIO");
-    let expect_system_audio = env_flag_enabled("REMOTE_PLAY_EXPECT_SYSTEM_AUDIO");
-    let expect_file_name = std::env::var("REMOTE_PLAY_EXPECT_FILE_NAME").ok();
-    let mut send_file = std::env::var_os("REMOTE_PLAY_SMOKE_SEND_FILE").map(PathBuf::from);
+    let expect_data_plane_media = env_flag_enabled("WEAVELO_EXPECT_DATA_PLANE_MEDIA");
+    let expect_audio = env_flag_enabled("WEAVELO_EXPECT_AUDIO");
+    let expect_system_audio = env_flag_enabled("WEAVELO_EXPECT_SYSTEM_AUDIO");
+    let expect_file_name = std::env::var("WEAVELO_EXPECT_FILE_NAME").ok();
+    let mut send_file = std::env::var_os("WEAVELO_SMOKE_SEND_FILE").map(PathBuf::from);
 
     tokio::fs::create_dir_all(&receive_dir).await?;
 
@@ -94,10 +94,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     udp_sender
         .send_control(
             &ControlMessage::StartStream {
-                width: env_u32("REMOTE_PLAY_SMOKE_WIDTH", 1280),
-                height: env_u32("REMOTE_PLAY_SMOKE_HEIGHT", 720),
-                fps: env_u32("REMOTE_PLAY_SMOKE_FPS", 30),
-                bitrate_kbps: env_u32("REMOTE_PLAY_SMOKE_BITRATE_KBPS", 4_000),
+                width: env_u32("WEAVELO_SMOKE_WIDTH", 1280),
+                height: env_u32("WEAVELO_SMOKE_HEIGHT", 720),
+                fps: env_u32("WEAVELO_SMOKE_FPS", 30),
+                bitrate_kbps: env_u32("WEAVELO_SMOKE_BITRATE_KBPS", 4_000),
                 session_id: rand::random::<u32>(),
             },
             host_addr,

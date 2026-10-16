@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Report RemotePlay installation/launcher/process mismatches without starting it.
+"""Report Weavelo installation/launcher/process mismatches without starting it.
 
 Only ps and launchctl print are executed. Legacy binaries may not recognize
---product-info-json, so this observer never executes any RemotePlay binary.
+--product-info-json, so this observer never executes any Weavelo binary.
 Membership and credential files are inspected with lstat only, never opened.
 The report is evidence for diagnosis, not signing, visual or streaming acceptance.
 """
@@ -19,7 +19,7 @@ import stat
 import subprocess
 import sys
 
-LABEL = 'com.remoteplay.host'
+LABEL = 'fun.hackerlife.weavelo.host'
 ORIGINAL = 'restored-original-gpui'
 LIMIT = 65536
 
@@ -53,7 +53,7 @@ def text_field(value: object) -> str | None:
 def bundle_info(app: Path) -> dict:
     result = read_document(app / 'Contents/Info.plist', 'plist')
     data = result.pop('value', {})
-    result.update(path=str(app), version=text_field(data.get('RemotePlayReleaseVersion')),
+    result.update(path=str(app), version=text_field(data.get('WeaveloReleaseVersion')),
                   build=text_field(data.get('CFBundleVersion')),
                   bundle_id=text_field(data.get('CFBundleIdentifier')),
                   executable=text_field(data.get('CFBundleExecutable')))
@@ -89,9 +89,9 @@ def observe_command(argv: list[str], runner) -> dict:
 
 def collect(home: Path, uid: int, expected_version: str | None = None,
             runner=subprocess.run) -> dict:
-    app = home / 'Applications/RemotePlay.app'
-    executable = app / 'Contents/MacOS/remote_play'
-    profile = home / 'Library/Application Support/RemotePlay/NativeMesh'
+    app = home / 'Applications/Weavelo.app'
+    executable = app / 'Contents/MacOS/weavelo'
+    profile = home / 'Library/Application Support/Weavelo/NativeMesh'
     installed = bundle_info(app)
     launcher = read_document(home / 'Library/LaunchAgents' / (LABEL + '.plist'), 'plist')
     data = launcher.pop('value', {})
@@ -118,7 +118,7 @@ def collect(home: Path, uid: int, expected_version: str | None = None,
     processes = []
     for line in process_probe.pop('output', '').splitlines():
         parts = line.strip().split(None, 1)
-        if len(parts) != 2 or not parts[0].isdigit() or Path(parts[1]).name != 'remote_play':
+        if len(parts) != 2 or not parts[0].isdigit() or Path(parts[1]).name != 'weavelo':
             continue
         path = Path(parts[1])
         item = {'pid': int(parts[0]), 'executable': str(path),
@@ -144,9 +144,9 @@ def collect(home: Path, uid: int, expected_version: str | None = None,
     if service['status'] == 'observed' and service['program'] != str(executable):
         findings.append('loaded_service_does_not_match_canonical_app')
     if len(processes) > 1:
-        findings.append('multiple_remoteplay_processes')
+        findings.append('multiple_weavelo_processes')
     if any(not p['canonical_path'] for p in processes):
-        findings.append('noncanonical_remoteplay_process')
+        findings.append('noncanonical_weavelo_process')
     if any(m.get('regular_file') and m.get('owner_uid') != uid for m in protected.values()):
         findings.append('protected_configuration_owned_by_another_user')
     if runtime['renderer'] in ('egui-diagnostic', 'headless'):

@@ -17,7 +17,7 @@ $start.UseShellExecute=$false
 $start.CreateNoWindow=$true
 $start.RedirectStandardOutput=$true
 $start.RedirectStandardError=$true
-$start.EnvironmentVariables.Remove('REMOTE_PLAY_LEGACY_MAC_GUI')
+$start.EnvironmentVariables.Remove('WEAVELO_LEGACY_MAC_GUI')
 $process=New-Object System.Diagnostics.Process
 $process.StartInfo=$start
 try {
@@ -32,7 +32,7 @@ try {
     $errorText=$stderr.GetAwaiter().GetResult()
     if($process.ExitCode -ne 0 -or $text.Length -gt 16384){throw 'Product identity command failed or returned oversized data'}
     $info=$text | ConvertFrom-Json
-    $expected=@{product='RemotePlay';version=$Version;platform='windows';default_gui='restored-original-gpui'}
+    $expected=@{product='Weavelo';version=$Version;platform='windows';default_gui='restored-original-gpui'}
     foreach($key in $expected.Keys){
         if($info.$key -isnot [string] -or $info.$key -cne $expected[$key]){throw ('Compiled GUI metadata mismatch: '+$key)}
     }

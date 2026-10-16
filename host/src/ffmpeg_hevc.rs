@@ -50,7 +50,7 @@ impl FfmpegHevcSource {
             .ok_or("ffmpeg stdout was not captured")?;
         let (access_tx, access_rx) = mpsc::channel(4);
         let reader = match std::thread::Builder::new()
-            .name("remoteplay-ffmpeg-reader".into())
+            .name("weavelo-ffmpeg-reader".into())
             .spawn(move || drain_hevc_reader(stdout, access_tx))
         {
             Ok(reader) => reader,
@@ -215,7 +215,7 @@ fn capture_command_using(
     #[cfg(target_os = "windows")]
     {
         // Capture only the primary physical desktop rectangle. The encoded output
-        // may be smaller, but RemotePlay never changes display modes or touches a
+        // may be smaller, but Weavelo never changes display modes or touches a
         // virtual display owned by another remote desktop application.
         let target_width = width.min(capture_rect.width).max(2);
         let target_height = height.min(capture_rect.height).max(2);

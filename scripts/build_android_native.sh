@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -z "${REMOTEPLAY_RELEASE_LOCK_FD:-}" ]]; then
+if [[ -z "${WEAVELO_RELEASE_LOCK_FD:-}" ]]; then
   exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" run android-native "$@"
 fi
 python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" check-lock android-native
@@ -45,14 +45,14 @@ export CMAKE_TOOLCHAIN_FILE_aarch64_linux_android="$ROOT/scripts/cmake/android-a
 export CMAKE_TOOLCHAIN_FILE_x86_64_linux_android="$ROOT/scripts/cmake/android-x86_64.cmake"
 
 # Only stage ABIs built successfully in this invocation. Never package a stale sibling ABI.
-TARGETS="${REMOTEPLAY_ANDROID_TARGETS:-aarch64-linux-android}"
+TARGETS="${WEAVELO_ANDROID_TARGETS:-aarch64-linux-android}"
 export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
 export AR_x86_64_linux_android="$TOOLCHAIN/llvm-ar"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 export CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS="${CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 cd "$ROOT"
 TARGET_DIR="$(cargo metadata --format-version 1 --no-deps --locked | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-STAGE="$(mktemp -d "${TMPDIR:-/tmp}/remoteplay-native.XXXXXX")"
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/weavelo-native.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
 for target in $TARGETS; do
   case "$target" in
@@ -62,14 +62,14 @@ for target in $TARGETS; do
   esac
   rustup target list --installed | grep -qx "$target" || { echo "Missing Rust target: $target" >&2; exit 1; }
   cargo build -p remote_client_bridge --features android --release --locked --target "$target" -j "${CARGO_BUILD_JOBS:-2}"
-  lib="$TARGET_DIR/$target/release/libremote_play_android.so"
+  lib="$TARGET_DIR/$target/release/libweavelo_android.so"
   test -s "$lib"
   mkdir -p "$STAGE/$abi"
-  cp "$lib" "$STAGE/$abi/libremote_play_android.so"
+  cp "$lib" "$STAGE/$abi/libweavelo_android.so"
 done
 mkdir -p "$OUT_DIR"
 # Remove only this product's generated libraries, not third-party JNI files.
-find "$OUT_DIR" -name libremote_play_android.so -type f -delete
+find "$OUT_DIR" -name libweavelo_android.so -type f -delete
 cp -R "$STAGE"/. "$OUT_DIR"/
 echo "Native ABI build complete: $TARGETS"
-find "$OUT_DIR" -name libremote_play_android.so -exec shasum -a 256 {} \;
+find "$OUT_DIR" -name libweavelo_android.so -exec shasum -a 256 {} \;

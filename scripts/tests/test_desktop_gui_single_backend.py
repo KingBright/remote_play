@@ -32,11 +32,11 @@ class SingleDesktopGuiStaticTests(unittest.TestCase):
         import json
         upstream = json.loads((ROOT / "third_party/ely-gpui-component/UPSTREAM.json").read_text())
         self.assertEqual(upstream["revision"], "f756043853ca93407e2da5d07cfe520c84f90963")
-        self.assertIn("remote_play_app", (APP / "Cargo.toml").read_text())
+        self.assertIn("weavelo_app", (APP / "Cargo.toml").read_text())
         lib = (APP / "src/lib.rs").read_text()
         self.assertNotIn("pub use ui::run_unified_gui", lib)
         self.assertIn("pub use restored_ui::run_restored_gui as run_unified_gui", lib)
-        self.assertNotIn("REMOTE_PLAY_LEGACY_MAC_GUI", (APP / "src/main.rs").read_text())
+        self.assertNotIn("WEAVELO_LEGACY_MAC_GUI", (APP / "src/main.rs").read_text())
         theme = (APP / "src/product_components/theme.rs").read_text()
         self.assertNotRegex(theme, r"impl\s+Global\s+for")
 
@@ -51,7 +51,7 @@ class SingleDesktopGuiStaticTests(unittest.TestCase):
 
     def test_entrypoint_has_no_egui_backend_switch(self):
         main = (APP / "src" / "main.rs").read_text()
-        self.assertNotIn("REMOTE_PLAY_GUI_BACKEND", main)
+        self.assertNotIn("WEAVELO_GUI_BACKEND", main)
         self.assertNotIn("egui-diagnostic", main)
 
     def test_vendored_capture_crate_has_no_egui_build_entry(self):

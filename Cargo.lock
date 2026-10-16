@@ -5488,7 +5488,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "remote_play_app"
+name = "weavelo_app"
 version = "2.0.0-alpha.9"
 dependencies = [
  "client",

@@ -81,12 +81,12 @@ impl Instance {
         let file = options.open(lock_path).map_err(|e| e.to_string())?;
         if file.try_lock().is_err() {
             let text = std::fs::read_to_string(&info)
-                .map_err(|_| "RemotePlay is already starting; try opening it again")?;
+                .map_err(|_| "Weavelo is already starting; try opening it again")?;
             if !graphical {
                 return Ok(None);
             }
             if text.trim() == "headless" {
-                return Err("RemotePlay is already running without a GUI. Switch the existing user service to graphical mode instead of starting a second network instance.".into());
+                return Err("Weavelo is already running without a GUI. Switch the existing user service to graphical mode instead of starting a second network instance.".into());
             }
             // An installed alpha.7 instance can own this same profile while a
             // newly built original UI starts. Never report that as success by
@@ -103,7 +103,7 @@ impl Instance {
                     .map(|r| r.renderer)
                     .unwrap_or_else(|| "older/unidentified UI".into());
                 return Err(format!(
-                    "Another RemotePlay interface ({name}) already owns this device profile. The requested {} was NOT opened. Close or upgrade the existing GUI through its launcher; no second network instance was started.",
+                    "Another Weavelo interface ({name}) already owns this device profile. The requested {} was NOT opened. Close or upgrade the existing GUI through its launcher; no second network instance was started.",
                     renderer.unwrap()
                 ));
             }

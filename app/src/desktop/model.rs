@@ -470,13 +470,13 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             "Waiting for the host to confirm this source"
         } else if !self.supports_input {
             match self.source {
-                CaptureSource::Window(_) => "This host cannot control the selected window. Check RemotePlay Accessibility on that host or choose an input-enabled source",
+                CaptureSource::Window(_) => "This host cannot control the selected window. Check Weavelo Accessibility on that host or choose an input-enabled source",
                 CaptureSource::MainDisplay | CaptureSource::Display(_) => "Display control unavailable. Read the host reason below; after correcting permission or source availability, reselect this source before enabling control",
             }
         } else if !self.conn.input_ready(self.video_id,self.source_revision) {
             "Waiting for this host to bind safe input to the current source"
         } else if !self.input_focused {
-            "RemotePlay window is inactive; remote control is paused"
+            "Weavelo window is inactive; remote control is paused"
         } else if self.paused || self.presentation_hidden || self.activity_pending.is_some() {
             "Remote control paused. Resume video and wait for a frame from this source"
         } else if recovery.waiting {
@@ -830,7 +830,7 @@ fn capture_permission_failure(reason: &str) -> bool {
 pub fn video_failure_guidance(reason: &str) -> &'static str {
     let lower = reason.to_lowercase();
     if lower.contains("code requirement") || lower.contains("signing identity") {
-        "The running host does not match its authorized signing identity. Install the correctly signed RemotePlay release on that host and restart it. Do not reset unrelated privacy permissions."
+        "The running host does not match its authorized signing identity. Install the correctly signed Weavelo release on that host and restart it. Do not reset unrelated privacy permissions."
     } else if capture_permission_failure(reason) {
         "The host could not use its screen-recording authorization. Permission may already be enabled: check the actual running app and its signing identity, then restart that app. Files remain available."
     } else {

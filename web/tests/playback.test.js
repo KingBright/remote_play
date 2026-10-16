@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RemotePlayWebClient } from '../src/client.js';
+import { WeaveloWebClient } from '../src/client.js';
 import { WebCodecsPlayer, isHevcKeyFrame } from '../src/decoder.js';
 import { WebAudioPlayer } from '../src/audio.js';
 import { canvasPoint } from '../src/input.js';
@@ -46,7 +46,7 @@ function environment(t) {
     });
   }
   env.canvas = { width: 1920, height: 1080, getContext: () => ({ drawImage() {} }) };
-  env.client = new RemotePlayWebClient(env.canvas);
+  env.client = new WeaveloWebClient(env.canvas);
   t.after(() => env.client.disconnect());
   return env;
 }

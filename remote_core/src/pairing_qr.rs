@@ -2,7 +2,7 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use std::fmt;
 
-pub const PAIRING_QR_SCHEME: &str = "remoteplay://join";
+pub const PAIRING_QR_SCHEME: &str = "weavelo://join";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingQrPayload {

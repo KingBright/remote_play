@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::{env, fs, path::Path};
 
 fn check(ok: bool, message: &str) {
-    assert!(ok, "RemotePlay build identity rejected: {message}");
+    assert!(ok, "Weavelo build identity rejected: {message}");
 }
 
 fn bounded_file(path: &Path) -> Vec<u8> {
@@ -42,6 +42,7 @@ fn generated_module(raw: &[u8]) -> String {
 }
 
 fn main() {
+    embed_windows_brand();
     println!("cargo:rerun-if-changed=build.rs");
     // ScreenCaptureKit's Swift bridge needs this on app, test and example
     // executables. Keep it local to final links so dependencies share caches.
@@ -49,15 +50,15 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
     }
     for key in [
-        "REMOTEPLAY_BUILD_IDENTITY_FILE",
-        "REMOTEPLAY_BUILD_IDENTITY_RS",
+        "WEAVELO_BUILD_IDENTITY_FILE",
+        "WEAVELO_BUILD_IDENTITY_RS",
     ] {
         println!("cargo:rerun-if-env-changed={key}");
     }
     let output = Path::new(&env::var_os("OUT_DIR").expect("Cargo output directory"))
         .join("compiled_build_identity.rs");
-    let record = env::var_os("REMOTEPLAY_BUILD_IDENTITY_FILE");
-    let module = env::var_os("REMOTEPLAY_BUILD_IDENTITY_RS");
+    let record = env::var_os("WEAVELO_BUILD_IDENTITY_FILE");
+    let module = env::var_os("WEAVELO_BUILD_IDENTITY_RS");
     let (Some(record), Some(module)) = (record.clone(), module.clone()) else {
         check(
             record.is_none() && module.is_none(),
@@ -134,7 +135,7 @@ fn main() {
         "profile",
     );
     check(
-        config["package"] == "remote_play_app" && config["binary"] == "remote_play",
+        config["package"] == "weavelo_app" && config["binary"] == "weavelo",
         "product target",
     );
     check(config["gui_entry"] == "restored-original-gpui", "GUI entry");
@@ -186,4 +187,19 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     fs::write(output, supplied_module).expect("write validated compiled identity");
+}
+
+fn embed_windows_brand() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") { return; }
+    let root = std::path::PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest root"));
+    let icon = root.join("../assets/brand/weavelo/favicon.ico").canonicalize().expect("final Weavelo Windows icon");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let out = std::path::PathBuf::from(env::var_os("OUT_DIR").expect("resource output"));
+    let rc = out.join("weavelo.rc");
+    let resource = out.join("weavelo.res");
+    fs::write(&rc, format!("1 ICON \"{}\"\n", icon.display().to_string().replace('\\', "/"))).expect("write icon resource");
+    let status = std::process::Command::new("rc.exe").arg("/nologo").arg("/fo").arg(&resource).arg(&rc).status().expect("existing Windows SDK rc.exe is required");
+    check(status.success(), "Windows brand resource compilation failed");
+    println!("cargo:rustc-link-arg-bin=weavelo={}", resource.display());
 }

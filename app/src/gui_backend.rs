@@ -23,7 +23,7 @@ pub struct ProductInfo {
 pub fn product_info() -> ProductInfo {
     ProductInfo {
         schema: 1,
-        product: "RemotePlay",
+        product: "Weavelo",
         version: env!("CARGO_PKG_VERSION"),
         platform: std::env::consts::OS,
         architecture: std::env::consts::ARCH,

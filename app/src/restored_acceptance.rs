@@ -37,9 +37,9 @@ impl SourceRequest {
         (source.title == self.title && source.process_id == self.process_id).then(|| source.clone())
     }
     pub fn from_env() -> Option<Result<Self, String>> {
-        if std::env::var_os("REMOTE_PLAY_RESTORED_TEST_OUTPUT").is_none() { return None; }
-        let legacy = ["REMOTE_PLAY_RESTORED_TEST_TITLE", "REMOTE_PLAY_RESTORED_TEST_WINDOW", "REMOTE_PLAY_RESTORED_TEST_PID"];
-        if let Some(raw) = std::env::var_os("REMOTE_PLAY_RESTORED_TEST_SOURCE") {
+        if std::env::var_os("WEAVELO_RESTORED_TEST_OUTPUT").is_none() { return None; }
+        let legacy = ["WEAVELO_RESTORED_TEST_TITLE", "WEAVELO_RESTORED_TEST_WINDOW", "WEAVELO_RESTORED_TEST_PID"];
+        if let Some(raw) = std::env::var_os("WEAVELO_RESTORED_TEST_SOURCE") {
             if legacy.iter().any(|name| std::env::var_os(name).is_some()) {
                 return Some(Err("use a JSON source selector or legacy window arguments, not both".into()));
             }
@@ -74,7 +74,7 @@ impl Plan {
         let p:Self=serde_json::from_str(text).map_err(|e|e.to_string())?;
         if !(2..=6).contains(&p.sources.len()) || !(2..=10).contains(&p.hold_seconds) || !(15..=240).contains(&p.minimum_frames) || !["LAN","P2P","Relay"].contains(&p.route.as_str()) {return Err("invalid bounded test sequence limits".into());}
         for s in &p.sources {
-            if s.device.len()!=32||!s.device.bytes().all(|c|c.is_ascii_hexdigit())||s.window==0||s.pid<=0||!s.title.starts_with("RemotePlay Native Decode Acceptance ")||s.title.len()>160 {return Err("sequence source must explicitly identify an owned synthetic window".into());}
+            if s.device.len()!=32||!s.device.bytes().all(|c|c.is_ascii_hexdigit())||s.window==0||s.pid<=0||!s.title.starts_with("Weavelo Native Decode Acceptance ")||s.title.len()>160 {return Err("sequence source must explicitly identify an owned synthetic window".into());}
         }
         if !p.sources.windows(2).any(|s|s[0].device!=s[1].device){return Err("sequence must exercise more than one target device".into());}
         Ok(p)
@@ -82,8 +82,8 @@ impl Plan {
 }
 impl Sequence {
     pub fn from_env()->Option<Result<Self,String>> {
-        if std::env::var_os("REMOTE_PLAY_RESTORED_TEST_OUTPUT").is_none(){return None;}
-        std::env::var("REMOTE_PLAY_RESTORED_TEST_SEQUENCE").ok().map(|text|Plan::parse(&text).map(|plan|Self{plan,index:0,phase_started:Instant::now(),healthy_since:None,receipts:Vec::new(),error:None,closing:None}))
+        if std::env::var_os("WEAVELO_RESTORED_TEST_OUTPUT").is_none(){return None;}
+        std::env::var("WEAVELO_RESTORED_TEST_SEQUENCE").ok().map(|text|Plan::parse(&text).map(|plan|Self{plan,index:0,phase_started:Instant::now(),healthy_since:None,receipts:Vec::new(),error:None,closing:None}))
     }
     pub fn step(&self)->&Source{&self.plan.sources[self.index]}
     pub fn phase_expired(&self)->bool{self.phase_started.elapsed()>Duration::from_secs(25)}
@@ -109,11 +109,11 @@ impl MediaCycle {
     pub fn from_env()->Option<Result<Self,String>> {
         if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref()!=Ok("1") {return None;}
         Some((|| {
-            if !cfg!(target_os="macos") || std::env::var_os("REMOTE_PLAY_RESTORED_TEST_SEQUENCE").is_some() {return Err("media cycle requires macOS single-device mode".into());}
-            let device=std::env::var("REMOTE_PLAY_RESTORED_TEST_DEVICE").map_err(|_|"exact device required")?;
+            if !cfg!(target_os="macos") || std::env::var_os("WEAVELO_RESTORED_TEST_SEQUENCE").is_some() {return Err("media cycle requires macOS single-device mode".into());}
+            let device=std::env::var("WEAVELO_RESTORED_TEST_DEVICE").map_err(|_|"exact device required")?;
             let source=SourceRequest::from_env().ok_or("exact source required")??;
             if device.len()!=32 || !device.bytes().all(|c|c.is_ascii_hexdigit())
-                || !matches!(source.source,CaptureSource::Window(_)) || !source.title.starts_with("RemotePlay Media Fixture ") {
+                || !matches!(source.source,CaptureSource::Window(_)) || !source.title.starts_with("Weavelo Media Fixture ") {
                 return Err("media cycle requires an owned synthetic window selector".into());
             }
             Ok(Self{phase:0,phase_started:Instant::now(),stable_since:None,identity:None,revision:0,frames:0,samples:0,callbacks:0,resume_started:None,first_decode_ms:None,first_audio_ms:None,observations:Vec::new(),error:None})
@@ -154,7 +154,7 @@ impl MediaCycle {
             assert!(SourceRequest::parse(text).is_err());
         }
     }
-    fn plan()->String{serde_json::json!({"sources":[{"device":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","window":5,"pid":1,"title":"RemotePlay Native Decode Acceptance A"},{"device":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","window":7,"pid":2,"title":"RemotePlay Native Decode Acceptance B"}],"route":"Relay","hold_seconds":3,"minimum_frames":30}).to_string()}
+    fn plan()->String{serde_json::json!({"sources":[{"device":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","window":5,"pid":1,"title":"Weavelo Native Decode Acceptance A"},{"device":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","window":7,"pid":2,"title":"Weavelo Native Decode Acceptance B"}],"route":"Relay","hold_seconds":3,"minimum_frames":30}).to_string()}
     #[test]fn valid_source_sequence_is_strict_and_bounded(){assert_eq!(Plan::parse(&plan()).unwrap().sources.len(),2);}
     #[test]fn wrong_window_unbounded_wait_and_unknown_fields_are_rejected(){
         let p:serde_json::Value=serde_json::from_str(&plan()).unwrap();

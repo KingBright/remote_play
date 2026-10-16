@@ -278,7 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn filesystem_clipboard_file_store_roundtrips_small_file() {
-        let base = unique_temp_dir("remote-play-clipboard-store");
+        let base = unique_temp_dir("weavelo-clipboard-store");
         let source_dir = base.join("source");
         let target_dir = base.join("target");
         tokio::fs::create_dir_all(&source_dir)
@@ -319,7 +319,7 @@ mod tests {
         };
 
         let err = store
-            .materialize_clipboard_file(&file, &unique_temp_dir("remote-play-clipboard-store"))
+            .materialize_clipboard_file(&file, &unique_temp_dir("weavelo-clipboard-store"))
             .await
             .expect_err("unsafe file name should be rejected");
 

@@ -316,7 +316,7 @@ impl RemoteBridgeClient {
         self.runtime.get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .thread_name("remote-play-bridge")
+                .thread_name("weavelo-bridge")
                 .build()
                 .expect("bridge tokio runtime")
         })
@@ -491,7 +491,7 @@ impl RemoteBridgeClient {
         let _lifecycle = self.lifecycle.lock().unwrap();
         let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
         let (config, changed) = store
-            .prepare_join(&payload.invite_code, "RemotePlay Android")
+            .prepare_join(&payload.invite_code, "Weavelo Android")
             .map_err(|err| err.to_string())?;
         if !changed {
             return Ok((format!("Already in network {}", config.network_name), false));
@@ -1046,7 +1046,7 @@ async fn run_bridge_network(
     // Subscribe before startup awaits so a background cancellation is not lost.
     let mut cancel_rx = cancel_tx.subscribe();
     let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
-    let identity = store.load_or_generate("RemotePlay Android")?;
+    let identity = store.load_or_generate("Weavelo Android")?;
     let live_capabilities = publisher_capabilities();
     let announcement = DiscoveryAnnouncement {
         network_name: identity.network_name.clone(),
@@ -1149,7 +1149,7 @@ async fn start_bridge_p2p(
     discovery_target: SocketAddr,
     cancel_tx: broadcast::Sender<()>,
 ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
-    let rendezvous_name = std::env::var("REMOTE_PLAY_P2P_RENDEZVOUS")
+    let rendezvous_name = std::env::var("WEAVELO_P2P_RENDEZVOUS")
         .unwrap_or_else(|_| DEFAULT_P2P_RENDEZVOUS.to_string());
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
     let rendezvous_addrs = resolve_p2p_rendezvous_addrs(&rendezvous_name, bind_addr).await?;
@@ -1195,7 +1195,7 @@ async fn start_bridge_relay(
     ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
-    let relay_url = std::env::var("REMOTE_PLAY_RELAY_SERVER_ADDR")
+    let relay_url = std::env::var("WEAVELO_RELAY_SERVER_ADDR")
         .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
     let control_group = derive_relay_group_id(
         &identity.network_name,

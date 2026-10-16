@@ -21,8 +21,8 @@ class ArchiveWorkspaceTests(unittest.TestCase):
         self.aux.mkdir()
         self.archive = self.aux / 'candidate.zip'
         with zipfile.ZipFile(self.archive, 'w') as output:
-            output.writestr('RemotePlay.app/Contents/MacOS/remote_play', b'tiny fixture')
-        self.policy = guard.Policy('com.example.fixture', 'remote_play', 'RemotePlay', 'a' * 40)
+            output.writestr('Weavelo.app/Contents/MacOS/weavelo', b'tiny fixture')
+        self.policy = guard.Policy('com.example.fixture', 'weavelo', 'Weavelo', 'a' * 40)
         self.report = dict(bundle_id=self.policy.bundle_id, certificate_sha1=self.policy.certificate_sha1,
                            designated_requirement=self.policy.requirement, version='1.0.0', build='1',
                            executable_sha256='b' * 64, info_sha256='c' * 64, signature_verified=True)
@@ -33,8 +33,8 @@ class ArchiveWorkspaceTests(unittest.TestCase):
                 patch.object(guard, 'verify_app', return_value=dict(self.report)) as verify:
             with guard.verified_archive(self.archive, self.policy, runner=runner, check=check,
                                         owned_workspace=self.aux) as (app, report):
-                self.assertEqual(app, self.aux / '.archive-check/RemotePlay.app')
-                self.assertEqual((app / 'Contents/MacOS/remote_play').read_bytes(), b'tiny fixture')
+                self.assertEqual(app, self.aux / '.archive-check/Weavelo.app')
+                self.assertEqual((app / 'Contents/MacOS/weavelo').read_bytes(), b'tiny fixture')
                 self.assertEqual(report['archive_sha256'], guard.sha256(self.archive))
                 verify.assert_called_once_with(app, self.policy, runner=runner, check=check)
         self.assertEqual(list(self.aux.iterdir()), [self.archive])
@@ -49,7 +49,7 @@ class ArchiveWorkspaceTests(unittest.TestCase):
         self.assertTrue(self.archive.is_file())
 
     def test_verification_failure_removes_only_its_new_child(self):
-        sibling = self.aux / 'RemotePlay.app'; sibling.mkdir()
+        sibling = self.aux / 'Weavelo.app'; sibling.mkdir()
         (sibling / 'untouched').write_bytes(b'current package input')
         with patch.object(guard, 'verify_app', side_effect=guard.ReleaseRejected('signature rejected')):
             with self.assertRaisesRegex(guard.ReleaseRejected, 'signature rejected'):
@@ -75,7 +75,7 @@ class ArchiveWorkspaceTests(unittest.TestCase):
         self.assertFalse((self.aux / '.archive-check').exists())
 
     def test_archive_path_and_collision_gates_remain_in_force(self):
-        for entries in [[('../outside', b'x')], [('RemotePlay.app/A', b'x'), ('remoteplay.app/a', b'y')]]:
+        for entries in [[('../outside', b'x')], [('Weavelo.app/A', b'x'), ('weavelo.app/a', b'y')]]:
             with zipfile.ZipFile(self.archive, 'w') as output:
                 for name, data in entries: output.writestr(name, data)
             with patch.object(guard, 'verify_app') as verify, self.assertRaises(guard.ReleaseRejected):
@@ -88,12 +88,12 @@ class ArchiveWorkspaceTests(unittest.TestCase):
                   f'sys.path.insert(0,{str(Path(guard.__file__).parent)!r}); import macos_release_guard as g\n'
                   'g.tempfile.TemporaryDirectory=lambda *a,**k: (_ for _ in ()).throw(AssertionError("system tmp forbidden"))\n'
                   'g.verify_app=lambda *a,**k: {}\n'
-                  'p=g.Policy("fixture","remote_play","RemotePlay","a"*40)\n'
+                  'p=g.Policy("fixture","weavelo","Weavelo","a"*40)\n'
                   f'with g.verified_archive(Path({str(self.archive)!r}),p,owned_workspace=Path({str(self.aux)!r})) as (app,report):\n'
                   ' os._exit(23)\n')
         result = subprocess.run([sys.executable, '-B', '-c', script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 23, result.stderr)
-        self.assertEqual((self.aux / '.archive-check/RemotePlay.app/Contents/MacOS/remote_play').read_bytes(), b'tiny fixture')
+        self.assertEqual((self.aux / '.archive-check/Weavelo.app/Contents/MacOS/weavelo').read_bytes(), b'tiny fixture')
         self.assertEqual({path.name for path in self.root.iterdir()}, {self.aux.name})
         # The original aux journal owns this entire subtree; this test never
         # calls a real project's recovery or scans unrelated system tmp paths.
@@ -102,8 +102,8 @@ class ArchiveWorkspaceTests(unittest.TestCase):
         self.archive.unlink()
         binary = self.root / 'binary'; binary.write_bytes(b'fixture binary')
         output = self.root / 'output'; output.mkdir()
-        archive = output / '.RemotePlay-macos-arm64.zip.pending'
-        receipt = output / '.RemotePlay-macos-arm64.verification.json.pending'
+        archive = output / '.Weavelo-macos-arm64.zip.pending'
+        receipt = output / '.Weavelo-macos-arm64.verification.json.pending'
         calls = []
         def command(args, *unused):
             calls.append(args)
@@ -122,7 +122,7 @@ class ArchiveWorkspaceTests(unittest.TestCase):
                 patch.object(guard.tempfile, 'TemporaryDirectory', side_effect=AssertionError('system tmp forbidden')):
             result = guard.package(binary, output, '1.0.0', '1', self.policy,
                                    archive=archive, receipt=receipt, workspace=self.aux)
-        self.assertEqual(verified, [self.aux / 'RemotePlay.app', self.aux / '.archive-check/RemotePlay.app'])
+        self.assertEqual(verified, [self.aux / 'Weavelo.app', self.aux / '.archive-check/Weavelo.app'])
         self.assertEqual(calls[0][0], '/usr/bin/codesign')
         self.assertTrue(archive.is_file()); self.assertTrue(receipt.is_file())
         self.assertFalse((self.aux / '.archive-check').exists())

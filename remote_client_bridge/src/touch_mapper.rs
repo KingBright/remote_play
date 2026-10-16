@@ -112,7 +112,7 @@ impl TouchStateTracker {
         self.last_two_finger_centroid = None;
     }
 
-    /// 将移动端/Web端多点触控转换为标准 RemotePlay InputEvents
+    /// 将移动端/Web端多点触控转换为标准 Weavelo InputEvents
     pub fn process_touch(
         &mut self,
         action: TouchAction,

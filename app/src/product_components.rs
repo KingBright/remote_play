@@ -18,34 +18,37 @@ pub mod assets {
     impl AssetSource for UiAsset {
         fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
             let bytes: Option<&'static [u8]> = match path {
-                "remoteplay-icons/server.svg" => {
+                "weavelo-brand/mark-light.svg" => Some(include_bytes!("../../assets/brand/weavelo/mark-light.svg")),
+                "weavelo-brand/mark-dark.svg" => Some(include_bytes!("../../assets/brand/weavelo/mark-dark.svg")),
+                "weavelo-brand/mark-mono.svg" => Some(include_bytes!("../../assets/brand/weavelo/mark-mono.svg")),
+                "weavelo-icons/server.svg" => {
                     Some(include_bytes!("product_components/icons/server.svg"))
                 }
-                "remoteplay-icons/maximize-off.svg" => {
+                "weavelo-icons/maximize-off.svg" => {
                     Some(include_bytes!("product_components/icons/maximize-off.svg"))
                 }
-                "remoteplay-icons/maximize-on.svg" => {
+                "weavelo-icons/maximize-on.svg" => {
                     Some(include_bytes!("product_components/icons/maximize-on.svg"))
                 }
-                "remoteplay-icons/minimize.svg" => {
+                "weavelo-icons/minimize.svg" => {
                     Some(include_bytes!("product_components/icons/minimize.svg"))
                 }
-                "remoteplay-icons/info.svg" => {
+                "weavelo-icons/info.svg" => {
                     Some(include_bytes!("product_components/icons/info.svg"))
                 }
-                "remoteplay-icons/user.svg" => {
+                "weavelo-icons/user.svg" => {
                     Some(include_bytes!("product_components/icons/user.svg"))
                 }
-                "remoteplay-icons/ping-indicator-0.svg" => Some(include_bytes!(
+                "weavelo-icons/ping-indicator-0.svg" => Some(include_bytes!(
                     "product_components/icons/ping-indicator-0.svg"
                 )),
-                "remoteplay-icons/ping-indicator-1.svg" => Some(include_bytes!(
+                "weavelo-icons/ping-indicator-1.svg" => Some(include_bytes!(
                     "product_components/icons/ping-indicator-1.svg"
                 )),
-                "remoteplay-icons/ping-indicator-2.svg" => Some(include_bytes!(
+                "weavelo-icons/ping-indicator-2.svg" => Some(include_bytes!(
                     "product_components/icons/ping-indicator-2.svg"
                 )),
-                "remoteplay-icons/ping-indicator-3.svg" => Some(include_bytes!(
+                "weavelo-icons/ping-indicator-3.svg" => Some(include_bytes!(
                     "product_components/icons/ping-indicator-3.svg"
                 )),
                 _ => None,
@@ -69,10 +72,14 @@ pub mod assets {
                 "ping-indicator-2.svg",
                 "ping-indicator-3.svg",
             ] {
-                let icon = format!("remoteplay-icons/{icon}");
+                let icon = format!("weavelo-icons/{icon}");
                 if icon.starts_with(path) {
                     names.push(icon.into());
                 }
+            }
+            for name in ["mark-light.svg", "mark-dark.svg", "mark-mono.svg"] {
+                let name = format!("weavelo-brand/{name}");
+                if name.starts_with(path) { names.push(name.into()); }
             }
             Ok(names)
         }
@@ -129,7 +136,7 @@ pub fn icon(name: IconName) -> ProductIcon {
         IconName::Info => "info.svg",
     };
     ProductIcon {
-        base: svg().path(format!("remoteplay-icons/{file}")),
+        base: svg().path(format!("weavelo-icons/{file}")),
     }
 }
 impl ProductIcon {

@@ -12,8 +12,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 pub const MESH_CONFIG_FILE_NAME: &str = "mesh.conf";
 pub const MESH_SECRET_FILE_NAME: &str = "mesh.secret";
-pub const REMOTE_PLAY_DEVICE_GROUP_DIR_ENV: &str = "REMOTE_PLAY_DEVICE_GROUP_DIR";
-pub const REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX: &str = "RPM2";
+pub const WEAVELO_DEVICE_GROUP_DIR_ENV: &str = "WEAVELO_DEVICE_GROUP_DIR";
+pub const WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX: &str = "RPM2";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct MeshSecret(String);
@@ -53,7 +53,7 @@ pub struct MeshConfig {
 impl MeshConfig {
     pub fn generate(display_name: impl Into<String>) -> Self {
         Self {
-            network_name: format!("remote-play-{}", hex_random::<8>()),
+            network_name: format!("weavelo-{}", hex_random::<8>()),
             network_secret: MeshSecret::generate(),
             node_id: hex_random::<16>(),
             display_name: sanitized_display_name(display_name),
@@ -125,7 +125,7 @@ impl MeshInvite {
         payload.extend_from_slice(&checksum.to_be_bytes());
         let encoded = crockford_base32_encode(&payload);
         format!(
-            "{REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX}-{}",
+            "{WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX}-{}",
             group_copy_code(&encoded)
         )
     }
@@ -138,14 +138,14 @@ const MESH_COPY_SECRET_HEX_BYTES: u8 = 1;
 fn decode_mesh_copy_code(value: &str) -> Result<MeshInvite, MeshConfigError> {
     let compact = compact_copy_code(value);
     if !compact
-        .get(..REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX.len())
+        .get(..WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX.len())
         .is_some_and(|prefix| {
-            prefix.eq_ignore_ascii_case(REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX)
+            prefix.eq_ignore_ascii_case(WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX)
         })
     {
         return Err(MeshConfigError::InvalidInviteCode);
     }
-    let encoded = &compact[REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX.len()..];
+    let encoded = &compact[WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX.len()..];
     let payload = crockford_base32_decode(encoded)?;
     if payload.len() < 8 {
         return Err(MeshConfigError::InvalidInviteCode);
@@ -385,7 +385,7 @@ pub trait MeshSecretStore {
 }
 
 pub fn default_app_private_mesh_dir() -> PathBuf {
-    if let Some(path) = env::var_os(REMOTE_PLAY_DEVICE_GROUP_DIR_ENV)
+    if let Some(path) = env::var_os(WEAVELO_DEVICE_GROUP_DIR_ENV)
         .and_then(non_empty_env_path)
         .map(PathBuf::from)
     {
@@ -396,25 +396,25 @@ pub fn default_app_private_mesh_dir() -> PathBuf {
         return PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("RemotePlay")
+            .join("Weavelo")
             .join("NativeMesh");
     }
     #[cfg(target_os = "windows")]
     if let Some(appdata) = env::var_os("APPDATA").and_then(non_empty_env_path) {
-        return PathBuf::from(appdata).join("RemotePlay").join("Mesh");
+        return PathBuf::from(appdata).join("Weavelo").join("Mesh");
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").and_then(non_empty_env_path) {
-        return PathBuf::from(config_home).join("remote-play").join("mesh");
+        return PathBuf::from(config_home).join("weavelo").join("mesh");
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(home) = env::var_os("HOME").and_then(non_empty_env_path) {
         return PathBuf::from(home)
             .join(".config")
-            .join("remote-play")
+            .join("weavelo")
             .join("mesh");
     }
-    env::temp_dir().join("remote-play").join("mesh")
+    env::temp_dir().join("weavelo").join("mesh")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,8 +631,8 @@ impl fmt::Display for MeshConfigError {
 }
 impl Error for MeshConfigError {}
 
-const MESH_CONFIG_METADATA_VERSION: &str = "remote-play-device-group-v2";
-const LEGACY_METADATA_VERSION: &str = "remote-play-mesh-v1";
+const MESH_CONFIG_METADATA_VERSION: &str = "weavelo-device-group-v2";
+const LEGACY_METADATA_VERSION: &str = "weavelo-mesh-v1";
 const MESH_CONFIG_PLACEHOLDER_SECRET: &str = "metadata-secret-loaded-separately";
 
 fn encode_mesh_config_metadata(config: &MeshConfig) -> String {
@@ -990,7 +990,7 @@ fn sanitized_display_name(display_name: impl Into<String>) -> String {
     let value = display_name.into();
     let value = value.trim();
     if value.is_empty() {
-        "RemotePlay Device".to_string()
+        "Weavelo Device".to_string()
     } else {
         value.to_string()
     }
@@ -1021,7 +1021,7 @@ mod tests {
         fn new(name: &str) -> Self {
             let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let root =
-                env::temp_dir().join(format!("remote-play-{name}-{}-{id}", std::process::id()));
+                env::temp_dir().join(format!("weavelo-{name}-{}-{id}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&root).unwrap();
             #[cfg(unix)]
@@ -1039,7 +1039,7 @@ mod tests {
     fn generated_config_is_valid_and_redacts_secret() {
         let config = MeshConfig::generate("Alice Mac");
         config.validate().unwrap();
-        assert!(config.network_name.starts_with("remote-play-"));
+        assert!(config.network_name.starts_with("weavelo-"));
         assert_eq!(config.display_name, "Alice Mac");
         assert!(
             !format!("{:?}", config.network_secret).contains(config.network_secret.expose_secret())
@@ -1050,7 +1050,7 @@ mod tests {
     fn invite_roundtrips_group_credentials_without_node_identity() {
         let config = MeshConfig::generate("Host");
         let code = config.invite_code();
-        assert!(code.starts_with(REMOTE_PLAY_DEVICE_GROUP_COPY_CODE_PREFIX));
+        assert!(code.starts_with(WEAVELO_DEVICE_GROUP_COPY_CODE_PREFIX));
         assert!(!code.contains(config.network_secret.expose_secret()));
         let joined = MeshConfig::from_invite_code(&code, "Viewer").unwrap();
         assert_eq!(joined.network_name, config.network_name);

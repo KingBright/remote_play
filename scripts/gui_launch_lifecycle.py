@@ -34,12 +34,12 @@ def validate(document: dict, executable: str, *, role: str = 'gui') -> dict:
     environment = document.get('EnvironmentVariables', {})
     if not isinstance(environment, dict):
         raise LifecycleRejected('Invalid environment dictionary')
-    value = environment.get('REMOTE_PLAY_HEADLESS', '0')
+    value = environment.get('WEAVELO_HEADLESS', '0')
     if not isinstance(value, str):
         raise LifecycleRejected('Headless setting must be a string')
     headless = value in ('1', 'true', 'TRUE', 'yes', 'YES')
     if headless != (role == 'host'):
-        raise LifecycleRejected('Launch role differs from REMOTE_PLAY_HEADLESS')
+        raise LifecycleRejected('Launch role differs from WEAVELO_HEADLESS')
     keep_alive = document.get('KeepAlive', False)
     if type(keep_alive) is bool:
         restarts_normal_exit = keep_alive

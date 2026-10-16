@@ -1,7 +1,7 @@
 # Product component adapter
 
 One runtime component/theme dependency: the fixed Ely CE core profile. `product_components`
-is a host adapter for the established RemotePlay product appearance, not a second framework.
+is a host adapter for the established Weavelo product appearance, not a second framework.
 Buttons use the actual Ely Button; theme state lives only in Ely Theme, and the root uses
 Ely FocusScope. Product Theme/ThemeSet are semantic value snapshots/configuration, with no
 Global implementation or independent manager. Original palette, typography, compact dimensions,

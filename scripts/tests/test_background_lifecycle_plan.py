@@ -5,12 +5,12 @@ from scripts.background_lifecycle_plan import plan, rollback_document, Lifecycle
 
 class BackgroundMigrationTests(unittest.TestCase):
     def setUp(self):
-        self.exe = '/Users/example/Applications/RemotePlay.app/Contents/MacOS/remote_play'
-        self.before = {'Label': 'com.remoteplay.host', 'ProgramArguments': [self.exe],
+        self.exe = '/Users/example/Applications/Weavelo.app/Contents/MacOS/weavelo'
+        self.before = {'Label': 'fun.hackerlife.weavelo.host', 'ProgramArguments': [self.exe],
                        'KeepAlive': True, 'RunAtLoad': True,
-                       'EnvironmentVariables': {'REMOTE_PLAY_HEADLESS': '0',
-                                                'REMOTE_PLAY_DEVICE_GROUP_DIR': '/private/profile',
-                                                'REMOTE_PLAY_DISPLAY_NAME': 'Existing Mac'}}
+                       'EnvironmentVariables': {'WEAVELO_HEADLESS': '0',
+                                                'WEAVELO_DEVICE_GROUP_DIR': '/private/profile',
+                                                'WEAVELO_DISPLAY_NAME': 'Existing Mac'}}
         self.info = {'separated_lifecycle': True, 'background_entry': '--background-service',
                      'frontend_entry': '--gui', 'default_gui': 'restored-original-gpui',
                      'original_gui_compiled': True}
@@ -22,8 +22,8 @@ class BackgroundMigrationTests(unittest.TestCase):
         self.assertEqual(result['after']['ProgramArguments'], [self.exe, '--background-service'])
         self.assertTrue(result['after']['KeepAlive'])
         self.assertTrue(result['after']['RunAtLoad'])
-        self.assertEqual(result['after']['EnvironmentVariables']['REMOTE_PLAY_DEVICE_GROUP_DIR'], '/private/profile')
-        self.assertEqual(result['after']['EnvironmentVariables']['REMOTE_PLAY_DISPLAY_NAME'], 'Existing Mac')
+        self.assertEqual(result['after']['EnvironmentVariables']['WEAVELO_DEVICE_GROUP_DIR'], '/private/profile')
+        self.assertEqual(result['after']['EnvironmentVariables']['WEAVELO_DISPLAY_NAME'], 'Existing Mac')
         self.assertFalse(result['applied'])
 
     def test_env_headless_alone_is_not_a_separation_capability(self):

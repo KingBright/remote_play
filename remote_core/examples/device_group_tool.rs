@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         "join" => {
             let display_name = args
                 .next()
-                .unwrap_or_else(|| "RemotePlay Device".to_string());
+                .unwrap_or_else(|| "Weavelo Device".to_string());
             if args.next().is_some() {
                 return Err(usage_error("join accepts path and optional display name"));
             }

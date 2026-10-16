@@ -10,7 +10,7 @@ TREE = '''N: android=http://schemas.android.com/apk/res/android
   E: manifest (line=2)
     A: android:versionCode(0x0101021b)=(type 0x10)0x3
     A: android:versionName(0x0101021c)="2.0.0-alpha.2" (Raw: "2.0.0-alpha.2")
-    A: package="com.remoteplay.client" (Raw: "com.remoteplay.client")
+    A: package="fun.hackerlife.weavelo" (Raw: "fun.hackerlife.weavelo")
     E: uses-sdk (line=7)
       A: android:minSdkVersion(0x0101020c)=(type 0x10)0x1a
       A: android:targetSdkVersion(0x01010270)=(type 0x10)0x23
@@ -48,7 +48,7 @@ class ManifestValidationTest(unittest.TestCase):
 
     def test_nested_attributes_do_not_override_root(self):
         value = module.compiled_manifest_attributes(TREE + '      E: activity (line=60)\n        A: package="other.package"\n')
-        self.assertEqual(value['package'], 'com.remoteplay.client')
+        self.assertEqual(value['package'], 'fun.hackerlife.weavelo')
 
     def test_duplicate_attribute_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Duplicate'):

@@ -83,7 +83,7 @@ use protocol::{
 use remote_core::clipboard_runtime::{ClipboardSyncRunnerConfig, run_clipboard_sync};
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
-    DiscoveryPeerSnapshot, DiscoveryRuntimeConfig, DiscoveryScope, REMOTE_PLAY_DISCOVERY_ENV,
+    DiscoveryPeerSnapshot, DiscoveryRuntimeConfig, DiscoveryScope, WEAVELO_DISCOVERY_ENV,
     discovery_port_from_env, run_discovery_runtime,
 };
 use remote_core::file_transfer_runtime::{
@@ -136,16 +136,16 @@ use remote_platform::WindowsClipboardProvider;
 pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     println!("Host starting in Standby Mode...");
     let _discovery = maybe_start_discovery_runtime(
-        "RemotePlay Host",
+        "Weavelo Host",
         DEFAULT_CONTROL_PORT,
         DiscoveryCapabilities {
             can_stream: true,
             can_view: false,
-            file_transfer: env_flag_enabled("REMOTE_PLAY_FILE_TRANSFER")
-                || env_flag_enabled("REMOTE_PLAY_FILE_CLIPBOARD")
-                || std::env::var_os("REMOTE_PLAY_HOST_SEND_FILE").is_some(),
-            clipboard_sync: env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC"),
-            talkback: env_flag_enabled("REMOTE_PLAY_TALKBACK"),
+            file_transfer: env_flag_enabled("WEAVELO_FILE_TRANSFER")
+                || env_flag_enabled("WEAVELO_FILE_CLIPBOARD")
+                || std::env::var_os("WEAVELO_HOST_SEND_FILE").is_some(),
+            clipboard_sync: env_flag_enabled("WEAVELO_CLIPBOARD_SYNC"),
+            talkback: env_flag_enabled("WEAVELO_TALKBACK"),
         },
     )
     .await;
@@ -156,9 +156,9 @@ pub async fn run_host_binary() -> Result<(), Box<dyn Error + Send + Sync>> {
     run_host_service(HostServiceConfig {
         bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_CONTROL_PORT)),
         stats,
-        enable_clipboard_sync: env_flag_enabled("REMOTE_PLAY_CLIPBOARD_SYNC"),
-        enable_file_transfer: env_flag_enabled("REMOTE_PLAY_FILE_TRANSFER"),
-        enable_talkback: env_flag_enabled("REMOTE_PLAY_TALKBACK"),
+        enable_clipboard_sync: env_flag_enabled("WEAVELO_CLIPBOARD_SYNC"),
+        enable_file_transfer: env_flag_enabled("WEAVELO_FILE_TRANSFER"),
+        enable_talkback: env_flag_enabled("WEAVELO_TALKBACK"),
     })
     .await
 }
@@ -195,7 +195,7 @@ async fn maybe_start_discovery_runtime(
     control_port: u16,
     capabilities: DiscoveryCapabilities,
 ) -> Option<DiscoveryRuntimeHandle> {
-    if !env_flag_enabled(REMOTE_PLAY_DISCOVERY_ENV) {
+    if !env_flag_enabled(WEAVELO_DISCOVERY_ENV) {
         return None;
     }
 
@@ -942,7 +942,7 @@ fn start_subscription_audio(config: SubscriptionAudioConfig) -> Vec<tokio::task:
             ))
         } else {
             eprintln!(
-                "REMOTE_PLAY_SYSTEM_AUDIO requires REMOTE_PLAY_DATA_PLANE_MEDIA=1 so the stream config can be delivered."
+                "WEAVELO_SYSTEM_AUDIO requires WEAVELO_DATA_PLANE_MEDIA=1 so the stream config can be delivered."
             );
             None
         }

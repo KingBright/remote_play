@@ -28,11 +28,11 @@ if display is None:
 if args.source == "monitor" and display.get_n_monitors() != 1:
     raise SystemExit("This pure test fixture covers one monitor; no multi-monitor capture started")
 
-window = Gtk.Window(title="RemotePlay Capture Probe - pure test colors")
+window = Gtk.Window(title="Weavelo Capture Probe - pure test colors")
 window.set_default_size(960, 540)
 box = Gtk.EventBox()
-box.set_name("remoteplay-capture-fixture")
-label = Gtk.Label(label="RemotePlay capture test\nOnly solid colors and this label")
+box.set_name("weavelo-capture-fixture")
+label = Gtk.Label(label="Weavelo capture test\nOnly solid colors and this label")
 box.add(label)
 window.add(box)
 css = Gtk.CssProvider()
@@ -41,7 +41,7 @@ colors = ("#d82424", "#24c848", "#2864e0")
 state = {"tick": 0, "child": None, "exit": 1}
 def paint():
     state["tick"] += 1
-    text = "#remoteplay-capture-fixture { background-color: " + colors[state["tick"] % 3] + "; color: white; font-size: 28px; }"
+    text = "#weavelo-capture-fixture { background-color: " + colors[state["tick"] % 3] + "; color: white; font-size: 28px; }"
     css.load_from_data(text.encode())
     box.queue_draw()
     return True
