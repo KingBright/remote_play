@@ -23,6 +23,19 @@ var lastKey = ["A":"","B":""]
 var clickSourcePID = ["A":Int64(0),"B":Int64(0)]
 var keySourcePID = ["A":Int64(0),"B":Int64(0)]
 var points: [String:[Double]] = [:]
+var inputEvents: [[String:Any]] = []
+var text = ["A":"","B":""]
+var moves = ["A":0,"B":0]
+var drags = ["A":0,"B":0]
+var scrolls = ["A":0,"B":0]
+func record(_ kind:String,_ label:String,_ event:NSEvent) {
+    inputEvents.append(["kind":kind,"window":label,"source_pid":event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0,
+        "monotonic_ns":DispatchTime.now().uptimeNanoseconds,"key_code":([NSEvent.EventType.keyDown,.keyUp,.flagsChanged].contains(event.type) ? event.keyCode : 0),
+        "characters":([NSEvent.EventType.keyDown,.keyUp].contains(event.type) ? event.characters ?? "" : ""),"flags":event.modifierFlags.rawValue,
+        "x":event.locationInWindow.x,"y":event.locationInWindow.y,
+        "scroll_x":(event.type == .scrollWheel ? event.scrollingDeltaX : 0),"scroll_y":(event.type == .scrollWheel ? event.scrollingDeltaY : 0)])
+    if inputEvents.count>256 {inputEvents.removeFirst(inputEvents.count-256)}
+}
 var closed = Set<String>()
 var lastCommand = ""
 var tick = 0
@@ -30,6 +43,11 @@ func save() {
     var data: [String:Any] = ["pid":ProcessInfo.processInfo.processIdentifier,"tick":tick,"command":lastCommand]
     if mediaMode { data["media_fixture"] = true; data["tone_running"] = toneRunning; data["tone_error"] = toneError }
     data["fixture_active"] = NSRunningApplication.current.isActive
+    data["input_events"] = inputEvents
+    data["text"] = text
+    data["moves"] = moves
+    data["drags"] = drags
+    data["scrolls"] = scrolls
     let main = CGDisplayBounds(CGMainDisplayID())
     for (label,window) in windows {
         let frame=window.frame
@@ -44,6 +62,7 @@ class FixtureView:NSView {
     override var acceptsFirstResponder:Bool{true}
     override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
     override func mouseDown(with event:NSEvent) {
+        record("mouse_down",label,event)
         heldButtons[label]!.insert(event.buttonNumber)
         clicks[label]! += 1;clickSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;window?.makeFirstResponder(self)
         if let window=window {
@@ -52,9 +71,13 @@ class FixtureView:NSView {
         }
         save();needsDisplay=true
     }
-    override func mouseUp(with event:NSEvent){heldButtons[label]!.remove(event.buttonNumber);mouseUps[label]! += 1;mouseUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
-    override func keyUp(with event:NSEvent){heldKeys[label]!.remove(Int(event.keyCode));keyUps[label]! += 1;keyUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
-    override func keyDown(with event:NSEvent){heldKeys[label]!.insert(Int(event.keyCode));keys[label]! += 1;keySourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;lastKey[label]=event.characters ?? "";save();needsDisplay=true}
+    override func mouseUp(with event:NSEvent){record("mouse_up",label,event);heldButtons[label]!.remove(event.buttonNumber);mouseUps[label]! += 1;mouseUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
+    override func keyUp(with event:NSEvent){record("key_up",label,event);heldKeys[label]!.remove(Int(event.keyCode));keyUps[label]! += 1;keyUpSourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;save()}
+    override func keyDown(with event:NSEvent){record("key_down",label,event);text[label]! += event.characters ?? "";if text[label]!.count>512 {text[label] = String(text[label]!.suffix(512))};heldKeys[label]!.insert(Int(event.keyCode));keys[label]! += 1;keySourcePID[label]=event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? 0;lastKey[label]=event.characters ?? "";save();needsDisplay=true}
+    override func mouseMoved(with event:NSEvent){moves[label]! += 1;record("mouse_move",label,event);save()}
+    override func mouseDragged(with event:NSEvent){drags[label]! += 1;record("mouse_drag",label,event);save()}
+    override func scrollWheel(with event:NSEvent){scrolls[label]! += 1;record("scroll",label,event);save()}
+    override func flagsChanged(with event:NSEvent){record("flags",label,event);save()}
     override func draw(_ rect:NSRect){
         (label == "A" ? NSColor(srgbRed:0.05,green:0.15,blue:0.8,alpha:1) : NSColor(srgbRed:0.05,green:0.7,blue:0.15,alpha:1)).setFill();bounds.fill()
         ("Synthetic window \(label)\nClicks \(clicks[label]!)   Keys \(keys[label]!)\nFrame \(tick)" as NSString).draw(at:NSPoint(x:25,y:35),withAttributes:[.font:NSFont.systemFont(ofSize:24),.foregroundColor:NSColor.white])
@@ -65,7 +88,7 @@ let app=NSApplication.shared;app.setActivationPolicy(.regular)
 for (label,x) in [("A",150.0),("B",800.0)] {
     let w=NSWindow(contentRect:NSRect(x:x,y:220,width:540,height:380),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
     w.title = mediaMode ? "RemotePlay Media Fixture \(mediaNonce) \(label)" : "RemotePlay scoped-window acceptance " + (ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_NONCE"] ?? "missing-nonce")
-    w.isReleasedWhenClosed=false;w.contentView=FixtureView(label);w.makeKeyAndOrderFront(nil);windows[label]=w
+    w.acceptsMouseMovedEvents=true;w.isReleasedWhenClosed=false;w.contentView=FixtureView(label);w.makeKeyAndOrderFront(nil);windows[label]=w
 }
 if mediaMode {
     // Output only: no input node or microphone is opened. The selected window
@@ -97,6 +120,10 @@ Timer.scheduledTimer(withTimeInterval:0.1,repeats:true){_ in
         if cmd["action"]=="activate_A" {
             app.activate(ignoringOtherApps:true)
             windows["A"]?.makeKeyAndOrderFront(nil)
+        }
+        if cmd["action"]=="activate_B" {
+            app.activate(ignoringOtherApps:true)
+            windows["B"]?.makeKeyAndOrderFront(nil)
         }
         if cmd["action"]=="move_resize_A" {
             // The supported control mode is explicitly foreground-window control.

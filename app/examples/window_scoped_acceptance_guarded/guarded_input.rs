@@ -154,6 +154,34 @@ async fn operation<L:Link>(link:&mut L, target:Target, budgets:Budgets, owned:&m
     Ok(())
 }
 
+// Explicit harmless suite: no command/control/option, clipboard or system shortcut.
+fn suite_events() -> Vec<InputEvent> {
+    let mut events=vec![InputEvent::MouseMoveAbsolute{x:16384,y:24576},InputEvent::MouseDown(0),
+        InputEvent::MouseMoveAbsolute{x:32768,y:32768},InputEvent::MouseMoveAbsolute{x:49151,y:40960},
+        InputEvent::MouseUp(0),InputEvent::MouseScroll{delta_x:0,delta_y:-3}];
+    for key_code in [0,11,8] { // abc, physical macOS key codes, not arbitrary text injection.
+        events.push(InputEvent::Key{key_code,pressed:true,modifiers:0});
+        events.push(InputEvent::Key{key_code,pressed:false,modifiers:0});
+    }
+    events.extend([InputEvent::ModifiersChanged(1),InputEvent::Key{key_code:0,pressed:true,modifiers:1},
+        InputEvent::Key{key_code:0,pressed:false,modifiers:1},InputEvent::ModifiersChanged(0)]);
+    events
+}
+
+async fn operation_mode<L:Link>(link:&mut L,target:Target,budgets:Budgets,owned:&mut bool,report:&mut Value,suite:bool)->Result<()> {
+    if !suite {return operation(link,target,budgets,owned,report).await;}
+    prepare_input(link,target,budgets,owned,report).await?;
+    report["requested_sequence"]=json!("drag_scroll_abc_shift_a");
+    for event in suite_events() {
+        link.send(SessionCommand::SourceInput{id:ID,source_revision:0,event}).await?;
+        report["input_commands_enqueued"]=json!(report["input_commands_enqueued"].as_u64().unwrap_or(0)+1);
+        settle(link,budgets.pause).await?;
+    }
+    report["input_sequence_enqueued"]=true.into();
+    // Enqueue is not native target evidence; the independent fixture verifies effects.
+    Ok(())
+}
+
 // Cleanup deliberately ignores operation cancellation and individual errors.
 // It attempts all stages and never accepts a timeout or wrong ID as an ACK.
 async fn cleanup_ack<L:Link>(link:&mut L, command:SessionCommand, budget:Duration,
@@ -198,7 +226,7 @@ async fn cleanup<L:Link>(link:&mut L, owned:bool, budgets:Budgets, report:&mut V
     report["cleanup_complete"]=json!(closed && (!owned || (report["input_released_acknowledged"]==true && report["unsubscribed_acknowledged"]==true)));
 }
 
-async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>) -> Value {
+async fn drive_mode<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>,suite:bool) -> Value {
     let mut report=json!({"schema":1,"kind":"controlled-synthetic-window-production-v2-input-probe",
         "connection_id":link.connection_id(),"subscription_id":ID,"fixture_pid":target.pid,"fixture_window":target.window,"fixture_nonce":target.nonce.clone(),
         "source_revision":0,"input_commands_enqueued":0,"input_sequence_enqueued":false,"cleanup_complete":false,
@@ -208,7 +236,7 @@ async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watc
     let cancelled=*cancel.borrow();
     let result=if cancelled { Err("cancelled before operation".into()) } else {
         tokio::select! {
-            result=tokio::time::timeout(budgets.operation,operation(link,target,budgets,&mut owned,&mut report))=>
+            result=tokio::time::timeout(budgets.operation,operation_mode(link,target,budgets,&mut owned,&mut report,suite))=>
                 result.unwrap_or_else(|_|Err("operation timed out; owned cleanup follows".into())),
             _=cancel.changed()=>Err("cancelled; owned cleanup follows".into()),
         }
@@ -220,6 +248,10 @@ async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,mut cancel:watc
     report
 }
 
+
+async fn drive<L:Link>(link:&mut L,target:Target,budgets:Budgets,cancel:watch::Receiver<bool>)->Value {
+    drive_mode(link,target,budgets,cancel,false).await
+}
 
 // Dedicated diagnostic mode. The direct parent observes held native effects,
 // then terminates only this owned helper without running graceful cleanup.
@@ -258,11 +290,11 @@ async fn hold_loss_operation(link:&mut Wire,target:Target,budgets:Budgets,owned:
     }
 }
 
-async fn drive_hold_loss(link:&mut Wire,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>,output:&std::path::Path) -> Value {
-    let mut report=json!({"schema":1,"kind":"controlled-synthetic-held-input-loss",
+async fn drive_hold_loss(link:&mut Wire,target:Target,budgets:Budgets,mut cancel:watch::Receiver<bool>,output:&std::path::Path,focus:bool) -> Value {
+    let mut report=json!({"schema":1,"kind":if focus {"controlled-synthetic-held-input-focus"} else {"controlled-synthetic-held-input-loss"},
         "connection_id":link.connection_id(),"subscription_id":ID,"fixture_pid":target.pid,
         "fixture_window":target.window,"fixture_nonce":target.nonce.clone(),"source_revision":0,
-        "input_commands_enqueued":0,"external_process_loss_required":true,"target_effect_verified":false,
+        "input_commands_enqueued":0,"external_process_loss_required":!focus,"target_effect_verified":false,
         "cleanup_complete":false,"desktop_subscribed":false,"audio":false,"clipboard":false,
         "OS_permissions_requested_or_changed":false,"cross_device_network_loss_verified":false});
     let mut owned=false;
@@ -285,8 +317,9 @@ async fn drive_hold_loss(link:&mut Wire,target:Target,budgets:Budgets,mut cancel
 }
 
 pub fn main_cli(args:&[String]) {
-    let hold_loss=args.get(1).is_some_and(|mode|mode=="hold-loss");
-    if args.len()!=7 || !matches!(args[1].as_str(),"input-window"|"hold-loss") { eprintln!("usage: probe input-window|hold-loss LOOPBACK_TARGET FIXTURE_PID WINDOW_ID FIXTURE_NONCE NEW_ABSOLUTE_OUTPUT_JSON");std::process::exit(2); }
+    let hold_loss=args.get(1).is_some_and(|mode|matches!(mode.as_str(),"hold-loss"|"hold-focus"));
+    let suite=args.get(1).is_some_and(|mode|mode=="input-suite");
+    if args.len()!=7 || !matches!(args[1].as_str(),"input-window"|"input-suite"|"hold-loss"|"hold-focus") { eprintln!("usage: probe input-window|input-suite|hold-loss|hold-focus LOOPBACK_TARGET FIXTURE_PID WINDOW_ID FIXTURE_NONCE NEW_ABSOLUTE_OUTPUT_JSON");std::process::exit(2); }
     let checked=(||->Result<_>{
         let address=args[2].parse::<SocketAddr>().map_err(|_|"invalid route")?;
         if !address.ip().is_loopback() || address.port()==0 { return Err("must use the existing viewer-local loopback route".into()); }
@@ -322,7 +355,8 @@ pub fn main_cli(args:&[String]) {
         let report=match tokio::time::timeout(Duration::from_secs(12),WorkspaceConnection::connect(address,scratch.clone())).await {
             Ok(Ok((conn,events)))=>{
                 let mut link=Wire{conn,events,stats:Statistics::new(),media:None};
-                if hold_loss {drive_hold_loss(&mut link,target,Budgets::default(),rx,&output).await}
+                if hold_loss {drive_hold_loss(&mut link,target,Budgets::default(),rx,&output,args[1]=="hold-focus").await}
+                else if suite {drive_mode(&mut link,target,Budgets::default(),rx,true).await}
                 else {drive(&mut link,target,Budgets::default(),rx).await}
             },
             Ok(Err(e))=>json!({"error":e,"input_commands_enqueued":0,"target_effect_verified":false,"connection_opened":false}),
@@ -402,5 +436,23 @@ mod tests {
     #[tokio::test] async fn cancellation_during_cleanup_still_confirms_close(){let (tx,rx)=watch::channel(false);let mut f=Fake{cancel_on_close:Some(tx),..Fake::default()};let r=drive(&mut f,target(),short(),rx).await;assert_eq!(r["cancelled"],true);assert_eq!(r["cleanup_complete"],true);assert_eq!(r["operation_succeeded"],false);}
     #[tokio::test] async fn overall_operation_timeout_after_a_press_still_cleans_owned_input(){let mut f=Fake::default();let mut budgets=short();budgets.operation=Duration::from_millis(6);let (_tx,rx)=watch::channel(false);let r=drive(&mut f,target(),budgets,rx).await;assert_eq!(r["operation_succeeded"],false);assert!(input_count(&f)>0);assert_eq!(r["cleanup_complete"],true);}
     #[tokio::test] async fn different_fixture_nonce_never_subscribes_or_sends_input(){let mut f=Fake{catalog_nonce:"ffffffffffffffffffffffffffffffff".into(),..Fake::default()};let r=run(&mut f).await;assert_eq!(input_count(&f),0);assert!(r.get("subscribed_acknowledged").is_none());assert_eq!(r["cleanup_complete"],true);}
+    #[tokio::test] async fn suite_keeps_same_guard_and_confirms_cleanup() {
+        let mut f=Fake::default();let (_tx,rx)=watch::channel(false);
+        let r=drive_mode(&mut f,target(),Budgets{operation:Duration::from_secs(1),acknowledgement:Duration::from_millis(20),pause:Duration::from_millis(1)},rx,true).await;
+        assert_eq!(r["operation_succeeded"],true);assert_eq!(r["cleanup_complete"],true);
+        assert_eq!(input_count(&f),16);assert_eq!(r["target_effect_verified"],false);
+    }
+    #[tokio::test] async fn suite_view_only_never_enqueues_input() {
+        let mut f=Fake{ready:false,..Fake::default()};let (_tx,rx)=watch::channel(false);
+        let r=drive_mode(&mut f,target(),short(),rx,true).await;
+        assert_eq!(input_count(&f),0);assert_eq!(r["cleanup_complete"],true);
+    }
+    #[test] fn suite_only_uses_safe_keys_and_releases_modifiers_and_button() {
+        let e=suite_events();assert_eq!(e.len(),16);
+        assert!(matches!(e.last(),Some(InputEvent::ModifiersChanged(0))));
+        assert_eq!(e.iter().filter(|v|matches!(v,InputEvent::MouseDown(0))).count(),1);
+        assert_eq!(e.iter().filter(|v|matches!(v,InputEvent::MouseUp(0))).count(),1);
+        for v in e {if let InputEvent::Key{key_code,modifiers,..}=v {assert!([0,11,8].contains(&key_code));assert!(modifiers<=1);}}
+    }
     #[test] fn target_ids_are_required(){assert!(Target{pid:0,window:77,nonce:NONCE.into()}.validate().is_err());assert!(Target{pid:123,window:0,nonce:NONCE.into()}.validate().is_err());}
 }
