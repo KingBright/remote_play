@@ -2467,13 +2467,26 @@
         },
         "deployed": false,
         "physical_input_release": "not_tested"
+      },
+      "quit_all": {
+        "state": "implemented_not_deployed",
+        "multiwindow_fixture_tests": {
+          "passed": 20,
+          "failed": 0,
+          "includes": "two actual loopback connection owners; missing one Closed makes whole exit fail"
+        },
+        "physical_service_stop_executed": false,
+        "real_device_configuration_modified": false
       }
     },
     "whole_process_exit": {
-      "implementation": "gap: attached GUI Quit closes its frontend only; existing background IPC has no Shutdown",
+      "implementation": "implemented_not_deployed: all current frontend owners close_verified, exact background-generation Shutdown, original host input/native cleanup, native process-exit event and endpoint absence; standalone cleans its own embedded host",
       "physical_status": "not_tested",
-      "required_next_design": "Original same-user service owner stop with active-session protection, native input/resource cleanup, supervisor restart policy and restart/reopen semantics; no unbound process kill or persistent permission change.",
-      "evidence": "LINUX-BACKGROUND-LIFECYCLE.md#关闭全进程退出与重连输入核查2026-10-17"
+      "local_service_api": "1.1 optional shutdown.v1; legacy Snapshot schema2 unchanged",
+      "supervisor_policy": "read-only original per-user policy/PID check; normal exit0; no persistent startup/permission change; Windows background capability withheld until a reviewed separated-service policy exists",
+      "in_flight_or_failed_cleanup": "do not claim success; preserve explicit error/unknown result, no arbitrary process kill or automatic replacement request",
+      "evidence": "LINUX-BACKGROUND-LIFECYCLE.md#当前全退出契约与实现源码已补齐尚未部署",
+      "target_baseline": "feba70a candidate unchanged; this code requires a separately frozen original producer release before physical acceptance"
     }
   },
   "superseded_acceptance_scopes": [

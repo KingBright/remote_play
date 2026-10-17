@@ -10,16 +10,20 @@ use sha2::{Digest, Sha256};
 use std::{fs, io::{self, Read, Write}, path::{Path, PathBuf}, sync::{Arc, Mutex}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::{watch, Semaphore}};
 
+mod exit_observer;
+mod stop_policy;
+
 type Error = Box<dyn std::error::Error + Send + Sync>;
 const SOCKET: &str = "background.sock";
 pub const ROLE_MARKER: &str = "background-service.enabled";
 const LIMIT: usize = 256 * 1024;
 const SCHEMA: u32 = 2;
 const TIMEOUT: Duration = Duration::from_secs(2);
+const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
+enum Request { Shutdown { generation: String, executable_sha256: String }, Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -38,7 +42,7 @@ struct Snapshot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Response { Negotiated { generation: String, executable_sha256: String, selection: Result<Selection, service_contract::Rejection> }, Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
+enum Response { StopPrepared { generation: String, executable_sha256: String, pid: u32, cleanup_verified: bool }, Negotiated { generation: String, executable_sha256: String, selection: Result<Selection, service_contract::Rejection> }, Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
 
 pub(crate) use crate::private_ipc::private_directory;
 #[cfg(unix)]
@@ -71,7 +75,7 @@ fn valid_length(header: [u8; 4]) -> io::Result<usize> {
 
 /// Bind only after obtaining the existing canonical runtime lock. Refuse a live
 /// endpoint; remove an owned stale socket only when no server is listening.
-pub(crate) struct Service { path: PathBuf, task: tokio::task::JoinHandle<()>, delivery_task:tokio::task::JoinHandle<()>, closing:Arc<Mutex<bool>>, broker:Arc<host::directed_delivery::Broker> }
+pub(crate) struct Service { path: PathBuf, task: tokio::task::JoinHandle<()>, delivery_task:tokio::task::JoinHandle<()>, closing:Arc<Mutex<bool>>, broker:Arc<host::directed_delivery::Broker>, stopped: Arc<tokio::sync::Notify> }
 impl Service {
     pub(crate) fn start(profile: &Path, runtime: Arc<UnifiedRuntimeHandle>, guard: crate::desktop::HeadlessInstanceGuard) -> Result<Self, Error> {
         Self::start_owner(profile,runtime,Arc::new(guard),OwnerMode::Background)
@@ -98,20 +102,39 @@ impl Service {
         let profile=profile.to_owned();
         let registration_lock=Arc::new(tokio::sync::Mutex::new(()));
         let closing=Arc::new(Mutex::new(false));let closed=closing.clone();let broker=runtime.owner.delivery.clone();
+        let stopped = Arc::new(tokio::sync::Notify::new()); let finished = stopped.clone();
         let task = tokio::spawn(async move {
             let mut children = tokio::task::JoinSet::new();
             while let Ok(mut socket) = listener.accept().await {
                 while children.try_join_next().is_some() {}
                 let Ok(permit) = limit.clone().try_acquire_owned() else { continue; };
                 let guard = guard.clone(); let runtime = runtime.clone(); let generation = generation.clone(); let executable_sha256 = executable_sha256.clone();
-                let profile=profile.clone();let registration_lock=registration_lock.clone();let closed=closed.clone();
+                let profile=profile.clone();let registration_lock=registration_lock.clone();let closed=closed.clone(); let finished=finished.clone();
                 children.spawn(async move {
                     let _guard = guard;
                     let _permit = permit;
-                    let _ = tokio::time::timeout(TIMEOUT, async {
-                        let mut header = [0; 4]; socket.read_exact(&mut header).await?;
-                        let mut bytes = vec![0; valid_length(header)?]; socket.read_exact(&mut bytes).await?;
-                        let request: Request = serde_json::from_slice(&bytes)?;
+                    let _ = tokio::time::timeout(STOP_TIMEOUT, async {
+                        let request: Request = tokio::time::timeout(TIMEOUT, async {
+                            let mut header = [0; 4]; socket.read_exact(&mut header).await?;
+                            let mut bytes = vec![0; valid_length(header)?]; socket.read_exact(&mut bytes).await?;
+                            Ok::<Request, Error>(serde_json::from_slice(&bytes)?)
+                        }).await??;
+                        if let Request::Shutdown { generation: expected, executable_sha256: hash } = &request {
+                            let admitted = admit_shutdown(owner_mode, expected, hash, &generation, &executable_sha256, &closed);
+                            let response = match admitted {
+                                Err(error) => Response::Rejected(error),
+                                Ok(()) => match runtime.owner.shutdown_host().await {
+                                    Ok(()) => Response::StopPrepared { generation: generation.clone(), executable_sha256: executable_sha256.clone(), pid: std::process::id(), cleanup_verified: true },
+                                    Err(error) => Response::Rejected(error),
+                                },
+                            };
+                            let success = matches!(response, Response::StopPrepared { .. });
+                            let write = socket.write_all(&frame(&serde_json::to_vec(&response)?)?).await;
+                            // An interrupted caller gets an unknown result, never a false success.
+                            // A completed cleanup exits normally even if the reply socket was lost.
+                            if success { finished.notify_one(); }
+                            write?; return Ok::<(), Error>(());
+                        }
                         let registration=match &request {
                             Request::Delivery{generation:service,executable_sha256:hash,intent:host::directed_delivery::LocalIntent::Register{generation:gui,..}} if service==&generation&&hash==&executable_sha256=>Some(gui.clone()),
                             _=>None,
@@ -135,12 +158,21 @@ impl Service {
                 });
             }
         });
-        Ok(Self { path, task, delivery_task, closing, broker })
+        Ok(Self { path, task, delivery_task, closing, broker, stopped })
     }
 }
 impl Drop for Service {
     fn drop(&mut self) { let mut closed=self.closing.lock().unwrap();*closed=true;self.broker.verified_gui_generation("");self.broker.reconcile(|_|false); self.delivery_task.abort(); self.task.abort(); crate::private_ipc::remove_endpoint(&self.path); }
 }
+fn admit_shutdown(mode: OwnerMode, expected: &str, hash: &str, generation: &str, actual_hash: &str, closing: &Mutex<bool>) -> Result<(), String> {
+    if mode != OwnerMode::Background || expected != generation || hash != actual_hash {
+        return Err("Shutdown requires the exact background owner generation and executable".into());
+    }
+    let mut state = closing.lock().map_err(|_| "Shutdown state unavailable")?;
+    if *state { return Err("Background shutdown already requested; outcome must be observed".into()); }
+    *state = true; Ok(())
+}
+
 fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: String, executable_sha256: String, owner_mode:OwnerMode) -> Response {
     if let Request::Negotiate { generation: expected, executable_sha256: hash, offer } = request {
         return answer_negotiation(expected, hash, offer, generation, executable_sha256);
@@ -163,7 +195,7 @@ fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: Stri
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
         Request::Reload(message) => pairing.request_runtime_reload(message),
-        Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
+        Request::Shutdown{..}|Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
     };
     let peers = runtime.owner.discovery_snapshot_rx().map(|rx| rx.borrow().clone()).unwrap_or_default();
     Response::Snapshot(Snapshot { schema: SCHEMA, owner_mode, version: env!("CARGO_PKG_VERSION").into(), generation, executable_sha256, pid: std::process::id(), peers, pairing })
@@ -237,6 +269,32 @@ impl Client {
             "service_contract": *self.contract.lock().unwrap(),
             "discovered_routes": cached.peers.len(), "profile": self.profile})
     }
+    pub fn shutdown_verified(&self) -> Result<serde_json::Value, Error> {
+        let _serial = self.transition.lock().map_err(|_| "Background transition unavailable")?;
+        let (generation, pid, mode) = { let cached = self.cached.lock().unwrap(); (cached.generation.clone(), cached.pid, cached.owner_mode) };
+        if mode != OwnerMode::Background || generation == "unavailable" {
+            return Err("No verified independent background owner".into());
+        }
+        if !self.contract.lock().unwrap().as_ref().is_some_and(|s| s.capabilities.iter().any(|c| c == service_contract::SHUTDOWN)) {
+            return Err("Background does not support verified shutdown; upgrade both owners".into());
+        }
+        stop_policy::verify(pid, &std::env::current_exe()?)?;
+        // Register an exact native process-exit event before requesting any stop.
+        let observer = exit_observer::ExitObserver::open(pid)?;
+        eprintln!("WEAVELO_STOP_INTENT {}", serde_json::json!({"generation":generation,"pid":pid,"executable_sha256":self.executable_sha256,"success":false}));
+        let response = exchange_response_timeout(&self.profile, &Request::Shutdown { generation: generation.clone(), executable_sha256: self.executable_sha256.clone() }, STOP_TIMEOUT)?;
+        validate_stop_receipt(response, &generation, &self.executable_sha256, pid)?;
+        observer.wait(Duration::from_secs(5))?;
+        // A replacement or supervised restart is not the stopped generation.
+        for _ in 0..3 {
+            if crate::private_ipc::exists(&self.profile, SOCKET)? { return Err("Background endpoint remains or was replaced; full exit unconfirmed".into()); }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Ok(serde_json::json!({"kind":"verified-background-stop", "scope":"background-service-only", "generation":generation, "pid":pid,
+            "executable_sha256":self.executable_sha256,"cleanup_verified":true,"process_exit_observed":true,
+            "endpoint_absent":true,"persistent_startup_changed":false}))
+    }
+
     pub async fn frontend_runtime(&self) -> Result<UnifiedRuntimeHandle, Error> {
         if self.owner_mode()!=OwnerMode::Background{return Err("Standalone GUI already owns its runtime".into());}
         let (tx, rx) = watch::channel(self.cached.lock().unwrap().peers.clone());
@@ -280,8 +338,19 @@ impl Client {
 pub(crate) fn executable_hash() -> Result<String, Error> {
     Ok(format!("{:x}", Sha256::digest(fs::read(std::env::current_exe()?)?)))
 }
+fn validate_stop_receipt(response: Response, generation: &str, hash: &str, pid: u32) -> Result<(), Error> {
+    match response {
+        Response::StopPrepared { generation: actual, executable_sha256, pid: actual_pid, cleanup_verified: true }
+            if actual == generation && executable_sha256 == hash && actual_pid == pid => Ok(()),
+        Response::Rejected(reason) => Err(format!("Background stop not confirmed: {reason}").into()),
+        _ => Err("Background stop receipt owner/cleanup mismatch".into()),
+    }
+}
 fn exchange_response(profile: &Path, command: &Request) -> Result<Response, Error> {
-    let mut socket=crate::private_ipc::connect(profile,SOCKET,TIMEOUT)?;
+    exchange_response_timeout(profile, command, TIMEOUT)
+}
+fn exchange_response_timeout(profile: &Path, command: &Request, timeout: Duration) -> Result<Response, Error> {
+    let mut socket=crate::private_ipc::connect(profile,SOCKET,timeout)?;
     socket.write_all(&frame(&serde_json::to_vec(command)?)?)?;
     let mut header = [0; 4]; socket.read_exact(&mut header)?;
     let mut bytes = vec![0; valid_length(header)?]; socket.read_exact(&mut bytes)?;
@@ -291,7 +360,7 @@ fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result
     let snapshot = match exchange_response(profile, command)? {
         Response::Snapshot(snapshot) => snapshot,
         Response::Rejected(_) => return Err("Background service rejected the operation".into()),
-        Response::ConnectionDiagnostics(_)|Response::Negotiated{..}=>return Err("Expected background Snapshot".into()),
+        Response::StopPrepared{..}|Response::ConnectionDiagnostics(_)|Response::Negotiated{..}=>return Err("Expected background Snapshot".into()),
     };
     validate_snapshot(&snapshot, profile, executable_sha256)?;
     Ok(snapshot)
@@ -349,7 +418,7 @@ pub async fn run(mut config: UnifiedRuntimeConfig) -> Result<(), Error> {
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
     config.enable_viewer_media = false; config.enable_workspace_viewer = false; config.enable_client_receiver = false;
     let runtime = Arc::new(crate::start_unified_runtime(config.clone()).await?);
-    let _service = Service::start(&config.mesh_dir, runtime, owner)?;
+    let service = Service::start(&config.mesh_dir, runtime.clone(), owner)?;
     // Persist the launch role, not credentials. During a crash/restart gap a
     // manual app launch must still attach/fail, never become a standalone host.
     let marker = config.mesh_dir.join(ROLE_MARKER);
@@ -365,13 +434,70 @@ pub async fn run(mut config: UnifiedRuntimeConfig) -> Result<(), Error> {
         }
         Err(error) => return Err(error.into()),
     }
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        _ = service.stopped.notified() => {},
+        result = tokio::signal::ctrl_c() => { result?; runtime.owner.shutdown_host().await?; },
+    }
+    // Successful explicit quit returns zero. Failure-only launchd/systemd policy
+    // does not relaunch it. No persistent startup or role marker is modified.
     Ok(())
 }
 
 #[cfg(test)]
 mod service_contract_tests {
     use super::*;
+
+    #[test]
+    fn full_exit_rejects_normal_restart_and_independent_activation_policies() {
+        let good=serde_json::json!({"Label":"fun.hackerlife.weavelo.host","ProgramArguments":["/fixture/weavelo","--background-service"],"RunAtLoad":true,"KeepAlive":{"SuccessfulExit":false}});
+        stop_policy::validate_launchd(&good,"/fixture/weavelo").unwrap();
+        for (key,value) in [("KeepAlive",serde_json::json!(true)),("StartInterval",serde_json::json!(30)),
+            ("MachServices",serde_json::json!({"fixture":true})),("ProgramArguments",serde_json::json!(["/wrong","--background-service"]))] {
+            let mut bad=good.clone();bad[key]=value;assert!(stop_policy::validate_launchd(&bad,"/fixture/weavelo").is_err());
+        }
+        let good="MainPID=42\nRestart=on-failure\nActiveState=active\nSubState=running\nJob=\nTriggeredBy=\nRestartForceExitStatus=\nExecStopPost=\nOnSuccess=\n";
+        stop_policy::validate_systemd(good,42).unwrap();
+        for bad in [good.replace("Restart=on-failure","Restart=always"),good.replace("TriggeredBy=","TriggeredBy=other.socket"),
+            good.replace("MainPID=42","MainPID=43"),good.replace("RestartForceExitStatus=","RestartForceExitStatus=0"),good.replace("OnSuccess=","OnSuccess=other.service"),good.replace("Job=","Job=45"),good.replace("SubState=running","SubState=stop-sigterm")] {
+            assert!(stop_policy::validate_systemd(&bad,42).is_err());
+        }
+    }
+
+    #[test]
+    fn shutdown_requires_exact_background_owner_and_never_accepts_a_replacement() {
+        let closing = Mutex::new(false);
+        for (mode, generation, hash) in [(OwnerMode::Standalone,"g","h"),
+            (OwnerMode::Background,"old","h"),(OwnerMode::Background,"g","wrong")] {
+            assert!(admit_shutdown(mode,generation,hash,"g","h",&closing).is_err());
+            assert!(!*closing.lock().unwrap());
+        }
+        admit_shutdown(OwnerMode::Background,"g","h","g","h",&closing).unwrap();
+        assert!(admit_shutdown(OwnerMode::Background,"g","h","g","h",&closing).is_err());
+        for (generation, hash, pid, clean) in [("old","h",42,true),("g","bad",42,true),
+            ("g","h",43,true),("g","h",42,false)] {
+            assert!(validate_stop_receipt(Response::StopPrepared { generation:generation.into(),
+                executable_sha256:hash.into(),pid,cleanup_verified:clean },"g","h",42).is_err());
+        }
+        validate_stop_receipt(Response::StopPrepared {generation:"g".into(),executable_sha256:"h".into(),
+            pid:42,cleanup_verified:true},"g","h",42).unwrap();
+        assert!(validate_stop_receipt(Response::Rejected("cleanup timed out".into()),"g","h",42).is_err());
+        let request=Request::Shutdown{generation:"g".into(),executable_sha256:"h".into()};
+        let bytes=frame(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert!(matches!(serde_json::from_slice::<Request>(&bytes[4..]).unwrap(),Request::Shutdown{..}));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_process_observer_requires_actual_owned_child_exit() {
+        use exit_observer::ExitObserver;
+        let mut child=std::process::Command::new("/bin/sh").args(["-c","read ignored; exit 0"])
+            .stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let still_running=ExitObserver::open(child.id()).unwrap().wait(Duration::from_millis(10));
+        assert!(still_running.is_err());assert!(child.try_wait().unwrap().is_none());
+        let observer=ExitObserver::open(child.id()).unwrap();drop(child.stdin.take());
+        observer.wait(Duration::from_secs(3)).unwrap();assert!(child.wait().unwrap().success());
+        assert!(ExitObserver::open(0).is_err());assert!(ExitObserver::open(std::process::id()).is_err());
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {

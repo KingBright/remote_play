@@ -196,6 +196,7 @@ pub(crate) struct OriginalOwner {
     #[cfg(any(unix, windows))]
     observed_service_epoch: std::sync::atomic::AtomicU64,
     pool: Mutex<Pool>,
+    pending_exit_connections: Mutex<Vec<Arc<WorkspaceConnection>>>,
     updates: tokio::sync::watch::Sender<u64>,
     presentation_visible: std::sync::atomic::AtomicBool,
     input_focused: std::sync::atomic::AtomicBool,
@@ -228,6 +229,7 @@ impl OriginalOwner {
             #[cfg(any(unix, windows))]
             observed_service_epoch: std::sync::atomic::AtomicU64::new(backend.frontend_epoch().map(|e| e.load(std::sync::atomic::Ordering::Acquire)).unwrap_or(0)),
             backend,
+            pending_exit_connections: Mutex::new(Vec::new()),
             updates,
             presentation_visible: std::sync::atomic::AtomicBool::new(true),
             input_focused: std::sync::atomic::AtomicBool::new(true),
@@ -1270,6 +1272,27 @@ impl OriginalOwner {
         });
         let count = p.sessions.len();
         p.tabs.select(0, &key, count);
+    }
+
+    pub async fn close_all_verified(&self) -> Result<(), String> {
+        let connections = {
+            let mut pool = self.pool.lock().unwrap();
+            if pool.tabs.connecting().is_some() { return Err("A connection is still being established; cancel it before full exit".into()); }
+            for view in &mut pool.sessions { view.session.release_input(); }
+            let mut retained=self.pending_exit_connections.lock().unwrap();
+            for view in &pool.sessions {
+                if !retained.iter().any(|old|Arc::ptr_eq(old,&view.session.conn)) { retained.push(view.session.conn.clone()); }
+            }
+            retained.clone()
+        };
+        self.close_all();
+        let mut pending = tokio::task::JoinSet::new();
+        for connection in connections { pending.spawn(async move { connection.close_verified().await }); }
+        let mut failure = false;
+        while let Some(result) = pending.join_next().await { failure |= !matches!(result, Ok(Ok(()))); }
+        if failure { return Err("Some outgoing connections did not confirm input/media cleanup; original connections retained, full exit not confirmed".into()); }
+        self.pending_exit_connections.lock().unwrap().clear();
+        Ok(())
     }
 
     pub fn close_all(&self) {

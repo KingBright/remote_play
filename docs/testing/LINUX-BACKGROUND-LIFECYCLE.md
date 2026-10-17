@@ -195,7 +195,34 @@ python3 -B scripts/build_identity_gate.py candidate-manifest \
 
 - 关闭附着GUI：原 `on_window_should_close` 释放输入并清理本前台会话，退出GUI；后台保留。`SessionState::drop` 另会释放键鼠/修饰键。该调用链已有实现，实际安装程序的手动关闭/重开与远端继续可用仍须真机证明。
 - 关闭连接的实现缺口已复现并修复：`WorkspaceConnection::control(Close)` 在返回future前调用原 `InputState::seal`；此前输入只在actor取到Close后清空，队列满时input tick仍能刷新旧held。现在seal立即清空slot，保留请求计数单调。实际Rust用例填满命令队列、不poll Close future，验证旧ready/snapshot/refresh/grant即时失效，再验证新绑定不能采用旧request或恢复旧held。修复前21通过/1失败，修复后22通过；无协议、身份或输入授权变化。
-- 退出整个产品仍有独立实现缺口：当前附着GUI的 `Quit` 只调用本前台owner.close_all与cx.quit，原后台Request没有Shutdown；不能将它称为退出全部后台。需在原同用户IPC/原服务监督模型中先明确精确owner停止、活动会话保护、输入/原生资源释放、服务不立即重启及再次启动的语义，再实现全退出。这里没有新增停止命令、杀进程、修改launchd/systemd或改变持久授权。
+- 历史核查（由下节实现覆盖）：退出整个产品当时仍有独立实现缺口：当前附着GUI的 `Quit` 只调用本前台owner.close_all与cx.quit，原后台Request没有Shutdown；不能将它称为退出全部后台。需在原同用户IPC/原服务监督模型中先明确精确owner停止、活动会话保护、输入/原生资源释放、服务不立即重启及再次启动的语义，再实现全退出。这里没有新增停止命令、杀进程、修改launchd/systemd或改变持久授权。
 - 重连后的旧输入：现有epoch/request/source binding及前台hold超时保护继续保留。本次22项连接回归包含关闭重试、释放重传和源切换隔离；只能证明本地代码路径，不能代替macOS/Windows/Linux的目标OS按键释放、断线重连或全进程退出验收。
 
 实际回归使用原main、`test_stream_settings_model.py --mode clock-workspace`、既有官方观察绑定与共享target。早期相对路径/陈旧Cargo.lock观察绑定均在编译前被拒，未改合同；采用当前已有且合同匹配的 `linux-cross-validation-binding.json` 后原门禁通过。没有新建源码副本、缓存、权威或发布产物。冻结二进制基线仍为feba70a；本次源码修复未部署，不能计入其真机通过率。
+
+
+## 当前全退出契约与实现（源码已补齐，尚未部署）
+
+三个意图明确区分：
+
+| 用户动作 | 前台 | 当前用户的本产品后台 | 回执边界 |
+| --- | --- | --- | --- |
+| 关闭窗口 | 附着模式退出前台；旧standalone仍按原行为收起窗口 | 不停止独立后台 | 不等于全产品退出，也不新增权限 |
+| Quit GUI（退出前台） | 关闭本前台进程的界面和会话 | 独立后台继续运行 | 仅在已有分离模式提供；standalone不冒充独立前台 |
+| Quit Weavelo（退出全部） | 本进程所有现有窗口锁定输入，收齐各自连接的已认证Closed，再退出 | 分离模式请求准确后台实例停止；standalone直接清理自己的host | 清理失败、在途连接未确定、超时或实例变化时保留错误，不报成功 |
+
+`FrontendExitGroup` 只是本GUI进程现有owner的弱引用集合，不是持久注册或另一套服务。全退出期间禁止新连接和重新解锁输入，所有窗口都纳入回执；失败后保留原owner及原连接，即使关闭了失败窗口或再次点击退出，也不能以空会话列表掩盖未确认的清理；不按进程名批量杀进程，不停止其他用户或其他应用的服务。正在建立而尚无确定连接的请求须先取消或完成，不能假装已经取得它的远端清理证明。
+
+复用原同用户私有控制端点，local service API minor更新为1.1并增加可选 `shutdown.v1`；原Snapshot schema2和旧请求字节保持兼容，网络Session协议不变。Shutdown固定现有generation与可执行文件hash，只接受Background owner；旧实例、错误hash、Standalone或已进入停止的实例均拒绝，不以兼容协商代替身份验证。Windows当前没有已审阅的独立服务停止策略，不广告此后台能力；其standalone退出仍通过同一host清理路径结束本进程，不引入Windows服务权限。
+
+后台停止在原host控制循环中撤销实际输入owner，沿原peer.shutdown、worker join和native-stop回执清理所有所属连接。失败或native完成未知时保留原失败/资源回执并停止接纳新命令，不以超时伪造成功。前台 `close_verified` 只接受来自已认证匹配连接的Closed；actor结束、连接取消和普通超时均不算远端清理成功。
+
+`StopPrepared` 只表示后台host清理完成，不表示进程已退出。Client先登记原生进程退出事件（macOS kqueue、Linux pidfd；Windows观察器实现也通过编译检查），再发原请求；核对回执generation/hash/PID/cleanup后，等待同一进程退出并检查私有端点没有留下或被替换。没有发送进程信号的fallback，失败不换PID、服务或通道重试。成功返回小型JSON `verified-background-stop`，scope明确为 `background-service-only`，包含准确owner、清理、进程退出和端点消失的观测；不含凭据、帧或输入文本。GUI记录该回执后才请求本前台退出；`WEAVELO_FRONTEND_EXIT_READY` 是前台退出意图，真正GUI进程退出仍由外部原生观察验收。
+
+停止前仅只读检查原用户服务策略：macOS核对原LaunchAgent的Label、精确程序/参数、失败重启条件、无定时/路径/socket/MachServices等独立激活，并核对loaded job PID；Linux核对原weavelo.service MainPID、ActiveState=active/SubState=running、Job为空、Restart=no/on-failure、无TriggeredBy、强制正常退出重启、ExecStopPost或OnSuccess激活。缺失、改变或不可读即拒绝。成功路径正常返回0，沿原失败重启策略保持停止，不执行enable/disable、bootout、配置写入或权限修改。保留原RunAtLoad/enabled和角色标记，因此下次登录仍按原自启动意图运行；退出后若需立刻再启动，使用原服务控制入口，不生成第二个独立owner或新身份。
+
+同一已安装可执行文件的 `--background-stop-json` 暴露上述验证操作，仅停止选定profile的独立后台，不能单独宣称仍在运行的GUI也退出；GUI的Quit Weavelo才串联全部前台连接清理、后台停止及前台退出。参数不接受任意PID或服务名。此轮只实现并回归，没有对真实安装调用该命令，也没有变更真实服务策略。
+
+双窗口回归使用两个独占随机loopback端口、真实WorkspaceConnection和OriginalOwner，分别验证全部确认及一个缺失回执的结果。host正反回归使用现有native-worker/withheld-stop夹具；进程观察用真实自有子进程证明超时不能当退出。原 `gui-input-status`、`host-control`、`lifecycle-service-contract`、`clock-workspace` 入口及macOS/Linux/Windows固定编译检查复用主main、共享缓存、原观察绑定、源码守护和收尾验证。它们不连接真实peer、不注入OS输入、不生成真实配对，不代替已安装产品关窗、全退出、重连和后台存活验收。
+
+冻结feba70a候选未改变，新实现尚不在该二进制中。后续包含这些功能的发布须沿原生产者重新冻结真实源码/配置/identity与回执，不能把文档提交或本地测试重标成已部署的源码来源。当前三组六方向的真机状态仍未测，DNS/ACL/配对和暂停上传边界保持。

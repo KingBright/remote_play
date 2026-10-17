@@ -1,7 +1,7 @@
 //! Opt-in full restored GPUI event-routing regression. Uses a local packet recorder,
 //! never a real host, native screen capture, device identity, or OS input injection.
 use super::{
-    DrawerTab, RestoredDashboard, UnifiedRuntimeConfig, component, weavelo_themes,
+    DrawerTab, FrontendExitGroup, RestoredDashboard, UnifiedRuntimeConfig, component, weavelo_themes,
     start_unified_runtime,
 };
 use crate::desktop::OriginalGuiSession;
@@ -148,7 +148,7 @@ fn restored_gpui_preserves_press_release_keyboard_and_overlay_isolation(cx: &mut
     });
     let (view, cx) = cx.add_window_view(move |window, cx| {
         let mut view =
-            RestoredDashboard::new(runtime, None, Arc::new(AtomicBool::new(false)), window, cx);
+            RestoredDashboard::new(runtime, None, Arc::new(AtomicBool::new(false)), None, Arc::new(FrontendExitGroup::default()), window, cx);
         view.owner.attach_recorder_session(session);
         view.pause_when_inactive = false;
         view.drawer_open = false;

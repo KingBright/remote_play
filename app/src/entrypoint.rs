@@ -92,6 +92,18 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
             #[cfg(not(all(any(unix, windows), feature = "gpui-restoration")))]
             { Err("The private GUI receive adapter is available on macOS/Linux".into()) }
         }
+        "--background-stop-json" => {
+            if args.next().is_some() { return Err("--background-stop-json takes no extra arguments".into()); }
+            #[cfg(any(unix, windows))]
+            {
+                let config = weavelo_app::UnifiedRuntimeConfig::from_env()?;
+                let client = weavelo_app::background_service::Client::connect(&config.mesh_dir)?;
+                println!("{}", client.shutdown_verified()?);
+                Ok(true)
+            }
+            #[cfg(not(any(unix, windows)))]
+            { Err("Verified background stop is not available on this platform".into()) }
+        }
         "--background-status-json" => {
             if args.next().is_some() { return Err("--background-status-json takes no extra arguments".into()); }
             #[cfg(any(unix, windows))]

@@ -60,7 +60,7 @@ pub async fn run_restored_gui(
     let profile = config.mesh_dir.clone();
     let runtime = Arc::new(start_unified_runtime(config).await?);
     let _service = crate::background_service::Service::start_for_gui(&profile, runtime.clone(), &instance)?;
-    run_original_dashboard(runtime, Some(instance), activation)
+    run_original_dashboard(runtime, Some(instance), activation, None)
 }
 
 /// A manually launched window attaches to the existing background owner.
@@ -76,7 +76,7 @@ pub async fn run_attached_gui(config: UnifiedRuntimeConfig) -> Result<(), Box<dy
     let signal = activation.clone();
     instance.attach_callback(move || { signal.store(true, Ordering::Release); })?;
     let runtime = Arc::new(service.frontend_runtime().await?);
-    run_original_dashboard(runtime, Some(instance), activation)
+    run_original_dashboard(runtime, Some(instance), activation, Some(service))
 }
 
 /// Bounded integration entry for the same production dashboard and renderer.
@@ -90,12 +90,14 @@ pub fn run_restored_workspace_runtime(
     let activation = Arc::new(AtomicBool::new(false));
     let signal = activation.clone();
     instance.attach_callback(move || { signal.store(true, Ordering::Release); })?;
-    run_original_dashboard(runtime, Some(instance), activation)
+    run_original_dashboard(runtime, Some(instance), activation, None)
 }
 
 fn run_original_dashboard(
     runtime: Arc<UnifiedRuntimeHandle>, instance: Option<Instance>, activation: Arc<AtomicBool>,
+    background: Option<crate::background_service::Client>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let exit_group=Arc::new(FrontendExitGroup::default());
     let startup_error = Arc::new(Mutex::new(None));
     let init_error = startup_error.clone();
     crate::desktop::foreground_runtime::run(move || {
@@ -111,7 +113,7 @@ fn run_original_dashboard(
                 crate::product_components::theme::install(
                     product_window_appearance(),
                     weavelo_themes(), cx);
-                open_restored_window(runtime, instance, activation, None, cx);
+                open_restored_window(runtime, instance, activation, None, background, exit_group, cx);
             })
     })?;
     if let Some(error) = startup_error.lock().map_err(|_| "GUI startup error lock poisoned")?.take() {
@@ -124,6 +126,8 @@ fn open_restored_window(
     instance: Option<Instance>,
     activation: Arc<AtomicBool>,
     device: Option<String>,
+    background: Option<crate::background_service::Client>,
+    exit_group: Arc<FrontendExitGroup>,
     cx: &mut App,
 ) {
     let primary = instance.is_some();
@@ -149,9 +153,10 @@ fn open_restored_window(
         ..Default::default()
     };
     cx.open_window(options, move |window, cx| {
-        let view = cx.new(|cx| RestoredDashboard::new(runtime, instance, activation, window, cx));
+        let view = cx.new(|cx| RestoredDashboard::new(runtime, instance, activation, background, exit_group, window, cx));
         let weak = view.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
+            if weak.update(cx, |this, _| this.exit_group.stopping.load(Ordering::Acquire)).unwrap_or(false) { return false; }
             if primary && attached {
                 let _ = weak.update(cx, |this, _| { this.owner.release_input(); this.owner.close_all(); });
                 cx.quit();
@@ -296,6 +301,40 @@ pub fn should_auto_hide_toolbar(
     !toolbar_hovered && !menu_open && now.saturating_duration_since(last_activity) >= hide_delay
 }
 
+/// Only the existing views in this GUI process; no persistent registry or IPC authority.
+#[derive(Default)]
+struct FrontendExitGroup {
+    stopping: AtomicBool,
+    owners: Mutex<Vec<std::sync::Weak<OriginalOwner>>>,
+    pending: Mutex<Vec<Arc<OriginalOwner>>>,
+}
+impl FrontendExitGroup {
+    fn owners(&self) -> Vec<Arc<OriginalOwner>> {
+        let mut owners=self.owners.lock().unwrap();
+        owners.retain(|owner|owner.strong_count()>0);
+        owners.iter().filter_map(std::sync::Weak::upgrade).collect()
+    }
+    async fn close_verified(&self) -> Result<(), String> {
+        let owners={
+            let mut retained=self.pending.lock().unwrap();
+            for owner in self.owners() {
+                if !retained.iter().any(|old|Arc::ptr_eq(old,&owner)) { retained.push(owner); }
+            }
+            retained.clone()
+        };
+        let mut tasks=tokio::task::JoinSet::new();
+        for owner in owners { tasks.spawn(async move { owner.close_all_verified().await }); }
+        let mut failure=None;
+        while let Some(result)=tasks.join_next().await {
+            match result {
+                Ok(Ok(()))=>{}, Ok(Err(error))=>{if failure.is_none(){failure=Some(error);}},
+                Err(_)=>{if failure.is_none(){failure=Some("A frontend cleanup worker failed".into());}},
+            }
+        }
+        match failure { Some(error)=>Err(error),None=>{self.pending.lock().unwrap().clear();Ok(())} }
+    }
+}
+
 struct RestoredDashboard {
     runtime: Arc<UnifiedRuntimeHandle>,
     owner: Arc<OriginalOwner>,
@@ -307,6 +346,9 @@ struct RestoredDashboard {
     activation: Arc<AtomicBool>,
     bound_source: Option<(u32, Instant)>,
     quitting: bool,
+    full_exit_pending: bool,
+    exit_group: Arc<FrontendExitGroup>,
+    background: Option<crate::background_service::Client>,
     window_handle: AnyWindowHandle,
     started: Instant,
     render_calls: u64,
@@ -363,6 +405,8 @@ impl RestoredDashboard {
         runtime: Arc<UnifiedRuntimeHandle>,
         instance: Option<Instance>,
         activation: Arc<AtomicBool>,
+        background: Option<crate::background_service::Client>,
+        exit_group: Arc<FrontendExitGroup>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -378,6 +422,7 @@ impl RestoredDashboard {
         })
         .detach();
         let owner = OriginalOwner::new(runtime.owner.clone());
+        exit_group.owners.lock().unwrap().push(Arc::downgrade(&owner));
         let mesh_pairing = runtime.mesh_pairing.clone();
         let mesh_pairing_snapshot = mesh_pairing.as_ref().map(MeshPairingControl::snapshot);
         let prefs = crate::preferences::UserPreferences::load_or_default();
@@ -409,6 +454,7 @@ impl RestoredDashboard {
             activation,
             bound_source: None,
             quitting: false,
+            full_exit_pending: false, exit_group, background,
             window_handle: window.window_handle(),
             started: Instant::now(),
             render_calls: 0,
@@ -1419,6 +1465,7 @@ impl RestoredDashboard {
     }
 
     fn open_device_window(&mut self, device_id: &str, cx: &mut Context<Self>) {
+        if self.exit_group.stopping.load(Ordering::Acquire) { return; }
         let device = self
             .runtime
             .owner
@@ -1434,6 +1481,8 @@ impl RestoredDashboard {
                 None,
                 Arc::new(AtomicBool::new(false)),
                 Some(device.device_id),
+                self.background.clone(),
+                self.exit_group.clone(),
                 cx,
             );
         }
@@ -1503,23 +1552,68 @@ impl RestoredDashboard {
                     }),
             );
         }
-        row.child(
+        let row = row.child(
             command_button("quit_restored_app", ActionVariantKind::Neutral, cx)
                 .rounded_full()
                 .h(px(28.))
                 .text_size(px(10.))
-                .child("Quit")
+                .child(if self.background.is_some() { "Quit GUI" } else { "Quit Weavelo" })
                 .on_click(move |_, _, cx| {
                     let _ = view.update(cx, |this, cx| {
-                        this.owner.close_all();
-                        this.quitting = true;
-                        cx.quit();
+                        if this.background.is_some() {
+                            this.owner.release_input(); this.owner.close_all();
+                            this.quitting = true; cx.quit();
+                        } else { this.begin_full_exit(cx); }
                     });
                 }),
-        )
+        );
+        if self.background.is_none() { return row; }
+        let view = cx.entity().downgrade();
+        row.child(command_button("quit_all_weavelo", ActionVariantKind::Danger, cx)
+            .rounded_full().h(px(28.)).text_size(px(10.)).child("Quit Weavelo")
+            .on_click(move |_, _, cx| {
+                let _ = view.update(cx, |this, cx| this.begin_full_exit(cx));
+            }))
+    }
+
+    fn begin_full_exit(&mut self, cx: &mut Context<Self>) {
+        if self.exit_group.stopping.swap(true, Ordering::AcqRel) { return; }
+        self.full_exit_pending = true;
+        for owner in self.exit_group.owners() { owner.set_input_locked(true); owner.release_input(); }
+        self.set_input_locked(true);
+        self.owner.release_input(); self.pointer_input = PointerInputTracker::default();
+        self.invalidate_source_commands(); self.session_commands.begin();
+        #[cfg(any(unix, windows))]
+        self.stop_directed_receive();
+        #[cfg(any(unix, windows))]
+        self.directed_send.take();
+        self.status = "Releasing connections and stopping Weavelo…".into();
+        let group = self.exit_group.clone(); let runtime = self.runtime.clone(); let background = self.background.clone();
+        cx.spawn(async move |view, cx| {
+            let result = async {
+                group.close_verified().await?;
+                if let Some(background) = background {
+                    tokio::task::spawn_blocking(move || background.shutdown_verified().map(|receipt| { eprintln!("WEAVELO_STOP_RECEIPT {receipt}"); }).map_err(|e|e.to_string()))
+                        .await.map_err(|_| "Background shutdown observer failed".to_string())?
+                } else { runtime.owner.shutdown_host().await }
+            }.await;
+            let _ = view.update(cx, |this, cx| {
+                this.full_exit_pending = false;
+                this.exit_group.stopping.store(false, Ordering::Release);
+                match result {
+                    Ok(()) => {
+                        eprintln!("WEAVELO_FRONTEND_EXIT_READY {}", serde_json::json!({"pid":std::process::id(),"cleanup_verified":true,"exit_requested":true}));
+                        this.quitting = true; cx.quit();
+                    },
+                    Err(error) => { this.status = format!("Full exit not confirmed: {error}"); cx.notify(); },
+                }
+            });
+        }).detach();
+        cx.notify();
     }
 
     fn set_input_locked(&mut self, locked: bool) {
+        if !locked && self.exit_group.stopping.load(Ordering::Acquire) { return; }
         if locked && !self.input_locked {
             for event in self.pointer_input.release_events() {
                 self.owner.queue_viewing_input(event);
@@ -3290,6 +3384,7 @@ impl RestoredDashboard {
     }
 
     fn dispatch_session_action(&mut self, action: SessionTabsAction, cx: &mut Context<Self>) {
+        if self.exit_group.stopping.load(Ordering::Acquire) { return; }
         #[cfg(any(unix, windows))]
         self.stop_directed_receive();
         let Some(effect) = self.owner.session_tabs().effect(action) else { return; };
@@ -3331,6 +3426,7 @@ impl RestoredDashboard {
     }
 
     fn start_stream_connection(&mut self, device_id: String, receive: Option<String>, cx: &mut Context<Self>) {
+        if self.exit_group.stopping.load(Ordering::Acquire) { return; }
                 self.invalidate_source_commands();
                 let ticket = self.session_commands.begin();
                 self.status = format!("Connecting to {device_id}");
@@ -3378,6 +3474,7 @@ impl RestoredDashboard {
         self.status="Contacting target to receive this screen".into();Ok(())
     }
     fn dispatch_device_action(&mut self, action: DeviceListAction, cx: &mut Context<Self>) {
+        if self.exit_group.stopping.load(Ordering::Acquire) { return; }
         #[cfg(any(unix, windows))]
         if !matches!(action, DeviceListAction::SelectFilter(_) | DeviceListAction::CopyReceiveCommand(_) | DeviceListAction::SendScreen(_)) { self.stop_directed_receive(); }
         let Some(effect) = self.device_list_state.reduce(action) else { cx.notify(); return; };
@@ -5111,6 +5208,55 @@ mod input_tests {
         should_reveal_toolbar,
     };
     use crate::HostStats;
+
+    #[tokio::test]
+    async fn full_exit_collects_both_windows_and_refuses_one_missing_remote_receipt() {
+        use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+        use remote_core::{net::{UdpMultiplexer,MultiplexedPacket},workspace_session::WorkspaceConnection};
+        use protocol::{ControlMessage,session::SessionCommand};
+        assert!(remote_core::session_crypto::load_session_psk().is_none(),"Fixture must not inherit a user's key");
+        remote_core::init_crypto_provider();
+        for confirm_second in [true,false] {
+            let group=Arc::new(super::FrontendExitGroup::default());
+            let (_,peers)=tokio::sync::watch::channel(remote_core::discovery::DiscoveryPeerSnapshot::default());
+            let backend=Arc::new(crate::UnifiedServiceOwner::from_background_snapshot(peers).await.unwrap());
+            let seen=Arc::new(AtomicUsize::new(0));let mut servers=Vec::new();let mut owners=Vec::new();
+            for index in 0..2 {
+                let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let addr=mux.local_addr().unwrap();
+                let (sender,receiver)=mux.split();let seen=seen.clone();let confirmed=index==0||confirm_second;
+                servers.push(tokio::spawn(async move {
+                    let mut received_close=false;
+                    while let Ok(packet)=receiver.recv().await {
+                        if let MultiplexedPacket::Control(ControlMessage::Session(command),from)=packet {
+                            let response=match *command {
+                                SessionCommand::Open{connection_id,..}=>Some(SessionCommand::Opened{connection_id,version:protocol::session::SESSION_VERSION,max_subscriptions:1,files:false,clipboard:false,window_capture:false}),
+                                SessionCommand::Close{connection_id}=>{
+                                    if !received_close {seen.fetch_add(1,Ordering::SeqCst);received_close=true;}
+                                    confirmed.then(||SessionCommand::Closed{connection_id,reason:"owned fixture cleanup complete".into()})
+                                }, _=>None,
+                            };
+                            if let Some(response)=response {sender.send_control(&ControlMessage::Session(Box::new(response)),from).await.unwrap();}
+                        }
+                    }
+                }));
+                let (connection,events)=WorkspaceConnection::connect_media(addr).await.unwrap();
+                let owner=super::OriginalOwner::new(backend.clone());
+                owner.attach_recorder_session(crate::desktop::OriginalGuiSession::new(format!("fixture-{index}"),"Fixture".into(),"Loopback".into(),connection,events));
+                group.owners.lock().unwrap().push(Arc::downgrade(&owner));owners.push(owner);
+            }
+            let result=group.close_verified().await;
+            assert_eq!(result.is_ok(),confirm_second);
+            assert_eq!(seen.load(Ordering::SeqCst),2,"both actual connection actors must receive Close");
+            if !confirm_second {
+                // Even if that failed window is closed, the original unknown
+                // connection must survive. Empty UI lists are not a receipt.
+                owners.pop();
+                assert!(group.close_verified().await.is_err(),"a repeated whole-exit request must not erase missing cleanup proof");
+            }
+            for server in servers {server.abort();let _=server.await;}
+            drop(owners);
+        }
+    }
 
     #[test]
     fn readiness_display_closes_immediately_and_debounces_recovery() {

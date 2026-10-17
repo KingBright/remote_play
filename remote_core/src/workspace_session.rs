@@ -42,6 +42,7 @@ pub struct WorkspaceEvents {
 }
 
 pub struct WorkspaceConnection {
+    close_confirmed: Arc<std::sync::atomic::AtomicBool>,
     last_response_rx: tokio::sync::watch::Receiver<Instant>,
     input: Arc<std::sync::Mutex<InputState>>,
     pub max_subscriptions: usize,
@@ -133,8 +134,10 @@ impl WorkspaceConnection {
             }));
             (runtime, worker)
         });
+        let close_confirmed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let input = Arc::new(std::sync::Mutex::new(InputState::default()));
         let mut actor = Actor {
+            close_confirmed: close_confirmed.clone(),
             last_response_tx,
             input: input.clone(),
             id,
@@ -156,6 +159,7 @@ impl WorkspaceConnection {
         });
         Ok((
             Self {
+                close_confirmed,
                 last_response_rx,
                 input,
                 max_subscriptions,
@@ -187,6 +191,20 @@ impl WorkspaceConnection {
             while !self.task.is_finished() { tokio::time::sleep(Duration::from_millis(10)).await; }
         }).await;
         let _ = self.cancel.send(());
+    }
+
+    /// Only an authenticated matching Closed receipt proves remote cleanup.
+    pub async fn close_verified(&self) -> Result<(), String> {
+        if self.close_confirmed.load(std::sync::atomic::Ordering::Acquire) && self.task.is_finished() { return Ok(()); }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            self.control(SessionCommand::Close { connection_id: self.id }).await?;
+            while !self.task.is_finished() { tokio::time::sleep(Duration::from_millis(10)).await; }
+            Ok::<(), String>(())
+        }).await.map_err(|_| "connection cleanup confirmation timed out")??;
+        if !self.close_confirmed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("connection ended without confirmed remote cleanup".into());
+        }
+        Ok(())
     }
 
     fn prepare_command(&self, command: SessionCommand) -> Result<Command, String> {
@@ -279,6 +297,7 @@ struct Pending {
     last_sent: Instant,
 }
 struct Actor {
+    close_confirmed: Arc<std::sync::atomic::AtomicBool>,
     input: Arc<std::sync::Mutex<InputState>>,
     last_response_tx: tokio::sync::watch::Sender<Instant>,
     id: u32,
@@ -314,6 +333,7 @@ mod input_api_tests {
         let (file_commands,_)=mpsc::channel(1);let (commands,mut queued)=mpsc::channel(1);
         let (cancel,_)=broadcast::channel(1);
         let conn=WorkspaceConnection {
+            close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_response_rx,input:input.clone(),max_subscriptions:8,files_available:false,clipboard_available:false,
             settings_revision:std::sync::atomic::AtomicU64::new(0),id:1,sender,target,file_commands,
             file_activity:Arc::new(std::sync::atomic::AtomicBool::new(false)),commands,cancel,
@@ -780,7 +800,7 @@ impl Actor {
                                 if let Some(view) = self.subscriptions.get(id) { view.host_stats.media_pause.acknowledge(self.target, *id, *revision, !video); }
                             }
                             let _ = self.control_tx.send(command);
-                            if closed { return; }
+                            if closed { self.close_confirmed.store(true, std::sync::atomic::Ordering::Release); return; }
                         }
                         Ok(MultiplexedPacket::ClockReply(reply,received_us,addr)) if addr==self.target => {
                             // Liveness follows authenticated session traffic, never clock fit quality.
@@ -945,6 +965,7 @@ mod tests {
         let (file_commands, _) = mpsc::channel(1);
         let (_, last_response_rx) = tokio::sync::watch::channel(Instant::now());
         let connection = WorkspaceConnection {
+            close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_response_rx, input: input.clone(), max_subscriptions: 1,
             files_available: false, clipboard_available: false,
             settings_revision: std::sync::atomic::AtomicU64::new(0), id: 42,
@@ -986,6 +1007,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_close_rejects_an_actor_exit_without_remote_cleanup_receipt() {
+        let (actor,_)=source_switch_actor().await;
+        let (commands,mut receiver)=mpsc::channel(1);let (file_commands,_)=mpsc::channel(1);
+        let (_,last_response_rx)=tokio::sync::watch::channel(Instant::now());
+        let task=tokio::spawn(async {});while !task.is_finished(){tokio::task::yield_now().await;}
+        let connection=WorkspaceConnection {
+            close_confirmed:Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_response_rx,input:actor.input.clone(),max_subscriptions:1,files_available:false,clipboard_available:false,
+            settings_revision:std::sync::atomic::AtomicU64::new(0),id:81,sender:actor.sender.clone(),target:actor.target,
+            file_commands,file_activity:Arc::new(std::sync::atomic::AtomicBool::new(false)),commands,
+            cancel:broadcast::channel(1).0,task,
+        };
+        assert!(connection.close_verified().await.is_err());
+        assert!(matches!(receiver.try_recv().unwrap(),Command::Control(SessionCommand::Close{connection_id:81})));
+        // An authenticated receipt + completed actor is idempotent, without replay.
+        connection.close_confirmed.store(true,std::sync::atomic::Ordering::Release);
+        connection.close_verified().await.unwrap();assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn authenticated_open_ignores_plaintext_retired_reject_and_handshake(){
         let server=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let target=server.local_addr().unwrap();let (tx,rx)=server.split();
         let client=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let local=client.local_addr().unwrap();let(sender,receiver)=client.split();
@@ -1012,6 +1053,7 @@ mod tests {
         let (files_tx, _) = mpsc::channel(1);
         (
             Actor {
+                close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 input: Arc::new(std::sync::Mutex::new(InputState::default())),
                 last_response_tx,
                 id: 90108,
@@ -1651,6 +1693,7 @@ mod tests {
             ),
         };
         let mut actor = Actor {
+            close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 55,
@@ -1769,6 +1812,7 @@ mod tests {
         let (audio_tx, _) = mpsc::channel(1);
         let (files_tx, _) = mpsc::channel(1);
         let mut actor = Actor {
+            close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 90100,
@@ -1783,6 +1827,7 @@ mod tests {
             pending: HashMap::new(),
             clipboard: None, audio_groups: HashMap::new(), pending_audio_activity: std::collections::BTreeMap::new(),
         };
+        let close_confirmed=actor.close_confirmed.clone();
         let (cancel, cancel_rx) = broadcast::channel(1);
         let task = tokio::spawn(async move {
             actor.run(cancel_rx).await;
@@ -1838,6 +1883,7 @@ mod tests {
         ));
         let _ = cancel.send(());
         assert!(task.await.unwrap().is_empty());
+        assert!(close_confirmed.load(std::sync::atomic::Ordering::Acquire));
     }
     #[tokio::test]
     async fn handshake_retries_loss_and_ignores_unrelated_control_without_spending_retries() {
@@ -1901,6 +1947,7 @@ mod rejected_datagram_tests {
         let (audio_tx, _) = mpsc::channel(2);
         let (files_tx, _) = mpsc::channel(2);
         let mut actor = Actor {
+            close_confirmed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             input:Arc::new(std::sync::Mutex::new(InputState::default())),
             last_response_tx,
             id: 91,

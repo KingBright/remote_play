@@ -8,10 +8,11 @@ use std::collections::BTreeSet;
 
 pub mod session;
 
-pub const VERSION: Version = Version { major: 1, minor: 0 };
+pub const VERSION: Version = Version { major: 1, minor: 1 };
 pub const SNAPSHOT: &str = "snapshot.v1";
 pub const PAIRING: &str = "pairing.v1";
 pub const CONNECTION_DIAGNOSTICS: &str = "connection-diagnostics.v1";
+pub const SHUTDOWN: &str = "shutdown.v1";
 const MAX_CAPABILITIES: usize = 32;
 const MAX_CAPABILITY_BYTES: usize = 96;
 
@@ -46,11 +47,13 @@ pub enum Rejection {
 }
 
 pub fn current_offer() -> Offer {
+    let mut capabilities = [SNAPSHOT, PAIRING, CONNECTION_DIAGNOSTICS].map(str::to_owned).to_vec();
+    // Only the installed macOS/Linux service policy has a reviewed stop path.
+    // Windows standalone Quit still cleans its own embedded host directly.
+    if cfg!(any(target_os = "macos", target_os = "linux")) { capabilities.push(SHUTDOWN.into()); }
     Offer {
         version: VERSION,
-        capabilities: [SNAPSHOT, PAIRING, CONNECTION_DIAGNOSTICS]
-            .map(str::to_owned)
-            .to_vec(),
+        capabilities,
         required: vec![SNAPSHOT.into()],
     }
 }

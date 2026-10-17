@@ -1758,11 +1758,36 @@ impl InputInjector for LazyInputInjector {
     }
 }
 
+pub struct ShutdownRequest {
+    pub reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+async fn shutdown_connections(
+    peers: &mut HashMap<SocketAddr, Connection>, closing: &mut HashMap<SocketAddr, ClosingTask>,
+    closed: &mut HashMap<SocketAddr, ClosedReceipt>, owner: &mut ActiveInput, injector: &LazyInputInjector,
+    sender: &UdpSender,
+) -> Result<(), String> {
+    // Revoke the actual input resource before waiting for capture workers.
+    let released = tokio::time::timeout(crate::lifecycle::CLEANUP_WAIT, owner.release(injector)).await;
+    let mut failed = !matches!(released, Ok(Ok(())));
+    for addr in peers.keys().copied().collect::<Vec<_>>() { begin_close(peers, closing, addr, true); }
+    for addr in closing.keys().copied().collect::<Vec<_>>() {
+        let mut ending = closing.remove(&addr).unwrap();
+        let result = (&mut ending.task).await.unwrap_or_else(|_| Err("connection cleanup task failed".into()));
+        failed |= result.is_err();
+        // The caller retains the original resource receipts even on failure.
+        let _ = tokio::time::timeout(Duration::from_millis(100), send_session(sender, addr, terminal_reply(ending.id, &result))).await;
+        closed.insert(addr, ClosedReceipt { resources: ending.resources.clone(), id: ending.id, result, at: Instant::now() });
+    }
+    failed |= closed.values().any(|receipt| receipt.result.is_err() || receipt.resources_live());
+    if failed { Err("host input/native cleanup incomplete; stop is not confirmed".into()) } else { Ok(()) }
+}
+
 pub async fn run_host_service(
     config: HostServiceConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     run_host_service_inner(
-        config, None,
+        config, None, None,
         #[cfg(all(unix, any(test, target_os = "linux")))]
         None,
     )
@@ -1776,15 +1801,16 @@ pub async fn run_host_service_with_portal_shares(
     config: HostServiceConfig,
     controls: mpsc::Receiver<LocalPortalShareCommand>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    run_host_service_inner(config, None, Some(controls)).await
+    run_host_service_inner(config, None, None, Some(controls)).await
 }
 
 pub async fn run_host_service_with_delivery(
     config: HostServiceConfig,
     delivery: Arc<crate::directed_delivery::Broker>,
+    shutdown: mpsc::Receiver<ShutdownRequest>,
     #[cfg(target_os="linux")] controls: mpsc::Receiver<LocalPortalShareCommand>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    run_host_service_inner(config, Some(delivery),
+    run_host_service_inner(config, Some(delivery), Some(shutdown),
         #[cfg(target_os="linux")] Some(controls),
         #[cfg(all(unix,test,not(target_os="linux")))] None,
     ).await
@@ -1793,6 +1819,7 @@ pub async fn run_host_service_with_delivery(
 async fn run_host_service_inner(
     config: HostServiceConfig,
     delivery: Option<Arc<crate::directed_delivery::Broker>>,
+    mut shutdown: Option<mpsc::Receiver<ShutdownRequest>>,
     #[cfg(all(unix, any(test, target_os = "linux")))] mut local_shares: Option<
         mpsc::Receiver<LocalPortalShareCommand>,
     >,
@@ -1809,6 +1836,7 @@ async fn run_host_service_inner(
     let mut psk = load_session_psk();
     let mut require_auth = require_session_auth() || psk.is_some();
     let mut input_owner = ActiveInput::default();
+    let mut stopping = false;
     let mut input_watchdog = tokio::time::interval(Duration::from_millis(
         protocol::realtime_input::INPUT_WATCHDOG_INTERVAL_MS));
     input_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1816,7 +1844,19 @@ async fn run_host_service_inner(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            request = async {
+                if let Some(receiver) = &mut shutdown { receiver.recv().await }
+                else { std::future::pending().await }
+            } => {
+                if let Some(request) = request {
+                    stopping = true;
+                    let result = shutdown_connections(&mut peers, &mut closing, &mut closed, &mut input_owner, &injector, &udp_sender).await;
+                    let success = result.is_ok(); let _ = request.reply.send(result);
+                    if success { return Ok(()); }
+                } else { shutdown = None; }
+            }
             local = async {
+                if stopping { return std::future::pending().await; }
                 #[cfg(all(unix, any(test, target_os = "linux")))]
                 if let Some(receiver) = &mut local_shares { return receiver.recv().await; }
                 #[cfg(all(unix, any(test, target_os = "linux")))]
@@ -1903,7 +1943,7 @@ async fn run_host_service_inner(
                     let _ = input_owner.release(&injector).await;
                 }
             }
-            received = udp_receiver.recv() => {
+            received = udp_receiver.recv(), if !stopping => {
                 let packet = match received { Ok(packet) => packet, Err(error) => { eprintln!("UDP receive: {error}"); continue; } };
                 match packet {
                     MultiplexedPacket::Control(ControlMessage::SessionHandshake(message), addr) => {
@@ -2698,6 +2738,41 @@ mod failure_admission_tests {
         assert!(peer.accept_input(&packet).is_none());
         peer.subscriptions.get_mut(&100).unwrap().settings.send_modify(|s|s.paused=true);
         assert!(peer.input_binding(31,100,10,2).is_none());
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_releases_input_and_waits_for_each_owned_connection() {
+        use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering::SeqCst};
+        let (mut peer, addr) = fixture_peer(78110).await;
+        install_capture_fixture(&mut peer).await;
+        let resources=peer.resources.clone();
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let (sender,_)=mux.split();
+        let held=Arc::new(AtomicBool::new(true));let releases=Arc::new(AtomicUsize::new(0));
+        let injector=LazyInputInjector(std::sync::Mutex::new(Some((InputTarget::Desktop,
+            Box::new(OwnershipProbe{held:held.clone(),releases:releases.clone(),delay:Duration::ZERO})))));
+        let mut owner=ActiveInput::default();owner.owner=Some((addr,100));
+        let mut peers=HashMap::from([(addr,peer)]);let mut closing=HashMap::new();let mut closed=HashMap::new();
+        shutdown_connections(&mut peers,&mut closing,&mut closed,&mut owner,&injector,&sender).await.unwrap();
+        assert!(!held.load(SeqCst));assert_eq!(releases.load(SeqCst),1);assert!(owner.owner.is_none());
+        assert!(peers.is_empty() && closing.is_empty());assert!(closed[&addr].result.is_ok());
+        assert!(!closed[&addr].resources_live());
+        assert!(resources.native_stops_completed.load(SeqCst)>0);
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_with_withheld_native_stop_returns_failure_and_retains_receipt() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (mut peer,addr)=fixture_peer(78111).await;
+        let (release,dropped)=install_withheld_stop_fixture(&mut peer).await;
+        let resources=peer.resources.clone();
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let (sender,_)=mux.split();
+        let mut peers=HashMap::from([(addr,peer)]);let mut closing=HashMap::new();let mut closed=HashMap::new();
+        let result=shutdown_connections(&mut peers,&mut closing,&mut closed,&mut ActiveInput::default(),&LazyInputInjector::default(),&sender).await;
+        assert!(result.is_err());assert!(closed[&addr].result.is_err());assert!(closed[&addr].resources_live());
+        assert!(!dropped.load(SeqCst));
+        release.send(Ok(())).unwrap();
+        tokio::time::timeout(Duration::from_secs(1),crate::lifecycle::wait_native_stops(&resources)).await.unwrap();
+        assert!(dropped.load(SeqCst));assert!(closed[&addr].result.is_err(),"late completion does not rewrite failure as success");
     }
 
     async fn fixture_peer(id: u32) -> (Connection, SocketAddr) {

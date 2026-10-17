@@ -1446,6 +1446,7 @@ pub struct UnifiedServiceOwner {
     side_services: UnifiedSideServiceControls,
     #[cfg(target_os = "linux")]
     local_portal_shares: Option<mpsc::Sender<host::service::LocalPortalShareCommand>>,
+    host_shutdown: Option<mpsc::Sender<host::service::ShutdownRequest>>,
     pub(crate) delivery: Arc<host::directed_delivery::Broker>,
     pub(crate) delivery_incoming: Mutex<Option<mpsc::Receiver<Arc<host::directed_delivery::Incoming>>>>,
     tasks: Vec<AbortOnDropTask>,
@@ -1543,12 +1544,14 @@ impl UnifiedServiceOwner {
         let (delivery, delivery_incoming)=host::directed_delivery::Broker::new();
         #[cfg(target_os = "linux")]
         let mut local_portal_shares = None;
+        let mut host_shutdown = None;
         if let Some(host_config) = config.passive_host {
+            let (stop_tx, stop_rx) = mpsc::channel(1); host_shutdown = Some(stop_tx);
             #[cfg(target_os = "linux")]
             let controls = { let (tx, rx) = mpsc::channel(16); local_portal_shares = Some(tx); rx };
             let broker=delivery.clone();
             tasks.push(AbortOnDropTask(tokio::spawn(async move {
-                let result = host::service::run_host_service_with_delivery(host_config, broker,
+                let result = host::service::run_host_service_with_delivery(host_config, broker, stop_rx,
                     #[cfg(target_os="linux")] controls,
                 ).await;
                 if let Err(err) = result { eprintln!("Unified passive host service stopped: {err}"); }
@@ -1621,13 +1624,22 @@ impl UnifiedServiceOwner {
             side_services: config.side_services,
             #[cfg(target_os = "linux")]
             local_portal_shares,
-            delivery, delivery_incoming: Mutex::new(Some(delivery_incoming)),
+            host_shutdown, delivery, delivery_incoming: Mutex::new(Some(delivery_incoming)),
             tasks,
         })
     }
 
     #[cfg(target_os = "linux")]
     pub fn local_portal_shares(&self) -> Option<mpsc::Sender<host::service::LocalPortalShareCommand>> { self.local_portal_shares.clone() }
+
+    pub async fn shutdown_host(&self) -> Result<(), String> {
+        let Some(sender) = &self.host_shutdown else { return Ok(()); };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            sender.send(host::service::ShutdownRequest { reply }).await.map_err(|_| "Host control owner unavailable")?;
+            result.await.map_err(|_| "Host cleanup receipt unavailable")?
+        }).await.map_err(|_| "Host cleanup timed out; no confirmed stop".to_string())?
+    }
 
     pub fn runtime(&self) -> Arc<Mutex<UnifiedAppRuntime>> {
         self.runtime.clone()
