@@ -41,7 +41,17 @@ BUILD_ENV = ('PATH', 'HOME', 'TMPDIR', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOL
              'MACOSX_DEPLOYMENT_TARGET', 'CC', 'CXX', 'AR', 'CPATH', 'LIBRARY_PATH',
              'PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR', 'RP_VERIFIED_FFMPEG_INCLUDE',
              'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
-             'INCLUDE', 'LIB', 'LIBPATH')
+             'INCLUDE', 'LIB', 'LIBPATH',
+             'WEAVELO_VALIDATION_SYSROOT', 'WEAVELO_VALIDATION_SYSROOT_MANIFEST',
+             'WEAVELO_VALIDATION_SYSROOT_MANIFEST_SHA256', 'WEAVELO_VALIDATION_LINUX_CLANG',
+             'WEAVELO_VALIDATION_ZIG', 'WEAVELO_VALIDATION_CMAKE', 'ZIG_GLOBAL_CACHE_DIR', 'ZIG_LOCAL_CACHE_DIR',
+             'CC_x86_64_unknown_linux_gnu', 'CXX_x86_64_unknown_linux_gnu', 'AR_x86_64_unknown_linux_gnu',
+             'CFLAGS_x86_64_unknown_linux_gnu', 'CXXFLAGS_x86_64_unknown_linux_gnu',
+             'CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu', 'CMAKE_x86_64_unknown_linux_gnu',
+             'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER', 'OPUS_NO_PKG_CONFIG',
+             'PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu', 'PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu',
+             'PKG_CONFIG_PATH_x86_64_unknown_linux_gnu', 'PKG_CONFIG_ALLOW_CROSS_x86_64_unknown_linux_gnu',
+             'BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu')
 
 
 class IdentityRejected(RuntimeError):
@@ -229,11 +239,15 @@ def build_environment() -> dict[str, str]:
                key not in BUILD_ENV and key not in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS')]
     require(not unknown and not os.environ.get('RUSTFLAGS') and
             not os.environ.get('CARGO_ENCODED_RUSTFLAGS'), 'Unrecorded build override rejected')
-    return {key: os.environ[key] for key in BUILD_ENV if key in os.environ}
+    values = os.environ
+    if os.environ.get('WEAVELO_VALIDATION_SYSROOT'):
+        from test_stream_settings_model import validation_environment
+        values = validation_environment('lifecycle-linux-native-build')
+    return {key: values[key] for key in BUILD_ENV if key in values}
 
 
 def environment_digest() -> str:
-    return digest(canonical(build_environment()))
+    return digest(canonical(compiler_environment_record()))
 
 
 def identity(source: dict, config: dict) -> dict:
@@ -329,6 +343,7 @@ def compiled_module(expected: dict) -> bytes:
     require(len(raw) <= 65536, 'Compiled identity exceeds native bounds')
     text = ('#[used]\n'
             '#[cfg_attr(target_os = "windows", unsafe(link_section = ".rpbuild"))]\n'
+            '#[cfg_attr(target_os = "linux", unsafe(link_section = ".rpbuild"))]\n'
             '#[cfg_attr(target_os = "macos", unsafe(link_section = "__TEXT,__rpbuild"))]\n'
             f'pub static BUILD_IDENTITY_BYTES: [u8; {len(raw)}] = [' +
             ','.join(str(b) for b in raw) + '];\n'
@@ -336,9 +351,9 @@ def compiled_module(expected: dict) -> bytes:
     return text.encode()
 
 
-def shared_target(repo: Path, requested: Path | None = None, *, lifecycle_binding: Path | None = None) -> Path:
-    require(lifecycle_binding is None or sys.platform == 'linux', 'Explicit observation binding is Linux only')
-    if sys.platform == 'linux':
+def shared_target(repo: Path, requested: Path | None = None, *, lifecycle_binding: Path | None = None, allow_cross_linux: bool = False) -> Path:
+    require(lifecycle_binding is None or sys.platform == 'linux' or (allow_cross_linux and sys.platform == 'darwin'), 'Explicit observation binding is Linux only')
+    if sys.platform == 'linux' or (allow_cross_linux and lifecycle_binding is not None):
         # Linux already owns a project-local cache. Reconcile its original
         # observe-only authority, never create/migrate to the Mac cache path.
         import check_artifact_lifecycle as lifecycle
@@ -490,26 +505,184 @@ class BuildInputs:
                     WEAVELO_BUILD_IDENTITY_RS=str(self.module))
 
 
-def observed_build(repo: Path, expected: dict, target: Path | None = None, *, lifecycle_binding: Path | None = None) -> dict:
+def linux_elf_identity(binary: Path, expected: dict, expected_binary_sha: str) -> dict:
+    """Read the immutable ELF identity section; never execute a cross target."""
+    import struct
+    require(expected['configuration']['platform'] == 'linux', 'Linux ELF identity required')
+    require(hash_file(binary) == sha(expected_binary_sha), 'Compiler ELF differs from pinned bytes')
+    size = binary.stat().st_size
+    with binary.open('rb') as stream:
+        def read_at(offset, length):
+            require(0 <= offset <= size and 0 <= length <= size-offset, 'ELF range exceeds file')
+            stream.seek(offset); raw = stream.read(length)
+            require(len(raw) == length, 'Truncated ELF')
+            return raw
+        h = struct.unpack('<16sHHIQQQIHHHHHH', read_at(0, 64))
+        require(h[0][:7] == b'\x7fELF\x02\x01\x01' and h[1] in (2, 3) and h[3] == 1 and h[8] == 64,
+                'ELF64 little-endian executable required')
+        machine = {'x86_64': 62, 'aarch64': 183}[expected['configuration']['architecture']]
+        require(h[2] == machine, 'ELF architecture differs from build identity')
+        require(h[11] == 64 and 0 < h[12] <= 4096 and 0 < h[13] < h[12], 'Invalid ELF section table')
+        sections = [struct.unpack('<IIQQQQIIQQ', read_at(h[6]+64*i,64)) for i in range(h[12])]
+        strings = sections[h[13]]
+        require(strings[1] == 3 and strings[5] <= 1024**2, 'Invalid ELF section names')
+        names = read_at(strings[4],strings[5]); identities = []
+        for section in sections:
+            require(section[0] < len(names), 'ELF section name exceeds table')
+            end = names.find(b'\0',section[0]);require(end >= 0,'Unterminated ELF section name')
+            if names[section[0]:end] == b'.rpbuild': identities.append(section)
+        require(len(identities) == 1, 'Exactly one immutable compiled identity section required')
+        section = identities[0]
+        require(section[1] == 1 and section[2] & 2 and not section[2] & 1 and 0 < section[5] <= 65536,
+                'Identity section must be allocated, read-only, bounded PROGBITS')
+        require(h[9] == 56 and 0 < h[10] <= 1024, 'Invalid ELF program table')
+        segments = [struct.unpack('<IIQQQQQQ',read_at(h[5]+56*i,56)) for i in range(h[10])]
+        require(any(p[0] == 1 and p[1] & 4 and not p[1] & 2 and
+                    p[2] <= section[4] and section[4]+section[5] <= p[2]+p[5] and
+                    section[3] == p[3]+section[4]-p[2] for p in segments),
+                'Identity bytes must be mapped by a read-only ELF load segment')
+        actual = json_bytes(read_at(section[4],section[5]))
+    require(validate_identity(actual, expected['source']['commit'],expected['identity_sha256']) == expected,
+            'Compiled ELF source/config identity differs')
+    require(hash_file(binary) == expected_binary_sha, 'ELF changed while reading identity')
+    return {'format':'ELF64-LE','machine':machine,'identity_sha256':expected['identity_sha256'],
+            'identity_section':'.rpbuild','runtime_observed':False}
+
+
+def compiler_command(config: dict) -> list[str]:
+    return ['cargo', 'build', '-p', 'weavelo_app', '--bin', 'weavelo',
+            '--no-default-features', '--features', ','.join(config['features']),
+            '--profile', config['profile'], '--target', config['target'], '--locked', '--offline', '-j', '2']
+
+
+def validate_compiled_linux(receipt: dict, commit: str, identity_sha: str) -> dict:
+    require(type(receipt.get('schema')) is int and receipt['schema'] == 2 and receipt.get('kind') == 'compiled-build-awaiting-native' and
+            receipt.get('native_observation') == 'pending' and receipt.get('product_info') is None,
+            'Original pending compiler receipt required; runtime claims forbidden')
+    expected = validate_identity(receipt.get('build_identity'),commit,identity_sha)
+    config = expected['configuration']
+    require(config['platform'] == 'linux' and config['profile'] == 'release', 'Normal Linux release compiler output required')
+    require(receipt.get('fresh_target') is False and receipt.get('build_storage',{}).get('mode') == 'shared-incremental',
+            'Missing original shared compiler evidence')
+    require(receipt.get('source_unchanged') is True and type(receipt.get('compiler_binary_bytes')) is int and
+            0 < receipt['compiler_binary_bytes'] <= LIMIT, 'Incomplete compiler receipt')
+    sha(receipt['compiler_binary_sha256'])
+    require(receipt.get('build_command') == compiler_command(config), 'Original fixed compiler command required')
+    require(type(receipt.get('environment_record')) is dict and
+            digest(canonical(receipt['environment_record'])) == config['environment_sha256'],
+            'Compiler environment record differs from prepared identity')
+    storage = receipt['build_storage'];binding = storage.get('observation_binding',{})
+    require(all(type(storage.get(key)) is str and Path(storage[key]).is_absolute()
+                for key in ('source_directory','target_directory')) and
+            type(binding.get('path')) is str and Path(binding['path']).is_absolute(),
+            'Original source/cache/binding locations required')
+    sha(binding.get('sha256'))
+    require(receipt.get('static_identity') == {'format':'ELF64-LE',
+            'machine':{'x86_64':62,'aarch64':183}[config['architecture']], 'identity_sha256':identity_sha,
+            'identity_section':'.rpbuild','runtime_observed':False}, 'Static compiler identity evidence required')
+    return expected
+
+
+def candidate_manifest(binary: Path, receipt: dict, receipt_sha: str, commit: str, identity_sha: str) -> dict:
+    expected = validate_compiled_linux(receipt,commit,identity_sha)
+    sha(receipt_sha)
+    require(binary.stat().st_size == receipt['compiler_binary_bytes'], 'Compiler byte count differs')
+    linux_elf_identity(binary,expected,receipt['compiler_binary_sha256'])
+    return {'schema':1,'kind':'weavelo-compiled-release-candidate','native_observation':'pending',
+            'release_authorized':False,'build_identity':expected,
+            'compiler_receipt_sha256':receipt_sha,'compiler_receipt_canonical_sha256':digest(canonical(receipt)),
+            'binary_sha256':receipt['compiler_binary_sha256'],'artifact_root':'Weavelo','executable':'weavelo',
+            'files':[{'path':'weavelo','sha256':receipt['compiler_binary_sha256'],'bytes':receipt['compiler_binary_bytes']}],
+            'product_info':None,'visual_acceptance':'not_evaluated','stream_acceptance':'not_evaluated'}
+
+
+def observe_compiled_linux(binary: Path, receipt: dict, receipt_sha: str, manifest: dict,
+                           manifest_sha: str, commit: str, identity_sha: str) -> dict:
+    import platform
+    require(sys.platform.startswith('linux'), 'Real native Linux execution required')
+    expected = validate_compiled_linux(receipt,commit,identity_sha)
+    require(platform.machine().lower() == {'x86_64':'x86_64','aarch64':'aarch64'}[expected['configuration']['architecture']],
+            'Native machine differs from candidate architecture')
+    require(manifest == candidate_manifest(binary,receipt,receipt_sha,commit,identity_sha),
+            'Candidate manifest differs from original compiler evidence')
+    sha(manifest_sha)
+    value = receipt['compiler_binary_sha256']
+    info = product_info(binary,expected,value)
+    validate_product_info(info,expected)
+    require(info.get('separated_lifecycle') is True and info.get('frontend_entry') == '--gui' and
+            info.get('background_entry') == '--background-service', 'Native lifecycle capability differs')
+    return {'schema':2,'kind':'observed-build','build_identity':expected,
+            'compiler_binary_sha256':value,'compiler_binary_bytes':receipt['compiler_binary_bytes'],
+            'product_info':info,'build_command':receipt['build_command'],'fresh_target':False,
+            'build_storage':receipt['build_storage'],'native_observation':'verified',
+            'deferred_compiler_receipt_sha256':receipt_sha,'candidate_manifest_sha256':manifest_sha,
+            'visual_acceptance':'not_evaluated','stream_acceptance':'not_evaluated'}
+
+
+def compiler_environment_record() -> dict:
+    env = build_environment()
+    if not env.get('WEAVELO_VALIDATION_SYSROOT'):
+        return env  # Keep existing native/legacy environment digests unchanged.
+    root = Path(env['WEAVELO_VALIDATION_SYSROOT'])
+    manifest = Path(env.get('WEAVELO_VALIDATION_SYSROOT_MANIFEST',''))
+    require(manifest.is_absolute(), 'Independently pinned sysroot inventory required')
+    require(hash_file(manifest) == sha(env.get('WEAVELO_VALIDATION_SYSROOT_MANIFEST_SHA256')), 'Sysroot inventory digest changed')
+    with manifest.open('rb') as incoming: raw = incoming.read(2*1024**2+1)
+    require(len(raw) <= 2*1024**2, 'Sysroot inventory too large')
+    records = json_bytes(raw)
+    require(0 < len(records) <= 50000, 'Invalid sysroot inventory')
+    actual_names = {str(p.relative_to(root)) for p in root.rglob('*') if p.is_symlink() or p.is_file()}
+    require(actual_names == set(records), 'Sysroot file set changed')
+    for name, record in records.items():
+        path = root.joinpath(*relative(name).parts)
+        require(type(record) is dict and set(record) in ({'symlink'},{'sha256','bytes'}), 'Invalid sysroot record')
+        if 'symlink' in record:
+            require(path.is_symlink() and os.readlink(path) == record['symlink'], 'Sysroot link changed')
+        else:
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size == record['bytes'] and
+                    hash_file(path) == record['sha256'], 'Sysroot bytes changed')
+    tool_keys = ('WEAVELO_VALIDATION_ZIG','WEAVELO_VALIDATION_CMAKE','WEAVELO_VALIDATION_LINUX_CLANG',
+                 'CC_x86_64_unknown_linux_gnu','CXX_x86_64_unknown_linux_gnu','AR_x86_64_unknown_linux_gnu',
+                 'CMAKE_x86_64_unknown_linux_gnu','CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER')
+    tools = {}
+    for key in tool_keys:
+        require(key in env, 'Missing fixed target compiler tool')
+        p = Path(env[key]).resolve(strict=True);tools[key] = {'path':str(p),'sha256':hash_file(p)}
+    support = Path(env['CC_x86_64_unknown_linux_gnu']).parent
+    for name in ('linux_zig_tool.py','linux_clang_link.py','linux_cmake.py','linux-zig-toolchain.cmake','linux-zig-ranlib'):
+        tools[name] = {'sha256':hash_file(support/name)}
+    linker = shutil.which('ld.lld')
+    require(linker is not None,'Installed LLD required')
+    tools['ld.lld'] = {'sha256':hash_file(Path(linker).resolve(strict=True))}
+    tools['python'] = {'sha256':hash_file(Path(sys.executable).resolve(strict=True))}
+    return {'variables':env,'tools':tools,'verified_sysroot_manifest_sha256':hash_file(manifest)}
+
+
+def observed_build(repo: Path, expected: dict, target: Path | None = None, *, lifecycle_binding: Path | None = None, defer_linux_observation: bool = False) -> dict:
     """Only this fixed build path may mint a build receipt; no loose-binary import.
 
+    Deferred Linux builds return a distinct pending compiler record, never an
+    observed receipt. Native completion must execute the exact pinned ELF.
     The app must embed the exact generated identity in ProductInfo. Shared-cache
     receipts do not claim that dependencies came from a fresh target.
     """
     validate_identity(expected, expected['source']['commit'], expected['identity_sha256'])
+    if defer_linux_observation:
+        require(expected['configuration']['platform'] == 'linux' and expected['configuration']['profile'] == 'release',
+                'Deferred observation is only for normal Linux release builds')
+        require(os.environ.get('WEAVELO_VALIDATION_SYSROOT') and lifecycle_binding is not None,
+                'Explicit verified Linux toolchain and original observation binding required')
     source = source_snapshot(repo, expected['source']['commit'], expected_patch=expected['source']['patch_sha256'])
     require(identity(source, expected['configuration']) == expected, 'Source differs from reviewed snapshot')
     require(toolchain_digest() == expected['configuration']['toolchain_sha256'], 'Toolchain changed')
     require(environment_digest() == expected['configuration']['environment_sha256'], 'Build environment changed')
     repo = repo.absolute()
     binding_sha256 = hash_file(lifecycle_binding) if lifecycle_binding is not None else None
-    target = (shared_target(repo, target, lifecycle_binding=lifecycle_binding)
+    target = (shared_target(repo, target, lifecycle_binding=lifecycle_binding, **({'allow_cross_linux':True} if defer_linux_observation else {}))
               if lifecycle_binding is not None else shared_target(repo, target))
     require(shutil.disk_usage(target).free >= 4 * 1024 ** 3, 'Four GiB free-space reserve required')
     config = expected['configuration']
-    command = ['cargo', 'build', '-p', 'weavelo_app', '--bin', 'weavelo',
-               '--no-default-features', '--features', ','.join(config['features']),
-               '--profile', config['profile'], '--target', config['target'], '--locked', '--offline', '-j', '2']
+    command = compiler_command(config)
     with BuildInputs(repo, target, expected) as inputs:
         module_hash = hash_file(inputs.module)
         result = inputs.run(command, env=inputs.environment())
@@ -526,6 +699,15 @@ def observed_build(repo: Path, expected: dict, target: Path | None = None, *, li
         profile = 'debug' if config['profile'] == 'dev' else 'release'
         binary = target / config['target'] / profile / ('weavelo.exe' if config['platform'] == 'windows' else 'weavelo')
         value = hash_file(binary)
+        if defer_linux_observation:
+            static = linux_elf_identity(binary, expected, value)
+            return {'schema':2, 'kind':'compiled-build-awaiting-native', 'native_observation':'pending',
+                    'build_identity':expected, 'compiler_binary_sha256':value, 'compiler_binary_bytes':binary.stat().st_size,
+                    'static_identity':static, 'source_unchanged':True, 'product_info':None,
+                    'build_command':command, 'fresh_target':False,
+                    'build_storage':{'mode':'shared-incremental','target_directory':str(target),'source_directory':str(repo),
+                                     'observation_binding':{'path':str(lifecycle_binding),'sha256':binding_sha256}},
+                    'environment_record':compiler_environment_record(), 'release_authorized':False}
         info = product_info(binary, expected, value)
         return {'schema': 2, 'kind': 'observed-build', 'build_identity': expected,
                 'compiler_binary_sha256': value, 'compiler_binary_bytes': binary.stat().st_size,
@@ -596,6 +778,8 @@ def seal_tree(stage: Path, build_receipt: dict, expected_commit: str, expected_i
                 'compiler_binary_sha256': compiler_sha, 'binary_sha256': final_sha,
                 'product_info': info, 'signing': signing,
                 'visual_acceptance': 'not_evaluated', 'stream_acceptance': 'not_evaluated'}
+    if platform == 'linux':
+        manifest['build_receipt_canonical_sha256'] = digest(canonical(build_receipt))
     # The final byte hash lives OUTSIDE a signed .app; no circular post-sign edit.
     require(files_in(app) == records, 'Staged files changed before sealing')
     manifest_sha = write_new(stage / MANIFEST, manifest)
@@ -829,6 +1013,18 @@ def main() -> None:
     build.add_argument('--target', type=Path, help='Must resolve to the existing platform cache contract')
     build.add_argument('--lifecycle-binding', type=Path, help='Linux only: refreshed observation binding; original authority/cache/budgets remain fixed')
     build.add_argument('--output', type=Path, required=True)
+    build.add_argument('--defer-linux-observation', action='store_true', help='Compile a real identity-bearing Linux release; explicitly no runtime receipt')
+    for name in ('candidate-manifest', 'observe-linux'):
+        step = commands.add_parser(name)
+        step.add_argument('--binary', type=Path, required=True)
+        step.add_argument('--compiled-receipt', type=Path, required=True)
+        step.add_argument('--compiled-receipt-sha256', required=True)
+        step.add_argument('--expected-commit', required=True)
+        step.add_argument('--expected-identity-sha256', required=True)
+        step.add_argument('--output', type=Path, required=True)
+        if name == 'observe-linux':
+            step.add_argument('--candidate-manifest', type=Path, required=True)
+            step.add_argument('--candidate-manifest-sha256', required=True)
     candidate = commands.add_parser('verify-candidate')
     candidate.add_argument('--repo', type=Path, required=True)
     candidate.add_argument('--binary', type=Path, required=True)
@@ -876,8 +1072,19 @@ def main() -> None:
             result = {'identity_file_sha256': output_sha, 'build_identity': result, 'compiled': False}
         elif args.command == 'build':
             result = observed_build(args.repo, read_json(args.identity, args.identity_sha256), args.target,
-                                    lifecycle_binding=args.lifecycle_binding)
+                                    lifecycle_binding=args.lifecycle_binding, defer_linux_observation=args.defer_linux_observation)
             result = {'build_receipt_sha256': write_new(args.output, result), 'build': result}
+        elif args.command in ('candidate-manifest','observe-linux'):
+            compiled = read_json(args.compiled_receipt,args.compiled_receipt_sha256)
+            if args.command == 'candidate-manifest':
+                document = candidate_manifest(args.binary,compiled,args.compiled_receipt_sha256,
+                                              args.expected_commit,args.expected_identity_sha256)
+                result = {'candidate_manifest_sha256':write_new(args.output,document),'manifest':document}
+            else:
+                document = observe_compiled_linux(args.binary,compiled,args.compiled_receipt_sha256,
+                    read_json(args.candidate_manifest,args.candidate_manifest_sha256),args.candidate_manifest_sha256,
+                    args.expected_commit,args.expected_identity_sha256)
+                result = {'build_receipt_sha256':write_new(args.output,document),'build':document}
         elif args.command == 'verify-candidate':
             result = verify_candidate(args.repo, args.binary,
                                       read_json(args.identity, args.identity_file_sha256),

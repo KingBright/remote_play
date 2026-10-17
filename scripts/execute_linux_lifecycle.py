@@ -93,14 +93,30 @@ def checked_installed_product(gate, executable, expected, binary_sha256):
     return info
 
 
+def installed_journal_identity(gate, root, plan, receipt):
+    original = root.get('plan', {})
+    policy.require(root.get('phase') == 'installed_and_running_verified' and
+                   root.get('plan_sha256') == gate.digest(gate.canonical(original)),
+                   'Original verified installation journal required')
+    policy.require(original.get('platform') == 'linux' and
+                   original.get('source_commit') == plan['source_commit'] and
+                   original.get('new_binary_sha256') == plan['binary_sha256'],
+                   'Lifecycle proposal differs from original installed provenance')
+    document = gate.read_json(receipt, original['receipt_sha256'])
+    policy.require(type(document.get('schema')) is int and document['schema'] in (1,2) and
+                   document.get('kind') == 'observed-build' and document.get('native_observation') in (None,'verified'),
+                   'Installed source requires a real observed producer receipt')
+    expected = gate.validate_identity(document['build_identity'],original['source_commit'],original['build_identity_sha256'])
+    policy.require(document['compiler_binary_sha256'] == plan['binary_sha256'], 'Installed compiler hash differs')
+    return expected
+
+
 class Native:
     def __init__(self, plan):
         policy.require(sys.platform.startswith('linux'), 'Native Linux required')
         import build_identity_gate as gate
-        from install_native_first_identity import PINS, COMMIT
         self.gate = gate; self.plan = plan; self.home = Path.home().resolve(strict=True)
-        policy.require(str(self.home) == plan['home'] and plan['source_commit'] == COMMIT and
-                       plan['binary_sha256'] == PINS['linux']['binary'], 'Existing fixed installation only')
+        policy.require(str(self.home) == plan['home'], 'Existing canonical installation home required')
         self.exe = Path(plan['executable']); self.profile = Path(plan['profile'])
         policy.require(self.exe == self.home/'.local/opt/weavelo/weavelo' and
                        self.profile == self.home/'.config/weavelo/mesh', 'Canonical existing installation paths required')
@@ -120,11 +136,11 @@ class Native:
         policy.require(hasattr(self.libc, 'renameat2'), 'Atomic unit exchange unavailable')
         self.rename = self.libc.renameat2
         self.rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        receipt = Path(__file__).resolve().parents[2]/'.remoteplay-lifecycle-helper-current/weavelo-linux-observed-build-receipt.json'
-        policy.require(gate.hash_file(receipt) == PINS['linux']['receipt'], 'Original observed receipt drift')
-        expected = gate.read_json(receipt)['build_identity']
-        gate.validate_identity(expected, COMMIT, PINS['linux']['identity'])
-        checked_installed_product(gate, self.exe, expected, PINS['linux']['binary'])
+        root = self.load()
+        legacy_location = Path(__file__).resolve().parents[2]/'.remoteplay-lifecycle-helper-current/weavelo-linux-observed-build-receipt.json'
+        receipt = Path(root.get('plan',{}).get('observed_build_receipt_path',str(legacy_location)))
+        expected = installed_journal_identity(gate,root,plan,receipt)
+        checked_installed_product(gate,self.exe,expected,plan['binary_sha256'])
         self.lock_fd = None
 
     def __enter__(self):

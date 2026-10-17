@@ -157,3 +157,35 @@ CMake 使用固定目标 `ar/ranlib`。旧缓存的 `CMakeCCompiler.cmake` 会�
 Zig 已启用的 C/C++ 未定义行为检查保持为 trap，避免 Rust 链接器依赖未配置的 Zig UBSan 诊断运行时。最终链接使用目标 Clang、真实 sysroot 和严格共享库符号解析；不会通过允许未解析符号来掩盖依赖缺失。
 
 在匹配 Fedora 44 x86_64 开发包上，已实际完成完整 GPUI/native-linux-video ELF 链接，检查视频桥接和 Opus 归档全部成员为 x86_64 ELF，递归动态库无缺失，成品没有开发 sysroot RPATH/RUNPATH。产物保留在原共享 target 的固定 debug 输出；它是受控开发构建，未生成正式身份回执、未发布或替换已安装应用。下一运行验收必须通过获准的 Linux 路径真实运行候选，继续原身份生产者/原生验收流程；不能用静态检查、Mac 上的测试或传输成功伪造正式回执，不能绕过 HO5 既有上传拒绝。
+
+## 正式 Linux release 候选和延后原生观察
+
+原 `build_identity_gate.py build` 新增显式 `--defer-linux-observation`：仅允许 Linux 的正常 `release` 配置，仍使用原主 main、共享 target、生产者锁、固定临时身份输入、源码/工具环境前后核对和空间底线。它实际运行 Cargo 编译，在最终 ELF 的只读 `.rpbuild` 节核验完整 source/config identity，输出 `compiled-build-awaiting-native`。这类回执的 `native_observation=pending`、`product_info=null`，不能用于正式安装或冒充 `observed-build`。现有无身份 debug ELF 无法导入该入口。
+
+配置和 prepare 沿用原入口。交叉编译环境除前述已核验的目标配置外，还须提供 `WEAVELO_VALIDATION_SYSROOT_MANIFEST` 和它独立固定的 `WEAVELO_VALIDATION_SYSROOT_MANIFEST_SHA256`；环境 identity 绑定工具可执行文件、目标适配器和完整 sysroot 文件清单/实际内容。编译前后必须得到同一摘要。保留原权威/adoption；生成日志、观察绑定、锁和 root-transition journal 作为保护证据，不再被误纳入源码 identity 或造成自引用。
+
+下面的路径和摘要须由实际配置/源码审阅结果替换；输出必须是尚不存在的确定文件。已有 user patch 仍由 prepare 的 `--expected-patch-sha256` 精确固定，不重写或偷偷清理。
+
+```sh
+python3 -B scripts/build_identity_gate.py build \
+  --repo "$PWD" --identity /private/review/linux-release-identity.json \
+  --identity-sha256 REVIEWED_IDENTITY_FILE_SHA256 \
+  --lifecycle-binding "$PWD/.rust-storage/linux-cross-validation-binding.json" \
+  --defer-linux-observation --output /private/review/linux-release-compiled-receipt.json
+python3 -B scripts/build_identity_gate.py candidate-manifest \
+  --binary "$HOME/rust-target/x86_64-unknown-linux-gnu/release/weavelo" \
+  --compiled-receipt /private/review/linux-release-compiled-receipt.json \
+  --compiled-receipt-sha256 REVIEWED_COMPILER_RECEIPT_SHA256 \
+  --expected-commit REVIEWED_COMMIT --expected-identity-sha256 REVIEWED_IDENTITY_SHA256 \
+  --output /private/review/linux-release-candidate-manifest.json
+```
+
+候选 manifest 是 `weavelo-compiled-release-candidate`，固定编译回执文件摘要、其规范内容摘要、ELF、真实版本/源码/配置 identity 及文件大小，明确等待原生观察。它不是已验收的 release manifest；原 `seal`、`installed`、Linux installer 都拒绝它。编译器产物保留在原 release 默认输出，不为候选另复制完整程序、创建归档或维护第二份源码。
+
+原合规通道恢复且具体原生执行获准后，Linux 上的原 gate 使用 `observe-linux`，同时接收上述编译回执和候选 manifest 的独立摘要，先验证全部关系和 ELF identity，然后真正运行同一字节候选的 `--product-info-json`，核对平台、架构、版本、GUI/native-video、分离前后台声明与编译 identity。只有这一步才生成 `observed-build`，保留原 Mac 编译 source/cache 路径作为历史事实，并绑定原编译回执和候选 manifest 摘要。不是在 Linux 重新编造编译历史，也不通过文件旁注替换运行结果。实际 GUI、视频、输入和关闭窗口后后台存活验收仍分别记录。
+
+获得真实观察后，原 `seal` 才生成 `weavelo-release`，并用 `build_receipt_canonical_sha256` 绑定 observed 文档内容。Linux 原 first-install 入口要求显式 `--build-receipt/--build-receipt-sha256`、`--release-manifest/--manifest-sha256`、`--expected-commit`、`--identity-sha256`、`--compiler-binary` 与独立核验的 `--old-binary-sha256`，不再使用固定 db9fc29 的 Linux 候选。它核对实际 ELF 和相同 receipt/manifest，重建内容必须逐字节复现审阅的 release manifest。已有安装和 journal 继续受原拒绝覆盖/恢复约束，参数不能把 first-install 变成隐式覆盖安装。
+
+同 profile 生命周期执行器从原私有安装 journal 的完整 plan/hash 取得已安装 source、binary、identity 和 observed receipt pin，不再导入全局旧 Linux PINS。旧 journal 的原回执位置仍兼容；其真实旧 source 不会被重标为新构建。该逻辑只验证已安装产品，不安装新候选。
+
+这些本地工程和 release 编译步骤均不授权传输或部署。原源地址策略拒绝、文件源授权和传输业务接口问题仍须由原平台处理；不会因 release 体积变化而改通道、分片、伪装文件或绕过拒绝。

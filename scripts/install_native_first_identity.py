@@ -20,6 +20,7 @@ import sys
 import time
 import zipfile
 
+# Historical Windows transaction pins. New Linux input is independently reviewed below.
 COMMIT = 'db9fc29ef94ba69189f5fdda129135619c035f0c'
 PINS = {
     'windows': dict(binary='cfc351261cdb8418431b3fb322a39078f2de338e39f7281a353294e83d55f531',
@@ -27,10 +28,8 @@ PINS = {
         identity='85f357ac99c2d1cdc18f09216d25db3fad057bde18ceabb6bc221cce17beb986',
         receipt='ef340443d6528349663b77570d94c315bed2f0783ef183d2fd6f96c579c123b1',
         archive='9b7736c310bf24c40b68b6069aeebd404d7c9c6a4b76e19d2ae6bba28df002f4'),
-    'linux': dict(binary='f03a8459ba7013e1e73f9e3e650c2ed162d44218d3679262d02d4ce1a034f0d4',
-        old='b9b205aa6badd985f86affe92e9c20eb1a65bcd44b05db05de492a7f1810466e',
-        identity='c8bee6ea2facc97b92d447f776682def4af9934e3d345c9a81fc15ee7a34ae53',
-        receipt='8e4ba3e101e8fcd278bd6d9232a9d8c70d2316d271aedeb4ad0989d75bdc2516')}
+}
+
 
 
 def require(ok, message):
@@ -88,12 +87,50 @@ def inventory(root, gate):
     return result
 
 
+def reviewed_linux_binding(gate, args):
+    """Consume independent receipt/manifest pins; pending/static evidence cannot install."""
+    names = ('build_receipt','build_receipt_sha256','release_manifest','manifest_sha256',
+             'expected_commit','identity_sha256','compiler_binary','old_binary_sha256')
+    require(args is not None and all(getattr(args,name,None) for name in names),
+            'Linux installation requires reviewed receipt, manifest, source, identity and old/new binary pins')
+    receipt = gate.read_json(args.build_receipt,args.build_receipt_sha256)
+    require(type(receipt.get('schema')) is int and receipt['schema'] in (1,2) and
+            receipt.get('kind') == 'observed-build' and receipt.get('native_observation') in (None,'verified'),
+            'Real observed producer receipt required; pending compiler output cannot install')
+    expected = gate.validate_identity(receipt.get('build_identity'),args.expected_commit,args.identity_sha256)
+    require(expected['configuration']['platform'] == 'linux', 'Linux producer identity required')
+    gate.validate_product_info(receipt['product_info'],expected)
+    gate.regular(args.release_manifest)
+    manifest = gate.manifest_document(args.release_manifest.read_bytes(),args.manifest_sha256,
+                                      args.expected_commit,args.identity_sha256)
+    require(manifest.get('build_receipt_canonical_sha256') == gate.digest(gate.canonical(receipt)),
+            'Release manifest is not bound to the reviewed observed receipt')
+    require(manifest['build_identity'] == expected and
+            manifest['product_info'] == receipt['product_info'] and
+            manifest['binary_sha256'] == receipt['compiler_binary_sha256'], 'Producer/manifest provenance differs')
+    names = {entry['path'] for entry in manifest['files']}
+    require(names in ({'weavelo'},{'weavelo','build-info.json'}), 'Unsupported Linux installer payload members')
+    if 'build-info.json' in names:
+        metadata = {'source_commit':args.expected_commit,'build_identity_sha256':args.identity_sha256,
+                    'binary_sha256':receipt['compiler_binary_sha256']}
+        raw = json.dumps(metadata,sort_keys=True,indent=2,allow_nan=False).encode()+b'\n'
+        entry = next(item for item in manifest['files'] if item['path'] == 'build-info.json')
+        require(entry['sha256'] == gate.digest(raw) and entry['bytes'] == len(raw), 'Reviewed build-info differs')
+    gate.linux_elf_identity(args.compiler_binary,expected,receipt['compiler_binary_sha256'])
+    return {'commit':args.expected_commit,
+            'pin':{'binary':receipt['compiler_binary_sha256'],'old':gate.sha(args.old_binary_sha256),
+                   'identity':args.identity_sha256,'receipt':args.build_receipt_sha256,'manifest':args.manifest_sha256},
+            'receipt':args.build_receipt,'compiler':args.compiler_binary,'manifest':args.release_manifest,
+            'manifest_document':manifest}
+
+
 class NativeInstall:
-    def __init__(self):
+    def __init__(self, reviewed=None):
         self.windows = sys.platform == 'win32'
         require(self.windows or sys.platform.startswith('linux'), 'Native Windows/Linux required')
         self.platform = 'windows' if self.windows else 'linux'
-        self.pin = PINS[self.platform]
+        self.pin = PINS['windows'] if self.windows else None
+        self.commit = COMMIT if self.windows else None
         self.home = Path.home().resolve(strict=True)
         self.repo = Path(__file__).resolve().parents[1]
         sys.path.insert(0, str(self.repo/'scripts'))
@@ -111,13 +148,17 @@ class NativeInstall:
             self.work = self.home/'AppData/Local/.weavelo-identity-migration'
             self.shortcut = self.home/'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Weavelo.lnk'
         else:
+            binding = reviewed_linux_binding(self.gate, reviewed)
+            self.pin = binding['pin']; self.commit = binding['commit']
             self.old_app = (self.home/'.local/opt/remoteplay/2.0.0-alpha.8').resolve(strict=True)
             self.old_exe = self.old_app/'remote_play'
             self.live = self.home/'.local/opt/weavelo'
             self.profile = self.home/'.config/weavelo/mesh'
             self.old_profiles = [self.home/'.config/remote-play/mesh', self.home/'.config/remote-play-current/mesh']
-            self.receipt = self.repo.parent/'.remoteplay-lifecycle-helper-current/weavelo-linux-observed-build-receipt.json'
-            self.compiler = self.repo/'target/x86_64-unknown-linux-gnu/release/weavelo'
+            self.receipt = binding['receipt']
+            self.compiler = binding['compiler']
+            self.input_manifest = binding['manifest']
+            self.input_manifest_document = binding['manifest_document']
             self.work = self.home/'.local/state/weavelo-identity-migration'
             self.old_unit = self.home/'.config/systemd/user/remote-play-current.service'
             self.new_unit = self.home/'.config/systemd/user/weavelo.service'
@@ -189,16 +230,19 @@ class NativeInstall:
         if not self.windows:
             require(not self.new_unit.exists(), 'Existing new unit preserved')
         require(g.hash_file(self.receipt) == self.pin['receipt'], 'Observed receipt drift')
+        if not self.windows:
+            require(g.hash_file(self.input_manifest) == self.pin['manifest'], 'Reviewed Linux manifest drift')
         r = g.read_json(self.receipt)
         expected = r['build_identity']
-        g.validate_identity(expected, COMMIT, self.pin['identity'])
+        g.validate_identity(expected, self.commit, self.pin['identity'])
         require(r['kind'] == 'observed-build' and r['compiler_binary_sha256'] == self.pin['binary'], 'Wrong observed producer output')
         g.product_info(self.compiler, expected, self.pin['binary'])
         pid = self.old_pid()
         self.native(pid, self.old_exe, self.pin['old'])
         session_observation = self.require_idle()
         result = dict(schema=1, platform=self.platform, kind='weavelo-first-identity-install',
-            source_commit=COMMIT, build_identity_sha256=self.pin['identity'], receipt_sha256=self.pin['receipt'],
+            source_commit=self.commit, build_identity_sha256=self.pin['identity'], receipt_sha256=self.pin['receipt'],
+            observed_build_receipt_path=str(self.receipt),
             old_pid=pid, old_executable=str(self.old_exe), old_binary_sha256=self.pin['old'],
             old_session_observation=session_observation,
             new_executable=str(self.exe), new_binary_sha256=self.pin['binary'],
@@ -269,10 +313,12 @@ class NativeInstall:
                 app = self.stage/'Weavelo'
                 app.mkdir(mode=0o700)
                 shutil.copy2(self.compiler, app/'weavelo')
-                self.gate.write_new(app/'build-info.json', {'source_commit': COMMIT,
-                    'build_identity_sha256': self.pin['identity'], 'binary_sha256': self.pin['binary']})
-                sealed = self.gate.seal_tree(self.stage, self.gate.read_json(self.receipt), COMMIT,
+                if any(entry['path'] == 'build-info.json' for entry in self.input_manifest_document['files']):
+                    self.gate.write_new(app/'build-info.json', {'source_commit': self.commit,
+                        'build_identity_sha256': self.pin['identity'], 'binary_sha256': self.pin['binary']})
+                sealed = self.gate.seal_tree(self.stage, self.gate.read_json(self.receipt,self.pin['receipt']), self.commit,
                                             self.pin['identity'], compiler_binary=self.compiler)
+                require(sealed['manifest_sha256'] == self.pin['manifest'], 'Reconstructed release manifest differs from reviewed release')
                 state['manifest_sha256'] = sealed['manifest_sha256']
                 unit = self.unit_bytes()
                 state['new_unit_sha256'] = hashlib.sha256(unit).hexdigest()
@@ -303,7 +349,7 @@ class NativeInstall:
                 exclusive_rename(self.stage/self.gate.MANIFEST, self.work/'installed-manifest.json')
                 self.stage.rmdir()
                 self.gate.verify_install(self.live, self.work/'installed-manifest.json', state['manifest_sha256'],
-                    COMMIT, self.pin['identity'], self.exe, self.exe)
+                    self.commit, self.pin['identity'], self.exe, self.exe)
                 with self.new_unit.open('xb') as out:
                     out.write(unit)
                     out.flush()
@@ -350,7 +396,7 @@ class NativeInstall:
                 args = [sys.executable, '-B', str(desktop), '--assets', str(self.repo/'assets/brand/weavelo'),
                     '--assets-manifest-sha256', self.gate.hash_file(self.repo/'assets/brand/weavelo/SOURCE.json'),
                     '--app', str(self.live), '--release-manifest', str(self.work/'installed-manifest.json'),
-                    '--manifest-sha256', state['manifest_sha256'], '--commit', COMMIT, '--identity-sha256', self.pin['identity']]
+                    '--manifest-sha256', state['manifest_sha256'], '--commit', self.commit, '--identity-sha256', self.pin['identity']]
                 result = subprocess.run(args, capture_output=True, text=True, check=True, timeout=30)
                 document = json.loads(result.stdout)
                 desktop_plan = document['plan_sha256']
@@ -397,8 +443,12 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--apply', action='store_true')
     p.add_argument('--plan-sha256')
+    for name in ('build-receipt','release-manifest','compiler-binary'):
+        p.add_argument('--'+name,type=Path)
+    for name in ('build-receipt-sha256','manifest-sha256','expected-commit','identity-sha256','old-binary-sha256'):
+        p.add_argument('--'+name)
     args = p.parse_args()
-    install = NativeInstall()
+    install = NativeInstall(args)
     if args.apply:
         require(args.plan_sha256 is not None, 'Reviewed plan required')
         install.apply(args.plan_sha256)
