@@ -4,7 +4,7 @@
 
 ## 当前桌面全互测轮次（2026-10-17，覆盖下方历史计划）
 
-用户明确要求四台桌面设备两两全部测试；本轮 Android 暂不验收，不取消长期 Android 支持。唯一当前明细在 [FOUR-PLATFORM-MATRIX.json](FOUR-PLATFORM-MATRIX.json) 的 `current_desktop_acceptance`，复用本文件及旧矩阵，不新建任务系统。下方旧日期的在线、安装、权限和验收观察保留为历史，不能覆盖本节。
+用户最新修正按操作系统类型验收：macOS↔Windows、macOS↔Linux、Windows↔Linux，共3组6方向。两台Mac视为同一种设备，不要求重复整套验收，Mac↔Mac不作为本轮必过项；本轮 Android 暂不验收，不取消长期 Android 支持。唯一当前明细在 [FOUR-PLATFORM-MATRIX.json](FOUR-PLATFORM-MATRIX.json) 的 `current_desktop_acceptance`，复用本文件及旧矩阵，不新建任务系统。下方旧日期的在线、安装、权限和验收观察保留为历史，不能覆盖本节。
 
 统一目标为 alpha.9，冻结 producer 源码 `feba70a21830540e919e94f9441f5088461a5438`，保留源码 patch `e42426ca85da429676f1a2f6d1532034f4a8a6361f1543f021476fe1d48ad7b2`。版本字符串相同不算对齐：每平台须按原发布门禁取得真实 build identity、observed receipt、最终 manifest 与实际运行映像绑定。目前两 Mac/HO5 安装为 db9fc29，cube 仍 alpha.8；Linux 新候选只有真实编译/静态身份，尚无 native runtime observation。本文更新不触发重编译、部署或重装。 `feba70a` 是本轮二进制验收基线，不随文档 HEAD 前移。后续仅矩阵/计划文档提交不构成二进制版本差异；仍按原 compiler 源码快照、build identity、配置、产物哈希及 observed receipt 核验实际运行映像，不把文档提交重新标成二进制来源，也不放宽原 producer 源码校验。
 
@@ -12,29 +12,25 @@
 
 | 采集端 → 接收端 | 主动推送 | 主动拉取 | 视频 | 音频 | 鼠标点击 | 键盘输入 | 断线重连 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MacBook → Studio | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| MacBook → HO5 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| MacBook → cube | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| Studio → MacBook | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| Studio → HO5 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| Studio → cube | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| HO5 → MacBook | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| HO5 → Studio | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| HO5 → cube | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| cube → MacBook | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| cube → Studio | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
-| cube → HO5 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| macOS（MacBook） → Windows（cube） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| Windows（cube） → macOS（MacBook） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| macOS（MacBook） → Linux（HO5） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| Linux（HO5） → macOS（MacBook） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| Windows（cube） → Linux（HO5） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
+| Linux（HO5） → Windows（cube） | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 | 未测 |
 
-共 6 组/12 方向/84 项，当前统一目标的真机通过数为 0；另有四台设备各自的基础后台存活项，均未验收。10月14日旧 alpha.8 Studio→MacBook 的视频显示及音频回调仅作历史 partial，反向认证超时为历史 failed，不计入当前通过率。
+共3组/6方向/42项，当前统一目标真机通过数为0；另有三个OS主测设备的后台存活项，均未验收。macOS主测选MacBook：已有签名/构建环境、安装alpha.9及冻结产物证据；Studio仅在必要复现/复核时使用，不重复整套。若需更换主测，记录实际映像与理由，不能用更换设备绕过拒绝。前一版6组12方向矩阵保留在同一JSON的 `superseded_acceptance_scopes`，仅为历史，不叠加为本轮要求。10月14日旧 alpha.8 Studio→MacBook 的视频显示及音频回调仅作历史 partial，反向认证超时为历史 failed，不计入当前通过率。
 
 执行顺序：
 
-1. 对每个可用组合核验实际运行映像/来源/版本、无冲突的会话和租约、正常发现路由及源授权；同一目标源码尚未对齐时不记通过。先检查两 Mac，当前最后只读观察为 12:57 UTC 双端 0 路由/0 会话。无需重复提示配对、重建分组或读取邀请码。
-2. 先 MacBook↔Studio；随后 MacBook↔HO5、Studio↔HO5；然后 MacBook↔cube、Studio↔cube；最后 HO5↔cube。只跳过受阻组合，任何独立就绪组合都可前移，不能因一台设备阻塞停止全轮。
+1. 对每个可用组合核验实际运行映像/来源/版本、无冲突的会话和租约、正常发现路由及源授权；同一目标源码尚未对齐时不记通过。沿既有非敏感观察判断主测条件，不重复轮询无变化状态，不重复提示配对、重建分组或读取邀请码。
+2. 先macOS(MacBook)↔Linux(HO5)，再macOS(MacBook)↔Windows(cube)，最后Windows(cube)↔Linux(HO5)。只跳过受阻组合，任何独立就绪组合都可前移，不能因一台设备阻塞停止全轮。
 3. 每组先前向再反向；每方向按主动推送→主动拉取→视频/音频→点击/键盘→断线重连→原生资源释放执行。每次只使用已绑定 PID/窗口 ID/source revision 的自有测试窗口、短非敏感文本和已知音频信号；产品链路产生事件，目标原生事件及可见状态证明生效，不能用 OS 直连注入代替产品。
-4. 每设备另验证关闭自有 GUI 后同一后台 owner/映像/profile 存活且可再次连接；不停止现有服务或其他会话。HO5 当前 Standalone 不是已验证的分离后台，须按既有迁移门禁处理。
+4. 三个OS主测设备另验证关闭自有 GUI 后同一后台 owner/映像/profile 存活且可再次连接；不停止现有服务或其他会话。HO5 当前 Standalone 不是已验证的分离后台，须按既有迁移门禁处理。
 5. 配对仅沿正常产品 UI，不能读取或转发凭据、不改变持久安全授权。HO5 正式候选原上传 `81e4983d-5c9e-4f21-aeee-90fe1aee6936` 因源策略暂停/0字节，实际源 `sdmntprwestus.oaiusercontent.com`；不重试或换域名/路由，等待原通道修复确认。旧 observer 草稿上传另有 operation，不得混用。Windows 三路径 ACL 继续原待确认边界，不盲目续装。
 6. 逐项回填真实 UTC、两端运行版本/源码/映像和 build identity、route/session/source revision、原生呈现/音频输出/输入副作用/重连和清理证据。无证据留 not_tested；已执行失败记 failed；部分链路仅 partial；不支持明确 unsupported，不能删项或当通过。原文件传输、多窗口、画质/性能与视觉回归要求继续保留，七项核心矩阵不缩减原功能范围。
+
+## 以下为历史设备池观察与较早范围（不增加本轮必过项）
 
 ## 设备登记与证据
 
