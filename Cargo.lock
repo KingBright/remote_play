@@ -1140,6 +1140,7 @@ version = "2.0.0-alpha.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cc",
  "core-foundation 0.10.0",
  "core-media-sys",
  "core-video",
@@ -1157,6 +1158,7 @@ dependencies = [
  "remote_platform",
  "rfd",
  "serde",
+ "tempfile",
  "tokio",
  "video-toolbox-sys",
  "wgpu",

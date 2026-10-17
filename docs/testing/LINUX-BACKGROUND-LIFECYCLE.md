@@ -127,4 +127,33 @@ CPUWeight 保留在既有 `weavelo.service` cgroup 上，不暗中给手动 GUI 
 新的 facts 中 `observation.drop_ins` 为上述记录数组，每项仅有 path、text、sha256、device、inode、uid、mode。旧空列表方案只适用于实际没有覆盖的主机，不能用来忽略 HO5 的现有覆盖。真实生产切换仍须满足兼容产物和未被拒绝的交付路径，当前没有执行。
 
 
-本轮构建记录：原共享 target 中实际编译并运行 Mac 原生能力 2 项、所有权 5 项、IPC 7 项，原守护 receipt 的 source-unchanged 和 owned-group-absent 均为 true；这些不是 Linux ELF 产物。Linux 完整特性检查首先暴露 CMake 丢弃编译器参数的适配器缺陷，已改为固定可执行 Zig entry 并拒绝外架构参数，编译器脚本也纳入 source guard。之后检查因目标 ALSA / libspa / PipeWire sysroot 缺失而失败，未开启宿主 pkg-config 跨编译放行，也未改用降级特性。需要在获准路径的 Linux 原生构建器，或经过核验的 Linux sysroot 上继续原生产流程；目前没有新的可交付 Linux 兼容 ELF。
+## Linux 交叉编译与归档验证
+
+`client/build.rs` 通过锁定的 `cc` crate 选择 C 编译器、归档器和 target 参数，不直接调用宿主 `cc/ar`。生产构建配置由 `client/build_toolchain.rs` 共享给真实工具选择回归；`native-build-toolchain` 模式验证带连字符/下划线的 target 变量、`TARGET_CC/AR`、通用变量的优先级和原生默认值。此回归不启动产品或生成身份。
+
+完整链接用原受控入口的 `lifecycle-linux-native-build`，沿用主 main、`~/rust-target`、源码守护、观察绑定、空间底线和进程组收尾。需要事先验证的 x86_64 Linux sysroot、已安装 Zig/CMake/Clang、原有 Zig 缓存；不安装系统软件，不使用宿主 pkg-config 库。以下环境路径是占位符，必须替换为已验证的目录与工具：
+
+```sh
+export WEAVELO_VALIDATION_SYSROOT=/absolute/verified-linux-sysroot
+export WEAVELO_VALIDATION_LINUX_CLANG=/absolute/installed/clang
+export PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu="$WEAVELO_VALIDATION_SYSROOT"
+export PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu="$WEAVELO_VALIDATION_SYSROOT/usr/lib64/pkgconfig:$WEAVELO_VALIDATION_SYSROOT/usr/share/pkgconfig"
+export PKG_CONFIG_PATH_x86_64_unknown_linux_gnu=
+export PKG_CONFIG_ALLOW_CROSS_x86_64_unknown_linux_gnu=1
+export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="--target=x86_64-unknown-linux-gnu --sysroot=$WEAVELO_VALIDATION_SYSROOT"
+export CFLAGS_x86_64_unknown_linux_gnu="--sysroot=$WEAVELO_VALIDATION_SYSROOT -isystem $WEAVELO_VALIDATION_SYSROOT/usr/include"
+export CXXFLAGS_x86_64_unknown_linux_gnu="$CFLAGS_x86_64_unknown_linux_gnu"
+export RP_VERIFIED_FFMPEG_INCLUDE="$WEAVELO_VALIDATION_SYSROOT/usr/include/ffmpeg"
+python3 -B scripts/test_stream_settings_model.py --mode lifecycle-linux-native-build \
+  --lifecycle-authority "$PWD/docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json" \
+  --lifecycle-binding "$PWD/.rust-storage/linux-cross-validation-binding.json" \
+  --lifecycle-helper "$HOME/.codex/skills/rust-project-lifecycle/scripts/rust_storage.py"
+```
+
+观察绑定必须由官方 `adopt` 针对当前依赖合同生成；既有绑定不覆盖。上面的跨编译放行仅用于已经验证的目标 sysroot，不允许指向 Homebrew 或其他宿主库。标准输入路径含空格时，CFLAGS/BINDGEN 的路径还需要按各工具参数解析规则引用。
+
+CMake 使用固定目标 `ar/ranlib`。旧缓存的 `CMakeCCompiler.cmake` 会重新加载宿主归档工具，单独增加 toolchain 文件不够；目标 CMake entry 通过官方 post-project include 覆盖实际生成命令，保留原缓存及其生成记录。真实 CMake 夹具验证已有宿主工具缓存能在同一目录重新配置。锁定版本的 audiopus CMake helper 未登记工具链环境变化，验证入口通过其已有受跟踪的 pkg-config 选择变量，固定原 bundled Opus 并随工具配置摘要改变重配；不清理共享 target。
+
+Zig 已启用的 C/C++ 未定义行为检查保持为 trap，避免 Rust 链接器依赖未配置的 Zig UBSan 诊断运行时。最终链接使用目标 Clang、真实 sysroot 和严格共享库符号解析；不会通过允许未解析符号来掩盖依赖缺失。
+
+在匹配 Fedora 44 x86_64 开发包上，已实际完成完整 GPUI/native-linux-video ELF 链接，检查视频桥接和 Opus 归档全部成员为 x86_64 ELF，递归动态库无缺失，成品没有开发 sysroot RPATH/RUNPATH。产物保留在原共享 target 的固定 debug 输出；它是受控开发构建，未生成正式身份回执、未发布或替换已安装应用。下一运行验收必须通过获准的 Linux 路径真实运行候选，继续原身份生产者/原生验收流程；不能用静态检查、Mac 上的测试或传输成功伪造正式回执，不能绕过 HO5 既有上传拒绝。

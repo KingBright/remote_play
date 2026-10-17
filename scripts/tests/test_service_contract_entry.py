@@ -20,6 +20,7 @@ from scripts.test_stream_settings_model import (validation_command, validation_e
 
 class ServiceContractEntryTests(unittest.TestCase):
     SESSION_CLOCK_CASES = {
+        'native-build-toolchain': ('client', 'native_build_toolchain_tests'),
         'lifecycle-capability': ('weavelo_app', 'gui_backend::tests'),
         'lifecycle-ownership': ('weavelo_app', 'desktop::instance::tests'),
         'lifecycle-service-contract': ('weavelo_app', 'background_service::service_contract_tests'),
@@ -43,6 +44,52 @@ class ServiceContractEntryTests(unittest.TestCase):
         'bridge-telemetry': ('remote_client_bridge', 'tests::telemetry_defaults_are_zero_not_marketing_numbers'),
         'bridge-keepalive': ('remote_client_bridge', 'tests::paused_session_uses_sparse_shared_keepalive_and_stops_input_grants'),
     }
+
+    def test_linux_cmake_uses_target_archive_tools_and_invalidates_old_opus_cache(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".cache/zig").mkdir(parents=True)
+            with patch.object(Path, "home", return_value=root), patch.object(runner.shutil, "which", return_value="/installed/zig"), \
+                    patch.dict(os.environ, {"CC": "native-cc", "AR": "native-ar"}, clear=True):
+                first = validation_environment("lifecycle-linux-native-check")
+                self.assertEqual(first["CC"], "native-cc")
+                self.assertEqual(first["AR"], "native-ar")
+                self.assertTrue(first["CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu"].endswith("/linux-zig-toolchain.cmake"))
+                self.assertTrue(first["OPUS_NO_PKG_CONFIG"].startswith("weavelo-target-tools-"))
+                self.assertIn("-fsanitize-trap=undefined", first["CFLAGS_x86_64_unknown_linux_gnu"])
+                with patch.object(Path, "read_bytes", return_value=b"changed toolchain"):
+                    second = validation_environment("lifecycle-linux-native-check")
+                self.assertNotEqual(first["OPUS_NO_PKG_CONFIG"], second["OPUS_NO_PKG_CONFIG"])
+
+    def test_linux_link_build_is_fixed_and_preserves_source_and_identity_guards(self):
+        mode = "lifecycle-linux-native-build"
+        self.assertEqual(validation_command("/cargo", Path("/existing/target"), mode), [
+            "/cargo", "build", "--offline", "--locked", "--target-dir", "/existing/target",
+            "-p", "weavelo_app", "--bin", "weavelo", "--target", "x86_64-unknown-linux-gnu",
+            "--no-default-features", "--features", "gpui-restoration,native-linux-video", "-j", "2"])
+        self.assertTrue(requires_workspace_source_guard(mode))
+        with patch.dict(os.environ, {"WEAVELO_BUILD_IDENTITY_FILE": "/fixture/identity"}):
+            with self.assertRaisesRegex(ValueError, "product identity inputs"):
+                validation_environment(mode)
+
+    def test_linux_link_build_refuses_missing_or_host_architecture_sysroot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / ".cache/zig").mkdir(parents=True)
+            libraries = root / "sysroot/usr/lib64"
+            libraries.mkdir(parents=True)
+            clang = root / "clang"
+            clang.touch()
+            with patch.object(Path, "home", return_value=root), patch.object(runner.shutil, "which", return_value=str(clang)):
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "explicit installed Clang"):
+                        validation_environment("lifecycle-linux-native-build")
+                for name in ("libc.so.6", "libasound.so.2", "libpipewire-0.3.so.0", "libavcodec.so.62", "libavutil.so.60"):
+                    (libraries / name).write_bytes(b"Mach-O arm64 host object")
+                with patch.dict(os.environ, {"WEAVELO_VALIDATION_LINUX_CLANG": str(clang),
+                        "WEAVELO_VALIDATION_SYSROOT": str(root / "sysroot")}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "Non-x86_64"):
+                        validation_environment("lifecycle-linux-native-build")
 
     def test_platform_checks_keep_fixed_targets_and_source_identity_guards(self):
         expected = {

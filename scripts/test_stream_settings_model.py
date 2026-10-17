@@ -22,6 +22,7 @@ OBSERVATION_TIMEOUT_SECONDS = 60
 # Fixed package/filter pairs only. These modes share the same guarded transaction;
 # callers cannot supply Cargo arguments, alternate profiles or test executables.
 SESSION_CLOCK_TESTS = {
+    "native-build-toolchain": ("client", "native_build_toolchain_tests"),
     "lifecycle-capability": ("weavelo_app", "gui_backend::tests"),
     "lifecycle-ownership": ("weavelo_app", "desktop::instance::tests"),
     "lifecycle-service-contract": ("weavelo_app", "background_service::service_contract_tests"),
@@ -58,6 +59,10 @@ PLATFORM_CHECKS = {
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "lifecycle-linux-native-build":
+        return [cargo, "build", *shared, "-p", "weavelo_app", "--bin", "weavelo",
+                "--target", LINUX_TARGET, "--no-default-features",
+                "--features", "gpui-restoration,native-linux-video", "-j", "2"]
     if mode in PLATFORM_CHECKS:
         return [cargo, "check", *shared, "-p", "weavelo_app", *PLATFORM_CHECKS[mode]]
     if mode in SESSION_CLOCK_TESTS:
@@ -103,10 +108,10 @@ def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
     env["CARGO_TERM_COLOR"] = "never"
-    if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
+    if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
             "WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
-    if mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check"):
+    if mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check", "lifecycle-linux-native-build"):
         zig = shutil.which("zig")
         cache = Path.home() / ".cache/zig"
         if not zig or not cache.is_dir():
@@ -120,14 +125,44 @@ def validation_environment(mode):
         env["CC_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-cc")
         env["CXX_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-cxx")
         env["AR_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-ar")
+        env["CMAKE_TOOLCHAIN_FILE_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-toolchain.cmake")
+        cmake = shutil.which("cmake")
+        if not cmake:
+            raise ValueError("Linux target build requires installed CMake")
+        env["WEAVELO_VALIDATION_CMAKE"] = str(Path(cmake).resolve())
+        env["CMAKE_x86_64_unknown_linux_gnu"] = str(tools / "linux-cmake")
+        # audiopus_sys's pinned CMake helper prints toolchain variables but does
+        # not register them as Cargo rerun inputs. Use its tracked pkg-config
+        # selector to select the already-bundled Opus and invalidate stale host
+        # archive configuration when our fixed toolchain changes.
+        toolchain_bytes = b"".join((tools / name).read_bytes() for name in (
+            "linux-zig-toolchain.cmake", "linux_zig_tool.py", "linux-zig-cc", "linux-zig-ar", "linux-zig-ranlib", "linux_cmake.py", "linux-cmake"))
+        env["OPUS_NO_PKG_CONFIG"] = "weavelo-target-tools-" + hashlib.sha256(toolchain_bytes).hexdigest()
+        # Keep Zig's enabled undefined-behavior checks as traps. Rust's linker
+        # does not automatically supply Zig's diagnostic UBSan runtime.
+        for variable in ("CFLAGS_x86_64_unknown_linux_gnu", "CXXFLAGS_x86_64_unknown_linux_gnu"):
+            env[variable] = (env.get(variable, "") + " -fsanitize-trap=undefined").strip()
         env.pop("CMAKE_PREFIX_PATH", None)  # Never search host Homebrew/Qt as Linux libraries.
         env["ZIG_GLOBAL_CACHE_DIR"] = str(cache)
         env["ZIG_LOCAL_CACHE_DIR"] = str(cache)
+        if mode == "lifecycle-linux-native-build":
+            sysroot = Path(env.get("WEAVELO_VALIDATION_SYSROOT", ""))
+            clang = Path(env.get("WEAVELO_VALIDATION_LINUX_CLANG", ""))
+            if (not sysroot.is_absolute() or sysroot.is_symlink() or not sysroot.is_dir()
+                    or not clang.is_absolute() or not clang.is_file()):
+                raise ValueError("Linux link requires explicit installed Clang and verified target sysroot")
+            for library in ("libc.so.6", "libasound.so.2", "libpipewire-0.3.so.0", "libavcodec.so.62", "libavutil.so.60"):
+                path = sysroot / "usr/lib64" / library
+                header = path.read_bytes()[:20]
+                if (not path.resolve().is_relative_to(sysroot.resolve()) or
+                        header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00"):
+                    raise ValueError("Non-x86_64 target sysroot library refused")
+            env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"] = str(tools / "linux-clang-link")
     return env
 
 
 def requires_workspace_source_guard(mode):
-    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode.startswith("media-lifecycle") or
+    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode.startswith("media-lifecycle") or
             mode in ("service-contract", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"))
 
 
@@ -370,7 +405,7 @@ def main():
     parser.add_argument("--lifecycle-authority", type=Path)
     parser.add_argument("--lifecycle-binding", type=Path)
     parser.add_argument("--lifecycle-helper", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
+    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "lifecycle-linux-native-build", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -435,9 +470,9 @@ def guarded_run(args, root, parser):
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
     sources.extend([root / "scripts/test_stream_settings_model.py", root / "scripts/check_artifact_lifecycle.py"])
-    if args.mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check"):
+    if args.mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check", "lifecycle-linux-native-build"):
         sources.extend(root / "scripts/cmake" / name for name in
-                       ("linux_zig_tool.py", "linux-zig-cc", "linux-zig-cxx", "linux-zig-ar"))
+                       ("linux_zig_tool.py", "linux-zig-cc", "linux-zig-cxx", "linux-zig-ar", "linux_clang_link.py", "linux-clang-link", "linux-zig-ranlib", "linux-zig-toolchain.cmake", "linux_cmake.py", "linux-cmake"))
     for path in (args.lifecycle_authority, args.lifecycle_binding, args.lifecycle_helper):
         if path is not None:
             sources.append(path)

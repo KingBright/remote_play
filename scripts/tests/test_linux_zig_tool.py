@@ -14,6 +14,10 @@ class CompilerEntryTests(unittest.TestCase):
         self.assertEqual(m.command('/installed/zig','c++',['-c','a.cpp'])[:4],['/installed/zig','c++','-target','x86_64-linux-gnu'])
         self.assertEqual(m.command('/installed/zig','ar',['crs','a.a','a.o']),['/installed/zig','ar','crs','a.a','a.o'])
 
+    def test_target_archive_indexer_has_no_compiler_or_host_target_flags(self):
+        self.assertEqual(m.command('/installed/zig','ranlib',['a.a']), ['/installed/zig','ranlib','a.a'])
+        with self.assertRaises(ValueError):m.command('/installed/zig','ranlib',['--target=x86_64-linux-gnu'])
+
     def test_foreign_targets_modes_and_missing_arguments_rejected(self):
         for mode,args in [('cc',['--target=aarch64-linux-gnu']),('cc',['-target','aarch64-linux-gnu']),('cc',['-target']),('ar',['--target=x86_64-linux-gnu']),('shell',[])]:
             with self.subTest(mode=mode,args=args),self.assertRaises(ValueError):m.command('/installed/zig',mode,args)
