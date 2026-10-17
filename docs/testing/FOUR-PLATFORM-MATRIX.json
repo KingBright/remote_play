@@ -1882,5 +1882,806 @@
       },
       "synthetic_source": true
     }
-  ]
+  ],
+  "current_desktop_acceptance": {
+    "schema": 1,
+    "updated_at_utc": "2026-10-17",
+    "scope": "Four physical desktops, six unordered pairs and twelve media directions. Android excluded only from this acceptance round; long-term Android support and historical records retained.",
+    "authoritative_for_current_desktop_round": true,
+    "legacy_inventory_and_directions": "Historical supplied observations; do not treat top-level 2026-10-09 inventory or prior direction outcomes as fresh acceptance.",
+    "target": {
+      "product": "Weavelo",
+      "version": "2.0.0-alpha.9",
+      "source_commit": "feba70a21830540e919e94f9441f5088461a5438",
+      "status": "platform_release_and_installed_provenance_alignment_pending",
+      "source_state": "patch",
+      "source_patch_sha256": "e42426ca85da429676f1a2f6d1532034f4a8a6361f1543f021476fe1d48ad7b2",
+      "rule": "Before any pass, bind both actual running images to this exact source snapshot and reviewed platform configuration, artifact/build identity and final observed release receipt. A future target change must invalidate prior target-specific passes explicitly. Matrix documentation commit alone does not change installed product provenance.",
+      "linux_compiler_candidate": {
+        "sha256": "1057115e508113291090d470000ea8b1f9f6bfd9c0d46b130add9f588c2323cb",
+        "bytes": 47802416,
+        "native_runtime_observed": false
+      },
+      "documentation_revision_policy": "feba70a is the frozen binary acceptance baseline, not the moving documentation HEAD. Later acceptance-plan/matrix documentation commits do not by themselves constitute a binary version difference or invalidate unchanged candidate bytes. Verify each runtime against its original compiler source snapshot, build identity, configuration, artifact hash and observed receipt; never relabel an artifact with the documentation commit or waive a producer source-snapshot check."
+    },
+    "direction_semantics": "A -> B means A captures/publishes, B receives/presents. active_push is initiated in A; active_pull is initiated in B against A. Input evidence is B -> the bound A fixture. The reverse row is independently executed.",
+    "status_values": [
+      "passed",
+      "failed",
+      "partial",
+      "not_tested",
+      "unsupported"
+    ],
+    "pass_requirements": {
+      "active_push": "Actual installed A UI initiates push to B; B confirms/rendered source and peer identity. Receive-only CLI does not prove active push.",
+      "active_pull": "Actual installed B selects/pulls A source; authenticated source/revision and visible result recorded.",
+      "video": "Actual capture/encode/transport/native decode and visibly changing presented owned fixture, exact source/PID/revision, frame/error/timing evidence. UI submission alone is insufficient.",
+      "audio": "Known fixture signal captured and received with playback/output evidence; audible or independently measured output, mute/unmute and correct session ownership. Callbacks alone remain partial.",
+      "mouse_click": "Through product control chain only, one click in the bound owned target window with native event and visible state change; adjacent window unchanged.",
+      "keyboard_input": "Through product control chain only, short non-sensitive fixture text, actual native/visible result and paired down/up; release on focus/lease/source change.",
+      "disconnect_reconnect": "Disconnect only this test session through product UI, re-establish authenticated route and source revision, restore visible/audio/control behavior, reject stale input, prove native resource cleanup. Do not sever shared network or other sessions."
+    },
+    "devices": {
+      "MacBook": {
+        "last_product_observation_date": "2026-10-17",
+        "installed_version": "2.0.0-alpha.9",
+        "installed_source": "db9fc29ef94ba69189f5fdda129135619c035f0c",
+        "target_version_verified": false,
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/current-readiness-native-recheck.json"
+      },
+      "Studio": {
+        "last_product_observation_date": "2026-10-17",
+        "installed_version": "2.0.0-alpha.9",
+        "installed_source": "db9fc29ef94ba69189f5fdda129135619c035f0c",
+        "target_version_verified": false,
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/current-readiness-native-recheck.json"
+      },
+      "HO5": {
+        "last_product_observation_date": "2026-10-17",
+        "installed_version": "2.0.0-alpha.9",
+        "installed_source": "db9fc29ef94ba69189f5fdda129135619c035f0c",
+        "target_version_verified": false,
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/current-readiness-native-recheck.json"
+      },
+      "cube": {
+        "last_product_observation_date": "2026-10-17",
+        "installed_version": "2.0.0-alpha.8",
+        "installed_source": "not_current_target",
+        "target_version_verified": false,
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/current-readiness-native-recheck.json"
+      }
+    },
+    "blockers": {
+      "pairing": {
+        "status": "blocked",
+        "detail": "Latest 2026-10-17 Mac status reports zero routes/sessions on both Macs. Earlier same-day group digests differ on MacBook/Studio/HO5. Do not read/forward invitation secrets or recreate groups. Await ordinary owner UI pairing; then recheck non-sensitive routes.",
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/macpair-reconnect-readonly-20261017-1257.json"
+      },
+      "ho5_source": {
+        "status": "blocked",
+        "detail": "Formal Linux candidate first upload paused before HTTP, zero bytes, source_address_policy_rejected. Preserve original operation; no retry/domain/route change without original-channel repair confirmation. This is separate from prior observer upload.",
+        "operation_id": "81e4983d-5c9e-4f21-aeee-90fe1aee6936",
+        "source_host": "sdmntprwestus.oaiusercontent.com"
+      },
+      "ho5_observer": {
+        "status": "blocked",
+        "detail": "Final native input observer not delivered/self-tested; GTK offscreen primitive smoke is not product input acceptance. Old observer draft operation cannot be reused for final bytes.",
+        "operation_id": "2e91ef4d-c1c7-4853-a249-8801a6d760bb"
+      },
+      "cube_acl": {
+        "status": "blocked",
+        "detail": "Latest 2026-10-17 evidence: new Mesh directory/conf/secret DACL checks fail; original installer rolled back to alpha.8. Preserve pending exact ACL confirmation; no replay or permission broadening."
+      },
+      "version_alignment": {
+        "status": "blocked",
+        "detail": "Same version string is insufficient. Both Macs/installed HO5 have db9fc29 alpha.9; cube remains alpha.8. Frozen source feba70a has formal Linux compiler candidate only, no runtime observation. Produce/verify platform releases using original gates and authorized install receipts before acceptance; no installation executed by this matrix update."
+      }
+    },
+    "directions": [
+      {
+        "id": "MacBook->Studio",
+        "producer": "MacBook",
+        "viewer": "Studio",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "MacBook->HO5",
+        "producer": "MacBook",
+        "viewer": "HO5",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "MacBook->cube",
+        "producer": "MacBook",
+        "viewer": "cube",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "Studio->MacBook",
+        "producer": "Studio",
+        "viewer": "MacBook",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "Studio->HO5",
+        "producer": "Studio",
+        "viewer": "HO5",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "Studio->cube",
+        "producer": "Studio",
+        "viewer": "cube",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "HO5->MacBook",
+        "producer": "HO5",
+        "viewer": "MacBook",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "HO5->Studio",
+        "producer": "HO5",
+        "viewer": "Studio",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "HO5->cube",
+        "producer": "HO5",
+        "viewer": "cube",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "cube->MacBook",
+        "producer": "cube",
+        "viewer": "MacBook",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "cube->Studio",
+        "producer": "cube",
+        "viewer": "Studio",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      },
+      {
+        "id": "cube->HO5",
+        "producer": "cube",
+        "viewer": "HO5",
+        "target_binding_verified": false,
+        "result": "not_tested",
+        "blocker_refs": [
+          "version_alignment",
+          "pairing",
+          "ho5_source",
+          "ho5_observer",
+          "cube_acl"
+        ],
+        "features": {
+          "active_push": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "active_pull": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "video": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "audio": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "mouse_click": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "keyboard_input": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          },
+          "disconnect_reconnect": {
+            "status": "not_tested",
+            "observed_at_utc": null,
+            "evidence": []
+          }
+        },
+        "session_binding": null,
+        "cleanup_evidence": []
+      }
+    ],
+    "background_survival": {
+      "MacBook": {
+        "status": "not_tested",
+        "target_verified": false,
+        "evidence": [],
+        "required": "Close only owned test GUI/window; verify same background owner/image/profile, remote reachability and subsequent reconnect; do not stop installed service or other sessions.",
+        "historical_observation": "Mac background role/status responds; actual GUI-close-survival not tested."
+      },
+      "Studio": {
+        "status": "not_tested",
+        "target_verified": false,
+        "evidence": [],
+        "required": "Close only owned test GUI/window; verify same background owner/image/profile, remote reachability and subsequent reconnect; do not stop installed service or other sessions.",
+        "historical_observation": "Mac background role/status responds; actual GUI-close-survival not tested."
+      },
+      "HO5": {
+        "status": "not_tested",
+        "target_verified": false,
+        "evidence": [],
+        "required": "Close only owned test GUI/window; verify same background owner/image/profile, remote reachability and subsequent reconnect; do not stop installed service or other sessions.",
+        "historical_observation": "HO5 observed Standalone same GUI/runtime PID; background independence not established."
+      },
+      "cube": {
+        "status": "not_tested",
+        "target_verified": false,
+        "evidence": [],
+        "required": "Close only owned test GUI/window; verify same background owner/image/profile, remote reachability and subsequent reconnect; do not stop installed service or other sessions.",
+        "historical_observation": "Old alpha.8 owner restored; target background survival untested."
+      }
+    },
+    "evidence_policy": "Each passed feature needs observed UTC, both actual running versions/source/build identities/hashes, route/session/source revision, operation/log/screenshot or native event proof, result and cleanup. Synthetic fixtures alone, unit tests, builds, source lists and historical versions cannot satisfy a current physical-device pass. Unknown/unsupported are never converted to passed.",
+    "historical_only": [
+      {
+        "date": "2026-10-14",
+        "direction": "Studio -> MacBook",
+        "versions": "Studio 20261011.1085 / MacBook alpha.8 20261014.8",
+        "result": "partial",
+        "detail": "653 decoded frames, visible GUI, zero decode errors, nonzero audio callbacks; audibility unverified, input locked, push/reverse/reconnect unverified.",
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/rp-directed-delivery/native-validation-closeout.json"
+      },
+      {
+        "date": "2026-10-11",
+        "direction": "MacBook -> Studio",
+        "version": "alpha.8 build1085",
+        "result": "failed",
+        "detail": "Bounded diagnostic authentication timeout before Open/Subscribe, zero decoded frames; not a current alpha.9 test.",
+        "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/two-mac-real-stream-1085-20261011/two-mac-real-stream-after-authorized-retry-handoff.json"
+      }
+    ],
+    "execution_order": [
+      [
+        "MacBook",
+        "Studio"
+      ],
+      [
+        "MacBook",
+        "HO5"
+      ],
+      [
+        "Studio",
+        "HO5"
+      ],
+      [
+        "MacBook",
+        "cube"
+      ],
+      [
+        "Studio",
+        "cube"
+      ],
+      [
+        "HO5",
+        "cube"
+      ]
+    ],
+    "scheduling": "Execute each listed pair in both directions serially, but skip only blocked pairs and continue any independently ready pair. Per direction: provenance/idle/route -> push -> pull -> video/audio -> mouse/keyboard -> reconnect -> exact cleanup. No global wait on HO5/Windows.",
+    "progress": {
+      "pairs": 6,
+      "directions": 12,
+      "required_direction_feature_cells": 84,
+      "passed": 0,
+      "failed": 0,
+      "partial": 0,
+      "not_tested": 84,
+      "note": "Current frozen target only; historical partial/failed observations retained separately."
+    }
+  }
 }
