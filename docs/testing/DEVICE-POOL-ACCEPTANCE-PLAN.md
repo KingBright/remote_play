@@ -30,6 +30,14 @@
 5. 配对仅沿正常产品 UI，不能读取或转发凭据、不改变持久安全授权。HO5 正式候选原上传 `81e4983d-5c9e-4f21-aeee-90fe1aee6936` 因源策略暂停/0字节，实际源 `sdmntprwestus.oaiusercontent.com`；不重试或换域名/路由，等待原通道修复确认。旧 observer 草稿上传另有 operation，不得混用。Windows 三路径 ACL 继续原待确认边界，不盲目续装。
 6. 逐项回填真实 UTC、两端运行版本/源码/映像和 build identity、route/session/source revision、原生呈现/音频输出/输入副作用/重连和清理证据。无证据留 not_tested；已执行失败记 failed；部分链路仅 partial；不支持明确 unsupported，不能删项或当通过。原文件传输、多窗口、画质/性能与视觉回归要求继续保留，七项核心矩阵不缩减原功能范围。
 
+### 2026-10-17 17:58–17:59 UTC 新只读核验与独立进展
+
+MacBook主测仍0路由/0会话；Studio仅复核同样无路由/会话。HO5 GUI端点已响应、0会话/无租约，但当前背景状态命令exit1，不能据此新判后台角色或已配对；已装映像仍非冻结候选。cube原owner PID34140仍在，三处新profile DACL未保护且含额外capability ACE（2/1/1），未修改。正式候选原上传仍paused/0字节，源授权需刷新；只观察原回执，未重启Octendra、重放上传或修改DNS/ACL。没有新增真机通过。
+
+真机受阻期间修复原 `gui_launch_lifecycle.py` 的独立缺口：`KeepAlive=false` 不足以证明关闭GUI后不重启，配置的StartInterval/Calendar、目录/文件/mount/event激活须拒绝给出该证明；只改只读校验，后台host策略不变。32项定向和原release 563项（554通过、9既有skip）通过，不计作真机后台存活验收。详细本地回执为 `/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/readiness-and-lifecycle-activation-20261017-evening.json`。
+
+后续仅沿正常配对、原HO5来源修复/授权及原cube三路径ACL确认推进；确认到位后先核验实际目标映像，再对任何已就绪OS组合按本节六方向顺序执行。不得由Octendra连接恢复推断DNS已修复，也不得由脚本回归推断产品交互已通过。
+
 ## 以下为历史设备池观察与较早范围（不增加本轮必过项）
 
 ## 设备登记与证据

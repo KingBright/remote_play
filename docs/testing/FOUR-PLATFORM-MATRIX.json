@@ -2391,6 +2391,62 @@
     "optional_review": {
       "MacBook<->Studio": "Not required to pass this round; historical evidence preserved; Studio is necessary-review device only.",
       "Studio_background_survival": "Only if Studio is used as a representative/review target; no separate mandatory full matrix."
+    },
+    "latest_readonly_verification": {
+      "date_utc": "2026-10-17 17:58–17:59",
+      "evidence": "/Users/jinliang/Workspace/Codex/2026-10-10/task-4/weavelo-db9fc29-build/readiness-and-lifecycle-activation-20261017-evening.json",
+      "macOS_primary": {
+        "device": "MacBook",
+        "pid": 38003,
+        "version": "2.0.0-alpha.9",
+        "routes": 0,
+        "sessions": 0,
+        "active_lease": false
+      },
+      "HO5": {
+        "gui_status_ok": true,
+        "sessions": 0,
+        "active_lease": false,
+        "frozen_candidate_installed": false,
+        "background_status_exit": 1,
+        "role_and_routes": "not freshly established; no credential-bearing Snapshot read"
+      },
+      "cube": {
+        "old_owner_pid": 34140,
+        "new_profile_dacl_protected": [
+          false,
+          false,
+          false
+        ],
+        "extra_capability_ace_counts": [
+          2,
+          1,
+          1
+        ],
+        "pairing_sessions": "not inspected on old binary"
+      },
+      "formal_upload": {
+        "operation_id": "81e4983d-5c9e-4f21-aeee-90fe1aee6936",
+        "state": "paused",
+        "confirmed_bytes": 0,
+        "source_host": "sdmntprwestus.oaiusercontent.com",
+        "source_authorization": "required",
+        "query_only": true
+      },
+      "new_physical_acceptance_passes": 0,
+      "services_permissions_network_changed": false
+    },
+    "independent_lifecycle_progress": {
+      "module": "scripts/gui_launch_lifecycle.py",
+      "fix": "Do not verify GUI normal-close policy when launchd independent schedule/event activation is configured, even with KeepAlive=false. Host policies unchanged; no service writes.",
+      "release_tests": {
+        "run": 563,
+        "passed": 554,
+        "skipped": 9,
+        "failed": 0
+      },
+      "physical_background_survival": "not_tested",
+      "baseline_effect": "Validator-only source change does not relabel or rebuild frozen candidate binaries."
     }
   },
   "superseded_acceptance_scopes": [

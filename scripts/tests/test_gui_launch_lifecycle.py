@@ -39,6 +39,29 @@ class GuiLifecycleTests(unittest.TestCase):
                 with self.assertRaises(LifecycleRejected):
                     validate(self.gui, self.path)
 
+    def test_independent_activation_cannot_claim_normal_gui_close_survival(self):
+        # launchd can start a job independently of KeepAlive after it exits.
+        triggers = {'StartInterval': 60, 'StartCalendarInterval': {'Minute': 0},
+                    'WatchPaths': ['/tmp/owned-fixture'],
+                    'QueueDirectories': ['/tmp/owned-fixture'],
+                    'StartOnMount': True, 'LaunchEvents': {'fixture.event': {}}}
+        for keep_alive in (False, {'SuccessfulExit': False}):
+            for key, value in triggers.items():
+                with self.subTest(keep_alive=keep_alive, trigger=key):
+                    document = dict(self.gui, ProgramArguments=[self.path, '--gui'],
+                                    KeepAlive=keep_alive, **{key: value})
+                    before = copy.deepcopy(document)
+                    with self.assertRaisesRegex(LifecycleRejected, 'activation'):
+                        validate(document, self.path)
+                    self.assertEqual(document, before)
+
+    def test_host_schedule_is_not_treated_as_gui_reopen(self):
+        document = dict(self.gui, ProgramArguments=[self.path, '--background-service'],
+                        KeepAlive=False, StartInterval=60)
+        result = validate(document, self.path, role='host')
+        self.assertEqual(result['role'], 'host')
+        self.assertEqual(result['independent_background_host'], 'not_evaluated')
+
     def test_a_background_host_can_restart_but_cannot_be_named_as_gui(self):
         self.gui['EnvironmentVariables']['WEAVELO_HEADLESS'] = '1'
         self.assertEqual(validate(self.gui, self.path, role='host')['role'], 'host')

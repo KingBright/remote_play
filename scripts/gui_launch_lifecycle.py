@@ -53,6 +53,13 @@ def validate(document: dict, executable: str, *, role: str = 'gui') -> dict:
         raise LifecycleRejected('Unknown or mixed role arguments; no lifecycle proof')
     if effective_role != role:
         raise LifecycleRejected('Launch role differs from the effective product entry')
+    # launchd.plist(5): these start jobs independently of KeepAlive, so a
+    # crash-only policy alone cannot prove a closed GUI stays closed. Configured
+    # activation triggers require separate review, even if a value looks inert.
+    activation = {'StartInterval', 'StartCalendarInterval', 'WatchPaths',
+                  'QueueDirectories', 'StartOnMount', 'LaunchEvents'}
+    if role == 'gui' and activation.intersection(document):
+        raise LifecycleRejected('Scheduled or event activation requires separate GUI lifecycle review')
     keep_alive = document.get('KeepAlive', False)
     if type(keep_alive) is bool:
         restarts_normal_exit = keep_alive
