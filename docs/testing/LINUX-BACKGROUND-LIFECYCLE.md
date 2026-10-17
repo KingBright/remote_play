@@ -189,3 +189,13 @@ python3 -B scripts/build_identity_gate.py candidate-manifest \
 同 profile 生命周期执行器从原私有安装 journal 的完整 plan/hash 取得已安装 source、binary、identity 和 observed receipt pin，不再导入全局旧 Linux PINS。旧 journal 的原回执位置仍兼容；其真实旧 source 不会被重标为新构建。该逻辑只验证已安装产品，不安装新候选。
 
 这些本地工程和 release 编译步骤均不授权传输或部署。原源地址策略拒绝、文件源授权和传输业务接口问题仍须由原平台处理；不会因 release 体积变化而改通道、分片、伪装文件或绕过拒绝。
+
+
+## 关闭、全进程退出与重连输入核查（2026-10-17）
+
+- 关闭附着GUI：原 `on_window_should_close` 释放输入并清理本前台会话，退出GUI；后台保留。`SessionState::drop` 另会释放键鼠/修饰键。该调用链已有实现，实际安装程序的手动关闭/重开与远端继续可用仍须真机证明。
+- 关闭连接的实现缺口已复现并修复：`WorkspaceConnection::control(Close)` 在返回future前调用原 `InputState::seal`；此前输入只在actor取到Close后清空，队列满时input tick仍能刷新旧held。现在seal立即清空slot，保留请求计数单调。实际Rust用例填满命令队列、不poll Close future，验证旧ready/snapshot/refresh/grant即时失效，再验证新绑定不能采用旧request或恢复旧held。修复前21通过/1失败，修复后22通过；无协议、身份或输入授权变化。
+- 退出整个产品仍有独立实现缺口：当前附着GUI的 `Quit` 只调用本前台owner.close_all与cx.quit，原后台Request没有Shutdown；不能将它称为退出全部后台。需在原同用户IPC/原服务监督模型中先明确精确owner停止、活动会话保护、输入/原生资源释放、服务不立即重启及再次启动的语义，再实现全退出。这里没有新增停止命令、杀进程、修改launchd/systemd或改变持久授权。
+- 重连后的旧输入：现有epoch/request/source binding及前台hold超时保护继续保留。本次22项连接回归包含关闭重试、释放重传和源切换隔离；只能证明本地代码路径，不能代替macOS/Windows/Linux的目标OS按键释放、断线重连或全进程退出验收。
+
+实际回归使用原main、`test_stream_settings_model.py --mode clock-workspace`、既有官方观察绑定与共享target。早期相对路径/陈旧Cargo.lock观察绑定均在编译前被拒，未改合同；采用当前已有且合同匹配的 `linux-cross-validation-binding.json` 后原门禁通过。没有新建源码副本、缓存、权威或发布产物。冻结二进制基线仍为feba70a；本次源码修复未部署，不能计入其真机通过率。

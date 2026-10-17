@@ -2446,7 +2446,34 @@
         "failed": 0
       },
       "physical_background_survival": "not_tested",
-      "baseline_effect": "Validator-only source change does not relabel or rebuild frozen candidate binaries."
+      "baseline_effect": "Validator-only source change does not relabel or rebuild frozen candidate binaries.",
+      "input_close": {
+        "fix": "Revoke input slots synchronously at Close API invocation before queue capacity/actor dequeue, preserving monotonic request IDs against late grants.",
+        "rust_before_fix": {
+          "passed": 21,
+          "failed": 1
+        },
+        "rust_after_fix": {
+          "passed": 22,
+          "failed": 0,
+          "source_guard": true,
+          "owned_process_group_absent": true
+        },
+        "release_tests": {
+          "run": 563,
+          "passed": 554,
+          "skipped": 9,
+          "failed": 0
+        },
+        "deployed": false,
+        "physical_input_release": "not_tested"
+      }
+    },
+    "whole_process_exit": {
+      "implementation": "gap: attached GUI Quit closes its frontend only; existing background IPC has no Shutdown",
+      "physical_status": "not_tested",
+      "required_next_design": "Original same-user service owner stop with active-session protection, native input/resource cleanup, supervisor restart policy and restart/reopen semantics; no unbound process kill or persistent permission change.",
+      "evidence": "LINUX-BACKGROUND-LIFECYCLE.md#关闭全进程退出与重连输入核查2026-10-17"
     }
   },
   "superseded_acceptance_scopes": [

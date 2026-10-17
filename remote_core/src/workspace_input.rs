@@ -174,6 +174,13 @@ impl InputState {
     }
     pub(crate) fn seal(&mut self, command: SessionCommand) -> Result<SessionCommand, String> {
         let (id, revision, event, release) = match command {
+            SessionCommand::Close { connection_id } => {
+                // control() seals before its future waits for queue capacity.
+                // Revoke held intent now so actor ticks cannot refresh it while
+                // Close is queued. Keep request IDs monotonic against late grants.
+                self.slots.clear();
+                return Ok(SessionCommand::Close { connection_id });
+            }
             SessionCommand::Input { id, event } => (id, None, Some(event), false),
             SessionCommand::SourceInput {
                 id,

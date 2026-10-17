@@ -937,6 +937,55 @@ mod tests {
     use protocol::session::CaptureSource;
 
     #[tokio::test]
+    async fn close_revokes_held_input_before_waiting_for_a_full_command_queue() {
+        let (actor, _audio) = source_switch_actor().await;
+        let input = actor.input.clone();
+        let (commands, mut queued) = mpsc::channel(1);
+        commands.try_send(Command::Clipboard(None)).unwrap();
+        let (file_commands, _) = mpsc::channel(1);
+        let (_, last_response_rx) = tokio::sync::watch::channel(Instant::now());
+        let connection = WorkspaceConnection {
+            last_response_rx, input: input.clone(), max_subscriptions: 1,
+            files_available: false, clipboard_available: false,
+            settings_revision: std::sync::atomic::AtomicU64::new(0), id: 42,
+            sender: actor.sender.clone(), target: actor.target, file_commands,
+            file_activity: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            commands, cancel: broadcast::channel(1).0, task: tokio::spawn(async {}),
+        };
+        let mut binding = protocol::realtime_input::InputBinding {
+            connection_id: 42, subscription_id: 7, source_revision: 11, epoch: [1; 16],
+        };
+        let request = {
+            let mut state = input.lock().unwrap(); state.source(7, 11);
+            let SessionCommand::RequestInputBinding { request, .. } = state.requests(42).remove(0) else { panic!() };
+            state.grant(42, binding, request, 1000);
+            state.seal_bound(binding, Some(protocol::InputEvent::MouseDown(0))).unwrap();
+            request
+        };
+        // control seals synchronously, even if its returned future is never polled.
+        let close = connection.control(SessionCommand::Close { connection_id: 42 });
+        {
+            let mut state = input.lock().unwrap();
+            assert!(!state.ready(7, 11), "Close must revoke input before actor dequeue");
+            assert!(state.snapshots().is_empty());
+            assert!(!state.refresh_bound(binding));
+            state.grant(42, binding, request, 1001);
+            assert!(!state.ready(7, 11), "late old grant cannot revive a closing slot");
+        }
+        assert!(matches!(queued.try_recv().unwrap(), Command::Clipboard(None)));
+        assert!(queued.try_recv().is_err(), "unpolled Close has not reached the actor");
+        drop(close);
+        // Reusing the subscription after reconnect cannot accept the old request
+        // or epoch, nor recreate its held button from an acknowledgement.
+        let mut state = input.lock().unwrap(); state.source(7, 11);
+        let SessionCommand::RequestInputBinding { request: next, .. } = state.requests(42).remove(0) else { panic!() };
+        assert_ne!(next, request);
+        state.grant(42, binding, request, 1002); assert!(!state.ready(7, 11));
+        binding.epoch = [2; 16]; state.grant(42, binding, next, 1003);
+        assert!(matches!(&state.snapshots()[0].payload, protocol::realtime_input::InputPayload::Held(held) if held.is_empty()));
+    }
+
+    #[tokio::test]
     async fn authenticated_open_ignores_plaintext_retired_reject_and_handshake(){
         let server=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let target=server.local_addr().unwrap();let (tx,rx)=server.split();
         let client=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let local=client.local_addr().unwrap();let(sender,receiver)=client.split();
