@@ -33,6 +33,7 @@ fn generated_module(raw: &[u8]) -> String {
     format!(
         "#[used]\n\
          #[cfg_attr(target_os = \"windows\", unsafe(link_section = \".rpbuild\"))]\n\
+         #[cfg_attr(target_os = \"linux\", unsafe(link_section = \".rpbuild\"))]\n\
          #[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__TEXT,__rpbuild\"))]\n\
          pub static BUILD_IDENTITY_BYTES: [u8; {}] = [{}];\n\
          pub fn build_identity_bytes() -> &'static [u8] {{ &BUILD_IDENTITY_BYTES }}\n",
