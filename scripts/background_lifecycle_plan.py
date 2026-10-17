@@ -16,18 +16,25 @@ class LifecyclePlanRejected(ValueError):
     pass
 
 
+def require_separated_entries(product_info: dict) -> None:
+    # Shared capability check only; existing native image/receipt gates remain
+    # responsible for proving which product actually supplied these fields.
+    if (not isinstance(product_info, dict)
+            or product_info.get('separated_lifecycle') is not True
+            or product_info.get('background_entry') != '--background-service'
+            or product_info.get('frontend_entry') != '--gui'
+            or product_info.get('default_gui') != 'restored-original-gpui'
+            or product_info.get('original_gui_compiled') is not True):
+        raise LifecyclePlanRejected('Candidate has no explicit background service and attached GPUI entry')
+
+
 def plan(document: dict, executable: str, product_info: dict, *, expected_label='fun.hackerlife.weavelo.host') -> dict:
     if (document.get('Label') != expected_label
             or document.get('ProgramArguments') not in
             ([executable], [executable, '--background-service'])
             or document.get('Program', executable) != executable):
         raise LifecyclePlanRejected('Unexpected canonical launch-agent executable/arguments')
-    if (product_info.get('separated_lifecycle') is not True
-            or product_info.get('background_entry') != '--background-service'
-            or product_info.get('frontend_entry') != '--gui'
-            or product_info.get('default_gui') != 'restored-original-gpui'
-            or product_info.get('original_gui_compiled') is not True):
-        raise LifecyclePlanRejected('Candidate has no explicit background service and attached GPUI entry')
+    require_separated_entries(product_info)
     environment = document.get('EnvironmentVariables', {})
     if not isinstance(environment, dict) or not environment.get('WEAVELO_DEVICE_GROUP_DIR'):
         raise LifecyclePlanRejected('Preserve the explicitly bound existing device profile')
