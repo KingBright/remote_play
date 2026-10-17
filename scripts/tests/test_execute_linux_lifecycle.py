@@ -251,6 +251,26 @@ class NativeStorageSafetyTests(unittest.TestCase):
                 self.b.stop_gui({'gui_pid':41,'gui_start_ticks':'original-start'})
             send.assert_not_called(); self.b.native.assert_not_called()
 
+    def test_effective_weight_mismatch_rejected_even_when_drop_in_bytes_match(self):
+        from unittest.mock import Mock, patch
+        case=fixtures.LinuxSeparationPlanTests();case.setUp()
+        case.facts['observation']['drop_ins']=case.overlays()
+        self.b.plan=case.proposal();self.b.check_drop_ins=Mock()
+        output='MainPID=41\nDropInPaths=reviewed\nActiveState=active\nSubState=running\nJob=\nCPUWeight=100\nTimeoutStopFailureMode=abort\n'
+        with patch.object(e.subprocess,'check_output',return_value=output):
+            with self.assertRaises(e.policy.LifecyclePlanRejected):self.b.service()
+        self.b.check_drop_ins.assert_called_once_with(['reviewed'])
+
+    def test_pending_stop_abort_job_never_counts_as_stable_old_owner(self):
+        from unittest.mock import Mock
+        self.b.service=Mock(return_value=41)
+        self.b.service_state={'ActiveState':'deactivating','SubState':'stop-sigterm','Job':'123'}
+        with self.assertRaises(e.policy.LifecyclePlanRejected):self.b.settled(True)
+        self.b.service=Mock(return_value=0)
+        with self.assertRaises(e.policy.LifecyclePlanRejected):self.b.settled(False)
+        self.b.service_state={'ActiveState':'inactive','SubState':'dead','Job':''}
+        self.assertEqual(self.b.settled(False),0)
+
     def test_foreign_locked_frontend_is_preserved(self):
         import fcntl,os
         path = self.b.profile/'gui-state/desktop-instance.lock'; path.parent.mkdir(mode=0o700)

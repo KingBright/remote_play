@@ -22,6 +22,9 @@ OBSERVATION_TIMEOUT_SECONDS = 60
 # Fixed package/filter pairs only. These modes share the same guarded transaction;
 # callers cannot supply Cargo arguments, alternate profiles or test executables.
 SESSION_CLOCK_TESTS = {
+    "lifecycle-capability": ("weavelo_app", "gui_backend::tests"),
+    "lifecycle-ownership": ("weavelo_app", "desktop::instance::tests"),
+    "lifecycle-service-contract": ("weavelo_app", "background_service::service_contract_tests"),
     "session-security": ("remote_core", "session_"),
     "clock-measurement": ("remote_core", "clock_sync::tests"),
     "clock-timing": ("remote_core", "timing::tests"),
@@ -45,6 +48,8 @@ SESSION_CLOCK_TESTS = {
 
 
 PLATFORM_CHECKS = {
+    "lifecycle-linux-native-check": ("--tests", "--target", LINUX_TARGET, "--no-default-features",
+                                     "--features", "gpui-restoration,native-linux-video"),
     "platform-macos-check": ("--bin", "weavelo", "--features", "gpui-native-video"),
     "platform-windows-check": ("--tests", "--target", "x86_64-pc-windows-gnu", "--features", "native-windows-video"),
     "platform-linux-check": ("--tests", "--target", LINUX_TARGET),
@@ -101,17 +106,21 @@ def validation_environment(mode):
     if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
             "WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
-    if mode in ("linux-x11-check", "platform-linux-check"):
+    if mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check"):
         zig = shutil.which("zig")
-        wrapper = shutil.which("cargo-zigbuild")
         cache = Path.home() / ".cache/zig"
-        if not zig or not wrapper or not cache.is_dir():
-            raise ValueError("Linux X11 check requires installed Zig, cargo-zigbuild and existing ~/.cache/zig")
+        if not zig or not cache.is_dir():
+            raise ValueError("Linux target check requires installed Zig and existing ~/.cache/zig")
         # Existing adapter translates cc-rs Rust triples to Zig triples.
         # Target-specific settings leave native build-script compilers unchanged.
-        env["CC_x86_64_unknown_linux_gnu"] = f"{wrapper} zig cc -- -target x86_64-linux-gnu"
-        env["CXX_x86_64_unknown_linux_gnu"] = f"{wrapper} zig c++ -- -target x86_64-linux-gnu"
-        env["AR_x86_64_unknown_linux_gnu"] = f"{wrapper} zig ar --"
+        tools = Path(__file__).resolve().parent / "cmake"
+        env["WEAVELO_VALIDATION_ZIG"] = str(Path(zig).resolve())
+        # CMake requires a single compiler executable path. Embedded command
+        # arguments can be discarded by cmake-rs, invoking cargo-zigbuild itself.
+        env["CC_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-cc")
+        env["CXX_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-cxx")
+        env["AR_x86_64_unknown_linux_gnu"] = str(tools / "linux-zig-ar")
+        env.pop("CMAKE_PREFIX_PATH", None)  # Never search host Homebrew/Qt as Linux libraries.
         env["ZIG_GLOBAL_CACHE_DIR"] = str(cache)
         env["ZIG_LOCAL_CACHE_DIR"] = str(cache)
     return env
@@ -426,6 +435,9 @@ def guarded_run(args, root, parser):
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
     sources.extend([root / "scripts/test_stream_settings_model.py", root / "scripts/check_artifact_lifecycle.py"])
+    if args.mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check"):
+        sources.extend(root / "scripts/cmake" / name for name in
+                       ("linux_zig_tool.py", "linux-zig-cc", "linux-zig-cxx", "linux-zig-ar"))
     for path in (args.lifecycle_authority, args.lifecycle_binding, args.lifecycle_helper):
         if path is not None:
             sources.append(path)

@@ -179,10 +179,39 @@ class Native:
 
     def service(self):
         raw = subprocess.check_output(['systemctl', '--user', 'show', 'weavelo.service',
-            '-p', 'MainPID', '-p', 'DropInPaths'], text=True, timeout=8)
+            '-p', 'MainPID', '-p', 'DropInPaths', '-p', 'ActiveState', '-p', 'SubState',
+            '-p', 'Job', '-p', 'CPUWeight', '-p', 'TimeoutStopFailureMode'], text=True, timeout=8)
         fields = dict(x.split('=', 1) for x in raw.splitlines())
-        policy.require(not fields['DropInPaths'], 'Unknown unit drop-in')
+        self.check_drop_ins(fields['DropInPaths'].split())
+        semantics = policy.validate_drop_ins(self.plan['observation']['drop_ins'], self.plan['profile_state']['directory']['uid'])
+        policy.require(all(fields.get(key) == value for key,value in semantics.items()), 'Effective drop-in semantics differ from reviewed policy')
+        self.service_state = fields
         return int(fields['MainPID'])
+
+    def settled(self, active):
+        pid = self.service(); fields = self.service_state
+        policy.require(fields.get('Job') == '', 'Pending systemd job; owner is not settled')
+        if active:
+            policy.require(pid > 0 and fields.get('ActiveState') == 'active' and fields.get('SubState') == 'running',
+                           'Service not stably running')
+        else:
+            policy.require(pid == 0 and fields.get('ActiveState') in ('inactive','failed'),
+                           'Stop job has not completed')
+        return pid
+
+    def check_drop_ins(self, paths):
+        reviewed = self.plan['observation']['drop_ins']
+        policy.validate_drop_ins(reviewed, self.plan['profile_state']['directory']['uid'])
+        policy.require(paths == [entry['path'] for entry in reviewed], 'Drop-in paths/order changed')
+        for entry in reviewed:
+            path = Path(entry['path']); before = path.lstat()
+            policy.require(not path.is_symlink() and stat.S_ISREG(before.st_mode), 'Drop-in is not ordinary')
+            raw = path.read_bytes(); after = path.lstat()
+            for metadata in (before,after):
+                policy.require((metadata.st_dev,metadata.st_ino,metadata.st_uid,stat.S_IMODE(metadata.st_mode)) ==
+                    (entry['device'],entry['inode'],entry['uid'],entry['mode']), 'Drop-in inode/permissions changed')
+            policy.require(policy.sha(raw) == entry['sha256'], 'Drop-in content changed')
+        return reviewed
 
     def snapshot(self):
         from acceptance.inspect_connection_lifecycle import request
@@ -218,7 +247,7 @@ class Native:
                        'Reviewed after-unit differs from narrow original producer policy')
         policy.require(self.file_state(self.unit) == plan['unit_state'] and self.file_state(self.pending) is None and
             self.file_state(self.marker) is None, 'Unit, stage or role-marker drift')
-        policy.require(self.service() == plan['observation']['pid'], 'Original owner changed')
+        policy.require(self.settled(True) == plan['observation']['pid'], 'Original owner changed')
         self.native(self.service()); snapshot = self.snapshot(); self.gui_status()
         policy.require(snapshot['owner_mode'] == 'Standalone' and snapshot['generation'] == plan['observation']['generation'], 'Original generation changed')
         enabled = subprocess.run(['systemctl', '--user', 'is-enabled', 'weavelo.service'], capture_output=True, timeout=8).returncode == 0
@@ -243,9 +272,9 @@ class Native:
         return self.file_state(self.pending)
 
     def stop_old(self, plan):
-        self.guard(); policy.require(self.service() == plan['observation']['pid'], 'Owner changed before stop')
+        self.guard(); policy.require(self.settled(True) == plan['observation']['pid'], 'Owner changed before stop')
         self.native(self.service()); self.gui_status(); self.ctl('stop')
-        policy.require(self.service() == 0, 'Original unit did not stop')
+        self.settled(False)
 
     def exchange(self):
         if self.rename(-100, os.fsencode(self.unit), -100, os.fsencode(self.pending), 2):
@@ -276,7 +305,7 @@ class Native:
         self.ctl('start'); deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             try:
-                pid = self.service(); self.native(pid); value = self.snapshot()
+                pid = self.settled(True); self.native(pid); value = self.snapshot()
                 policy.require(value['pid'] == pid and value['owner_mode'] == 'Background', 'Background not ready')
                 self.same_profile(); marker = self.file_state(self.marker, True)
                 policy.require(marker and marker['size'] == 0 and marker['mode'] == 0o600, 'Unknown role marker')
@@ -311,6 +340,7 @@ class Native:
 
     def verify_terminal(self, plan, state):
         self.same_profile()
+        self.settled(True)
         policy.require(self.security(self.unit) == plan['unit_security_sha256'], 'Terminal unit security metadata drift')
         if state['phase'] == 'committed':
             policy.require(self.file_state(self.unit) == state['after_unit'], 'Committed unit drift')
@@ -353,6 +383,7 @@ class Native:
     def rollback(self, plan, state):
         self.same_profile()
         policy.require(self.file_state(self.journal) == self.journal_state, 'Original journal changed; no recovery effects')
+        self.service()
         unit = self.file_state(self.unit); pending = self.file_state(self.pending)
         policy.require(unit == plan['unit_state'] or
             (unit == state.get('stage') and pending == plan['unit_state']), 'Unknown recovery unit layout')
@@ -377,13 +408,13 @@ class Native:
                     policy.require(marker is None, 'Unreceipted role marker; preserve for explicit review')
                 else:
                     policy.require(pid == state['background']['pid'] and value['generation'] == state['background']['generation'], 'Another background generation owns service')
-                self.ctl('stop'); policy.require(self.service() == 0, 'Background did not stop')
+                self.ctl('stop'); self.settled(False)
             owned = state.get('background', {}).get('marker')
             policy.rollback_preview(plan, expected_plan_sha256=state['plan_sha256'],
                 original_unit=state['before_unit_utf8'].encode(), current_unit=self.unit_bytes(),
                 current_profile_state=self.profile_state(), owned_unit=state['stage'], current_unit_state=unit,
                 owned_marker=owned, current_marker=marker, background_stopped=True, attached_gui_pids=[],
-                marker_absence_verified=marker is None)
+                marker_absence_verified=marker is None, current_drop_ins=plan['observation']['drop_ins'])
             if marker:
                 policy.require(self.file_state(self.marker, True) == owned, 'Role marker changed before removal')
                 self.marker.unlink()

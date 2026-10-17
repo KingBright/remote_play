@@ -175,6 +175,43 @@ class LinuxSeparationPlanTests(unittest.TestCase):
         with self.assertRaises(m.LifecyclePlanRejected):
             m.rollback_preview(proposal, **args)
 
+    def overlays(self):
+        result=[]
+        for path,text,uid,inode in [
+            ('/usr/lib/systemd/user/service.d/10-timeout-abort.conf','[Service]\nTimeoutStopFailureMode=abort\n',0,99),
+            ('/run/user/1000/systemd/user.control/weavelo.service.d/50-CPUWeight.conf','[Service]\nCPUWeight=10000\n',1000,100)]:
+            result.append(dict(path=path,text=text,uid=uid,inode=inode,device=2,mode=0o644,sha256=m.sha(text.encode())))
+        return result
+
+    def test_known_drop_ins_preserved_exactly_with_effective_semantics(self):
+        self.facts['observation']['drop_ins']=self.overlays()
+        before=copy.deepcopy(self.facts); proposal=self.proposal()
+        self.assertEqual(self.facts,before)
+        self.assertEqual(proposal['observation']['drop_ins'],before['observation']['drop_ins'])
+        self.assertEqual(proposal['preserved_dropin_semantics'],{'TimeoutStopFailureMode':'abort','CPUWeight':'10000'})
+        self.assertNotIn('set-property',proposal['unit_after_utf8'])
+
+    def test_unknown_drop_in_path_directive_reset_or_owner_refused(self):
+        for change in ('path','exec','reset','owner','repeat','weight','sha'):
+            entries=self.overlays()
+            if change=='path':entries[0]['path']='/etc/systemd/user/foreign.conf'
+            if change=='owner':entries[0]['uid']=1000
+            if change=='exec':entries[0]['text']+='ExecStart=/other/app\n'
+            if change=='reset':entries[0]['text']='[Service]\nTimeoutStopFailureMode=\n'
+            if change=='repeat':entries[0]['text']+='TimeoutStopFailureMode=abort\n'
+            if change=='weight':entries[1]['text']='[Service]\nCPUWeight=10001\n'
+            if change!='sha':
+                for item in entries:item['sha256']=m.sha(item['text'].encode())
+            else:entries[0]['sha256']='e'*64
+            with self.subTest(change=change),self.assertRaises(m.LifecyclePlanRejected):m.validate_drop_ins(entries,1000)
+
+    def test_overlay_drift_blocks_rollback_without_rewriting_policy(self):
+        self.facts['observation']['drop_ins']=self.overlays()
+        proposal,args=self.rollback_args();args['current_drop_ins']=self.overlays()
+        self.assertFalse(m.rollback_preview(proposal,**args)['applied'])
+        args['current_drop_ins'][1]['inode']+=1
+        with self.assertRaises(m.LifecyclePlanRejected):m.rollback_preview(proposal,**args)
+
     def test_isolated_cli_only_writes_new_private_proposal(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve(); root.chmod(0o700)

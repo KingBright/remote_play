@@ -3,6 +3,12 @@ use serde::Serialize;
 
 pub const ORIGINAL_RENDERER: &str = "restored-original-gpui";
 
+// Capability of the compiled role entries, not native deployment acceptance.
+// Keep Windows conservative until its own lifecycle validation is complete.
+pub const SEPARATED_LIFECYCLE_COMPILED: bool = cfg!(all(
+    any(target_os = "macos", target_os = "linux"), feature = "gpui-restoration"
+));
+
 #[derive(Serialize)]
 pub struct ProductInfo {
     pub schema: u32,
@@ -33,15 +39,30 @@ pub fn product_info() -> ProductInfo {
             || cfg!(all(target_os = "linux", feature = "native-linux-video"))
             || cfg!(all(target_os = "windows", feature = "native-windows-video")),
         build_identity: crate::build_identity::compiled(),
-        separated_lifecycle: cfg!(all(target_os = "macos", feature = "gpui-restoration")),
-        background_entry: cfg!(all(target_os = "macos", feature = "gpui-restoration")).then_some("--background-service"),
-        frontend_entry: cfg!(all(target_os = "macos", feature = "gpui-restoration")).then_some("--gui"),
+        separated_lifecycle: SEPARATED_LIFECYCLE_COMPILED,
+        background_entry: SEPARATED_LIFECYCLE_COMPILED.then_some("--background-service"),
+        frontend_entry: SEPARATED_LIFECYCLE_COMPILED.then_some("--gui"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_claim_matches_both_compiled_role_entries() {
+        let info = product_info();
+        assert_eq!(info.separated_lifecycle, SEPARATED_LIFECYCLE_COMPILED);
+        assert_eq!(info.background_entry, SEPARATED_LIFECYCLE_COMPILED.then_some("--background-service"));
+        assert_eq!(info.frontend_entry, SEPARATED_LIFECYCLE_COMPILED.then_some("--gui"));
+        #[cfg(all(any(target_os = "macos", target_os = "linux"), feature = "gpui-restoration"))]
+        {
+            // These production implementations must exist in the same build;
+            // this test starts neither a runtime nor a credential store.
+            let _background = crate::background_service::run;
+            let _frontend = crate::restored_ui::run_attached_gui;
+        }
+    }
 
     #[test]
     fn product_contract_names_the_compiled_gpui_gui() {

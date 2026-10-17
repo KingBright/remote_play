@@ -214,6 +214,23 @@ impl Drop for Instance {
 mod tests {
     use super::*;
     #[test]
+    fn closing_and_reopening_frontend_preserves_same_background_profile_lock() {
+        let profile = tempfile::tempdir().unwrap();
+        let host = Instance::acquire_headless(profile.path()).unwrap().unwrap();
+        let frontend = Instance::acquire_frontend(profile.path()).unwrap().unwrap();
+        assert!(frontend.frontend);
+        drop(frontend);
+        assert!(Instance::acquire_headless(profile.path()).unwrap().is_none());
+        let reopened = Instance::acquire_frontend(profile.path()).unwrap().unwrap();
+        drop(reopened);
+        assert!(Instance::acquire_headless(profile.path()).unwrap().is_none());
+        drop(host);
+        assert!(Instance::acquire_headless(profile.path()).unwrap().is_some());
+        assert!(!profile.path().join("mesh.conf").exists());
+        assert!(!profile.path().join("mesh.secret").exists());
+    }
+
+    #[test]
     fn profile_named_gui_state_still_owns_runtime_and_its_actual_lock() {
         let root = tempfile::tempdir().unwrap();
         let profile = root.path().join("gui-state");

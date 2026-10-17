@@ -15,7 +15,7 @@ Environment="WEAVELO_HEADLESS=1"
 
 方案固定原 unit SHA256、device/inode、uid、mode、links；固定同一 profile 目录身份及现有 mesh.conf / mesh.secret 的 device/inode、uid、mode、links、SHA256。只接受目录 0700、两个现有普通文件 0600；不修权限、不复制或导入认证数据。原源码 commit 和二进制 SHA 也被固定，但此工具不重新编译、包装或部署它们。
 
-仅支持原安装器的窄 unit 格式。重复指令、额外 ExecStart、EnvironmentFile、ExecStartPre、User、未知环境、转义/续行、额外 drop-in、未知角色标记、非 Standalone owner、活动/待定会话或租约都会拒绝。配置差异需要原维护者另行审查，不能靠删掉字段绕过。
+仅支持原安装器的窄 unit 格式。重复指令、额外 ExecStart、EnvironmentFile、ExecStartPre、User、未知环境、转义/续行、未审阅的 drop-in、未知角色标记、非 Standalone owner、活动/待定会话或租约都会拒绝。配置差异需要原维护者另行审查，不能靠删掉字段绕过。
 
 ## 可复现隔离回归
 
@@ -48,7 +48,7 @@ python3 -B scripts/linux_background_lifecycle_plan.py \
 
 ## 后续真实操作所需顺序（此工具不执行）
 
-1. 由原安装生产者在原 journal 中绑定此次生命周期子事务和 reviewed plan SHA。重新核验已安装映像、原 profile 与 unit 的字节、inode/权限、原服务状态、无 drop-in、标记不存在、无会话/租约；未知或漂移则保留原状。再次确认现有认证对仍存在，不能把缺文件解释为首次生成身份。
+1. 由原安装生产者在原 journal 中绑定此次生命周期子事务和 reviewed plan SHA。重新核验已安装映像、原 profile 与 unit 的字节、inode/权限、原服务状态、精确已审阅 drop-in、标记不存在、无会话/租约；未知或漂移则保留原状。再次确认现有认证对仍存在，不能把缺文件解释为首次生成身份。
 2. 只停止已核验的原 unit / PID，等待该实际 owner 退出并确认原 profile 锁与 IPC 可用状态。不能按进程名批量终止，也不能停止其他任务的会话。
 3. CAS 替换同一 unit 的上述两行，保留原 mode、ownership 和其他元数据，沿原机制 reload / start。只保留原 enabled 意图。由同一原生产者记录新 unit 的实际 inode 与 SHA，不能用相同内容推断文件归属。
 4. 原 `--background-service` 使用同一 profile。核验实际运行映像、OwnerMode::Background、原认证对不变及角色标记的 uid/mode/零长度/device/inode；将该标记的真实归属证据写入原事务。原生入口创建的 `background-service.enabled` 是持久角色标记，不是凭据；本工具从不创建它。
@@ -104,4 +104,27 @@ python3 -B -m unittest discover -s scripts/tests -p test_execute_linux_lifecycle
 
 只读核查发现，当前固定 db9fc29 Linux 产物的 `--product-info-json` 实际报告 `separated_lifecycle=false`、background/frontend entry 为空；源码 `gui_backend.rs` 将这些声明限制在 macOS，虽然通用 entrypoint 中存在其他平台的入口分支。执行器以已安装编译产物的真实声明为准，不能用方案里的合成 true 字段提升其能力，不会尝试启动后再解释为支持。需要经原构建及原生验收流程取得明确支持的候选后才能切换，不能改写旧产物信息或用文件旁注重新标记。
 
-该机还存在系统提供的 `TimeoutStopFailureMode` 和现有运行时 `CPUWeight` drop-in。当前窄方案拒绝任何未纳入的 drop-in；这不表示应删除它们或改变系统权限。后续应单独审阅、固定这些既有覆盖的内容/来源并保持其效果，再扩展允许范围。没有执行此项配置修改。被拒上传仍保持原操作，未选择其他通道交付执行器。因此当前没有实际执行 GUI 关闭后后台存活验收。
+该机还存在系统提供的 `TimeoutStopFailureMode` 和现有运行时 `CPUWeight` drop-in。这些覆盖现已按下述精确内容、来源和 inode 合同纳入；未知覆盖仍拒绝。没有删除、写入或改变任何实际覆盖。被拒上传仍保持原操作，未选择其他通道交付执行器。因此当前没有实际执行 GUI 关闭后后台存活验收。
+
+
+## Linux 能力核验与保留覆盖（后续进展）
+
+已安装旧产物的 false 声明是 `gui_backend.rs` 中 macOS-only 条件造成的，不能据此认定 Linux 没编译入口。HO5 对原二进制的隔离负向实测证明：`--background-service` 被识别，且在自有控制目录被锁定时，在加载/生成身份之前拒绝第二运行时；未触碰真实 profile，也未创建认证对。`restored_ui::run_attached_gui`、后台 IPC 和前台独立锁已有 Unix 实现。
+
+源码把 Mac/Linux 的分离声明绑定到同一 `SEPARATED_LIFECYCLE_COMPILED` 能力常量并引用实际编译的前后台入口，Windows 不扩展。原受控入口真实编译的能力测试 2 项、profile/前台所有权测试 5 项、IPC 契约测试 7 项通过；前台控制对象关闭重建时后台锁仍被持有，测试不生成凭据。这不是 Linux GUI 正向呈现验收，也不能把旧 ELF 的旁注改成 true；仍需原构建者生成新的已验证 Linux 兼容产物，按原固定 provenance 更新候选。
+
+复现固定构建模式：`lifecycle-capability`、`lifecycle-ownership`、`lifecycle-service-contract`；均使用 `scripts/test_stream_settings_model.py` 原入口、原共享 target 和官方只读绑定。`lifecycle-linux-native-check` 使用 x86_64 Linux 目标和完整 `gpui-restoration,native-linux-video` 特性执行真实 `cargo check --tests`。它是编译检查而非 Linux 链接/运行/发布。交叉构建不应混用宿主库；缺目标 sysroot 继续拒绝。
+
+允许的现有覆盖只有以下两个来源，完整文本 SHA、device/inode、uid、mode 全部进入方案：
+
+- `/usr/lib/systemd/user/service.d/10-timeout-abort.conf`：root 所有，只允许 `[Service] TimeoutStopFailureMode=abort`。
+- `/run/user/<uid>/systemd/user.control/weavelo.service.d/50-CPUWeight.conf`：当前用户所有，只允许 `[Service] CPUWeight=<1..10000>`；HO5 实测为 10000。
+
+两者均只读取和保留，不执行 set-property、不删除覆盖、不更改 vendor 的停止行为。新字段 `preserved_dropin_semantics` 显示精确保留值。重复/重置/额外指令、未知路径、不可写权限以外的额外 mode、内容或 inode 漂移均拒绝。每次 systemd 操作还核对有效 `TimeoutStopFailureMode`/`CPUWeight` 与计划一致；回滚也要求同一组覆盖，而非恢复或覆盖外部修改。
+
+CPUWeight 保留在既有 `weavelo.service` cgroup 上，不暗中给手动 GUI 另设权重；前台性能仍需实际测量。`abort` 在停止超时后可能触发 SIGABRT，因此只有 `Job` 为空且 ActiveState/SubState 已稳定时，才允许宣告后台启动、停止完成或回滚成功。旧 PID 尚在但 stop job 未结束不能被当作已恢复；执行器保留原事务供显式恢复，不取消未知 job 或关闭 vendor 机制。
+
+新的 facts 中 `observation.drop_ins` 为上述记录数组，每项仅有 path、text、sha256、device、inode、uid、mode。旧空列表方案只适用于实际没有覆盖的主机，不能用来忽略 HO5 的现有覆盖。真实生产切换仍须满足兼容产物和未被拒绝的交付路径，当前没有执行。
+
+
+本轮构建记录：原共享 target 中实际编译并运行 Mac 原生能力 2 项、所有权 5 项、IPC 7 项，原守护 receipt 的 source-unchanged 和 owned-group-absent 均为 true；这些不是 Linux ELF 产物。Linux 完整特性检查首先暴露 CMake 丢弃编译器参数的适配器缺陷，已改为固定可执行 Zig entry 并拒绝外架构参数，编译器脚本也纳入 source guard。之后检查因目标 ALSA / libspa / PipeWire sysroot 缺失而失败，未开启宿主 pkg-config 跨编译放行，也未改用降级特性。需要在获准路径的 Linux 原生构建器，或经过核验的 Linux sysroot 上继续原生产流程；目前没有新的可交付 Linux 兼容 ELF。

@@ -20,6 +20,9 @@ from scripts.test_stream_settings_model import (validation_command, validation_e
 
 class ServiceContractEntryTests(unittest.TestCase):
     SESSION_CLOCK_CASES = {
+        'lifecycle-capability': ('weavelo_app', 'gui_backend::tests'),
+        'lifecycle-ownership': ('weavelo_app', 'desktop::instance::tests'),
+        'lifecycle-service-contract': ('weavelo_app', 'background_service::service_contract_tests'),
         'session-security': ('remote_core', 'session_'),
         'clock-measurement': ('remote_core', 'clock_sync::tests'),
         'clock-timing': ('remote_core', 'timing::tests'),
@@ -43,6 +46,8 @@ class ServiceContractEntryTests(unittest.TestCase):
 
     def test_platform_checks_keep_fixed_targets_and_source_identity_guards(self):
         expected = {
+            "lifecycle-linux-native-check": ("--tests", "--target", "x86_64-unknown-linux-gnu", "--no-default-features",
+                                              "--features", "gpui-restoration,native-linux-video"),
             "platform-macos-check": ("--bin", "weavelo", "--features", "gpui-native-video"),
             "platform-windows-check": ("--tests", "--target", "x86_64-pc-windows-gnu", "--features", "native-windows-video"),
             "platform-linux-check": ("--tests", "--target", "x86_64-unknown-linux-gnu"),

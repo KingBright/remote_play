@@ -65,6 +65,43 @@ def validate_profile(state):
         hash_pin(item['sha256'])
 
 
+def validate_drop_ins(entries, uid):
+    require(type(entries) is list and len(entries) <= 2, 'Exact reviewed drop-in list required')
+    semantics = {}; paths = set()
+    allowed = {
+        '/usr/lib/systemd/user/service.d/10-timeout-abort.conf': (0, 'TimeoutStopFailureMode'),
+        f'/run/user/{uid}/systemd/user.control/weavelo.service.d/50-CPUWeight.conf': (uid, 'CPUWeight'),
+    }
+    for item in entries:
+        require(isinstance(item, dict) and set(item) == {'path','text','sha256','device','inode','uid','mode'},
+                'Exact drop-in content and inode pins required')
+        path = item['path']; require(path in allowed and path not in paths, 'Unknown/duplicate drop-in path')
+        paths.add(path); owner, directive = allowed[path]
+        for name in ('device','inode','uid','mode'):
+            require(type(item[name]) is int and item[name] >= 0, 'Invalid drop-in inode metadata')
+        require(item['inode'] > 0 and item['uid'] == owner and item['mode'] in (0o600,0o644), 'Drop-in owner/mode differs')
+        require(isinstance(item['text'], str) and len(item['text'].encode()) <= 16384 and
+                sha(item['text'].encode()) == item['sha256'], 'Drop-in bytes do not match pin')
+        section = False; value = None
+        for line in item['text'].splitlines():
+            line = line.strip()
+            if not line or line.startswith(('#',';')): continue
+            require('\\' not in line and '\x00' not in line, 'Unsupported drop-in escaping')
+            if line == '[Service]':
+                require(not section, 'Repeated drop-in section'); section = True; continue
+            require(section and '=' in line and value is None, 'Unknown/reset/repeated drop-in semantics')
+            key, value = line.split('=',1)
+            require(key == directive, 'Unknown drop-in directive')
+            if key == 'TimeoutStopFailureMode':
+                require(value == 'abort', 'Only the observed vendor stop-timeout policy is reviewed')
+            else:
+                require(value.isascii() and value.isdigit() and str(int(value)) == value and
+                        1 <= int(value) <= 10000, 'Invalid CPUWeight; no default inferred')
+        require(section and value is not None, 'Drop-in directive missing')
+        semantics[directive] = value
+    return semantics
+
+
 def rewrite_unit(raw, executable, profile):
     require(type(raw) is bytes and 0 < len(raw) <= 65536, 'Bounded original unit bytes required')
     text = raw.decode('utf-8')
@@ -140,8 +177,8 @@ def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profi
     require(observation.get('active_sessions') == 0 and type(observation.get('active_sessions')) is int and
             observation.get('pending_sessions') == 0 and type(observation.get('pending_sessions')) is int and
             observation.get('active_lease') is False, 'Busy or unknown sessions/lease; preserve current owner')
-    require(observation.get('drop_ins') == [] and type(observation.get('drop_ins')) is list and
-            observation.get('unit_active') is True and type(observation.get('unit_enabled')) is bool and
+    overlay_semantics = validate_drop_ins(observation.get('drop_ins'), profile_state['directory']['uid'])
+    require(observation.get('unit_active') is True and type(observation.get('unit_enabled')) is bool and
             observation.get('marker_present') is False, 'Unknown drop-in, service or role-marker state')
     unit_after = rewrite_unit(unit_before, executable, profile)
     result = {'schema': 1, 'kind': 'linux-same-profile-background-migration-plan',
@@ -154,6 +191,7 @@ def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profi
         'observation': copy.deepcopy({k: observation[k] for k in ('owner_mode', 'pid', 'generation',
             'binary_sha256', 'active_sessions', 'pending_sessions', 'active_lease', 'drop_ins',
             'unit_active', 'unit_enabled', 'marker_present')}),
+        'preserved_dropin_semantics': overlay_semantics,
         'unit_enabled_after': observation['unit_enabled'], 'manual_gui_arguments': [executable, '--gui'],
         'desktop_entry_modified': False, 'credentials_created_or_imported': False,
         'profile_permissions_modified': False, 'applied': False,
@@ -168,7 +206,10 @@ def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profi
 
 def rollback_preview(migration, *, expected_plan_sha256, original_unit, current_unit,
                      current_profile_state, owned_unit, current_unit_state, owned_marker, current_marker,
-                     background_stopped, attached_gui_pids, marker_absence_verified=False):
+                     background_stopped, attached_gui_pids, marker_absence_verified=False, current_drop_ins=None):
+    reviewed = migration['observation']['drop_ins']
+    require(current_drop_ins == reviewed or (not reviewed and current_drop_ins is None),
+            'Drop-in changed; preserve its policy and refuse rollback effects')
     expected = dict(migration); actual_digest = expected.pop('plan_sha256', None)
     require(actual_digest == expected_plan_sha256 == digest(expected), 'Recorded plan CAS mismatch')
     require(sha(original_unit) == migration['unit_before_sha256'] and
