@@ -62,4 +62,46 @@ python3 -B scripts/linux_background_lifecycle_plan.py \
 
 若后台在创建标记之前就失败，只有 `owned_marker=None`、`current_marker=None` 且 `marker_absence_verified=true` 的已验证缺失分支允许恢复 unit，不执行任何标记删除；未知缺失不能等同不存在。
 
-预览返回要恢复的原 unit 字节、mode、原 enabled 意图及精确 marker/unit CAS 条件，始终 `applied=false`。它不执行停止、删除或重启；真实执行器尚未接入。本阶段不会触碰当前 HO5 服务、Windows ACL、被拒的源码上传、共享缓存或成品。
+预览返回要恢复的原 unit 字节、mode、原 enabled 意图及精确 marker/unit CAS 条件，始终 `applied=false`。它不执行停止、删除或重启；真实执行器现已接入下述原 journal 子事务；真实设备验收单独记录。本阶段不会触碰当前 HO5 服务、Windows ACL、被拒的源码上传、共享缓存或成品。
+
+
+## 原安装 journal 执行器
+
+`scripts/execute_linux_lifecycle.py` 使用既有 `~/.local/state/weavelo-identity-migration/journal.json` 的 `linux_lifecycle` 子对象和同目录固定锁。保留原顶层安装 phase/字段，不创建另一套身份事务。仅支持原 observed receipt 验证的固定已安装二进制/source；不会编译、安装应用或生成 profile。切换前必须重新生成并审阅实际方案，包括 `unit_security_sha256`：对 unit 的 uid/gid/mode 及每个 xattr 值的 SHA256 映射做规范 JSON SHA256。旧的纯预览方案可缺该值，但不能用于真实执行。
+
+在已批准且未被拒绝的原部署路径交付最终固定源码后，原生 Linux 命令为：
+
+```sh
+python3 -B scripts/execute_linux_lifecycle.py --plan /private/review/linux-background-plan.json \
+  --expected-plan-sha256 REVIEWED_PLAN_SHA256 --apply
+```
+
+发现中断时先读取原 journal；同一 `--apply` 不重放未完成动作。明确恢复仍使用同一计划与原 journal：
+
+```sh
+python3 -B scripts/execute_linux_lifecycle.py --plan /private/review/linux-background-plan.json \
+  --expected-plan-sha256 REVIEWED_PLAN_SHA256 --recover
+```
+
+命令中的路径与摘要是占位符，不能直接用于设备。已 committed/rolled_back 的重复请求只复核终态，既不再启动 GUI，也不重做切换。不同 plan SHA、未知 journal/unit/marker/前台锁或配置漂移会拒绝。unit 通过 Linux `renameat2(RENAME_EXCHANGE)` 保留原 inode，固定 pending 保存本次小 unit 及恢复证据，不复制应用或缓存。不支持的安全元数据或需要额外权限时在原服务停止前失败，保留原状。
+
+恢复只使用先前已持久化的后台 generation、marker inode 和 GUI PID/start ticks。使用 pidfd 固定 GUI 进程后才允许终止本次已证明归属的 GUI。后台启动结果未知且 marker 尚无已验证启动回执时，标记即便为空也保持未知，不能倒推归属删除。已存在或锁定的其他前台不能被关闭。中间意图和小 pending 留在原事务归属下，未知文件不清理。
+
+正常路径用安装的同一二进制 `--gui` 与已有五秒 acceptance hook 创建本次 GUI；验证 `/proc` 映像、实际 render receipt、正常退出，再核验后台 PID/generation 仍相同及原 profile 不变。这个自动定时关闭验收不是手动点击关闭、登录/重启或长时稳定性验收，不能替代后者。
+
+隔离验证：
+
+```sh
+python3 -B -m unittest discover -s scripts/tests -p test_execute_linux_lifecycle.py -v
+```
+
+状态机故障注入不启动进程；存储测试用真实自有临时文件检查 journal CAS、stage、inode 与锁，Linux xattr 和 pidfd 系统边界在 macOS 上使用明确 mock。它们不能替代 HO5 原生 `renameat2`、systemd 和 GUI 验收。本阶段没有实际切换 HO5；若源码交付被平台拒绝，保持原操作并停止生产应用，不能换通道绕过。
+
+前台锁的 Unix `flock` / `LOCK_NB` 兼容依据为 [Rust File::try_lock 官方说明](https://doc.rust-lang.org/std/fs/struct.File.html#method.try_lock)；实际部署仍要求原产品持有该锁与当前内核行为一致。
+
+
+## 当前 HO5 原生前置核查
+
+只读核查发现，当前固定 db9fc29 Linux 产物的 `--product-info-json` 实际报告 `separated_lifecycle=false`、background/frontend entry 为空；源码 `gui_backend.rs` 将这些声明限制在 macOS，虽然通用 entrypoint 中存在其他平台的入口分支。执行器以已安装编译产物的真实声明为准，不能用方案里的合成 true 字段提升其能力，不会尝试启动后再解释为支持。需要经原构建及原生验收流程取得明确支持的候选后才能切换，不能改写旧产物信息或用文件旁注重新标记。
+
+该机还存在系统提供的 `TimeoutStopFailureMode` 和现有运行时 `CPUWeight` drop-in。当前窄方案拒绝任何未纳入的 drop-in；这不表示应删除它们或改变系统权限。后续应单独审阅、固定这些既有覆盖的内容/来源并保持其效果，再扩展允许范围。没有执行此项配置修改。被拒上传仍保持原操作，未选择其他通道交付执行器。因此当前没有实际执行 GUI 关闭后后台存活验收。

@@ -118,12 +118,13 @@ def rewrite_unit(raw, executable, profile):
     return ''.join(out).encode()
 
 
-def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profile_state, unit_state, observation):
+def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profile_state, unit_state, observation, unit_security_sha256=None):
     canonical_path(home)
     executable = home + '/.local/opt/weavelo/weavelo'
     profile = home + '/.config/weavelo/mesh'
     require_separated_entries(product_info)
     hash_pin(binary_sha256)
+    if unit_security_sha256 is not None: hash_pin(unit_security_sha256)
     require(isinstance(source_commit, str) and re.fullmatch('[0-9a-f]{40}', source_commit), 'Exact existing source commit required')
     validate_profile(profile_state)
     require(isinstance(unit_state, dict) and set(unit_state) == {'device', 'inode', 'uid', 'mode', 'links', 'sha256'}, 'Original unit inode and byte pins required')
@@ -147,6 +148,7 @@ def plan(unit_before, *, home, product_info, binary_sha256, source_commit, profi
         'home': home, 'unit_name': UNIT_NAME, 'executable': executable, 'profile': profile,
         'binary_sha256': binary_sha256, 'source_commit': source_commit,
         'unit_before_sha256': sha(unit_before), 'unit_after_sha256': sha(unit_after),
+        'unit_security_sha256': unit_security_sha256,
         'unit_after_utf8': unit_after.decode(), 'unit_state': copy.deepcopy(unit_state),
         'profile_state': copy.deepcopy(profile_state),
         'observation': copy.deepcopy({k: observation[k] for k in ('owner_mode', 'pid', 'generation',
