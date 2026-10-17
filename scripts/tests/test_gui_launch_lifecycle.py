@@ -56,5 +56,35 @@ class GuiLifecycleTests(unittest.TestCase):
                     validate(document, self.path)
 
 
+    def test_installed_explicit_background_entry_needs_no_headless_environment(self):
+        self.gui['ProgramArguments'] = [self.path, '--background-service']
+        self.gui['EnvironmentVariables'] = {}
+        self.gui['KeepAlive'] = {'SuccessfulExit': False}
+        result = validate(self.gui, self.path, role='host')
+        self.assertEqual(result['role_source'], 'explicit-entry')
+        with self.assertRaises(LifecycleRejected):
+            validate(self.gui, self.path, role='gui')
+
+    def test_explicit_gui_cannot_be_claimed_as_host_by_inherited_environment(self):
+        self.gui['ProgramArguments'] = [self.path, '--gui']
+        self.gui['EnvironmentVariables']['WEAVELO_HEADLESS'] = '1'
+        self.gui['KeepAlive'] = False
+        self.assertEqual(validate(self.gui, self.path)['role'], 'gui')
+        with self.assertRaises(LifecycleRejected):
+            validate(self.gui, self.path, role='host')
+
+    def test_unknown_or_mixed_entries_fail_before_policy_claim(self):
+        for tail in (['--gui', '--background-service'], ['--background-service', '--gui'],
+                     ['--product-info-json'], ['--unknown']):
+            with self.subTest(tail=tail), self.assertRaises(LifecycleRejected):
+                validate(dict(self.gui, ProgramArguments=[self.path, *tail], KeepAlive=False), self.path)
+
+    def test_program_only_legacy_entry_keeps_environment_role_semantics(self):
+        self.gui.pop('ProgramArguments')
+        self.gui['Program'] = self.path
+        self.gui['EnvironmentVariables']['WEAVELO_HEADLESS'] = '1'
+        self.assertEqual(validate(self.gui, self.path, role='host')['role_source'], 'environment-default')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -37,9 +37,22 @@ def validate(document: dict, executable: str, *, role: str = 'gui') -> dict:
     value = environment.get('WEAVELO_HEADLESS', '0')
     if not isinstance(value, str):
         raise LifecycleRejected('Headless setting must be a string')
-    headless = value in ('1', 'true', 'TRUE', 'yes', 'YES')
-    if headless != (role == 'host'):
-        raise LifecycleRejected('Launch role differs from WEAVELO_HEADLESS')
+    # entrypoint.rs handles explicit roles before its default HEADLESS branch.
+    # The deployed background service deliberately need not set HEADLESS at all;
+    # --gui likewise remains a frontend even with an inherited HEADLESS=1.
+    tail = args[1:] if args is not None else []
+    if tail == ['--background-service']:
+        effective_role, role_source = 'host', 'explicit-entry'
+    elif tail == ['--gui']:
+        effective_role, role_source = 'gui', 'explicit-entry'
+    elif not tail:
+        headless = value in ('1', 'true', 'TRUE', 'yes', 'YES')
+        effective_role = 'host' if headless else 'gui'
+        role_source = 'environment-default'
+    else:
+        raise LifecycleRejected('Unknown or mixed role arguments; no lifecycle proof')
+    if effective_role != role:
+        raise LifecycleRejected('Launch role differs from the effective product entry')
     keep_alive = document.get('KeepAlive', False)
     if type(keep_alive) is bool:
         restarts_normal_exit = keep_alive
@@ -55,7 +68,7 @@ def validate(document: dict, executable: str, *, role: str = 'gui') -> dict:
         raise LifecycleRejected('Invalid or unsupported KeepAlive value')
     if role == 'gui' and restarts_normal_exit:
         raise LifecycleRejected('Unconditional KeepAlive would reopen the GUI after normal exit')
-    return {'role': role, 'executable': executable,
+    return {'role': role, 'role_source': role_source, 'executable': executable,
             'normal_gui_exit_restarts': role == 'gui' and restarts_normal_exit,
             'launch_policy_verified': True, 'service_modified': False,
             'independent_background_host': 'not_evaluated',
