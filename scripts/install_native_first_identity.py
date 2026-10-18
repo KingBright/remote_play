@@ -201,7 +201,9 @@ class NativeInstall:
             if k.startswith(('REMOTE_PLAY_', 'WEAVELO_', 'RP_MEDIA_ACCEPTANCE')):
                 env.pop(k)
         prefix = 'REMOTE_PLAY_' if old else 'WEAVELO_'
-        env.update({prefix+'HEADLESS': '0', prefix+'PASSIVE_HOST': '0',
+        # Windows production and rollback are duplex roles. A receive-only test
+        # must never leave either normal owner without its passive listener.
+        env.update({prefix+'HEADLESS': '0', prefix+'PASSIVE_HOST': '1' if self.windows else '0',
                     prefix+'DEVICE_GROUP_DIR': str(self.old_profiles[-1] if old else self.profile)})
         return env
 

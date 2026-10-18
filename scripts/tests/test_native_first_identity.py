@@ -63,6 +63,7 @@ class SafetyTests(unittest.TestCase):
 
     def test_runtime_does_not_import_old_credentials(self):
         install = m.NativeInstall.__new__(m.NativeInstall)
+        install.windows = False
         install.profile = Path('/new/profile')
         install.old_profiles = [Path('/old/profile')]
         with patch.dict(os.environ, {'REMOTE_PLAY_DEVICE_GROUP_DIR':'/wrong','WEAVELO_SECRET':'not-a-real-secret','RP_MEDIA_ACCEPTANCE_TOKEN':'fixture'}, clear=True):
@@ -74,12 +75,43 @@ class SafetyTests(unittest.TestCase):
 
     def test_rollback_environment_targets_only_old_profile(self):
         install = m.NativeInstall.__new__(m.NativeInstall)
+        install.windows = False
         install.profile = Path('/new/profile')
         install.old_profiles = [Path('/old/profile')]
         with patch.dict(os.environ, {}, clear=True):
             env = install.runtime_env(old=True)
         self.assertEqual(env['REMOTE_PLAY_DEVICE_GROUP_DIR'], '/old/profile')
         self.assertNotIn('WEAVELO_DEVICE_GROUP_DIR', env)
+
+    def test_windows_production_and_rollback_launches_restore_duplex_host(self):
+        # Exercise the real launcher, not just the environment helper; no child
+        # or window may start while checking restoration from receive-only env.
+        for old in (False, True):
+            with self.subTest(rollback=old):
+                install = m.NativeInstall.__new__(m.NativeInstall)
+                install.windows = True
+                install.exe = Path('/new/app/weavelo.exe')
+                install.old_exe = Path('/old/app/remote_play.exe')
+                install.profile = Path('/new/profile')
+                install.old_profiles = [Path('/old/profile')]
+                inherited = {'WEAVELO_PASSIVE_HOST': '0', 'REMOTE_PLAY_PASSIVE_HOST': '0',
+                             'WEAVELO_RESTORED_TEST_OUTPUT': '/fixture-only',
+                             'PSExecutionPolicyPreference': 'Restricted', 'PATH': 'existing'}
+                with patch.dict(os.environ, inherited, clear=True), \
+                     patch.object(m.subprocess, 'CREATE_NEW_PROCESS_GROUP', 512, create=True), \
+                     patch.object(m.subprocess, 'Popen') as start:
+                    install.launch_windows(old=old)
+                    self.assertEqual(dict(os.environ), inherited)
+                args, kwargs = start.call_args
+                prefix = 'REMOTE_PLAY_' if old else 'WEAVELO_'
+                self.assertEqual(args[0], [str(install.old_exe if old else install.exe)])
+                self.assertEqual(kwargs['env'][prefix + 'PASSIVE_HOST'], '1')
+                self.assertEqual(kwargs['env'][prefix + 'HEADLESS'], '0')
+                self.assertEqual(kwargs['env'][prefix + 'DEVICE_GROUP_DIR'],
+                                 '/old/profile' if old else '/new/profile')
+                self.assertEqual(kwargs['env']['PSExecutionPolicyPreference'], 'Restricted')
+                self.assertNotIn('WEAVELO_RESTORED_TEST_OUTPUT', kwargs['env'])
+                self.assertNotIn(('WEAVELO_' if old else 'REMOTE_PLAY_') + 'DEVICE_GROUP_DIR', kwargs['env'])
 
     def test_unit_environment_injection_refused(self):
         install = m.NativeInstall.__new__(m.NativeInstall)
