@@ -64,7 +64,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-    packaging { jniLibs.excludes.add("**/libremote_play_android.so") }
+    packaging {
+        jniLibs.excludes.add("**/libremote_play_android.so")
+        // The release gate binds the exact original native producer bytes.
+        // AGP must not silently strip and replace that verified ELF.
+        jniLibs.keepDebugSymbols.add("**/libweavelo_android.so")
+    }
     buildFeatures {
         compose = true
     }
