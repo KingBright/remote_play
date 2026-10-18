@@ -1,5 +1,8 @@
 package `fun`.hackerlife.weavelo
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,6 +26,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+        // Consent remains the user's choice; foreground-service startup does not
+        // depend on granting notification-drawer visibility.
+    }
+
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        val preferences = getSharedPreferences("permissions", MODE_PRIVATE)
+        if (preferences.getBoolean("notification_requested", false)) return
+        preferences.edit().putBoolean("notification_requested", true).apply()
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     override fun onStart() {
         super.onStart()
         WeaveloClient.setBackgrounded(false)
@@ -37,6 +54,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionOnce()
         WeaveloClient.initialize(applicationContext)
 
         setContent {
