@@ -183,7 +183,7 @@ class LinuxCandidateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):install.reviewed_linux_binding(g,args)
 
     def test_no_linux_installer_fallback_to_historical_source(self):
-        self.assertNotIn('linux',install.PINS)
+        self.assertFalse(hasattr(install,'PINS'))
         with self.assertRaises(RuntimeError):install.reviewed_linux_binding(g,None)
 
     def test_lifecycle_uses_original_journal_binding_for_any_reviewed_source(self):

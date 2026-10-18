@@ -2,9 +2,10 @@
 """Narrow native Windows/Linux first install, consuming original verified outputs.
 
 No build, key import, secret export, OS permissions repair or package rewriting.
-This entry is pinned to the reviewed db9fc29 artifacts below; committing this
-installer does not rebuild or repin those runtime artifacts. Run from this
-primary checkout only. Existing/partially migrated installations are refused.
+Both platforms require explicit reviewed original producer inputs; there is no
+historical artifact fallback. Installer source and runtime source are distinct:
+changing this installer does not rebuild or relabel a reviewed runtime. Run from
+this primary checkout only. Existing/partially migrated installations are refused.
 Old app and credentials stay in their original locations as rollback. Unknown
 journals are never replayed. Linux uses the project's original sealer/desktop tool.
 """
@@ -19,16 +20,6 @@ import subprocess
 import sys
 import time
 import zipfile
-
-# Historical Windows transaction pins. New Linux input is independently reviewed below.
-COMMIT = 'db9fc29ef94ba69189f5fdda129135619c035f0c'
-PINS = {
-    'windows': dict(binary='cfc351261cdb8418431b3fb322a39078f2de338e39f7281a353294e83d55f531',
-        old='11d67f773ac92c8fff8506a68d8bb5c26fac8bf3c288aaef5a39828a14177e5e',
-        identity='85f357ac99c2d1cdc18f09216d25db3fad057bde18ceabb6bc221cce17beb986',
-        receipt='ef340443d6528349663b77570d94c315bed2f0783ef183d2fd6f96c579c123b1',
-        archive='9b7736c310bf24c40b68b6069aeebd404d7c9c6a4b76e19d2ae6bba28df002f4'),
-}
 
 
 
@@ -124,27 +115,92 @@ def reviewed_linux_binding(gate, args):
             'manifest_document':manifest}
 
 
+def reviewed_windows_binding(gate, args, repo):
+    """Bind the original six-member Windows package, receipt and rollback image."""
+    names = ('build_receipt', 'build_receipt_sha256', 'release_archive', 'archive_sha256',
+             'expected_commit', 'identity_sha256', 'compiler_binary', 'old_binary_sha256')
+    require(args is not None and all(getattr(args, name, None) for name in names),
+            'Windows installation requires reviewed receipt, archive, source, identity and old/new binary pins')
+    paths = {'build_receipt': repo/'target/package/windows/windows-current-build-receipt.json',
+             'release_archive': repo/'target/package/windows/Weavelo-Windows-x64.zip',
+             'compiler_binary': repo/'target/release/weavelo.exe'}
+    for name, path in paths.items():
+        require(real_path(getattr(args, name)) == path, 'Use original Windows producer output paths')
+    receipt = gate.read_json(args.build_receipt, args.build_receipt_sha256)
+    require(type(receipt.get('schema')) is int and receipt['schema'] == 2 and
+            receipt.get('kind') == 'observed-build', 'Native Windows observed producer receipt required')
+    expected = gate.validate_identity(receipt.get('build_identity'), args.expected_commit, args.identity_sha256)
+    config = expected['configuration']
+    require(config['platform'] == 'windows' and config['architecture'] == 'x86_64' and
+            config['target'] == 'x86_64-pc-windows-msvc' and config['profile'] == 'release',
+            'Original native Windows release identity required')
+    binary = gate.sha(receipt['compiler_binary_sha256'])
+    require(type(receipt.get('compiler_binary_bytes')) is int and
+            args.compiler_binary.stat().st_size == receipt['compiler_binary_bytes'], 'Compiler size differs')
+    require(gate.product_info(args.compiler_binary, expected, binary) == receipt['product_info'],
+            'Actual compiler ProductInfo differs from observed receipt')
+    pin = {'binary': binary, 'old': gate.sha(args.old_binary_sha256),
+           'identity': gate.sha(args.identity_sha256), 'receipt': gate.sha(args.build_receipt_sha256),
+           'archive': gate.sha(args.archive_sha256)}
+    candidate = args.release_archive.parent/'Weavelo'
+    files = reviewed_windows_payload(gate, candidate, args.release_archive, receipt, pin)
+    return {'commit': args.expected_commit, 'pin': pin, 'receipt': args.build_receipt,
+            'compiler': args.compiler_binary, 'archive': args.release_archive,
+            'candidate': candidate, 'payload': files}
+
+
+def reviewed_windows_payload(gate, candidate, archive, receipt, pin):
+    require(gate.hash_file(archive) == pin['archive'], 'Formal archive drift')
+    files = inventory(candidate, gate)
+    expected = {'application-identity.json', 'build-info.json', 'ffmpeg-license.txt',
+                'weavelo.exe', 'Weavelo.ico', 'bin/ffmpeg.exe'}
+    require(set(files) == expected and files['weavelo.exe'] == pin['binary'],
+            'Original Windows payload differs')
+    with zipfile.ZipFile(archive) as z:
+        entries = [item for item in z.infolist() if not item.is_dir()]
+        names = [item.filename.replace('\\', '/') for item in entries]
+        require(len(names) == len(set(name.lower() for name in names)) and
+                set(names) == {'Weavelo/'+name for name in expected}, 'Unexpected or duplicate archive member')
+        require(sum(item.file_size for item in entries) <= 512*1024**2, 'Windows archive too large')
+        for item, name in zip(entries, names):
+            with z.open(item) as incoming:
+                value = hashlib.file_digest(incoming, 'sha256').hexdigest()
+            require(value == files[name.removeprefix('Weavelo/')], 'Archive/payload mismatch')
+    info = gate.read_json(candidate/'build-info.json')
+    require(info.get('source_commit') == receipt['build_identity']['source']['commit'] and
+            info.get('build_identity') == receipt['build_identity'] and
+            info.get('build_receipt_sha256') == pin['receipt'] and
+            info.get('weavelo_sha256') == pin['binary'] and
+            info.get('package_version') == receipt['build_identity']['configuration']['version'] and
+            info.get('ffmpeg_sha256') == files['bin/ffmpeg.exe'] and
+            info.get('system_ffmpeg_fallback') is False, 'Windows package/producer provenance differs')
+    require(gate.hash_file(archive) == pin['archive'] and inventory(candidate, gate) == files,
+            'Windows package changed during verification')
+    return files
+
+
 class NativeInstall:
     def __init__(self, reviewed=None):
         self.windows = sys.platform == 'win32'
         require(self.windows or sys.platform.startswith('linux'), 'Native Windows/Linux required')
         self.platform = 'windows' if self.windows else 'linux'
-        self.pin = PINS['windows'] if self.windows else None
-        self.commit = COMMIT if self.windows else None
         self.home = Path.home().resolve(strict=True)
         self.repo = Path(__file__).resolve().parents[1]
         sys.path.insert(0, str(self.repo/'scripts'))
         import build_identity_gate
         self.gate = build_identity_gate
         if self.windows:
+            binding = reviewed_windows_binding(self.gate, reviewed, self.repo)
+            self.pin = binding['pin']; self.commit = binding['commit']
             self.old_app = self.home/'AppData/Local/RemotePlay'
             self.live = self.home/'AppData/Local/Weavelo'
             self.old_exe = self.old_app/'remote_play.exe'
             self.profile = self.home/'AppData/Roaming/Weavelo/Mesh'
             self.old_profiles = [self.home/'AppData/Roaming/RemotePlay/Mesh']
-            self.receipt = self.repo/'target/package/windows/windows-current-build-receipt.json'
-            self.candidate = self.repo/'target/package/windows/Weavelo'
-            self.compiler = self.repo/'target/release/weavelo.exe'
+            self.receipt = binding['receipt']
+            self.candidate = binding['candidate']
+            self.compiler = binding['compiler']
+            self.archive = binding['archive']
             self.work = self.home/'AppData/Local/.weavelo-identity-migration'
             self.shortcut = self.home/'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Weavelo.lnk'
         else:
@@ -252,15 +308,9 @@ class NativeInstall:
             old_app_retained=str(self.old_app), fresh_identity=True, secret_import=False,
             security_policy_modified=False, installer_sha256=g.hash_file(Path(__file__).absolute()))
         if self.windows:
-            archive = self.candidate.parent/'Weavelo-Windows-x64.zip'
-            require(g.hash_file(archive) == self.pin['archive'], 'Formal archive drift')
-            files = inventory(self.candidate, g)
-            require(files.get('weavelo.exe') == self.pin['binary'], 'Candidate differs')
-            with zipfile.ZipFile(archive) as z:
-                actual = {n.removeprefix('Weavelo/'): hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist() if not n.endswith('/')}
-                require(all(n.startswith('Weavelo/') for n in z.namelist()), 'Unexpected archive prefix')
-                require(actual == files, 'Archive/payload mismatch')
-            result.update(archive_sha256=self.pin['archive'], payload=files, persistent_startup_added=False,
+            files = reviewed_windows_payload(g, self.candidate, self.archive, r, self.pin)
+            result.update(archive_sha256=self.pin['archive'], archive_path=str(self.archive),
+                          compiler_binary_path=str(self.compiler), payload=files, persistent_startup_added=False,
                           shortcut=str(self.shortcut),
                           new_profile_security='protected owner/SYSTEM/Administrators DACL at creation; never repair existing profile implicitly')
         else:
@@ -370,7 +420,7 @@ class NativeInstall:
                 if not self.windows:
                     pid = int(subprocess.check_output(['systemctl', '--user', 'show', 'weavelo.service', '-p', 'MainPID', '--value'], text=True).strip())
                 try:
-                    proof = self.native(pid, self.exe, self.pin['binary'], self.gate.read_json(self.receipt)['build_identity'])
+                    proof = self.native(pid, self.exe, self.pin['binary'], self.gate.read_json(self.receipt,self.pin['receipt'])['build_identity'])
                     require((self.profile/'mesh.conf').is_file() and (self.profile/'mesh.secret').is_file(), 'New profile not ready')
                     status = subprocess.run([str(self.exe), '--gui-status-json'], env=self.runtime_env(), text=True, capture_output=True, timeout=10)
                     gui = json.loads(status.stdout)
@@ -417,7 +467,7 @@ class NativeInstall:
             if stopped:
                 if self.windows:
                     if child is not None and child.poll() is None:
-                        self.native(child.pid, self.exe, self.pin['binary'], self.gate.read_json(self.receipt)['build_identity'])
+                        self.native(child.pid, self.exe, self.pin['binary'], self.gate.read_json(self.receipt,self.pin['receipt'])['build_identity'])
                         child.terminate()
                         child.wait(timeout=15)
                     if state.get('shortcut_sha256'):
@@ -445,9 +495,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--apply', action='store_true')
     p.add_argument('--plan-sha256')
-    for name in ('build-receipt','release-manifest','compiler-binary'):
+    for name in ('build-receipt','release-manifest','release-archive','compiler-binary'):
         p.add_argument('--'+name,type=Path)
-    for name in ('build-receipt-sha256','manifest-sha256','expected-commit','identity-sha256','old-binary-sha256'):
+    for name in ('build-receipt-sha256','manifest-sha256','archive-sha256','expected-commit','identity-sha256','old-binary-sha256'):
         p.add_argument('--'+name)
     args = p.parse_args()
     install = NativeInstall(args)
