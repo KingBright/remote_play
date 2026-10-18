@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         WeaveloClient.setBackgrounded(false)
+        WorkspaceClient.resumeOnForeground(this)
         WorkspaceClient.backgrounded(false)
     }
 
@@ -66,9 +67,9 @@ class MainActivity : ComponentActivity() {
             val networkName by WeaveloClient.networkName.collectAsState()
             var joiningNetwork by remember { mutableStateOf(false) }
             var sendFileOnConnect by remember { mutableStateOf(false) }
-            var workspaceDeviceId by remember { mutableStateOf("") }
+            var workspaceDeviceId by remember { mutableStateOf(WorkspaceClient.requestedSession()?.deviceId ?: "") }
             var scanningQr by remember { mutableStateOf(false) }
-            var workspaceEndpoint by remember { mutableStateOf<String?>(null) }
+            var workspaceEndpoint by remember { mutableStateOf(WorkspaceClient.requestedSession()?.endpoint) }
             var receivedFiles by remember { mutableStateOf(false) }
             var pairingMessage by remember { mutableStateOf<String?>(null) }
             val publisherStatus by PublisherClient.status.collectAsState()

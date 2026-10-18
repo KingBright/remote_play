@@ -8,7 +8,8 @@ import android.os.PowerManager
 /** Idle media connections only; unfinished file transfers defer this deadline. */
 object BackgroundConnectionPolicy {
     fun seconds(configured: Int, adaptive: Boolean, charging: Boolean, powerSave: Boolean,
-                batteryPercent: Int, metered: Boolean): Int {
+                batteryPercent: Int, metered: Boolean, backgroundServiceEnabled: Boolean = false): Int {
+        if (backgroundServiceEnabled) return 0 // Explicit active-session service, stopped by Disconnect.
         val limit = configured.coerceIn(0, 86400)
         if (limit == 0 || !adaptive || charging) return limit // Explicit "always keep" wins.
         return minOf(limit, when {
@@ -26,6 +27,7 @@ object BackgroundConnectionPolicy {
             prefs.getBoolean("adaptive_background", true), battery.isCharging,
             context.getSystemService(PowerManager::class.java).isPowerSaveMode,
             battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY),
-            context.getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered)
+            context.getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered,
+            prefs.getBoolean("background_service_enabled", false))
     }
 }

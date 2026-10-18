@@ -23,7 +23,11 @@ data class WorkspaceState(val remoteFiles: List<RemoteSharedFile> = emptyList(),
 object WorkspaceClient {
     private external fun nativeAction(operation: Int, payload: String): String
     external fun nativeMedia(id: Int, audio: Boolean): ByteArray?
-    private val scope = CoroutineScope(SupervisorJob() + Executors.newSingleThreadExecutor().asCoroutineDispatcher())
+    private val dispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val ownership = WorkspaceSessionOwnership()
+    private val pendingStarts = java.util.concurrent.atomic.AtomicInteger()
+    val starting: Boolean get() = pendingStarts.get() > 0
     private val mutable = MutableStateFlow(WorkspaceState())
     val state = mutable.asStateFlow()
     @Volatile var active = false
@@ -60,29 +64,76 @@ object WorkspaceClient {
         runCatching(block).onFailure { mutable.value = mutable.value.copy(status = it.message ?: "Connection failed") }
     }
 
-    fun open(context: Context, endpoint: String, sessionKey: String = "", deviceId: String = "") = guarded {
-        closeNative()
-        this.context = context.applicationContext
-        this.endpoint = endpoint
-        this.deviceId = deviceId
-        mutable.value = WorkspaceState(sessionKey = sessionKey)
-        nextId = 256; revision = 0; asleep = false; background = false; transfersActive = false
-        connectNative()
-        active = true
-        context.startForegroundService(Intent(context, SessionConnectionService::class.java))
-        polling = scope.launch {
-            while (isActive && active) {
-                if (!asleep) runCatching { drainEvents() }.onFailure { mutable.value = mutable.value.copy(status = it.message ?: "Connection error") }
-                if (background && !asleep) {
-                    val seconds = BackgroundConnectionPolicy.currentSeconds(context)
-                    if (seconds > 0 && !transfersActive && SystemClock.elapsedRealtime() - lastFileAction >= 5_000 && SystemClock.elapsedRealtime() - backgroundAt >= seconds * 1000L) {
-                        action(1); asleep = true; retainingConnection = false
-                        mutable.value = mutable.value.copy(connected = false, status = "Connection sleeping to save power")
+    fun requestedSession(): WorkspaceSessionRequest? = ownership.request()
+    fun sessionKeyFor(endpoint: String, deviceId: String): String = ownership.request()
+        ?.takeIf { it.endpoint == endpoint && it.deviceId == deviceId }?.sessionKey
+        ?: java.util.UUID.randomUUID().toString()
+
+    fun resumeOnForeground(context: Context) {
+        ownership.request()?.let { SessionConnectionService.openWorkspace(context, it) }
+    }
+
+    // Called only by the foreground Service. All native work remains serialized;
+    // the polling Job is a child of the Service rather than the UI/global scope.
+    fun openFromService(context: Context, ownerScope: CoroutineScope, owner: Any, request: WorkspaceSessionRequest, forceReconnect: Boolean = false) {
+        pendingStarts.incrementAndGet()
+        guarded {
+            try {
+                if (!ownerScope.isActive) return@guarded
+                val previous = ownership.request()
+                val sameSession = previous == request && mutable.value.sessionKey == request.sessionKey
+                val reuse = ownership.attach(owner, request, active && !asleep && !forceReconnect)
+                if (!reuse) {
+                    closeNative()
+                    this.context = context.applicationContext
+                    endpoint = request.endpoint; deviceId = request.deviceId
+                    mutable.value = if (sameSession) mutable.value.copy(connected = false, status = "Connecting…")
+                        else WorkspaceState(sessionKey = request.sessionKey)
+                    if (!sameSession) nextId = 256
+                    revision = 0; asleep = false
+                    background = WeaveloClient.backgrounded; transfersActive = false
+                    if (background) backgroundAt = SystemClock.elapsedRealtime()
+                    connectNative()
+                    active = true
+                    if (sameSession) {
+                        mutable.value.panes.forEach { command("Subscribe", this.request(it)) }
+                        if (mutable.value.clipboard) command("SetClipboard", JSONObject().put("enabled", true))
+                        activity()
                     }
                 }
-                delay(if (background) 1000 else 50)
-            }
+                polling?.cancel()
+                polling = ownerScope.launch(dispatcher) {
+                    while (isActive && active) {
+                        if (!asleep) runCatching { drainEvents() }.onFailure { mutable.value = mutable.value.copy(status = it.message ?: "Connection error") }
+                        if (background && !asleep) {
+                            val seconds = BackgroundConnectionPolicy.currentSeconds(context)
+                            if (seconds > 0 && !transfersActive && SystemClock.elapsedRealtime() - lastFileAction >= 5_000 && SystemClock.elapsedRealtime() - backgroundAt >= seconds * 1000L) {
+                                action(1); asleep = true; retainingConnection = false
+                                mutable.value = mutable.value.copy(connected = false, status = "Connection sleeping to save power")
+                            }
+                        }
+                        delay(if (background) 1000 else 50)
+                    }
+                }
+            } catch (error: Exception) {
+                ownership.release(owner, preserveForForeground = true)
+                throw error
+            } finally { pendingStarts.decrementAndGet() }
         }
+    }
+
+    fun disconnectSession(sessionKey: String) = guarded {
+        if (!ownership.disconnect(sessionKey)) return@guarded
+        closeNative()
+        mutable.value = WorkspaceState(status = "Disconnected")
+    }
+
+    fun closeFromService(owner: Any, preserveForForeground: Boolean) = guarded {
+        if (!ownership.release(owner, preserveForForeground)) return@guarded
+        closeNative()
+        mutable.value = if (preserveForForeground) mutable.value.copy(connected = false,
+            panes = mutable.value.panes.map { it.copy(input = false) }, status = "Connection sleeping; reopen to reconnect")
+            else WorkspaceState(status = "Disconnected")
     }
     private fun connectNative() {
         val directory = File(checkNotNull(context).filesDir, "received").apply { mkdirs() }
@@ -94,23 +145,15 @@ object WorkspaceClient {
         mutable.value = mutable.value.copy(connected = true, connectionGeneration = ++connectionGeneration, panes = mutable.value.panes.map { it.copy(input = false) }, remoteFiles = emptyList(), sharedNext = null, sharedBusy = false, status = "Connected")
     }
     private fun closeNative() { polling?.cancel(); polling = null; if (active) action(1); active = false; retainingConnection = false }
-    fun close() = guarded { closeNative(); mutable.value = WorkspaceState(status = "Disconnected") }
-    fun reconnect() = guarded {
-        connectNative(); asleep = false
-        checkNotNull(context).startForegroundService(Intent(context, SessionConnectionService::class.java))
-        mutable.value.panes.forEach { command("Subscribe", request(it)) }
-        if (mutable.value.clipboard) command("SetClipboard", JSONObject().put("enabled", true))
-        activity()
+    fun reconnect() {
+        ownership.request()?.let { SessionConnectionService.openWorkspace(checkNotNull(context), it, forceReconnect = true) }
     }
     fun backgrounded(value: Boolean) = guarded {
         if (!active || background == value) return@guarded
         background = value
         if (value) backgroundAt = SystemClock.elapsedRealtime()
         if (!value && asleep) {
-            connectNative(); asleep = false
-            checkNotNull(context).startForegroundService(Intent(context, SessionConnectionService::class.java))
-            mutable.value.panes.forEach { command("Subscribe", request(it)) }
-            if (mutable.value.clipboard) command("SetClipboard", JSONObject().put("enabled", true))
+            ownership.request()?.let { SessionConnectionService.openWorkspace(checkNotNull(context), it) }
         }
         if (!value) pendingClipboard?.let { applyClipboard(it); pendingClipboard = null }
         activity()

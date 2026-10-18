@@ -75,6 +75,7 @@ fun MobileViewportScreen(
     var fpsText by remember { mutableStateOf(WeaveloClient.streamFps.toString()) }
     var bitrateText by remember { mutableStateOf(WeaveloClient.streamBitrateKbps.toString()) }
     var keepAliveText by remember { mutableStateOf(WeaveloClient.backgroundKeepAliveSeconds.toString()) }
+    var keepService by remember { mutableStateOf(WeaveloClient.backgroundServiceEnabled()) }
     var settingsError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -140,7 +141,11 @@ fun MobileViewportScreen(
                     label = { Text("Video bitrate (kbps)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                 OutlinedTextField(value = keepAliveText, onValueChange = { keepAliveText = it },
                     label = { Text("Background keepalive (seconds)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                Text("0 keeps the connection. After the limit, disconnect to save power and reconnect on return.")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(keepService, { keepService = it })
+                    Text("Keep this connection in background until Disconnect")
+                }
+                Text("When off, the idle timeout applies (0 keeps the connection). This is not a system-stop or battery exemption.")
                 settingsError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             } },
             confirmButton = { TextButton(onClick = {
@@ -152,7 +157,7 @@ fun MobileViewportScreen(
                 } else scope.launch {
                     settingsError = withContext(Dispatchers.IO) { WeaveloClient.updateStreamRates(fps, bitrate) }
                     if (settingsError == null) settingsError = WeaveloClient.updateBackgroundKeepAlive(keepAlive)
-                    if (settingsError == null) showStreamSettings = false
+                    if (settingsError == null) { WeaveloClient.updateBackgroundServiceEnabled(keepService); showStreamSettings = false }
                 }
             }) { Text("Apply") } },
             dismissButton = { TextButton(onClick = { showStreamSettings = false }) { Text("Cancel") } })

@@ -164,7 +164,7 @@ object WeaveloClient {
         }
         _sessionError.value = ""
         _sessionState.value = SessionState.DISCONNECTED
-        appContext?.let { it.stopService(Intent(it, SessionConnectionService::class.java)) }
+        // The shared Service stops itself only after both viewer and workspace release it.
     }
 
     @Synchronized fun setBackgrounded(value: Boolean) {
@@ -193,6 +193,14 @@ object WeaveloClient {
                 pauseExecutor.execute { if (isNativeLoaded) nativeSetNetworkEnabled(false) }
             }
         }
+    }
+
+    fun backgroundServiceEnabled(): Boolean = appContext?.getSharedPreferences("stream", Context.MODE_PRIVATE)
+        ?.getBoolean("background_service_enabled", false) ?: false
+
+    fun updateBackgroundServiceEnabled(enabled: Boolean) {
+        appContext?.getSharedPreferences("stream", Context.MODE_PRIVATE)?.edit()
+            ?.putBoolean("background_service_enabled", enabled)?.apply()
     }
 
     @Synchronized fun updateBackgroundKeepAlive(seconds: Int): String? {

@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, deviceId: String = "", onClose: () -> Unit) {
     val context = LocalContext.current
-    val sessionKey = remember(endpoint, deviceId) { java.util.UUID.randomUUID().toString() }
+    val sessionKey = rememberSaveable(endpoint, deviceId) { WorkspaceClient.sessionKeyFor(endpoint, deviceId) }
     var requestedFilePicker by rememberSaveable(endpoint, deviceId) { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val state by WorkspaceClient.state.collectAsState()
@@ -47,11 +47,16 @@ fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, device
     val preferences = remember { context.getSharedPreferences("stream", android.content.Context.MODE_PRIVATE) }
     var keepAlive by remember { mutableStateOf(preferences.getInt("background_keepalive_seconds", 300).toString()) }
     var adaptive by remember { mutableStateOf(preferences.getBoolean("adaptive_background", true)) }
+    var keepService by remember { mutableStateOf(WeaveloClient.backgroundServiceEnabled()) }
     val scope = rememberCoroutineScope()
     var selectedSettings by remember { mutableStateOf<WorkspacePane?>(null) }
     val volumes = remember { mutableStateMapOf<Int, Float>() }
     if (backgroundSettings) AlertDialog(onDismissRequest = { backgroundSettings = false }, title = { Text("Background connection") },
         text = { Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(keepService, { keepService = it }); Text("Keep this connection in background until Disconnect")
+            }
+            Text("This is an explicit foreground service, not a battery or system-stop exemption. The idle timeout below applies when this is off.")
             OutlinedTextField(keepAlive, { keepAlive = it }, label = { Text("Idle seconds (0 = always keep)") },
                 isError = keepAlive.toIntOrNull()?.let { it !in 0..86400 } ?: true)
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -62,15 +67,16 @@ fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, device
             val seconds = keepAlive.toIntOrNull()
             if (seconds != null && seconds in 0..86400) {
                 WeaveloClient.updateBackgroundKeepAlive(seconds)
+                WeaveloClient.updateBackgroundServiceEnabled(keepService)
                 preferences.edit().putBoolean("adaptive_background", adaptive).apply()
                 backgroundSettings = false
             }
         }) { Text("Save") } })
     DisposableEffect(endpoint, deviceId) {
-        WorkspaceClient.open(context, endpoint, sessionKey, deviceId)
+        SessionConnectionService.openWorkspace(context, WorkspaceSessionRequest(endpoint, deviceId, sessionKey))
         val observer = LifecycleEventObserver { _, _ -> foreground = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) }
         lifecycle.addObserver(observer)
-        onDispose { lifecycle.removeObserver(observer); WorkspaceClient.close() }
+        onDispose { lifecycle.removeObserver(observer) }
     }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val publishSelection = shareSelection
@@ -99,7 +105,7 @@ fun WorkspaceScreen(endpoint: String, sendFileOnConnect: Boolean = false, device
     MaterialTheme {
         Column(Modifier.fillMaxSize().background(Color(0xff101318)).safeDrawingPadding().padding(8.dp)) {
             Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onClose) { Text("Disconnect") }
+                TextButton(onClick = { SessionConnectionService.closeWorkspace(context, sessionKey); onClose() }) { Text("Disconnect") }
                 if (!state.connected) TextButton(onClick = { WorkspaceClient.reconnect() }) { Text("Reconnect") }
                 TextButton(onClick = { WorkspaceClient.layout(!state.grid) }) { Text(if (state.grid) "Use tabs" else "Show together") }
                 TextButton(onClick = { pickerSessionKey = sessionKey; shareSelection = false; filePicker.launch(arrayOf("*/*")) }, enabled = state.connected && state.files) { Text("Send file") }

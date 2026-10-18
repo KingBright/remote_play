@@ -17,4 +17,13 @@ class BackgroundConnectionPolicyTest {
         assertEquals(300, policy(adaptive = false, saving = true))
         assertEquals(0, policy(limit = 0, saving = true))
     }
+
+    @Test fun explicitBackgroundServiceIsDistinctFromDefaultIdleBudget() {
+        assertEquals(300, BackgroundConnectionPolicy.seconds(300, true, false, false, 80, false))
+        assertEquals(30, BackgroundConnectionPolicy.seconds(300, true, false, true, 10, true))
+        assertEquals(0, BackgroundConnectionPolicy.seconds(300, true, false, true, 10, true,
+            backgroundServiceEnabled = true))
+        assertEquals(300, BackgroundConnectionPolicy.seconds(300, true, false, false, 80, false,
+            backgroundServiceEnabled = false))
+    }
 }
