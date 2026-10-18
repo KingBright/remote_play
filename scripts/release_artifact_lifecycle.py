@@ -23,6 +23,7 @@ HELPER = Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storag
 AUTHORITY = 'docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json'
 LOCK_ENV = 'WEAVELO_RELEASE_LOCK_FD'
 PID_ENV = 'WEAVELO_RELEASE_PRODUCER_PID'
+ANDROID_UPGRADE_ENV = 'WEAVELO_ANDROID_UPGRADE_CANDIDATE'
 TRANSITION_ENV = 'WEAVELO_TRANSITION_INTENT_SHA256'
 ANDROID_SIGNER = '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5'
 ENTRIES = {'macos': 'package_macos_unified.sh', 'android-release': 'build_android_release.sh',
@@ -82,8 +83,21 @@ def macos_output_root():
     return target.resolve() / 'package/macos'
 
 
+def android_upgrade_mode():
+    value = os.environ.get(ANDROID_UPGRADE_ENV, '0')
+    require(value in ('0', '1'), 'Invalid fixed Android upgrade mode')
+    return value == '1'
+
+
+def android_component():
+    return 'android-arm64-upgrade' if android_upgrade_mode() else 'android-arm64-release'
+
+
 def android_files():
-    apk = ROOT / 'android/app/build/outputs/apk/release/app-release.apk'
+    # One explicitly requested upgrade pair while the current installation input
+    # is frozen. Same authority/output root; no arbitrary paths or generations.
+    name = 'app-upgrade.apk' if android_upgrade_mode() else 'app-release.apk'
+    apk = ROOT / 'android/app/build/outputs/apk/release' / name
     return [apk, apk.with_suffix('.verification.json')]
 
 
@@ -92,7 +106,8 @@ def stage_paths(files):
 
 
 def android_workspace():
-    return android_files()[0].parent / '.weavelo-android-package.pending'
+    name = '.weavelo-android-upgrade-package.pending' if android_upgrade_mode() else '.weavelo-android-package.pending'
+    return android_files()[0].parent / name
 
 
 def check_lock(kind):
@@ -107,6 +122,8 @@ def check_lock(kind):
     state = json.loads(os.pread(fd, 65536, 0))
     require(state['project'] == str(ROOT) and (state['kind'] == kind or
             (state['kind'] == 'android-release' and kind == 'android-native')), 'Wrong producer lock scope')
+    require(state.get('android_upgrade_candidate', False) == android_upgrade_mode(),
+            'Inherited Android output mode differs from producer lock')
     require(state.get('transition') == transition_config(kind), 'Inherited transition environment differs from producer lock')
     return fd, state
 
@@ -169,7 +186,8 @@ def producer(kind):
     path = state_dir / 'release-producer.lock'
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     prepared = False
-    state = {'project': str(ROOT), 'kind': kind, 'producer_pid': os.getpid()}
+    state = {'project': str(ROOT), 'kind': kind, 'producer_pid': os.getpid(),
+             'android_upgrade_candidate': android_upgrade_mode()}
     if transition is not None:
         state['transition'] = transition
     try:
@@ -324,7 +342,7 @@ def admit_android(state):
     if any(path.exists() or path.is_symlink() for path in files):
         current = android_evidence(*files)
         verify_existing_android_signer(files[0])
-    return admit(state, 'android-arm64-release', files, current=current, aux_stage=android_workspace())
+    return admit(state, android_component(), files, current=current, aux_stage=android_workspace())
 
 
 def publish_android(state):
@@ -356,7 +374,7 @@ def check_current(output_directory):
     pid = int(os.environ.get(PID_ENV, '0'))
     require(pid > 1, 'Use scripts/build_android_release.sh for a verified current APK')
     result = module.companion('rust_release').validate_producer(
-        module.release_api(), str(ROOT), 'android-arm64-release', list(map(str, android_files())), pid)
+        module.release_api(), str(ROOT), android_component(), list(map(str, android_files())), pid)
     require(result['staged_files'] == list(map(str, stage_paths(android_files()))), 'Unexpected APK stage contract')
     require(result['owned_aux_stages'] == [str(android_workspace())]
             and Path(output_directory).resolve() == android_workspace() / 'release',

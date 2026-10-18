@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+case "$#:${1:-}" in
+    0:) export WEAVELO_ANDROID_UPGRADE_CANDIDATE=0 ;;
+    1:--upgrade-candidate) export WEAVELO_ANDROID_UPGRADE_CANDIDATE=1 ;;
+    *) echo 'Only the fixed --upgrade-candidate output is supported' >&2; exit 2 ;;
+esac
+if [[ "$WEAVELO_ANDROID_UPGRADE_CANDIDATE" == 1 ]]; then
+    APK_NAME=app-upgrade.apk
+    APK_WORKSPACE_NAME=.weavelo-android-upgrade-package.pending
+else
+    APK_NAME=app-release.apk
+    APK_WORKSPACE_NAME=.weavelo-android-package.pending
+fi
 if [[ -z "${WEAVELO_RELEASE_LOCK_FD:-}" ]]; then
     exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" run android-release "$@"
 fi
@@ -29,7 +41,7 @@ trap 'unset PASSWORD WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_PASSW
 cd "$ROOT"
 ./scripts/build_android_native.sh
 cd android
-APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/.weavelo-android-package.pending"
+APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/$APK_WORKSPACE_NAME"
 ./gradlew --no-daemon --no-configuration-cache --max-workers=2 -Pandroid.injected.apk.location="$APK_WORKSPACE" -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
 APK="$APK_WORKSPACE/release/app-release.apk"
 [ -f "$APK" ] || { echo "Signed release APK not found: $APK" >&2; exit 1; }
@@ -38,7 +50,7 @@ APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort 
 "$APKSIGNER" verify --verbose --print-certs "$APK"
 # Calls the unchanged verify_release_apk.verify gate and writes the exact reserved receipt.
 python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" publish-android
-APK="$ROOT/android/app/build/outputs/apk/release/app-release.apk"
+APK="$ROOT/android/app/build/outputs/apk/release/$APK_NAME"
 echo "Release APK: $APK"
 echo "Size: $(stat -f %z "$APK")"
 echo "SHA-256: $(shasum -a 256 "$APK" | awk '{print $1}')"

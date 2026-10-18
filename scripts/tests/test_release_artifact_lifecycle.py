@@ -31,7 +31,7 @@ class ReleaseHookTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         patch.object(hook, 'ROOT', self.root).start()
         patch.dict(os.environ, {}, clear=False).start()
-        for key in (hook.LOCK_ENV, hook.PID_ENV): os.environ.pop(key, None)
+        for key in (hook.LOCK_ENV, hook.PID_ENV, hook.ANDROID_UPGRADE_ENV): os.environ.pop(key, None)
         self.calls = []
         self.public = patch.object(hook, 'public', side_effect=self.public_call).start()
         self.target = patch.object(hook, 'macos_output_root', return_value=self.root / 'shared/package/macos').start()
@@ -184,6 +184,61 @@ class ReleaseHookTests(unittest.TestCase):
         self.assertEqual(args.count('--current-sha256'), 2)
         self.assertEqual([p.read_bytes() for p in (apk, receipt)], before)
         self.assertNotIn('--snapshot', args); self.assertNotIn('--generation', args)
+
+    def test_upgrade_reserves_distinct_public_pair_without_touching_waiting_default(self):
+        apk, receipt, _ = self.apk(); before = [(p.read_bytes(), p.stat().st_ino) for p in (apk, receipt)]
+        with patch.dict(os.environ, {hook.ANDROID_UPGRADE_ENV: '1'}), patch.object(hook, 'verify_existing_android_signer') as signer:
+            admission = hook.admit_android(self.state)
+            signer.assert_not_called()
+            self.assertEqual(admission['component'], 'android-arm64-upgrade')
+            self.assertEqual(Path(admission['files'][0]).name, 'app-upgrade.apk')
+            self.assertEqual(Path(admission['files'][1]).name, 'app-upgrade.verification.json')
+            self.assertEqual(Path(admission['owned_aux_stages'][0]).name, '.weavelo-android-upgrade-package.pending')
+        self.assertEqual([(p.read_bytes(), p.stat().st_ino) for p in (apk, receipt)], before)
+
+    def test_upgrade_verified_publish_keeps_the_waiting_default_bytes_and_inode(self):
+        apk, receipt, _ = self.apk(); before = [(p.read_bytes(), p.stat().st_ino) for p in (apk, receipt)]
+        with patch.dict(os.environ, {hook.ANDROID_UPGRADE_ENV: '1'}):
+            admission, candidate, report = self.android_candidate()
+            with patch.dict(sys.modules, {'verify_release_apk': SimpleNamespace(verify=lambda *_: report)}), contextlib.redirect_stdout(io.StringIO()):
+                hook.publish_android(self.state)
+            action, args = self.calls[-1]
+            self.assertEqual(action, 'release-publish')
+            self.assertEqual(args[args.index('--component')+1], 'android-arm64-upgrade')
+            self.assertTrue(all('app-upgrade' in p for p in admission['files']))
+            self.assertFalse(candidate.exists())
+        self.assertEqual([(p.read_bytes(), p.stat().st_ino) for p in (apk, receipt)], before)
+
+    def test_upgrade_mode_cannot_change_inside_default_producer_lock(self):
+        with hook.producer('android-release') as (fd, _):
+            with patch.dict(os.environ, {hook.LOCK_ENV: str(fd), hook.ANDROID_UPGRADE_ENV: '1'}):
+                with self.assertRaisesRegex(hook.Refusal, 'output mode differs'):
+                    hook.check_lock('android-release')
+
+    def test_upgrade_native_child_inherits_original_producer_and_exact_mode(self):
+        shutil.copy2(SCRIPT, self.root/'scripts/release_artifact_lifecycle.py')
+        with patch.dict(os.environ, {hook.ANDROID_UPGRADE_ENV: '1'}):
+            with hook.producer('android-release') as (fd, _):
+                process = subprocess.run(['bash', '-c', 'exec "$1" -B "$2" check-lock android-native',
+                    'fixture', sys.executable, str(self.root/'scripts/release_artifact_lifecycle.py')],
+                    env=dict(os.environ, **{hook.LOCK_ENV: str(fd)}), pass_fds=(fd,), capture_output=True, text=True)
+                self.assertEqual(process.returncode, 0, process.stderr)
+
+    def test_upgrade_gradle_guard_binds_real_public_reservation_not_mode_flag(self):
+        with patch.dict(os.environ, {hook.ANDROID_UPGRADE_ENV: '1', hook.PID_ENV: str(os.getpid())}):
+            result = {'staged_files': list(map(str, hook.stage_paths(hook.android_files()))),
+                      'owned_aux_stages': [str(hook.android_workspace())]}
+            validator = self.current_guard(result)
+            hook.check_current(hook.android_workspace()/'release')
+            validator.assert_called_with('api', str(self.root), 'android-arm64-upgrade',
+                                         list(map(str, hook.android_files())), os.getpid())
+            with self.assertRaises(hook.Refusal): hook.check_current(hook.android_files()[0].parent)
+
+    def test_upgrade_mode_does_not_accept_arbitrary_output_paths(self):
+        with patch.dict(os.environ, {hook.ANDROID_UPGRADE_ENV: '/tmp/other-output'}):
+            with self.assertRaisesRegex(hook.Refusal, 'Invalid fixed Android'):
+                hook.android_files()
+        self.assertEqual(self.calls, [])
 
     def test_partial_old_current_preserved(self):
         apk, receipt, _ = self.apk(); receipt.unlink()
