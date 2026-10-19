@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
             var sendFileOnConnect by remember { mutableStateOf(false) }
             var workspaceDeviceId by remember { mutableStateOf(WorkspaceClient.requestedSession()?.deviceId ?: "") }
             var scanningQr by remember { mutableStateOf(false) }
+            var manualInvitationRequested by remember { mutableStateOf(false) }
             var workspaceEndpoint by remember { mutableStateOf(WorkspaceClient.requestedSession()?.endpoint) }
             var receivedFiles by remember { mutableStateOf(false) }
             var pairingMessage by remember { mutableStateOf<String?>(null) }
@@ -127,7 +128,8 @@ class MainActivity : ComponentActivity() {
                             scanningQr = false
                             joinNetwork(raw)
                         },
-                        onCancel = { scanningQr = false }
+                        onCancel = { scanningQr = false },
+                        onManualInput = { scanningQr = false; manualInvitationRequested = true }
                     )
                 }
                 sessionState == SessionState.STREAMING || sessionState == SessionState.RECONNECTING -> {
@@ -167,6 +169,8 @@ class MainActivity : ComponentActivity() {
                         onStopSharing = { PublisherClient.stop(this) },
                         onBrowseFiles = { receivedFiles = true },
                         onJoinCode = ::joinNetwork,
+                        showInvitationInput = manualInvitationRequested,
+                        onInvitationInputShown = { manualInvitationRequested = false },
                         onScanQr = { scanningQr = true }
                     )
                 }

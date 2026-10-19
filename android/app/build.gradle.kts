@@ -73,6 +73,8 @@ android {
     buildFeatures {
         compose = true
     }
+    // The same synthetic Rust-generated QR bitmap is decoded by Android tests.
+    sourceSets.getByName("test").resources.srcDir("../../remote_core/tests/fixtures")
 }
 
 // onlyIf runs before Gradle cleans outputDirectory; doFirst would be too late.

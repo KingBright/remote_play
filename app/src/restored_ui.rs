@@ -4646,6 +4646,8 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDas
                 )
             },
         )
+        .child(div().text_size(px(10.0)).text_color(theme.content.secondary)
+            .child("Scan with Weavelo on Android, or copy the invitation code."))
         .child(
             div()
                 .flex()
@@ -4755,13 +4757,14 @@ fn qr_matrix_view(matrix: &remote_core::QrMatrix) -> Div {
     div()
         .flex()
         .flex_col()
-        .p_2()
+        .flex_none()
+        // QR readers require a full four-module quiet zone on every side.
+        .p(px(3.0 * remote_core::pairing_qr::QR_QUIET_ZONE_MODULES as f32))
         .bg(rgb(0xffffff))
-        .rounded(px(6.0))
         .children((0..width).map(|y| {
-            div().flex().flex_row().children((0..width).map(move |x| {
-                div().size(cell).bg(if matrix.is_dark(x, y) {
-                    rgb(0x0d0f12)
+            div().flex().flex_row().flex_none().children((0..width).map(move |x| {
+                div().flex_none().size(cell).bg(if matrix.is_dark(x, y) {
+                    rgb(0x000000)
                 } else {
                     rgb(0xffffff)
                 })

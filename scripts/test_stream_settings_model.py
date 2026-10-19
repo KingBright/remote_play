@@ -43,6 +43,7 @@ SESSION_CLOCK_TESTS = {
     "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
     "mesh-profile": ("remote_core", "mesh::tests"),
+    "pairing-qr": ("remote_core", "pairing_qr::tests"),
     "bridge-startup": ("remote_client_bridge", "startup_diagnostics::tests"),
     "bridge-auth": ("remote_client_bridge", "publisher_bridge::tests"),
     "bridge-telemetry": ("remote_client_bridge", "tests::telemetry_defaults_are_zero_not_marketing_numbers"),
@@ -61,6 +62,10 @@ PLATFORM_CHECKS = {
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "pairing-fixture":
+        return [cargo, "run", *shared, "-p", "remote_core", "--example", "synthetic_pairing_qr"]
+    if mode == "pairing-join":
+        return [cargo, "test", *shared, "-p", "remote_core", "--test", "pairing_join", "--", "--nocapture"]
     if mode == "lifecycle-linux-native-build":
         return [cargo, "build", *shared, "-p", "weavelo_app", "--bin", "weavelo",
                 "--target", LINUX_TARGET, "--no-default-features",
@@ -110,7 +115,7 @@ def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
     env["CARGO_TERM_COLOR"] = "never"
-    if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode in ("service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
+    if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode in ("pairing-fixture", "pairing-join", "service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
             "WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
     if mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check", "lifecycle-linux-native-build"):
@@ -164,7 +169,7 @@ def validation_environment(mode):
 
 
 def requires_workspace_source_guard(mode):
-    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode.startswith("media-lifecycle") or
+    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("pairing-fixture", "pairing-join", "lifecycle-linux-native-build") or mode.startswith("media-lifecycle") or
             mode in ("service-contract", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"))
 
 
@@ -378,7 +383,7 @@ def execute_guarded_command(command, root, target, env, observation, sources, ha
                         if result:
                             for key, value in zip(test_results, result.groups()):
                                 test_results[key] += int(value)
-                if mode in SESSION_CLOCK_TESTS and not tests_observed:
+                if (mode in SESSION_CLOCK_TESTS or mode == "pairing-join") and not tests_observed:
                     error = "no matching library tests executed; result not accepted"
                     exit_code = exit_code or 1
                 if not exit_code:
@@ -407,7 +412,7 @@ def main():
     parser.add_argument("--lifecycle-authority", type=Path)
     parser.add_argument("--lifecycle-binding", type=Path)
     parser.add_argument("--lifecycle-helper", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "lifecycle-linux-native-build", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
+    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "pairing-fixture", "pairing-join", "lifecycle-linux-native-build", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

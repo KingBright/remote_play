@@ -41,6 +41,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         'clock-display': ('weavelo_app', 'telemetry_display::tests'),
         'clock-renderer': ('client', 'render_timing::tests'),
         'mesh-profile': ('remote_core', 'mesh::tests'),
+        'pairing-qr': ('remote_core', 'pairing_qr::tests'),
         'bridge-startup': ('remote_client_bridge', 'startup_diagnostics::tests'),
         'bridge-auth': ('remote_client_bridge', 'publisher_bridge::tests'),
         'bridge-telemetry': ('remote_client_bridge', 'tests::telemetry_defaults_are_zero_not_marketing_numbers'),
@@ -120,6 +121,19 @@ class ServiceContractEntryTests(unittest.TestCase):
                     '/existing/cargo', 'test', '--offline', '--locked', '--target-dir',
                     '/existing/target', '-p', package, '--lib', test_filter, '--', '--nocapture',
                 ])
+
+    def test_pairing_modes_keep_actual_module_fixture_and_source_identity_guards(self):
+        for mode, arguments in (
+            ('pairing-join', ['test', '-p', 'remote_core', '--test', 'pairing_join', '--', '--nocapture']),
+            ('pairing-fixture', ['run', '-p', 'remote_core', '--example', 'synthetic_pairing_qr']),
+        ):
+            with self.subTest(mode=mode):
+                self.assertEqual(validation_command('/cargo', Path('/target'), mode),
+                    ['/cargo', arguments[0], '--offline', '--locked', '--target-dir', '/target', *arguments[1:]])
+                self.assertTrue(requires_workspace_source_guard(mode))
+                with patch.dict(os.environ, {'WEAVELO_BUILD_IDENTITY_FILE': '/fixture/identity'}):
+                    with self.assertRaisesRegex(ValueError, 'product identity inputs'):
+                        validation_environment(mode)
 
     def test_session_clock_modes_use_the_existing_guarded_run_entry(self):
         for mode in self.SESSION_CLOCK_CASES:

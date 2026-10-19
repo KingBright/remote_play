@@ -1,4 +1,5 @@
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshConfig};
+use remote_core::parse_pairing_qr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -107,8 +108,16 @@ impl MeshPairingControl {
             );
         }
 
+        let payload = match parse_pairing_qr(invite_code) {
+            Ok(payload) => payload,
+            Err(err) => return self.update_message(
+                format!("Could not read that device-group invitation: {err}"),
+                MeshPairingMessageKind::Error,
+                false,
+            ),
+        };
         let store = AppPrivateMeshConfigStore::new(&self.config_dir);
-        match store.prepare_join(invite_code, &self.display_name) {
+        match store.prepare_join(&payload.invite_code, &self.display_name) {
             Ok((_, false)) => self.update_message(
                 "Already a member of this device network.",
                 MeshPairingMessageKind::Success,
@@ -301,6 +310,39 @@ mod tests {
         assert_eq!(after.network_name, before.network_name);
         assert_eq!(after.message_kind, MeshPairingMessageKind::Error);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qr_and_manual_invitation_use_same_membership_and_reload_path() {
+        let root = temp_dir("qr-join");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let control = MeshPairingControl::load_or_create(&root, "Local desktop")
+            .unwrap().with_mesh_reload_tx(tx);
+        let before = control.snapshot();
+        let remote = MeshConfig::generate("Synthetic invitation");
+        let qr = remote_core::encode_pairing_qr(&remote.invite_code(), 5154).unwrap();
+        let joined = control.join_from_invite_code(&qr);
+        assert_eq!(joined.network_name, remote.network_name);
+        assert_eq!(joined.device_id, before.device_id);
+        assert_eq!(joined.display_name, before.display_name);
+        assert_eq!(joined.message_kind, MeshPairingMessageKind::Success);
+        rx.try_recv().unwrap();
+        for repeated in [&qr, &remote.invite_code()] {
+            let again = control.join_from_invite_code(repeated);
+            assert_eq!(again.message_kind, MeshPairingMessageKind::Success);
+            assert_eq!(again.device_id, joined.device_id);
+            assert!(rx.try_recv().is_err());
+        }
+        for invalid in ["weavelo://join?code=invalid", "weavelo://join?port=0&code=invalid"] {
+            let failed = control.join_from_invite_code(invalid);
+            assert_eq!(failed.message_kind, MeshPairingMessageKind::Error);
+            assert_eq!(failed.network_name, joined.network_name);
+            assert_eq!(failed.device_id, joined.device_id);
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(AppPrivateMeshConfigStore::new(&root).load().unwrap().unwrap().network_secret,
+                   remote.network_secret);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -15,6 +15,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -64,13 +65,22 @@ fun MobileConsoleScreen(
     onStopSharing: () -> Unit = {},
     onBrowseFiles: () -> Unit = {},
     onJoinCode: (String) -> Unit = {},
+    showInvitationInput: Boolean = false,
+    onInvitationInputShown: () -> Unit = {},
     onScanQr: () -> Unit
 ) {
     var pairingCode by remember { mutableStateOf("") }
     var pairingCodeOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(showInvitationInput) {
+        if (showInvitationInput) {
+            pairingCodeOpen = true
+            onInvitationInputShown()
+        }
+    }
     var advancedConnection by remember { mutableStateOf(false) }
-    if (pairingCodeOpen) AlertDialog(onDismissRequest = { pairingCodeOpen = false }, title = { Text("Join with invitation") },
+    if (pairingCodeOpen) AlertDialog(onDismissRequest = { pairingCode = ""; pairingCodeOpen = false }, title = { Text("Join with invitation") },
         text = { OutlinedTextField(pairingCode, { pairingCode = it }, label = { Text("Invitation from an existing network member") }) },
+        dismissButton = { TextButton(onClick = { pairingCode = ""; pairingCodeOpen = false }) { Text("Cancel") } },
         confirmButton = { TextButton(onClick = { onJoinCode(pairingCode.trim()); pairingCode = ""; pairingCodeOpen = false }, enabled = nativeAvailable && !joiningNetwork && pairingCode.isNotBlank()) { Text("Join") } })
     var activeTab by remember { mutableStateOf("Devices") }
     var manualEndpoint by remember { mutableStateOf("") }
