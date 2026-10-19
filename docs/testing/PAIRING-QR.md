@@ -1,11 +1,18 @@
 # Invitation QR pairing
 
-The original GPUI product already generates invitations on macOS, Windows and
-Linux. Open the device drawer, select **Pairing**, and show the QR in **Weavelo
-Device Group**. On Android, select **Scan to join network**, allow camera access,
-and scan the code. A decoded result uses the same asynchronous join operation as
-**Enter invitation**. The existing behavior joins immediately after decoding;
-there is no additional credential exchange by an agent.
+The original GPUI product generates invitations on macOS, Windows and Linux.
+Open the device drawer, select **Pairing**, and show the QR in **Weavelo Device
+Group**. Android also generates an invitation: select **Show invitation QR**.
+This explicitly reads the existing private group through the native bridge; it
+does not create another group or include secrets in periodic telemetry.
+
+On Android, select **Scan to join network**, allow camera access, and scan the
+other device's QR. A decoded result uses the same asynchronous join operation as
+**Enter invitation**. To join a desktop to an Android group, save the phone's QR
+with **Save PNG**, transfer the image yourself, then select **Scan QR Image…**
+in desktop **Pairing**. The desktop recognizes PNG, JPEG and WebP images locally
+and delegates the validated invitation to the existing join operation. Both
+paths join immediately after decoding; no agent transfers real credentials.
 
 The manual input dialog accepts the original invitation or its QR text. Desktop
 **Join from Clipboard** also accepts either form. Android offers **Enter
@@ -14,6 +21,13 @@ denied or no rear camera is available. System back cancels scanning. Invalid
 invitations display the existing join error without replacing membership; start
 another scan to retry. Active sessions, file reception and screen sharing still
 block changing networks through the existing Android join guard.
+
+Desktop image selection can be cancelled, and an in-flight decode can be
+cancelled from the pairing card. Late results and duplicate submissions cannot
+join. An invalid or unreadable image leaves membership unchanged; an image with
+different valid invitations must be cropped to one. The original active-session
+and file-transfer guards run again before joining. If the group changes while
+the file picker is open, a new scan is required.
 
 ## Preserved contract
 
@@ -27,18 +41,19 @@ block changing networks through the existing Android join guard.
 - The original path-form QR and bare/manual codes remain accepted. Empty,
   oversized, lookalike-route, duplicate-code/port and invalid-port envelopes
   fail without echoing credential text. Parsed payload debug output is redacted.
-- GPUI uses a full four-module white quiet zone with unshrunk black/white cells.
-  Android uses the already-installed CameraX and ZXing libraries; no dependency
-  or toolkit replacement is involved.
+- GPUI and Android use a full four-module white quiet zone with unshrunk
+  black/white cells. Android reuses CameraX and ZXing. Desktop image recognition
+  uses pinned `rqrr` and the existing `image` version under the `pairing-image`
+  feature; these decoder dependencies are not enabled in the Android bridge.
+  No UI toolkit is replaced.
 - Decode runs on a serial worker and copies cropped luminance using row/pixel
   strides without changing the source buffer position. Each image closes on all
   paths. The scanner unbinds only its own use cases on disposal and fences late
   provider/result callbacks and repeated frames.
 
-Android currently consumes invitations; it has no invitation-generation UI.
-Desktop has QR generation and text/clipboard joining, but no camera/image-import
-scanner. The web viewer has no device-group invitation workflow. This change
-does not add those separate capabilities.
+Desktop supports QR image import, not live camera scanning. Clipboard text
+joining remains a separate fallback and is not described as QR recognition.
+The web viewer has no device-group invitation workflow.
 
 ## Synthetic regression entrypoints
 
@@ -49,7 +64,9 @@ single primary `main` checkout with the existing toolchain/cache contract:
 ```sh
 python3 -B scripts/test_stream_settings_model.py --mode pairing-fixture
 python3 -B scripts/test_stream_settings_model.py --mode pairing-qr
+python3 -B scripts/test_stream_settings_model.py --mode pairing-image
 python3 -B scripts/test_stream_settings_model.py --mode pairing-join
+python3 -B scripts/test_stream_settings_model.py --mode bridge-invitation
 ```
 
 The generator overwrites only `remote_core/tests/fixtures/pairing-qr.txt` with a
@@ -59,15 +76,25 @@ cropped, strided camera planes. They also exercise blank/non-QR frames,
 truncated planes, duplicate-frame contention and cancelled callbacks.
 The `pairing-join` integration target directly imports the production
 `client/src/mesh_pairing.rs` module, avoiding a full GPUI/media rebuild without
-substituting the controller or its storage implementation.
+substituting the controller or its storage implementation. It also rasterizes
+the actual Android-generated matrix, reads the PNG through the desktop file
+decoder, and joins through that controller while retaining device identity.
+The bridge export tests verify read-only behavior and private-store rejection.
 
 ```sh
 cd android
 ./gradlew --offline --no-daemon --max-workers=1 :app:testDebugUnitTest
 ```
 
+`InvitationQrTest` compares the production Android encoder against
+`remote_core/tests/fixtures/android-pairing-qr.txt`, a synthetic fixture including
+its white margin. To regenerate it after an intentional encoder change, run the
+same test with `WEAVELO_UPDATE_QR_FIXTURE=1`; the generator verifies the fixed
+synthetic source fixture and never reads installed device configuration.
+
 Native camera permission dialogs, camera release/reopen, optical scanning at
-different display scales, real device membership and native GPUI presentation
+different display scales, Android save/copy actions, native desktop file-picker
+interactions, real device membership and native GPUI presentation
 still require physical acceptance. Unit tests and Kotlin compilation do not
 establish those outcomes. Real pairing is performed by the owner scanning in the
 ordinary app; never export a real invitation into test fixtures, logs or reports.
@@ -102,3 +129,41 @@ real camera/permission/back/reopen interactions, optical scanning, native GUI
 visual acceptance, real device pairing, signing, publishing or installation.
 The existing Studio `app-upgrade.apk` receipt still describes the earlier
 unsigned alpha.9/code 13 candidate, so it is not evidence of this change.
+
+## Reverse-flow validation
+
+Feature baseline: `b72416c432105652648c6724cbcf20a7bbc291f7`, primary `main`.
+Before committing, Book's code 14 and acceptance changes through `12f858e` were
+fast-forwarded; all 20 local feature files were retained byte-for-byte.
+The subsequent documentation-only acceptance commit `43c0075` was also retained
+before pushing the feature; it changed none of the validated feature source.
+This follow-up adds Android invitation display/save and desktop QR image import.
+It does not change app versions, the Rust toolchain, signing or installed apps.
+
+| Check | Observed result |
+| --- | --- |
+| Desktop image decoding, invalid/large images, ambiguity and cancellation | 4 passed |
+| Actual controller, including Android-generated PNG import and repeat join | 8 passed |
+| Native invitation export with Android JNI enabled on macOS | 3 passed; read-only and private-store protections retained |
+| Android JVM suite | 53 passed, no failures/errors/skips |
+| Android debug Kotlin/test compilation and lint | Passed |
+| Required release-script suite | 606 run: 598 passed, 8 existing skips |
+| Guarded-entry regression | 29 passed |
+| macOS GPUI product compile check | Incomplete: the existing 1,800-second guard ended dependency compilation with exit 124; no compiler error was reported before the deadline |
+
+The Rust test receipts report unchanged source bytes and exited owned process
+groups. Evidence is in `.rust-storage/validation-logs/pairing-reverse-*.log`
+and the corresponding private runner receipts. Android results remain in the
+default `android/app/build/test-results/testDebugUnitTest/` directory.
+The desktop compile receipt is `platform-macos-check-9kgimdm2.jsonl`: its owned
+process group exited, post-observation passed and source bytes stayed unchanged.
+The product UI was not reached, so this is not a successful desktop build. The
+remaining check needs a later coordinated run using the same retained cache;
+no second Rust build was started after the coordinated run reached its deadline.
+
+No APK or desktop package was produced or installed by this follow-up. Book's
+separately accepted code 14 uses build source `bce8031` and acceptance commit
+`12f858e`; it does not include these reverse-flow changes. Native Android
+save/copy/camera interaction for this follow-up, desktop picker/rendering,
+Windows/Linux compilation and real pairing remain untested. The owner must
+perform real pairing; test and report artifacts contain only synthetic invites.

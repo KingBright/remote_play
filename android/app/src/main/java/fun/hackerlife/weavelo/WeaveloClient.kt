@@ -28,6 +28,10 @@ enum class TouchMode(val code: Int) {
     GAMEPAD(2)
 }
 
+class DeviceInvitation(val code: String, val qrPayload: String, val networkName: String) {
+    override fun toString(): String = "DeviceInvitation(<redacted>)"
+}
+
 data class TelemetrySnapshot(
     val fps: Float = 0.0f,
     // Decoder cost only; capture-to-receive and its uncertainty are separate.
@@ -331,6 +335,17 @@ object WeaveloClient {
         return result
     }
 
+    /** Explicit UI request only; never include this in periodic identity/telemetry. */
+    fun currentInvitation(): DeviceInvitation {
+        check(isNativeLoaded) { "Native client unavailable" }
+        val raw = try { nativeGetInvitationJson() } catch (_: LinkageError) {
+            throw IllegalStateException("Invitation export requires the matching native client")
+        } ?: throw IllegalStateException("Invitation unavailable")
+        val json = JSONObject(raw)
+        check(!json.has("error")) { "Invitation unavailable" }
+        return DeviceInvitation(json.getString("code"), json.getString("qr_payload"), json.getString("network_name"))
+    }
+
     private fun refreshNetworkIdentity() {
         val raw = nativeGetNetworkIdentityJson() ?: return
         runCatching { _networkName.value = JSONObject(raw).optString("network_name") }
@@ -425,6 +440,7 @@ object WeaveloClient {
     private external fun nativePollAudioPacket(): ByteArray?
     private external fun nativeGetDevicesJson(): String?
     private external fun nativeGetNetworkIdentityJson(): String?
+    private external fun nativeGetInvitationJson(): String?
     private external fun nativeJoinPairingPayload(payload: String): String?
     private external fun nativeGetSessionState(): Int
     private external fun nativeGetSessionError(): String?

@@ -364,6 +364,7 @@ struct RestoredDashboard {
     viewer_media_status: UnifiedViewerMediaStatus,
     mesh_pairing: Option<MeshPairingControl>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    pairing_image_import: remote_core::pairing_image::PairingImageImport,
     pointer_input: PointerInputTracker,
     input_focus: FocusHandle,
     root_focus: FocusHandle,
@@ -470,6 +471,7 @@ impl RestoredDashboard {
             viewer_media_status,
             mesh_pairing,
             mesh_pairing_snapshot,
+            pairing_image_import: Default::default(),
             pointer_input: PointerInputTracker::default(),
             input_focus: cx.focus_handle(),
             root_focus,
@@ -724,6 +726,7 @@ impl RestoredDashboard {
     }
 
     fn create_mesh_group(&mut self) {
+        self.pairing_image_import.cancel();
         #[cfg(any(unix, windows))]
         if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
@@ -739,6 +742,12 @@ impl RestoredDashboard {
     }
 
     fn join_mesh_group_from_clipboard(&mut self, cx: &mut Context<Self>) {
+        let invite_code = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+        self.join_mesh_group_from_payload(&invite_code);
+    }
+
+    fn join_mesh_group_from_payload(&mut self, invite_code: &str) {
+        self.pairing_image_import.cancel();
         #[cfg(any(unix, windows))]
         if self.directed_send.as_ref().is_some_and(|s|!s.is_finished()){self.status="Stop sending before changing the device network".into();return;}
         if !self.owner.can_change_network() {
@@ -749,13 +758,60 @@ impl RestoredDashboard {
         let Some(control) = &self.mesh_pairing else {
             return;
         };
-        let invite_code = cx
-            .read_from_clipboard()
-            .and_then(|item| item.text())
-            .unwrap_or_default();
         self.session_commands.begin();
         self.owner.clear_failed_connection();
-        self.mesh_pairing_snapshot = Some(control.join_from_invite_code(&invite_code));
+        self.mesh_pairing_snapshot = Some(control.join_from_invite_code(invite_code));
+    }
+
+    fn pairing_image_status(&mut self, message: impl Into<String>, kind: MeshPairingMessageKind) {
+        let message = message.into();
+        self.status = message.clone();
+        if let Some(snapshot) = &mut self.mesh_pairing_snapshot {
+            snapshot.message = message;
+            snapshot.message_kind = kind;
+        }
+    }
+
+    fn scan_pairing_image(&mut self, cx: &mut Context<Self>) {
+        #[cfg(any(unix, windows))]
+        if self.directed_send.as_ref().is_some_and(|s| !s.is_finished()) {
+            self.pairing_image_status("Stop sending before changing the device network.", MeshPairingMessageKind::Warning);
+            return;
+        }
+        if !self.owner.can_change_network() {
+            self.pairing_image_status("Disconnect current sessions before changing the device network.", MeshPairingMessageKind::Warning);
+            return;
+        }
+        let Some(control) = self.mesh_pairing.clone() else { return; };
+        let Some(ticket) = self.pairing_image_import.begin() else { return; };
+        let original_invite = control.snapshot().invite_code;
+        self.owner.release_input();
+        self.pairing_image_status("Choose a local invitation QR image.", MeshPairingMessageKind::Neutral);
+        let task = tokio::spawn(async move {
+            let Some(file) = rfd::AsyncFileDialog::new().set_title("Scan Weavelo invitation image")
+                .add_filter("Invitation QR image", &["png", "jpg", "jpeg", "webp"]).pick_file().await
+            else { return None; };
+            let path = file.path().to_path_buf();
+            Some(tokio::task::spawn_blocking(move || remote_core::pairing_image::decode_pairing_image_file(&path))
+                .await.unwrap_or(Err(remote_core::pairing_image::PairingImageError::Read)))
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await.unwrap_or(Some(Err(remote_core::pairing_image::PairingImageError::Read)));
+            let _ = view.update(cx, |this, cx| {
+                if !this.pairing_image_import.finish(ticket) { cx.notify(); return; }
+                if control.snapshot().invite_code != original_invite {
+                    this.pairing_image_status("The device group changed. Scan the image again.", MeshPairingMessageKind::Warning);
+                } else {
+                    match result {
+                        None => this.pairing_image_status("Image scan cancelled.", MeshPairingMessageKind::Neutral),
+                        Some(Err(error)) => this.pairing_image_status(error.to_string(), MeshPairingMessageKind::Error),
+                        Some(Ok(payload)) => this.join_mesh_group_from_payload(&payload.invite_code),
+                    }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
     }
 
     fn open_popout_pip_window(&mut self, cx: &mut Context<Self>) {
@@ -2061,6 +2117,7 @@ impl Render for RestoredDashboard {
                     &snapshot.devices,
                     &role,
                     self.mesh_pairing_snapshot.clone(),
+                    self.pairing_image_import.is_pending(),
                     self.active_tab,
                     &self.device_list_state,
                     #[cfg(any(unix, windows))]
@@ -3041,6 +3098,7 @@ fn slide_over_management_drawer(
     devices: &[AppDevice],
     role: &RoleState,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    pairing_image_pending: bool,
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
     #[cfg(any(unix, windows))] receive_label: Option<String>,
@@ -3175,7 +3233,7 @@ fn slide_over_management_drawer(
                     )
                     .into_any_element(),
                     DrawerTab::DeviceGroup => {
-                        drawer_device_group_tab(mesh_pairing_snapshot, cx).into_any_element()
+                        drawer_device_group_tab(mesh_pairing_snapshot, pairing_image_pending, cx).into_any_element()
                     }
                     DrawerTab::Files => file_transfer_panel(owner.clone(), cx).into_any_element(),
                     DrawerTab::Security => {
@@ -3530,12 +3588,13 @@ impl RestoredDashboard {
 
 fn drawer_device_group_tab(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    pairing_image_pending: bool,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let mut content = div().flex().flex_col().gap_3();
 
     if let Some(snapshot) = mesh_pairing_snapshot {
-        content = content.child(mesh_pairing_card(snapshot, cx));
+        content = content.child(mesh_pairing_card(snapshot, pairing_image_pending, cx));
     }
 
     content
@@ -4548,7 +4607,7 @@ fn telemetry_hud_metrics_list(host_stats: Option<&UiHostStats>, theme: &Theme) -
     }
 }
 
-fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDashboard>) -> Div {
+fn mesh_pairing_card(snapshot: MeshPairingSnapshot, image_pending: bool, cx: &mut Context<RestoredDashboard>) -> Div {
     let theme = cx.theme().clone();
     let message_tone = pairing_message_tone(snapshot.message_kind);
     let message_color = status_color(message_tone, cx);
@@ -4558,6 +4617,8 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDas
     let copy_view = cx.weak_entity();
     let join_view = cx.weak_entity();
     let create_view = cx.weak_entity();
+    let image_view = cx.weak_entity();
+    let cancel_image_view = cx.weak_entity();
 
     let mut card = div()
         .flex()
@@ -4684,6 +4745,24 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, cx: &mut Context<RestoredDas
                     })
                     .child("Join from Clipboard"),
                 ),
+        )
+        .child(
+            div().flex().gap_2()
+                .child(command_button("join_mesh_image", ActionVariantKind::Neutral, cx)
+                    .h(px(28.0)).flex_1().px_2().text_size(px(10.0)).disabled(image_pending)
+                    .on_click(move |_, _, cx| {
+                        let _ = image_view.update(cx, |this, cx| this.scan_pairing_image(cx));
+                    }).child("Scan QR Image…"))
+                .when(image_pending, |row| row.child(
+                    command_button("cancel_mesh_image", ActionVariantKind::Neutral, cx)
+                        .h(px(28.0)).px_2().text_size(px(10.0))
+                        .on_click(move |_, _, cx| {
+                            let _ = cancel_image_view.update(cx, |this, cx| {
+                                this.pairing_image_import.cancel();
+                                this.pairing_image_status("Image scan cancelled.", MeshPairingMessageKind::Neutral);
+                                cx.notify();
+                            });
+                        }).child("Cancel"))),
         )
         .child(
             div().flex().gap_2().child(

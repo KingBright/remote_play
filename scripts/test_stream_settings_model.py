@@ -44,6 +44,8 @@ SESSION_CLOCK_TESTS = {
     "clock-renderer": ("client", "render_timing::tests"),
     "mesh-profile": ("remote_core", "mesh::tests"),
     "pairing-qr": ("remote_core", "pairing_qr::tests"),
+    "pairing-image": ("remote_core", "pairing_image::tests"),
+    "bridge-invitation": ("remote_client_bridge", "pairing_export::tests"),
     "bridge-startup": ("remote_client_bridge", "startup_diagnostics::tests"),
     "bridge-auth": ("remote_client_bridge", "publisher_bridge::tests"),
     "bridge-telemetry": ("remote_client_bridge", "tests::telemetry_defaults_are_zero_not_marketing_numbers"),
@@ -65,7 +67,7 @@ def validation_command(cargo, target, mode):
     if mode == "pairing-fixture":
         return [cargo, "run", *shared, "-p", "remote_core", "--example", "synthetic_pairing_qr"]
     if mode == "pairing-join":
-        return [cargo, "test", *shared, "-p", "remote_core", "--test", "pairing_join", "--", "--nocapture"]
+        return [cargo, "test", *shared, "-p", "remote_core", "--features", "pairing-image", "--test", "pairing_join", "--", "--nocapture"]
     if mode == "lifecycle-linux-native-build":
         return [cargo, "build", *shared, "-p", "weavelo_app", "--bin", "weavelo",
                 "--target", LINUX_TARGET, "--no-default-features",
@@ -74,7 +76,9 @@ def validation_command(cargo, target, mode):
         return [cargo, "check", *shared, "-p", "weavelo_app", *PLATFORM_CHECKS[mode]]
     if mode in SESSION_CLOCK_TESTS:
         package, test_filter = SESSION_CLOCK_TESTS[mode]
-        return [cargo, "test", *shared, "-p", package, "--lib",
+        features = {"pairing-image": ["--features", "pairing-image"],
+                    "bridge-invitation": ["--features", "android"]}.get(mode, [])
+        return [cargo, "test", *shared, "-p", package, "--lib", *features,
                 test_filter, "--", "--nocapture"]
     if mode == "service-contract":
         return [cargo, "test", *shared, "-p", "weavelo_app", "--lib",

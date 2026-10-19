@@ -23,6 +23,8 @@ pub mod mesh;
 pub mod net;
 pub mod p2p;
 pub mod pairing_qr;
+#[cfg(feature = "pairing-image")]
+pub mod pairing_image;
 pub mod relay;
 pub mod role;
 pub mod scheduled_sender;

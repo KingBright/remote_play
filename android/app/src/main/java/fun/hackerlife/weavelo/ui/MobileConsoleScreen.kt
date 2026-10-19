@@ -71,6 +71,8 @@ fun MobileConsoleScreen(
 ) {
     var pairingCode by remember { mutableStateOf("") }
     var pairingCodeOpen by remember { mutableStateOf(false) }
+    var invitationOpen by remember { mutableStateOf(false) }
+    if (invitationOpen) InvitationDialog { invitationOpen = false }
     LaunchedEffect(showInvitationInput) {
         if (showInvitationInput) {
             pairingCodeOpen = true
@@ -172,6 +174,9 @@ fun MobileConsoleScreen(
                     enabled = nativeAvailable,
                     onClick = { pairingCodeOpen = true }
                 )
+            }
+            TextButton(onClick = { invitationOpen = true }, enabled = nativeAvailable && !joiningNetwork) {
+                Text("Show invitation QR", color = ColorAccentCyan)
             }
             if (networkName.isNotBlank()) {
                 Text("Network: $networkName", color = ColorTextSecondary, fontSize = 11.sp,

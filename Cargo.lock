@@ -2241,6 +2241,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "font-types"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2479,6 +2485,34 @@ dependencies = [
  "pin-project-lite",
  "slab",
 ]
+
+[[package]]
+name = "g2gen"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5a7e0eb46f83a20260b850117d204366674e85d3a908d90865c78df9a6b1dfc"
+dependencies = [
+ "g2poly",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "g2p"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "539e2644c030d3bf4cd208cb842d2ce2f80e82e6e8472390bcef83ceba0d80ad"
+dependencies = [
+ "g2gen",
+ "g2poly",
+]
+
+[[package]]
+name = "g2poly"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "312d2295c7302019c395cfb90dacd00a82a2eabd700429bba9c7a3f38dbbe11b"
 
 [[package]]
 name = "generic-array"
@@ -3017,7 +3051,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -3025,6 +3059,9 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hassle-rs"
@@ -3773,6 +3810,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
+dependencies = [
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -5459,12 +5505,14 @@ dependencies = [
  "bytes",
  "futures-util",
  "hmac",
+ "image",
  "libc",
  "protocol",
  "qrcode",
  "quanta",
  "rand 0.10.1",
  "ring",
+ "rqrr",
  "rustls",
  "serde",
  "serde_json",
@@ -5486,34 +5534,6 @@ dependencies = [
  "remote_core",
  "tokio",
  "url",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "weavelo_app"
-version = "2.0.0-alpha.9"
-dependencies = [
- "client",
- "ely-gpui-component",
- "gpui-ce",
- "host",
- "image",
- "libc",
- "objc2 0.6.4",
- "objc2-app-kit",
- "protocol",
- "raw-window-handle",
- "remote_client_bridge",
- "remote_core",
- "remote_platform",
- "rfd",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "unicode-segmentation",
  "windows-sys 0.59.0",
 ]
 
@@ -5589,6 +5609,16 @@ name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
+
+[[package]]
+name = "rqrr"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d084c50c5cfa397a081850da329566c8667b0b6c4e81da16abff1fef27de93b"
+dependencies = [
+ "g2p",
+ "lru",
+]
 
 [[package]]
 name = "rust-embed"
@@ -7572,6 +7602,34 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "weavelo_app"
+version = "2.0.0-alpha.9"
+dependencies = [
+ "client",
+ "ely-gpui-component",
+ "gpui-ce",
+ "host",
+ "image",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-app-kit",
+ "protocol",
+ "raw-window-handle",
+ "remote_client_bridge",
+ "remote_core",
+ "remote_platform",
+ "rfd",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "unicode-segmentation",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

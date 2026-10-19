@@ -6,6 +6,7 @@ mod workspace_touch;
 #[cfg(feature = "android")]
 pub mod jni_bridge;
 mod startup_diagnostics;
+mod pairing_export;
 
 #[cfg(feature = "wasm")]
 pub mod wasm_bridge;
@@ -477,6 +478,11 @@ impl RemoteBridgeClient {
             .to_string(),
             _ => "{}".into(),
         }
+    }
+
+    pub fn invitation_json(&self) -> Result<String, &'static str> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
+        pairing_export::invitation_json(&AppPrivateMeshConfigStore::new(bridge_device_group_dir()))
     }
 
     pub fn join_pairing_payload(&self, raw: &str) -> Result<String, String> {

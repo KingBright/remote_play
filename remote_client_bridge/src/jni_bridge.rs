@@ -655,3 +655,13 @@ pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetNetwor
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
 }
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetInvitationJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let result = client().invitation_json().unwrap_or_else(|error| serde_json::json!({"error": error}).to_string());
+    env.new_string(result).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+}

@@ -42,6 +42,8 @@ class ServiceContractEntryTests(unittest.TestCase):
         'clock-renderer': ('client', 'render_timing::tests'),
         'mesh-profile': ('remote_core', 'mesh::tests'),
         'pairing-qr': ('remote_core', 'pairing_qr::tests'),
+        'pairing-image': ('remote_core', 'pairing_image::tests'),
+        'bridge-invitation': ('remote_client_bridge', 'pairing_export::tests'),
         'bridge-startup': ('remote_client_bridge', 'startup_diagnostics::tests'),
         'bridge-auth': ('remote_client_bridge', 'publisher_bridge::tests'),
         'bridge-telemetry': ('remote_client_bridge', 'tests::telemetry_defaults_are_zero_not_marketing_numbers'),
@@ -117,14 +119,16 @@ class ServiceContractEntryTests(unittest.TestCase):
         self.assertEqual(runner.SESSION_CLOCK_TESTS, self.SESSION_CLOCK_CASES)
         for mode, (package, test_filter) in self.SESSION_CLOCK_CASES.items():
             with self.subTest(mode=mode):
+                features = {'pairing-image': ['--features', 'pairing-image'],
+                            'bridge-invitation': ['--features', 'android']}.get(mode, [])
                 self.assertEqual(validation_command('/existing/cargo', Path('/existing/target'), mode), [
                     '/existing/cargo', 'test', '--offline', '--locked', '--target-dir',
-                    '/existing/target', '-p', package, '--lib', test_filter, '--', '--nocapture',
+                    '/existing/target', '-p', package, '--lib', *features, test_filter, '--', '--nocapture',
                 ])
 
     def test_pairing_modes_keep_actual_module_fixture_and_source_identity_guards(self):
         for mode, arguments in (
-            ('pairing-join', ['test', '-p', 'remote_core', '--test', 'pairing_join', '--', '--nocapture']),
+            ('pairing-join', ['test', '-p', 'remote_core', '--features', 'pairing-image', '--test', 'pairing_join', '--', '--nocapture']),
             ('pairing-fixture', ['run', '-p', 'remote_core', '--example', 'synthetic_pairing_qr']),
         ):
             with self.subTest(mode=mode):

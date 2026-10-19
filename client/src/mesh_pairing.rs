@@ -125,7 +125,7 @@ impl MeshPairingControl {
             ),
             Ok((config, true)) => self.save_and_update(
                 config,
-                "Joined the device group from clipboard.",
+                "Joined the device group from invitation.",
                 MeshPairingMessageKind::Success,
                 true,
             ),
