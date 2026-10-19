@@ -405,8 +405,19 @@ def save_unsigned(expected_sha, expected_pid, expected_commit):
         try:
             os.kill(expected_pid, 0)  # Observation only; the original task owns cancellation.
         except ProcessLookupError:
-            break
-        require(time.monotonic() < deadline, 'Original producer did not finish its normal abort')
+            # A cancelled terminal can leave its already-owned child holding the
+            # inherited FD. Observe that lock too; never rewrite or clear it.
+            lock_fd = os.open(ROOT / '.rust-storage/release-producer.lock', os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    break
+            finally:
+                os.close(lock_fd)
+        require(time.monotonic() < deadline, 'Original producer or inherited lock is still active')
         time.sleep(1)
     # producer() performs the original public preflight/recovery and takes the
     # same producer lock. No old PID, lock or transaction is rewritten here.

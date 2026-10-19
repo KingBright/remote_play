@@ -384,13 +384,18 @@ class ReleaseHookTests(unittest.TestCase):
                       signing_status='unsigned', debuggable=False, abi=['arm64-v8a'],
                       native_16kb_aligned=True, version='2.0.0-alpha.8', version_code=9)
         verifier = SimpleNamespace(verify_unsigned=Mock(return_value=report))
+        (self.root / '.rust-storage').mkdir()
+        (self.root / '.rust-storage/release-producer.lock').write_text('{}')
         with patch.object(hook, 'buffer_unsigned', return_value=(data, {})), \
              patch.object(hook.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(hook.fcntl, 'flock', side_effect=[BlockingIOError(), None, None]), \
+             patch.object(hook.time, 'sleep') as wait, \
              patch.object(hook.subprocess, 'check_output', return_value='b'*40), \
              patch.dict(sys.modules, {'verify_release_apk': verifier}), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             result = hook.save_unsigned(expected, 12345, 'a'*40)
         self.assertTrue(result['current_committed'])
+        wait.assert_called_once_with(1)
         calls = [args for action, args in self.calls if action == 'release-publish']
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][calls[0].index('--validation-kind')+1], 'unsigned-dev')
