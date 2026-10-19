@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-case "$#:${1:-}" in
-    0:) export WEAVELO_ANDROID_UPGRADE_CANDIDATE=0 ;;
-    1:--upgrade-candidate) export WEAVELO_ANDROID_UPGRADE_CANDIDATE=1 ;;
-    *) echo 'Only the fixed --upgrade-candidate output is supported' >&2; exit 2 ;;
-esac
+export WEAVELO_ANDROID_UPGRADE_CANDIDATE=0
+UNSIGNED_ONLY=0
+for option in "$@"; do
+    case "$option" in
+        --upgrade-candidate) [[ "$WEAVELO_ANDROID_UPGRADE_CANDIDATE" == 0 ]] || exit 2; export WEAVELO_ANDROID_UPGRADE_CANDIDATE=1 ;;
+        --unsigned-only) [[ "$UNSIGNED_ONLY" == 0 ]] || exit 2; UNSIGNED_ONLY=1 ;;
+        *) echo 'Only --upgrade-candidate and --unsigned-only are supported' >&2; exit 2 ;;
+    esac
+done
 if [[ "$WEAVELO_ANDROID_UPGRADE_CANDIDATE" == 1 ]]; then
     APK_NAME=app-upgrade.apk
     APK_WORKSPACE_NAME=.weavelo-android-upgrade-package.pending
@@ -32,17 +36,25 @@ if [[ -z "${JAVA_HOME:-}" || ! -x "$JAVA_HOME/bin/java" ]] || "$JAVA_HOME/bin/ja
     fi
 fi
 [ -x "${JAVA_HOME:-}/bin/java" ] || { echo "HotSpot JDK 17 is required for Android release builds" >&2; exit 1; }
-[ -f "$KEYSTORE" ] || { echo "Release keystore missing: $KEYSTORE" >&2; exit 1; }
 [ -d "$SDK/build-tools" ] || { echo "Android SDK not found: $SDK" >&2; exit 1; }
-PASSWORD="$(security find-generic-password -a "$ACCOUNT" -s "$SERVICE" -w)" || { echo 'Release signing password missing from macOS Keychain' >&2; exit 1; }
 export ANDROID_HOME="$SDK" ANDROID_SDK_ROOT="$SDK"
-export WEAVELO_ANDROID_KEYSTORE="$KEYSTORE" WEAVELO_ANDROID_KEYSTORE_PASSWORD="$PASSWORD" WEAVELO_ANDROID_KEY_ALIAS="$ALIAS" WEAVELO_ANDROID_KEY_PASSWORD="$PASSWORD"
-trap 'unset PASSWORD WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_PASSWORD' EXIT
+if [[ "$UNSIGNED_ONLY" == 1 ]]; then
+    # Local preparation only: never read signing credentials or publish current.
+    unset WEAVELO_ANDROID_KEYSTORE WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_ALIAS WEAVELO_ANDROID_KEY_PASSWORD
+else
+    [ -f "$KEYSTORE" ] || { echo "Release keystore missing: $KEYSTORE" >&2; exit 1; }
+    PASSWORD="$(security find-generic-password -a "$ACCOUNT" -s "$SERVICE" -w)" || { echo 'Release signing password missing from macOS Keychain' >&2; exit 1; }
+    export WEAVELO_ANDROID_KEYSTORE="$KEYSTORE" WEAVELO_ANDROID_KEYSTORE_PASSWORD="$PASSWORD" WEAVELO_ANDROID_KEY_ALIAS="$ALIAS" WEAVELO_ANDROID_KEY_PASSWORD="$PASSWORD"
+    trap 'unset PASSWORD WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_PASSWORD' EXIT
+fi
 cd "$ROOT"
 ./scripts/build_android_native.sh
 cd android
 APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/$APK_WORKSPACE_NAME"
 ./gradlew --no-daemon --no-configuration-cache --max-workers=2 -Pandroid.injected.apk.location="$APK_WORKSPACE" -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
+if [[ "$UNSIGNED_ONLY" == 1 ]]; then
+    exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" hold-unsigned
+fi
 APK="$APK_WORKSPACE/release/app-release.apk"
 [ -f "$APK" ] || { echo "Signed release APK not found: $APK" >&2; exit 1; }
 APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"

@@ -100,7 +100,7 @@ def compiled_manifest_attributes(tree: str) -> dict:
                 target_sdk=integer("uses-sdk", "android:targetSdkVersion"), debuggable=False)
 
 
-def verify(apk: Path, root: Path) -> dict:
+def _inspect_apk(apk: Path, root: Path, release_signature: bool) -> dict:
     sdk = Path(os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or Path.home() / 'Library/Android/sdk')
     tools = sorted((sdk / 'build-tools').glob('*'), key=lambda p: tuple(int(n) for n in re.findall(r'\d+', p.name)))
     if not tools:
@@ -116,14 +116,21 @@ def verify(apk: Path, root: Path) -> dict:
     expected_name = re.search(r'versionName\s*=\s*"([^"]+)"', gradle)[1]
     if (str(manifest['version_code']), manifest['version']) != (expected_code, expected_name):
         raise ValueError('APK version does not match the source release')
-    certificate = run([str(tools / 'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)])
-    if 'Android Debug' in certificate:
-        raise ValueError('Refusing a debug signing certificate')
-    fingerprint = re.search(r'Signer #1 certificate SHA-256 digest: ([0-9a-f]+)', certificate)
-    if not fingerprint:
-        raise ValueError('No verified release signer fingerprint')
-    if fingerprint[1] != '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5':
-        raise ValueError('Release signer differs from the previously published app')
+    fingerprint = None
+    if release_signature:
+        certificate = run([str(tools / 'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)])
+        if 'Android Debug' in certificate:
+            raise ValueError('Refusing a debug signing certificate')
+        fingerprint = re.search(r'Signer #1 certificate SHA-256 digest: ([0-9a-f]+)', certificate)
+        if not fingerprint:
+            raise ValueError('No verified release signer fingerprint')
+        if fingerprint[1] != '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5':
+            raise ValueError('Release signer differs from the previously published app')
+    else:
+        signature = subprocess.run([str(tools / 'apksigner'), 'verify', '--verbose', str(apk)],
+                                   capture_output=True, text=True, timeout=90)
+        if signature.returncode == 0:
+            raise ValueError('Unsigned preparation unexpectedly contains a signed APK')
     run([str(tools / 'zipalign'), '-c', '-P', '16', '4', str(apk)])
     expected_jni = set()
     for source in (root / 'android/app/src/main/java/fun/hackerlife/weavelo').glob('*.kt'):
@@ -168,9 +175,20 @@ def verify(apk: Path, root: Path) -> dict:
                 raise ValueError('APK contains stale Weavelo native code')
     return dict(version=manifest['version'], version_code=manifest['version_code'],
                 min_sdk=manifest['min_sdk'], target_sdk=manifest['target_sdk'], debuggable=False,
-                signer_sha256=fingerprint[1], abi=sorted(abis), native_16kb_aligned=True,
+                signer_sha256=fingerprint[1] if fingerprint else None,
+                signing_status='signed' if release_signature else 'unsigned',
+                abi=sorted(abis), native_16kb_aligned=True,
                 jni_entry_points=len(expected_jni), libraries=libraries,
                 size_bytes=apk.stat().st_size, sha256=hashlib.sha256(apk.read_bytes()).hexdigest())
+
+
+def verify(apk: Path, root: Path) -> dict:
+    return _inspect_apk(apk, root, release_signature=True)
+
+
+def verify_unsigned(apk: Path, root: Path) -> dict:
+    # Preparation evidence has no signer and cannot pass android_evidence().
+    return _inspect_apk(apk, root, release_signature=False)
 
 
 if __name__ == '__main__':

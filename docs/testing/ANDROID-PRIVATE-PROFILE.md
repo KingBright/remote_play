@@ -36,6 +36,18 @@ or bypass the producer. Preserve the original signing material on its authorized
 machine. The final APK must pass `verify_release_apk.py` with the original signer
 and retain the formal current-output transaction and verification receipt.
 
+For local preparation without any signing credential access, use
+`scripts/build_android_release.sh --upgrade-candidate --unsigned-only`.
+It retains the original producer lock, public reservation and Gradle gate.
+After content/JNI/version/alignment checks it emits `UNSIGNED_APK_READY` and
+`unsigned-preparation.json` beside `app-release-unsigned.apk` in the existing
+public-owned packaging workspace. Its explicit state is `unsigned-awaiting-signing`;
+it has no signer and cannot pass the signed current-output evidence gate.
+The producer holds that stage for a bounded 30-minute review window. Expiry or
+cancellation uses the original abort/cleanup path and preserves the existing signed
+current output. This mode has no transfer or signing endpoint and creates no key.
+Keep cross-device signing paused until its separate authorization is confirmed.
+
 For physical acceptance, use the existing MacBook USB ADB and the exact nubia
 serial. Verify the installed version, signer, first-install time and notification
 permission before `adb -s 324662166861 install -r APK`. Recheck them after the

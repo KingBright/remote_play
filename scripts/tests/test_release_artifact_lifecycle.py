@@ -341,6 +341,41 @@ class ReleaseHookTests(unittest.TestCase):
         with patch.dict(os.environ,{hook.PID_ENV:str(os.getpid())}):
             with self.assertRaises(hook.Refusal): hook.check_current(hook.android_workspace()/'release')
 
+
+    def test_unsigned_preparation_cannot_be_published_as_release_evidence(self):
+        apk, receipt, report = self.apk(signer_sha256=None, signing_status='unsigned')
+        with self.assertRaisesRegex(hook.Refusal, 'signing receipt'):
+            hook.android_evidence(apk, receipt)
+
+    def test_unsigned_review_holds_original_stage_and_never_publishes(self):
+        admission = hook.admit_android(self.state)
+        apk, _, report = self.apk(hook.android_workspace() / 'release/app-release-unsigned.apk',
+                                  signer_sha256=None, signing_status='unsigned')
+        self.state['admission'] = admission
+        verifier = SimpleNamespace(verify_unsigned=Mock(return_value=report))
+        with patch.dict(sys.modules, {'verify_release_apk': verifier}), \
+             patch.object(hook, 'check_lock', return_value=(1, self.state)) as lock, \
+             patch.object(hook, 'check_current') as guard, \
+             patch.object(hook.subprocess, 'check_output', side_effect=['a'*40+'\n', '']), \
+             patch.object(hook.time, 'monotonic', side_effect=[0, 0, 1801]), \
+             patch.object(hook.time, 'sleep') as sleep, \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(hook.Refusal, 'review window'):
+                hook.hold_unsigned()
+        lock.assert_called_once_with('android-release')
+        guard.assert_called_once_with(hook.android_workspace() / 'release')
+        verifier.verify_unsigned.assert_called_once_with(apk, self.root)
+        metadata = json.loads((apk.parent / 'unsigned-preparation.json').read_text())
+        self.assertEqual(metadata['state'], 'unsigned-awaiting-signing')
+        self.assertIsNone(metadata['signer_sha256'])
+        self.assertEqual(metadata['retention'], 'live-public-owned-stage-only')
+        self.assertIn('UNSIGNED_APK_READY', output.getvalue())
+        self.assertFalse(any(action == 'release-publish' for action, _ in self.calls))
+        self.assertFalse(any(Path(p).exists() for p in admission['staged_files']))
+        self.assertTrue(apk.is_file())
+        sleep.assert_called_once_with(1)
+
+
     def test_formal_gradle_gate_precedes_output_cleanup(self):
         stage = SCRIPT.parents[1]
         gradle = (stage/'android/app/build.gradle.kts').read_text()

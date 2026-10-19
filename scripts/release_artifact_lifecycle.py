@@ -17,6 +17,7 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
@@ -365,6 +366,39 @@ def publish_android(state):
     return result
 
 
+
+def hold_unsigned():
+    from verify_release_apk import verify_unsigned
+    _, state = check_lock('android-release')
+    directory = android_workspace() / 'release'
+    check_current(directory)
+    candidate = directory / 'app-release-unsigned.apk'
+    regular(candidate)
+    report = verify_unsigned(candidate, ROOT)
+    value, size = hashed(candidate)
+    require(report.get('sha256') == value and report.get('size_bytes') == size
+            and report.get('signer_sha256') is None
+            and report.get('signing_status') == 'unsigned',
+            'Unsigned preparation must not be a signed delivery')
+    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    require(re.fullmatch('[0-9a-f]{40}', head), 'Invalid source commit')
+    require(not subprocess.check_output(['git', 'status', '--porcelain=v1'], cwd=ROOT, text=True),
+            'Unsigned preparation requires the clean primary checkout')
+    deadline = time.monotonic() + 1800
+    record = dict(report, state='unsigned-awaiting-signing', path=str(candidate),
+                  source_commit_observed=head, retention='live-public-owned-stage-only',
+                  hold_seconds=1800, producer_pid=state['producer_pid'])
+    with (directory / 'unsigned-preparation.json').open('x') as outgoing:
+        json.dump(record, outgoing, indent=2); outgoing.write('\n')
+        outgoing.flush(); os.fsync(outgoing.fileno())
+    print('UNSIGNED_APK_READY ' + json.dumps(record), flush=True)
+    # No signing, transfer or publication endpoint. Keep the existing public
+    # transaction alive for review; its original finally/abort owns all cleanup.
+    while time.monotonic() < deadline:
+        time.sleep(1)
+    raise Refusal('Unsigned review window ended; original transaction will abort safely')
+
+
 def check_current(output_directory):
     # The JVM does not preserve arbitrary lock FDs when starting Python. The
     # public check verifies the transaction, process start identity and caller ancestry.
@@ -435,6 +469,7 @@ def main():
     command = commands.add_parser('check-current')
     command.add_argument('--apk-output-directory', required=True)
     commands.add_parser('publish-android')
+    commands.add_parser('hold-unsigned')
     args = parser.parse_args()
     if args.action == 'run':
         return run(args.kind, args.arguments)
@@ -442,6 +477,8 @@ def main():
         check_lock(args.kind)
     elif args.action == 'check-current':
         check_current(args.apk_output_directory)
+    elif args.action == 'hold-unsigned':
+        hold_unsigned()
     else:
         _, state = check_lock('android-release')
         print(json.dumps(publish_android(state)))
