@@ -250,3 +250,53 @@ phone still had no linked peer or existing remote workspace. Real video/input,
 application file transfer, active workspace-service recovery and long-duration
 operation remain unverified. Synthetic test invitations were never joined through
 the installed profile. This acceptance does not cover later reverse-QR UI work.
+
+
+## 2026-10-19 code14 foreground-camera follow-up
+
+The owner explicitly requested invitation QR scanning and authorized its expected
+foreground camera consent through Android's standard prompt. The installed
+code14 package was retained; this follow-up did not build or install another APK.
+Before acting, USB identity, code14, the Devices page and ungranted camera access
+were checked. No other camera request or pairing operation had run in this task.
+
+The standard `com.android.permissioncontroller` prompt named Weavelo. Its
+`permission_allow_foreground_only_button` (allow only while using the app) was
+selected. Android reported `Uid mode: CAMERA: foreground`; CAMERA became granted,
+while RECORD_AUDIO remained ungranted and POST_NOTIFICATIONS remained granted.
+No `pm grant`, app-op mutation, background grant or platform-consent bypass was
+used. No camera image, real invitation, clipboard or credential was read.
+
+Physical observations on nubia serial `324662166861`:
+
+| Action | Observed camera-service result |
+| --- | --- |
+| Open scanner after standard foreground consent | Back camera 0 owned by Weavelo PID 16980 |
+| Tap scanner Cancel | Weavelo removed from Active Camera Clients; Devices page restored |
+| Open scanner again | Camera 0 reacquired, scanner visible, no new permission prompt |
+| Press system Back | Camera client removed; camera app-op no longer running |
+
+The same app process remained alive, no fatal-exception marker appeared, and the
+persisted network digest remained
+`a3bd51b6989c27e33125f3e4977f0c06aa1391f9c4784a68976d3536eac65043`.
+The final observed UI was Devices with no active camera client. Foreground camera
+permission remains available for the owner's normal scanner use.
+
+The focused `QrFrameDecoderTest` suite was rerun offline: 6 passed, no failures,
+errors or skips. Synthetic frames verify four orientations of the shared
+Rust-generated QR, row padding, pixel stride, crop and buffer-position retention.
+Truncated buffers, invalid plane dimensions/stride, blank frames and a non-QR
+barcode return no result. Concurrent frames claim one result; cancelled and late
+callbacks cannot complete the scan. No synthetic invitation was joined through
+the installed profile. These tests establish malformed-frame handling in the
+production decoder, not injection of malformed buffers into the physical camera.
+
+Camera opening, Cancel release, reopen and Back release are now physically
+verified. Optical recognition of a synthetic displayed card and real invitation
+pairing still require the phone to be aimed at the intended target. A separate
+non-sensitive invalid test card contains only
+`WEAVELO-C14-CAMERA-TEST-NOT-AN-INVITATION`; it is not an RPM2 invitation and cannot
+identify a real network. Real pairing remains an owner-performed scan in the
+ordinary app. Desktop Computer Use approval remains unconfirmed and was not
+bypassed. Video/input, file transfer and long-duration session acceptance remain
+unverified.
