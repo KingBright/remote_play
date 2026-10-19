@@ -257,7 +257,8 @@ class ServiceContractEntryTests(unittest.TestCase):
     def run_fake_validation(self, *, output=b'running 1 test\ntest fixture ... ok\n',
                             interrupt=False, test_timeout=None, build_timeout=None,
                             post_code=0, source_changed=False, group_absent=True, cleanup_failure=False,
-                            diagnostic_failure=False):
+                            diagnostic_failure=False, mode='clock-host-auth',
+                            elapsed=None, expected_build_timeout=None):
         with tempfile.TemporaryDirectory() as temporary, contextlib.ExitStack() as stack:
             root = Path(temporary)
             (root / '.rust-storage').mkdir()
@@ -281,6 +282,8 @@ class ServiceContractEntryTests(unittest.TestCase):
                 side_effect=[False, True] if not group_absent else [True]))
             stack.enter_context(patch.object(runner.shutil, 'disk_usage', return_value=Mock(free=runner.RESERVE * 2)))
             stack.enter_context(patch.object(runner.time, 'sleep', side_effect=KeyboardInterrupt if interrupt else None))
+            if elapsed is not None:
+                stack.enter_context(patch.object(runner.time, 'monotonic', side_effect=[0, elapsed, elapsed]))
             if test_timeout is not None:
                 stack.enter_context(patch.object(runner, 'TEST_TIMEOUT_SECONDS', test_timeout))
             if build_timeout is not None:
@@ -304,7 +307,7 @@ class ServiceContractEntryTests(unittest.TestCase):
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             code = runner.execute_guarded_command(['cargo', 'test', '--lib'], root, root, {},
-                                                  ['official-observe'], [source], hashes, 'clock-host-auth')
+                                                  ['official-observe'], [source], hashes, mode)
             self.assertEqual(stopped.call_count, 2 if cleanup_failure or not group_absent else 1)
             stopped.assert_called_with(process)
             post.assert_called_once()
@@ -318,6 +321,8 @@ class ServiceContractEntryTests(unittest.TestCase):
             self.assertEqual(log.read_bytes(), output)
             records = [json.loads(line) for line in receipt.read_text().splitlines()]
             self.assertEqual(records[0]['event'], 'started')
+            if expected_build_timeout is not None:
+                self.assertEqual(records[0]['build_timeout_seconds'], expected_build_timeout)
             self.assertEqual(records[-1]['event'], 'finished')
             if not group_absent or cleanup_failure:
                 self.assertEqual(group_probe.call_count, 1 if group_absent else 2)
@@ -347,6 +352,22 @@ class ServiceContractEntryTests(unittest.TestCase):
                 code, receipt = self.run_fake_validation(**arguments)
                 self.assertEqual(code, 124)
                 self.assertEqual(receipt['reason'], reason)
+                self.assertEqual(receipt['post_observation_exit'], 0)
+
+    def test_macos_compile_window_is_longer_but_still_bounded_and_mode_specific(self):
+        for mode, elapsed, expected, deadline in (
+            ('platform-macos-check', 1801, 0, 7200),
+            ('platform-macos-check', 7201, 124, 7200),
+            ('clock-host-auth', 1801, 124, 1800),
+        ):
+            with self.subTest(mode=mode, elapsed=elapsed):
+                code, receipt = self.run_fake_validation(
+                    mode=mode, elapsed=elapsed, expected_build_timeout=deadline,
+                    output=b'Checking native dependencies\n')
+                self.assertEqual(code, expected)
+                self.assertEqual(receipt['reason'], 'completed' if expected == 0 else 'build_deadline')
+                self.assertTrue(receipt['owned_group_absent'])
+                self.assertTrue(receipt['sources_unchanged'])
                 self.assertEqual(receipt['post_observation_exit'], 0)
 
     def test_source_change_failed_observation_and_live_group_cannot_report_success(self):

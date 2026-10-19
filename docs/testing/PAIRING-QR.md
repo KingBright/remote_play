@@ -149,17 +149,28 @@ It does not change app versions, the Rust toolchain, signing or installed apps.
 | Android debug Kotlin/test compilation and lint | Passed |
 | Required release-script suite | 606 run: 598 passed, 8 existing skips |
 | Guarded-entry regression | 29 passed |
-| macOS GPUI product compile check | Incomplete: the existing 1,800-second guard ended dependency compilation with exit 124; no compiler error was reported before the deadline |
+| macOS GPUI product compile check | Passed on Studio: fixed `--bin weavelo --features gpui-native-video` check, exit 0, 393.17 seconds using the retained shared cache |
+| macOS continuation deadline/cleanup regressions | 4 targeted tests passed; existing feature/unit suites were not rerun |
 
 The Rust test receipts report unchanged source bytes and exited owned process
 groups. Evidence is in `.rust-storage/validation-logs/pairing-reverse-*.log`
 and the corresponding private runner receipts. Android results remain in the
 default `android/app/build/test-results/testDebugUnitTest/` directory.
-The desktop compile receipt is `platform-macos-check-9kgimdm2.jsonl`: its owned
-process group exited, post-observation passed and source bytes stayed unchanged.
-The product UI was not reached, so this is not a successful desktop build. The
-remaining check needs a later coordinated run using the same retained cache;
-no second Rust build was started after the coordinated run reached its deadline.
+The first desktop attempt (`platform-macos-check-9kgimdm2.jsonl`) reached its
+1,800-second deadline during dependency compilation and exited 124. It was not
+counted as a successful compile. After the Rust owner explicitly released the
+window, the fixed check resumed from the same cache on source `899bf5d`.
+
+The successful receipt is `platform-macos-check-oh2912v2.jsonl`: Cargo and the
+runner both exited 0, post-observation passed, all source bytes stayed unchanged,
+and the owned process group exited. The fixed macOS mode now has a bounded
+7,200-second compile window; other build/test deadlines, disk reserve, source
+verification and owned-process cleanup remain intact. No toolchain, profile,
+target directory or Cargo command was changed.
+
+At 2026-10-19 18:24:25 UTC, Studio had no Cargo/rustc process or shared debug lock
+holder, and the build window was released. This proves the macOS product compile
+check, not native GUI rendering, linking/packaging, signing or installation.
 
 No APK or desktop package was produced or installed by this follow-up. Book's
 separately accepted code 14 uses build source `bce8031` and acceptance commit

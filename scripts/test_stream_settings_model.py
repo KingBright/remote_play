@@ -17,6 +17,9 @@ import time
 RESERVE = 4 * 1024**3
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
 BUILD_TIMEOUT_SECONDS = 1800
+# Native GPUI dependencies can exceed the ordinary focused-test build window.
+# Keep this fixed and bounded; other modes and test execution retain their limits.
+MACOS_CHECK_BUILD_TIMEOUT_SECONDS = 7200
 TEST_TIMEOUT_SECONDS = 120
 OBSERVATION_TIMEOUT_SECONDS = 60
 # Fixed package/filter pairs only. These modes share the same guarded transaction;
@@ -301,6 +304,8 @@ def private_validation_log(root, mode):
 
 
 def execute_guarded_command(command, root, target, env, observation, sources, hashes, mode):
+    build_timeout = (MACOS_CHECK_BUILD_TIMEOUT_SECONDS
+                     if mode == "platform-macos-check" else BUILD_TIMEOUT_SECONDS)
     with private_validation_log(root, mode) as (log_path, log, receipt_path, receipt):
         print(f"Live private log: {log_path}", flush=True)
         print(f"Validation receipt: {receipt_path}", flush=True)
@@ -316,7 +321,7 @@ def execute_guarded_command(command, root, target, env, observation, sources, ha
         try:
             process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             record({"event": "started", "mode": mode, "pid": process.pid, "owned_process_group": process.pid,
-                    "command": command, "build_timeout_seconds": BUILD_TIMEOUT_SECONDS,
+                    "command": command, "build_timeout_seconds": build_timeout,
                     "test_timeout_seconds": TEST_TIMEOUT_SECONDS})
             # A separate open description avoids moving the child's output cursor.
             with log_path.open("rb") as reader:
@@ -326,7 +331,7 @@ def execute_guarded_command(command, root, target, env, observation, sources, ha
                     if tests_started is None and (b"Running unittests" in pending or re.search(rb"running \d+ tests?", pending)):
                         tests_started = now
                         record({"event": "tests_started", "elapsed_seconds": now - started})
-                    if now - started >= BUILD_TIMEOUT_SECONDS:
+                    if now - started >= build_timeout:
                         reason, exit_code = "build_deadline", 124
                         break
                     if tests_started is not None and now - tests_started >= TEST_TIMEOUT_SECONDS:
