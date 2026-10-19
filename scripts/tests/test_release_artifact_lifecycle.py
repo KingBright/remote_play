@@ -437,7 +437,9 @@ class ReleaseHookTests(unittest.TestCase):
                       native_16kb_aligned=True, version='2.0.0-alpha.8', version_code=9)
         verifier = SimpleNamespace(verify_unsigned=Mock(return_value=report))
         (self.root / '.rust-storage').mkdir()
-        (self.root / '.rust-storage/release-producer.lock').write_text('{}')
+        producer_lock = self.root / '.rust-storage/release-producer.lock'
+        producer_lock.write_text('{}')
+        producer_lock.chmod(0o600)
         with patch.object(hook, 'buffer_unsigned', return_value=(data, {})), \
              patch.object(hook.os, 'kill', side_effect=ProcessLookupError), \
              patch.object(hook.fcntl, 'flock', side_effect=[BlockingIOError(), None, None]), \
