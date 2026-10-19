@@ -120,8 +120,8 @@ identity or remote signing path was used.
 
 One invocation of the formal `--upgrade-candidate` producer rebuilt
 `remote_core` and `remote_client_bridge`, then completed Gradle release assembly,
-lint and unit tests. The fixed release regressions ran 605 tests successfully
-with 8 conditional skips. Original publication reported `current_committed=true`
+lint and unit tests. The fixed release regressions ran 605 tests: 597 passed
+and 8 were conditionally skipped. Original publication reported `current_committed=true`
 and `cleanup_status=completed`; the observed build input hashes were unchanged.
 
 | Verified release field | Value |
@@ -160,3 +160,93 @@ decoded/displayed video, remote input, application file transfer and long-durati
 operation remain unverified. Static telemetry labels are not proof of those
 paths. Octendra retained discovery-only scope; its device credentials,
 accessibility permission and shell activation were not changed.
+
+
+## 2026-10-19 MacBook code14 QR acceptance
+
+The authorized source was pinned to
+`b72416c432105652648c6724cbcf20a7bbc291f7`, including the toolchain and invitation
+QR fixes. The original MacBook primary `main` checkout was fast-forwarded to that
+exact commit. Only Android `versionCode` was incremented to 14 in build commit
+`bce8031379f788607818c01330f516f7a4045e84`. No later Studio implementation was
+pulled into this build. The original keychain/signing identity, shared
+`/Users/jinliang/rust-target`, source directory and release authority were reused.
+
+The repository-pinned Rust/Cargo 1.99.1 and Android targets were installed through
+the existing rustup setup. The existing HotSpot JDK 17 and Android NDK
+27.0.12077973 were used. The first fixed-suite attempt timed out waiting for the
+initial toolchain installation; the complete suite passed after installation.
+
+The observe-only adoption check then identified an older `Cargo.lock` digest in
+the original machine-local binding. Owner reassessment compared that registered
+lock from `705a1f029d1e1deedf28df51852896bf9fc552d4` with the pinned source:
+third-party package versions, sources and checksums were unchanged. The delta was
+the existing application rename/version and client references to already-locked
+`cc` and `tempfile`. The original helper's dry-run differed only in that digest.
+Only the digest was refreshed, from
+`4b080a8b8d834a1e05bd8bef77f24132390b83583d3fbbb4a576441366a833f9` to
+`c7fc4e9101e2f80a8388ef43998cbb43f992ab7520809d80a5588e746fb3b9a3`.
+The authority inventory, canonical shared target, coverage, budgets, file mode and
+all other binding fields were retained; no additional ownership or cleanup scope
+was claimed. The original adoption check then passed. The source remained clean
+through the guarded tests and formal build.
+
+| Check | Observed result |
+| --- | --- |
+| Required release-script suite | 606 run: 598 passed, 8 conditional skips |
+| Synthetic fixture generator | Passed; profile/network independent, tracked fixture unchanged |
+| Rust QR codec | 7 passed |
+| Actual pairing controller integration | 7 passed |
+| Android JVM suite | 50 passed, including 6 QR tests; no failures or skips |
+| Release assembly and lint | Passed through the original formal producer |
+| Guarded Rust process groups and source checks | Owned groups absent, source bytes unchanged |
+
+One invocation of `./scripts/build_android_release.sh --upgrade-candidate`
+rebuilt the ARM64 native library and published the signed default upgrade output.
+Original publication reported `current_committed=true` and
+`cleanup_status=completed`. Independent verification of the actual published APK
+passed before installation. Read-only inspection warnings for unrelated,
+root-owned global LaunchDaemon configurations did not change their permissions.
+
+| Verified release field | Value |
+| --- | --- |
+| Build source | `bce8031379f788607818c01330f516f7a4045e84` |
+| Package | `fun.hackerlife.weavelo` |
+| Version | `2.0.0-alpha.9`, code `14` |
+| APK bytes | `16686025` |
+| APK SHA-256 | `88e5f9f588c689cf2eceb48353608727074719f441eff17436028023a49be931` |
+| Existing signing certificate SHA-256 | `215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5` |
+| Native library SHA-256 | `269383845dd59f799df6c9896b5e4e855b8a336407e16eaedad4aaa693ea534d` |
+| Native gates | ARM64 only, 27 JNI entry points, 16 KiB alignment, non-debuggable |
+| Default output | `android/app/build/outputs/apk/release/app-upgrade.apk` with its original verification receipt |
+
+USB nubia NX741J, Android 16 / SDK 36, serial `324662166861` was rechecked.
+The code13 installed APK matched the approved baseline, and no install session
+was active. A single `adb install -r` at `2026-10-19T17:50:09Z` returned Success.
+The installed code14 APK hash matched the new release. First-install time remained
+`2026-10-19 10:04:33`; the device-reported update time became
+`2026-10-20 01:50:09`. Credential/device-encrypted data-directory inodes and
+runtime permission grants were preserved: notifications granted, camera and
+microphone ungranted. No uninstall, data clear or permission grant was used.
+
+Physical checks passed:
+
+- Cold launches completed in 169 ms and 137 ms. Settings showed
+  `Loaded (.so ready)`; the second process had no fatal-exception,
+  `profile-io:app-private:os=13` or `Native unavailable` log markers.
+- The persisted network digest remained
+  `a3bd51b6989c27e33125f3e4977f0c06aa1391f9c4784a68976d3536eac65043`.
+- After 20 seconds on Home, resuming retained the same process and network
+  identity; Activity startup reported HOT / 44 ms.
+- Scan entry displayed the system camera request. Cancelling that request with
+  Back, without granting permission, showed the manual-input fallback and Cancel.
+  Cancel returned to Devices with unchanged membership and no invitation scanned.
+
+Camera opening, release/reopen, optical QR scanning, actual membership changes and
+real device pairing remain unverified. Real invitations are scanned by the owner
+in the ordinary application; no real invitation entered tests, logs or reports.
+Desktop Computer Use approval was still unconfirmed and was not bypassed. The
+phone still had no linked peer or existing remote workspace. Real video/input,
+application file transfer, active workspace-service recovery and long-duration
+operation remain unverified. Synthetic test invitations were never joined through
+the installed profile. This acceptance does not cover later reverse-QR UI work.
