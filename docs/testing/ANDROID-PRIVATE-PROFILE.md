@@ -61,6 +61,44 @@ and verified receipt in the established default pair. This is explicitly
 public authority owns atomic replacement and temporary cleanup; no APK generation,
 source copy or extra persistent artifact is created.
 
+
+Studio local signing setup (the existing MacBook identity remains in place):
+
+1. Run `./scripts/setup_android_release_signing.sh --prepare` in Studio's primary
+   checkout. This creates only the private Signing directory and checks Keychain
+   item metadata without requesting a password. Default `--check` is read-only.
+   This setup entry never generates a signing key.
+2. Personally copy the original encrypted
+   `~/Library/Application Support/RemotePlay/Signing/remoteplay-release.p12`
+   from MacBook to the same path on Studio. Keep the MacBook original.
+   On Studio run
+   `chmod 600 "$HOME/Library/Application Support/RemotePlay/Signing/remoteplay-release.p12"`.
+   Do not attach the file or its password to chat or a tool request.
+3. In Studio Keychain Access, create a password item in the existing login keychain
+   with name/service `com.remoteplay.android.release.signing`, account `jinliang`,
+   and the original p12 password. If needed, personally reveal that existing item
+   in MacBook Keychain Access using its normal authentication.
+   Keep alias `remoteplay`; do not generate a key or replace an existing item.
+4. Run `./scripts/setup_android_release_signing.sh --check`. This confirms only
+   local file permissions and item presence. The signed build verifies the actual
+   pinned certificate:
+   `215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5`.
+5. To sign the retained Studio APK without rebuilding, use
+   `./scripts/build_android_release.sh --upgrade-candidate --sign-prepared`.
+   It reads Studio's existing Keychain through the original signing path, stages
+   the registered unsigned current in the original reservation, and invokes local
+   SDK apksigner with password environment references. It then applies the
+   unchanged signed APK verifier and normal current publication/cleanup.
+   Failure preserves the unsigned current. The signed receipt retains the
+   original observed build commit and unsigned SHA-256.
+
+MacBook can continue its independent local build/sign/delivery with its existing
+key. No cross-machine signing endpoint, private-key transfer API, new credential,
+wireless ADB or helper-service authorization is part of this workflow.
+The available Remote Hosts tools can prepare non-secret configuration and inspect
+status; they do not expose a dedicated Studio credential-entry/takeover surface.
+Credential copying and Keychain password entry therefore remain local user steps.
+
 For physical acceptance, use the existing MacBook USB ADB and the exact nubia
 serial. Verify the installed version, signer, first-install time and notification
 permission before `adb -s 324662166861 install -r APK`. Recheck them after the

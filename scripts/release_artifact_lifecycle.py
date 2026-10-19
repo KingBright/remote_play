@@ -461,6 +461,36 @@ def admit_android(state):
     return admit(state, android_component(), files, current=current, aux_stage=android_workspace())
 
 
+def stage_unsigned_current(state):
+    require(registered_unsigned_current(), 'A registered unsigned current APK is required')
+    files = android_files()
+    recorded, _ = document(files[1])
+    expected = unsigned_evidence(*files)[0]
+    require(bool(re.fullmatch('[0-9a-f]{40}', recorded.get('source_commit_observed', ''))),
+            'Prepared APK requires its observed source commit')
+    admission = state['admission']
+    require(admission['files'] == list(map(str, files))
+            and admission['owned_aux_stages'] == [str(android_workspace())],
+            'Prepared APK requires the original exact reservation')
+    directory = android_workspace() / 'release'
+    check_current(directory)
+    directory.mkdir(mode=0o700)
+    source = regular(files[0]); before = source.stat()
+    require(before.st_size <= 256 * 1024 ** 2, 'Prepared APK exceeds memory bound')
+    data = source.read_bytes()
+    require(source.stat() == before and hashlib.sha256(data).hexdigest() == expected,
+            'Prepared APK changed during staging')
+    target = directory / 'app-release-unsigned.apk'
+    with target.open('xb') as outgoing:
+        outgoing.write(data); outgoing.flush(); os.fsync(outgoing.fileno())
+    require(hashed(target)[0] == expected, 'Prepared APK stage differs')
+    with (directory / 'prepared-unsigned.json').open('x') as outgoing:
+        json.dump({'source_commit_observed': recorded['source_commit_observed'],
+                   'unsigned_sha256': expected}, outgoing)
+        outgoing.write('\n'); outgoing.flush(); os.fsync(outgoing.fileno())
+    return target
+
+
 def publish_android(state):
     from verify_release_apk import verify
     admission = state['admission']; apk, receipt = map(Path, admission['staged_files'])
@@ -468,6 +498,15 @@ def publish_android(state):
     candidate = android_workspace() / 'release/app-release.apk'
     regular(candidate)
     report = verify(candidate, ROOT)  # Unchanged version/JNI/ABI/alignment and actual signature gates.
+    prepared_path = candidate.parent / 'prepared-unsigned.json'
+    if prepared_path.exists():
+        prepared, _ = document(prepared_path)
+        unsigned = candidate.parent / 'app-release-unsigned.apk'
+        require(hashed(unsigned)[0] == prepared.get('unsigned_sha256')
+                and prepared.get('source_commit_observed') == document(android_files()[1])[0].get('source_commit_observed'),
+                'Prepared signing provenance changed')
+        report.update(source_commit_observed=prepared['source_commit_observed'],
+                      signed_from_unsigned_sha256=prepared['unsigned_sha256'])
     value, size = hashed(candidate)
     require(report.get('sha256') == value and report.get('size_bytes') == size, 'APK changed after signing verification')
     require(not apk.exists() and not apk.is_symlink(), 'Staged APK already exists')
@@ -585,6 +624,7 @@ def main():
     command.add_argument('--apk-output-directory', required=True)
     commands.add_parser('publish-android')
     commands.add_parser('hold-unsigned')
+    commands.add_parser('stage-unsigned-current')
     command = commands.add_parser('save-unsigned')
     command.add_argument('--upgrade-candidate', action='store_true')
     command.add_argument('--expected-sha256', required=True)
@@ -599,6 +639,9 @@ def main():
         check_current(args.apk_output_directory)
     elif args.action == 'hold-unsigned':
         hold_unsigned()
+    elif args.action == 'stage-unsigned-current':
+        _, state = check_lock('android-release')
+        print(stage_unsigned_current(state))
     elif args.action == 'save-unsigned':
         os.environ[ANDROID_UPGRADE_ENV] = '1' if args.upgrade_candidate else '0'
         save_unsigned(args.expected_sha256, args.expected_producer_pid, args.source_commit)

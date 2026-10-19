@@ -3,13 +3,16 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 export WEAVELO_ANDROID_UPGRADE_CANDIDATE=0
 UNSIGNED_ONLY=0
+SIGN_PREPARED=0
 for option in "$@"; do
     case "$option" in
         --upgrade-candidate) [[ "$WEAVELO_ANDROID_UPGRADE_CANDIDATE" == 0 ]] || exit 2; export WEAVELO_ANDROID_UPGRADE_CANDIDATE=1 ;;
         --unsigned-only) [[ "$UNSIGNED_ONLY" == 0 ]] || exit 2; UNSIGNED_ONLY=1 ;;
-        *) echo 'Only --upgrade-candidate and --unsigned-only are supported' >&2; exit 2 ;;
+        --sign-prepared) [[ "$SIGN_PREPARED" == 0 ]] || exit 2; SIGN_PREPARED=1 ;;
+        *) echo 'Only --upgrade-candidate, --unsigned-only and --sign-prepared are supported' >&2; exit 2 ;;
     esac
 done
+[[ "$UNSIGNED_ONLY" == 0 || "$SIGN_PREPARED" == 0 ]] || { echo 'Unsigned preparation and local signing are separate modes' >&2; exit 2; }
 if [[ "$WEAVELO_ANDROID_UPGRADE_CANDIDATE" == 1 ]]; then
     APK_NAME=app-upgrade.apk
     APK_WORKSPACE_NAME=.weavelo-android-upgrade-package.pending
@@ -48,17 +51,22 @@ else
     trap 'unset PASSWORD WEAVELO_ANDROID_KEYSTORE_PASSWORD WEAVELO_ANDROID_KEY_PASSWORD' EXIT
 fi
 cd "$ROOT"
-./scripts/build_android_native.sh
-cd android
 APK_WORKSPACE="$ROOT/android/app/build/outputs/apk/release/$APK_WORKSPACE_NAME"
-./gradlew --no-daemon --no-configuration-cache --max-workers=2 -Pandroid.injected.apk.location="$APK_WORKSPACE" -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
+APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"
+[ -x "$APKSIGNER" ] || { echo "apksigner not found under $SDK/build-tools" >&2; exit 1; }
+if [[ "$SIGN_PREPARED" == 1 ]]; then
+    python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" stage-unsigned-current
+    "$APKSIGNER" sign --ks "$KEYSTORE" --ks-key-alias "$ALIAS" --ks-pass env:WEAVELO_ANDROID_KEYSTORE_PASSWORD --key-pass env:WEAVELO_ANDROID_KEY_PASSWORD --out "$APK_WORKSPACE/release/app-release.apk" "$APK_WORKSPACE/release/app-release-unsigned.apk"
+else
+    ./scripts/build_android_native.sh
+    cd android
+    ./gradlew --no-daemon --no-configuration-cache --max-workers=2 -Pandroid.injected.apk.location="$APK_WORKSPACE" -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs='-Xmx2g -XX:MaxMetaspaceSize=1g' :app:assembleRelease :app:lintRelease :app:testDebugUnitTest
+fi
 if [[ "$UNSIGNED_ONLY" == 1 ]]; then
     exec python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" hold-unsigned
 fi
 APK="$APK_WORKSPACE/release/app-release.apk"
 [ -f "$APK" ] || { echo "Signed release APK not found: $APK" >&2; exit 1; }
-APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -type f -name apksigner | sort -V | tail -1)"
-[ -x "$APKSIGNER" ] || { echo "apksigner not found under $SDK/build-tools" >&2; exit 1; }
 "$APKSIGNER" verify --verbose --print-certs "$APK"
 # Calls the unchanged verify_release_apk.verify gate and writes the exact reserved receipt.
 python3 -B "$ROOT/scripts/release_artifact_lifecycle.py" publish-android
