@@ -144,7 +144,7 @@ class MainActivity : ComponentActivity() {
                         nativeAvailable = WeaveloClient.nativeAvailable && !joiningNetwork,
                         networkName = networkName,
                         joiningNetwork = joiningNetwork,
-                        pairingMessage = listOfNotNull(pairingMessage, publisherStatus.takeIf { it.isNotBlank() }, receiverState.message.takeIf { it.isNotBlank() }).distinct().joinToString("\n"),
+                        pairingMessage = listOfNotNull(WeaveloClient.nativeStartupError.takeIf { it.isNotBlank() }?.let { "error:Native startup failed ($it). Existing data is retained." }, pairingMessage, publisherStatus.takeIf { it.isNotBlank() }, receiverState.message.takeIf { it.isNotBlank() }).distinct().joinToString("\n"),
                         sessionError = sessionError,
                         sessionState = sessionState,
                         onCancelConnect = {

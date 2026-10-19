@@ -5,6 +5,7 @@ mod workspace_touch;
 
 #[cfg(feature = "android")]
 pub mod jni_bridge;
+mod startup_diagnostics;
 
 #[cfg(feature = "wasm")]
 pub mod wasm_bridge;

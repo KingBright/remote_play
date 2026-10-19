@@ -347,16 +347,22 @@ pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeInit(
         Ok(value) => value.into(),
         Err(_) => return 0,
     };
-    let device_group_dir = std::path::PathBuf::from(storage_dir)
+    let device_group_dir = std::path::PathBuf::from(&storage_dir)
         .join("weavelo")
         .join("device-group");
     if configure_device_group_dir(device_group_dir).is_err() && GLOBAL_CLIENT.get().is_none() {
+        let _ = env.throw_new("java/lang/IllegalStateException", "WEAVELO_NATIVE_INIT:path-binding-conflict");
         return 0;
     }
     let _ = client();
     let store = remote_core::mesh::AppPrivateMeshConfigStore::new(crate::bridge_device_group_dir());
-    let Ok(identity) = store.load_or_generate("Weavelo Android") else {
-        return 0;
+    let identity = match store.load_or_generate("Weavelo Android") {
+        Ok(identity) => identity,
+        Err(error) => {
+            let code = crate::startup_diagnostics::profile_error_code(&error, std::path::Path::new(&storage_dir));
+            let _ = env.throw_new("java/lang/IllegalStateException", format!("WEAVELO_NATIVE_INIT:{code}"));
+            return 0;
+        }
     };
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
     1

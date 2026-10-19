@@ -65,6 +65,13 @@ object WeaveloClient {
     val networkName: StateFlow<String> = _networkName.asStateFlow()
 
     private var isNativeLoaded = false
+    var nativeStartupError: String = ""
+        private set
+    private fun startupFailed(code: String) {
+        isNativeLoaded = false
+        nativeStartupError = code
+        android.util.Log.e("WeaveloNative", code)
+    }
     private var appContext: Context? = null
     private val pauseExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     @Volatile var backgrounded = false
@@ -92,7 +99,7 @@ object WeaveloClient {
             System.loadLibrary("weavelo_android")
             isNativeLoaded = true
         } catch (e: UnsatisfiedLinkError) {
-            isNativeLoaded = false
+            startupFailed(NativeStartupDiagnostics.loading(e))
         }
     }
 
@@ -102,8 +109,18 @@ object WeaveloClient {
     fun initialize(context: Context): Boolean {
         appContext = context.applicationContext
         if (!isNativeLoaded) return false
-        val initialized = nativeInit(context.filesDir.absolutePath)
+        val initialized = try {
+            nativeInit(context.filesDir.absolutePath)
+        } catch (error: Exception) {
+            startupFailed(NativeStartupDiagnostics.initialization(error))
+            return false
+        } catch (error: LinkageError) {
+            startupFailed("native-entry-point-unavailable")
+            return false
+        }
         isNativeLoaded = initialized
+        if (!initialized) startupFailed("native-initialization-rejected")
+        else nativeStartupError = ""
         if (initialized) {
             val prefs = context.getSharedPreferences("stream", Context.MODE_PRIVATE)
             streamFps = prefs.getInt("fps", 60)
