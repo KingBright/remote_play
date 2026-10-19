@@ -1,0 +1,45 @@
+{
+  "schema": "remoteplay.lifecycle.adoption-plan.v1",
+  "project": "Weavelo",
+  "owner": "Weavelo",
+  "state": "observe-only-local-authority-required",
+  "native_helper_policy": false,
+  "inventory_role": "template-only; copy and review as the local authority before adoption",
+  "artifacts": [
+    {
+      "id": "host-shared-cargo-target-and-build",
+      "path": "REPLACE_WITH_REVIEWED_EXISTING_SHARED_TARGET",
+      "canonical_path": "REPLACE_WITH_REVIEWED_EXISTING_SHARED_TARGET",
+      "kind": "shared_cargo_cache",
+      "owner": "shared-multiple-projects; Weavelo is a consumer",
+      "purpose": "Reference the existing shared Cargo target/build; do not move or claim it",
+      "shared": true,
+      "exclusive_owner": false,
+      "generated": true,
+      "role": "unknown-protected",
+      "activity": "not-verified",
+      "delete_now": false,
+      "reproducible": false,
+      "backed_up": false,
+      "single_project_clean_allowed": false
+    }
+  ],
+  "coverage": {
+    "build_lock": false,
+    "closure": false,
+    "exact_apply": false,
+    "ide": false
+  },
+  "build_ready": false,
+  "policy": {
+    "existing_target_action": "preserve; register reference only",
+    "single_project_shared_target_clean_allowed": false,
+    "move_or_rotate_existing_cache_allowed": false,
+    "automatic_apply_allowed": false
+  },
+  "remaining_gaps": [
+    "Review this machine existing storage and output ownership before adoption",
+    "Keep signing identities, current deliveries and pending transitions separate from this template",
+    "Adoption does not implement build locking, cleanup, IDE coverage or product acceptance"
+  ]
+}

@@ -25,8 +25,8 @@ class LifecycleAdoptionInterfaceTests(unittest.TestCase):
         sys.dont_write_bytecode = True
         try:
             spec.loader.exec_module(cls.helper)
-            if getattr(cls.helper, "VERSION", None) != "1.1.0":
-                raise unittest.SkipTest("RP observation fixture requires reviewed helper v1.1.0")
+            if getattr(cls.helper, "VERSION", None) not in {"1.1.0", "2.1.3"}:
+                raise unittest.SkipTest("RP observation fixture requires reviewed helper v1.1.0 or v2.1.3")
             cls.adopt = cls.helper.companion("rust_adopt")
             entry = Path(__file__).resolve().parents[1] / "check_artifact_lifecycle.py"
             entry_spec = importlib.util.spec_from_file_location("rp_lifecycle_entry", entry)

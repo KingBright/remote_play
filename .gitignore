@@ -30,3 +30,7 @@ __pycache__/
 /.rust-storage/validation-logs/
 /.rust-storage/fixed-validation.lock
 /.rust-storage/release-identity-transition.json
+
+# Machine-local lifecycle authority and binding; portable template remains tracked.
+/.rust-storage/adoption.json
+/docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json
