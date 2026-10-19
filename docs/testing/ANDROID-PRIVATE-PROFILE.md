@@ -300,3 +300,84 @@ identify a real network. Real pairing remains an owner-performed scan in the
 ordinary app. Desktop Computer Use approval remains unconfirmed and was not
 bypassed. Video/input, file transfer and long-duration session acceptance remain
 unverified.
+
+
+## 2026-10-19 MacBook code15 reverse-QR acceptance
+
+The original MacBook primary `main` checkout was fast-forwarded from `43c0075`
+to the explicitly accepted source `1807d509032458fb86dfda0bad589a7e2e5ca94f`,
+including reverse-QR feature `899bf5d`. Only Android `versionCode` was incremented
+to 15 in build commit `cf31c391d2e93c146d5e13dd89d537634bd200c1`.
+No additional checkout or later unverified implementation was used.
+
+The original release lock was free, no delivery transaction or cleanup lock was
+pending, and no build process was active before starting. The existing Rust
+1.99.1, HotSpot JDK 17, Android SDK/NDK, signing keychain identity and shared
+`/Users/jinliang/rust-target` were reused. The accepted lock-file delta adds six
+checksummed crates.io packages for optional desktop QR image recognition; the
+Android bridge does not enable that feature. Original-helper reassessment
+refreshed only `Cargo.lock` in the machine-local observe-only binding to
+`2ccf450879b377afc608d74790fb48bdcbb0568ce6844c6ae81e996b1c469fc3`.
+The original authority inventory, canonical cache, budgets, coverage, configuration
+and file modes were retained. New dependencies were already in the existing cache.
+
+| Check | Observed result |
+| --- | --- |
+| Required release-script suite | 607 run: 599 passed, 8 conditional skips |
+| Synthetic QR fixture generation | Passed; tracked source remained unchanged |
+| Rust QR codec | 7 passed |
+| Desktop QR image recognition | 4 passed |
+| Actual controller / Android-generated PNG interoperability | 8 passed |
+| Read-only invitation export and private-store rejection | 3 passed |
+| Android JVM suite | 53 passed, no failures/errors/skips |
+| New Android invitation encoder tests | 3 passed: scanner roundtrip, four-module white quiet zone, exact desktop fixture match |
+| Formal release assembly and lint | Passed |
+
+Each guarded Rust run reported unchanged source bytes, successful post-observation
+and absence of its owned process group. One invocation of the original formal
+`--upgrade-candidate` producer rebuilt the native bridge, verified the actual APK,
+published the default output and completed temporary-stage cleanup. Independent
+verification of the published file also passed before installation.
+
+| Verified release field | Value |
+| --- | --- |
+| Build source | `cf31c391d2e93c146d5e13dd89d537634bd200c1` |
+| Package | `fun.hackerlife.weavelo` |
+| Version | `2.0.0-alpha.9`, code `15` |
+| APK bytes | `16709412` |
+| APK SHA-256 | `c2af1bf851c716a81f88077172318fb52b362e3ceacaed63d7eddbd442703cdf` |
+| Existing signing certificate SHA-256 | `215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5` |
+| Native library SHA-256 | `259992101f3767b6496a5c6b2ae927837ed92fa0a0921bd05552e8ba8c2b2612` |
+| Native gates | ARM64 only, 28 current JNI entry points, 16 KiB alignment, non-debuggable |
+| Default output | `android/app/build/outputs/apk/release/app-upgrade.apk` and its original verification receipt |
+
+USB nubia NX741J serial `324662166861` was online. Its installed code14 APK
+matched the accepted hash, no install session was active, and the scanner did not
+own the camera. A single `adb install -r` at `2026-10-19T18:33:57Z` returned
+Success. Installed code15 and its APK hash matched the verified file. First-install
+time remained `2026-10-19 10:04:33`; the device-reported update time became
+`2026-10-20 02:33:57`. Both private-data directory inodes and all observed runtime
+grants were retained: camera and notifications granted, microphone ungranted.
+There was no uninstall, data clear, credential change or new permission grant.
+
+The first code15 cold launch completed in 180 ms without the former profile error
+or Native unavailable state. **Show invitation QR** opened **Invite a device**,
+completed native loading and exposed the generic QR canvas with positive bounds
+`[166,730][1050,1614]`. Save PNG, Copy code and Close were enabled. Close returned
+to Devices; a second opening loaded correctly, and system Back also dismissed it.
+The same app process remained alive, with no fatal-exception marker or active
+camera client at the end. The persisted network digest remained
+`a3bd51b6989c27e33125f3e4977f0c06aa1391f9c4784a68976d3536eac65043`.
+
+Physical invitation checks used only whitelisted interface metadata and the
+network digest. No screenshot, QR pixels, invitation string or clipboard was
+captured. Save PNG and Copy code were not pressed; no real invitation file or
+network join was produced. Generation, quiet-zone and cross-platform decoding
+were tested with synthetic fixtures through the production encoder/controller.
+
+Real optical invitation scanning, actual pairing, real Save PNG/Copy code and
+desktop picker/rendering remain unverified here. The owner performs real pairing
+and any credential-bearing image transfer in the ordinary apps. This Android
+acceptance does not establish desktop package deployment, video/input, file
+transfer or long-duration session behavior. Earlier pending optical-test fixtures
+and unresolved recovery materials remain protected.

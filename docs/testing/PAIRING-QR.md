@@ -178,3 +178,18 @@ separately accepted code 14 uses build source `bce8031` and acceptance commit
 save/copy/camera interaction for this follow-up, desktop picker/rendering,
 Windows/Linux compilation and real pairing remain untested. The owner must
 perform real pairing; test and report artifacts contain only synthetic invites.
+
+
+## MacBook code15 package acceptance
+
+The accepted source `1807d509032458fb86dfda0bad589a7e2e5ca94f` was built on Book
+as `cf31c391d2e93c146d5e13dd89d537634bd200c1` with only versionCode 15 added.
+The original signed formal producer, release lint and all 53 Android JVM tests
+passed; the five synthetic regression modes also passed. USB nubia was upgraded
+in place to the independently verified code15 APK. The new invitation dialog
+loaded its generic QR region; Close, reopen and system Back were physically
+verified without collecting real invitation text/pixels or using Save PNG/Copy.
+Package hashes, preserved installation identity, exact test counts and remaining
+physical limits are recorded in
+[Android code15 acceptance](ANDROID-PRIVATE-PROFILE.md#2026-10-19-macbook-code15-reverse-qr-acceptance).
+Real owner-performed optical pairing and desktop package acceptance remain open.
