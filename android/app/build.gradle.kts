@@ -23,7 +23,7 @@ android {
         applicationId = "fun.hackerlife.weavelo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
+        versionCode = 13
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionName = "2.0.0-alpha.9"
 

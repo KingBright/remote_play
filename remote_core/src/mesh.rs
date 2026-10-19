@@ -920,6 +920,37 @@ fn create_private_dir(path: &Path) -> Result<(), MeshStoreError> {
         .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
     validate_private_dir(path)
 }
+fn publish_new_private_file(temporary: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let source = CString::new(temporary.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid profile path"))?;
+        let target = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid profile path"))?;
+        // Android SELinux forbids app-data hard links. Never replace an identity
+        // that another initializer published after the access check.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        fs::hard_link(temporary, path)?;
+        fs::remove_file(temporary)
+    }
+}
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), MeshStoreError> {
     validate_private_parent(path)?;
     let before = private_file_metadata(path)?;
@@ -964,10 +995,8 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), MeshStoreError> {
         } else {
             // Atomic create-only publication: a concurrent first start cannot
             // replace an identity that appeared after the access check.
-            fs::hard_link(&temporary, path)
+            publish_new_private_file(&temporary, path)
                 .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
-            fs::remove_file(&temporary)
-                .map_err(|source| MeshStoreError::io(temporary.clone(), source))?;
         }
         Ok(())
     })();
@@ -1032,6 +1061,58 @@ mod tests {
     impl Drop for TempTree {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn profile_first_publication_never_overwrites_an_existing_identity() {
+        let temp = TempTree::new("profile-publish-existing");
+        let target = temp.root.join("identity");
+        let staged = temp.root.join("staged");
+        write_private_file(&target, b"existing identity").unwrap();
+        write_private_file(&staged, b"candidate identity").unwrap();
+        let before = fs::read(&target).unwrap();
+        let error = publish_new_private_file(&staged, &target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), before);
+        assert_eq!(fs::read(&staged).unwrap(), b"candidate identity");
+        assert_eq!(fs::read_dir(&temp.root).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn profile_concurrent_first_publication_has_exactly_one_complete_winner() {
+        use std::sync::{Arc, Barrier};
+        let temp = TempTree::new("profile-publish-race");
+        let target = temp.root.join("identity");
+        let barrier = Arc::new(Barrier::new(2));
+        let workers: Vec<_> = [b"first identity".as_slice(), b"second identity".as_slice()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let staged = temp.root.join(format!("staged-{index}"));
+                write_private_file(&staged, bytes).unwrap();
+                let target = target.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result = publish_new_private_file(&staged, &target);
+                    if result.is_err() {
+                        fs::remove_file(staged).unwrap();
+                    }
+                    (result, bytes)
+                })
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|(result, _)| result.is_ok()).count(), 1);
+        let winner = results.iter().find(|(result, _)| result.is_ok()).unwrap().1;
+        assert_eq!(fs::read(&target).unwrap(), winner);
+        assert_eq!(fs::read_dir(&temp.root).unwrap().count(), 1);
+        check_private_file(&target, &fs::metadata(&target).unwrap()).unwrap();
+        for (result, _) in results {
+            if let Err(error) = result {
+                assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            }
         }
     }
 

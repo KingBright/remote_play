@@ -354,7 +354,6 @@ pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeInit(
         let _ = env.throw_new("java/lang/IllegalStateException", "WEAVELO_NATIVE_INIT:path-binding-conflict");
         return 0;
     }
-    let _ = client();
     let store = remote_core::mesh::AppPrivateMeshConfigStore::new(crate::bridge_device_group_dir());
     let identity = match store.load_or_generate("Weavelo Android") {
         Ok(identity) => identity,
@@ -365,6 +364,8 @@ pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeInit(
         }
     };
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
+    // Discovery loads the same profile; publish the identity before spawning it.
+    let _ = client();
     1
 }
 

@@ -40,6 +40,8 @@ class ServiceContractEntryTests(unittest.TestCase):
         'routed-auth': ('remote_core', 'p2p::routed_p2p_tests'),
         'clock-display': ('weavelo_app', 'telemetry_display::tests'),
         'clock-renderer': ('client', 'render_timing::tests'),
+        'mesh-profile': ('remote_core', 'mesh::tests'),
+        'bridge-startup': ('remote_client_bridge', 'startup_diagnostics::tests'),
         'bridge-auth': ('remote_client_bridge', 'publisher_bridge::tests'),
         'bridge-telemetry': ('remote_client_bridge', 'tests::telemetry_defaults_are_zero_not_marketing_numbers'),
         'bridge-keepalive': ('remote_client_bridge', 'tests::paused_session_uses_sparse_shared_keepalive_and_stops_input_grants'),
@@ -365,6 +367,8 @@ class ServiceContractEntryTests(unittest.TestCase):
             (root / '.rust-storage').mkdir()
             directory = root / '.rust-storage/validation-logs'
             directory.mkdir(mode=0o755)
+            # A restrictive host umask must not turn this public fixture private.
+            directory.chmod(0o755)
             with self.assertRaisesRegex(ValueError, 'private'):
                 with runner.private_validation_log(root, 'clock-host-auth'):
                     self.fail('public logs admitted')

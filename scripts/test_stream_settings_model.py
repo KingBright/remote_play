@@ -42,6 +42,8 @@ SESSION_CLOCK_TESTS = {
     "routed-auth": ("remote_core", "p2p::routed_p2p_tests"),
     "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
+    "mesh-profile": ("remote_core", "mesh::tests"),
+    "bridge-startup": ("remote_client_bridge", "startup_diagnostics::tests"),
     "bridge-auth": ("remote_client_bridge", "publisher_bridge::tests"),
     "bridge-telemetry": ("remote_client_bridge", "tests::telemetry_defaults_are_zero_not_marketing_numbers"),
     "bridge-keepalive": ("remote_client_bridge", "tests::paused_session_uses_sparse_shared_keepalive_and_stops_input_grants"),
