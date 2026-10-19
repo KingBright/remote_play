@@ -46,7 +46,20 @@ it has no signer and cannot pass the signed current-output evidence gate.
 The producer holds that stage for a bounded 30-minute review window. Expiry or
 cancellation uses the original abort/cleanup path and preserves the existing signed
 current output. This mode has no transfer or signing endpoint and creates no key.
-Keep cross-device signing paused until its separate authorization is confirmed.
+Cross-device proxy signing is cancelled. Both Macs must keep independent local
+build/sign/delivery capability using the same existing Android signing identity.
+
+To retain exactly one prepared APK without rebuilding, the owner starts
+`release_artifact_lifecycle.py save-unsigned` with the prepared SHA-256, original
+producer PID and observed source commit. The coordinator validates and buffers
+the existing bytes, then waits (at most five minutes) for the original task to
+finish through its normal cancel/abort path. It does not stop that task or alter
+its locks. After the old transaction finishes, the normal producer/preflight,
+admission and `release-publish --validation-kind unsigned-dev` save the same bytes
+and verified receipt in the established default pair. This is explicitly
+`unsigned-awaiting-local-key-import`, never a signing receipt. The original
+public authority owns atomic replacement and temporary cleanup; no APK generation,
+source copy or extra persistent artifact is created.
 
 For physical acceptance, use the existing MacBook USB ADB and the exact nubia
 serial. Verify the installed version, signer, first-install time and notification

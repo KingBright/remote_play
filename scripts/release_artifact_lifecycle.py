@@ -338,9 +338,113 @@ def verify_existing_android_signer(apk):
             and 'Android Debug' not in result.stdout, 'Existing APK signature verification failed; preserving it')
 
 
+
+def unsigned_evidence(apk, receipt):
+    from verify_release_apk import verify_unsigned
+    recorded, receipt_sha = document(receipt)
+    actual = verify_unsigned(apk, ROOT)
+    require(recorded.get('signing_status') == 'unsigned'
+            and recorded.get('signer_sha256') is None
+            and all(recorded.get(key) == actual.get(key) for key in actual),
+            'Saved unsigned evidence differs from the actual APK')
+    return [actual['sha256'], receipt_sha]
+
+
+def registered_unsigned_current():
+    path = ROOT / '.rust-storage/release-deliveries.json'
+    if not path.exists():
+        return False
+    registry, _ = document(path)
+    current = registry.get('current_components', {}).get(android_component())
+    if not current or current.get('validation_kind') != 'unsigned-dev':
+        return False
+    files = android_files()
+    require(current.get('files') == list(map(str, files))
+            and current.get('validation_file') == str(files[1]),
+            'Registered unsigned current paths differ')
+    expected = unsigned_evidence(*files)
+    require(current.get('validation_digest') == expected[1],
+            'Registered unsigned receipt digest differs')
+    return True
+
+
+def buffer_unsigned(expected_sha, expected_pid, expected_commit):
+    from verify_release_apk import verify_unsigned
+    require(LOCK_ENV not in os.environ, 'Save handover requires a new bounded coordinator')
+    lock, _ = document(ROOT / '.rust-storage/release-producer.lock')
+    require(lock.get('producer_pid') == expected_pid and lock.get('kind') == 'android-release'
+            and lock.get('android_upgrade_candidate') == android_upgrade_mode(),
+            'Unsigned source producer identity differs')
+    source = android_workspace() / 'release/app-release-unsigned.apk'
+    evidence = source.parent / 'unsigned-preparation.json'
+    recorded, _ = document(evidence)
+    require(recorded.get('producer_pid') == expected_pid
+            and recorded.get('source_commit_observed') == expected_commit
+            and recorded.get('sha256') == expected_sha
+            and recorded.get('state') == 'unsigned-awaiting-signing',
+            'Unsigned source checkpoint differs')
+    actual = verify_unsigned(source, ROOT)
+    require(actual['sha256'] == expected_sha
+            and all(recorded.get(key) == actual.get(key) for key in actual),
+            'Unsigned source content differs')
+    source = regular(source); before = source.stat()
+    require(before.st_size <= 256 * 1024 ** 2, 'Unsigned handover exceeds memory bound')
+    data = source.read_bytes()
+    require(source.stat() == before and hashlib.sha256(data).hexdigest() == expected_sha,
+            'Unsigned source changed during handover')
+    return data, recorded
+
+
+def save_unsigned(expected_sha, expected_pid, expected_commit):
+    data, recorded = buffer_unsigned(expected_sha, expected_pid, expected_commit)
+    print('UNSIGNED_SAVE_BUFFERED ' + json.dumps({
+        'sha256': expected_sha, 'bytes': len(data), 'old_producer_pid': expected_pid,
+        'source_commit_observed': expected_commit}), flush=True)
+    deadline = time.monotonic() + 300
+    while True:
+        try:
+            os.kill(expected_pid, 0)  # Observation only; the original task owns cancellation.
+        except ProcessLookupError:
+            break
+        require(time.monotonic() < deadline, 'Original producer did not finish its normal abort')
+        time.sleep(1)
+    # producer() performs the original public preflight/recovery and takes the
+    # same producer lock. No old PID, lock or transaction is rewritten here.
+    with producer('android-release') as (fd, state):
+        admission = admit_android(state); state['admission'] = admission; write_state(fd, state)
+        apk, receipt = map(Path, admission['staged_files'])
+        with apk.open('xb') as outgoing:
+            outgoing.write(data); outgoing.flush(); os.fsync(outgoing.fileno())
+        del data
+        from verify_release_apk import verify_unsigned
+        report = verify_unsigned(apk, ROOT)
+        require(report['sha256'] == expected_sha, 'Saved unsigned APK differs from prepared bytes')
+        report.update(state='unsigned-awaiting-local-key-import',
+                      source_commit_observed=expected_commit, retention='current-output',
+                      saved_by_commit=subprocess.check_output(
+                          ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip())
+        with receipt.open('x') as outgoing:
+            json.dump(report, outgoing, indent=2); outgoing.write('\n')
+            outgoing.flush(); os.fsync(outgoing.fileno())
+        expected = unsigned_evidence(apk, receipt)
+        args = ['--component', admission['component'], '--producer-pid', state['producer_pid'],
+                '--validation-kind', 'unsigned-dev', '--validation-digest', expected[1],
+                '--validation-file', receipt]
+        for path, digest in zip(admission['files'], expected):
+            args.extend(['--file', path, '--expected-sha256', digest])
+        result = public('release-publish', *args)
+        require(result.get('current_committed') is True
+                and result.get('paths') == admission['files'], 'Unsigned current save was not confirmed')
+        print('UNSIGNED_APK_SAVED ' + json.dumps(dict(report,
+            path=admission['files'][0], cleanup_status=result.get('cleanup_status'))), flush=True)
+        return result
+
+
 def admit_android(state):
     files = android_files(); current = None
     if any(path.exists() or path.is_symlink() for path in files):
+        if registered_unsigned_current():
+            return admit(state, android_component(), files, aux_stage=android_workspace())
         current = android_evidence(*files)
         verify_existing_android_signer(files[0])
     return admit(state, android_component(), files, current=current, aux_stage=android_workspace())
@@ -470,6 +574,11 @@ def main():
     command.add_argument('--apk-output-directory', required=True)
     commands.add_parser('publish-android')
     commands.add_parser('hold-unsigned')
+    command = commands.add_parser('save-unsigned')
+    command.add_argument('--upgrade-candidate', action='store_true')
+    command.add_argument('--expected-sha256', required=True)
+    command.add_argument('--expected-producer-pid', required=True, type=int)
+    command.add_argument('--source-commit', required=True)
     args = parser.parse_args()
     if args.action == 'run':
         return run(args.kind, args.arguments)
@@ -479,6 +588,9 @@ def main():
         check_current(args.apk_output_directory)
     elif args.action == 'hold-unsigned':
         hold_unsigned()
+    elif args.action == 'save-unsigned':
+        os.environ[ANDROID_UPGRADE_ENV] = '1' if args.upgrade_candidate else '0'
+        save_unsigned(args.expected_sha256, args.expected_producer_pid, args.source_commit)
     else:
         _, state = check_lock('android-release')
         print(json.dumps(publish_android(state)))

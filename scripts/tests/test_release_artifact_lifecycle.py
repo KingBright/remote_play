@@ -376,6 +376,68 @@ class ReleaseHookTests(unittest.TestCase):
         sleep.assert_called_once_with(1)
 
 
+
+    def test_save_unsigned_uses_normal_unsigned_dev_publication(self):
+        data = b'synthetic signed APK'
+        expected = hashlib.sha256(data).hexdigest()
+        report = dict(sha256=expected, size_bytes=len(data), signer_sha256=None,
+                      signing_status='unsigned', debuggable=False, abi=['arm64-v8a'],
+                      native_16kb_aligned=True, version='2.0.0-alpha.8', version_code=9)
+        verifier = SimpleNamespace(verify_unsigned=Mock(return_value=report))
+        with patch.object(hook, 'buffer_unsigned', return_value=(data, {})), \
+             patch.object(hook.os, 'kill', side_effect=ProcessLookupError), \
+             patch.object(hook.subprocess, 'check_output', return_value='b'*40), \
+             patch.dict(sys.modules, {'verify_release_apk': verifier}), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            result = hook.save_unsigned(expected, 12345, 'a'*40)
+        self.assertTrue(result['current_committed'])
+        calls = [args for action, args in self.calls if action == 'release-publish']
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][calls[0].index('--validation-kind')+1], 'unsigned-dev')
+        apk, receipt = hook.stage_paths(hook.android_files())
+        self.assertEqual(apk.read_bytes(), data)
+        metadata = json.loads(receipt.read_text())
+        self.assertIsNone(metadata['signer_sha256'])
+        self.assertEqual(metadata['source_commit_observed'], 'a'*40)
+        self.assertEqual(metadata['state'], 'unsigned-awaiting-local-key-import')
+        self.assertIn('UNSIGNED_APK_SAVED', output.getvalue())
+
+    def test_registered_unsigned_current_is_reused_without_fake_signing_adoption(self):
+        apk, receipt, report = self.apk(signer_sha256=None, signing_status='unsigned')
+        state = self.root / '.rust-storage'
+        state.mkdir(exist_ok=True)
+        (state / 'release-deliveries.json').write_text(json.dumps({'current_components': {
+            hook.android_component(): {'validation_kind': 'unsigned-dev',
+                'files': list(map(str, hook.android_files())), 'validation_file': str(receipt),
+                'validation_digest': hashlib.sha256(receipt.read_bytes()).hexdigest()}}}))
+        with patch.dict(sys.modules, {'verify_release_apk': SimpleNamespace(
+                verify_unsigned=Mock(return_value=report))}), \
+             patch.object(hook, 'verify_existing_android_signer') as signer:
+            hook.admit_android(self.state)
+        signer.assert_not_called()
+        self.assertFalse(any('--adopt-current' in args for action, args in self.calls
+                             if action == 'release-admit'))
+
+    def test_unsigned_buffer_is_hash_bound_and_does_not_move_original(self):
+        source = hook.android_workspace() / 'release/app-release-unsigned.apk'
+        apk, _, report = self.apk(source, signer_sha256=None, signing_status='unsigned')
+        recorded = dict(report, producer_pid=12345, source_commit_observed='a'*40,
+                        state='unsigned-awaiting-signing')
+        (source.parent / 'unsigned-preparation.json').write_text(json.dumps(recorded))
+        state = self.root / '.rust-storage'
+        state.mkdir(exist_ok=True)
+        (state / 'release-producer.lock').write_text(json.dumps({
+            'producer_pid':12345, 'kind':'android-release', 'android_upgrade_candidate':False}))
+        with patch.dict(sys.modules, {'verify_release_apk': SimpleNamespace(
+                verify_unsigned=Mock(return_value=report))}):
+            data, checkpoint = hook.buffer_unsigned(report['sha256'], 12345, 'a'*40)
+            self.assertEqual(data, source.read_bytes())
+            self.assertTrue(source.exists())
+            with self.assertRaises(hook.Refusal):
+                hook.buffer_unsigned('0'*64, 12345, 'a'*40)
+        self.assertFalse(any(p.exists() for p in hook.android_files()))
+
+
     def test_formal_gradle_gate_precedes_output_cleanup(self):
         stage = SCRIPT.parents[1]
         gradle = (stage/'android/app/build.gradle.kts').read_text()
