@@ -30,6 +30,11 @@ class ReleaseHookTests(unittest.TestCase):
         (self.root / 'scripts').mkdir()
         self.addCleanup(patch.stopall)
         patch.object(hook, 'ROOT', self.root).start()
+        # The real canonical-path check must inspect this owned fixture, not a
+        # developer's installed helper (whose home directory may be an alias).
+        helper = self.root / 'scripts/rust_storage.py'
+        helper.write_text('# Synthetic helper; public calls are mocked.\n')
+        patch.object(hook, 'HELPER', helper).start()
         patch.dict(os.environ, {}, clear=False).start()
         for key in (hook.LOCK_ENV, hook.PID_ENV, hook.ANDROID_UPGRADE_ENV): os.environ.pop(key, None)
         self.calls = []

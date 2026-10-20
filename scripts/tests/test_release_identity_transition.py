@@ -150,6 +150,19 @@ class TransitionWiringTests(unittest.TestCase):
         self.assertEqual(events[1][1],dict(transition_intent_sha256='a'*64,transition_phase='sealed',candidate_seal_sha256='9'*64))
         self.assertEqual(events[2][1][events[2][1].index('--candidate-seal-sha256')+1],'9'*64)
 
+    def test_linked_fixture_helper_still_refused_before_publish(self):
+        state,a,manifest,report,sealed=self.candidate()
+        self.current_guard(sealed)
+        alias=self.root/'helper-alias.py'
+        alias.symlink_to(hook.HELPER)
+        with patch.object(hook,'HELPER',alias),patch.object(hook,'regular',new=REAL_REGULAR), \
+             patch.object(hook,'public',return_value=sealed) as public:
+            with self.assertRaisesRegex(hook.Refusal,'Linked release path rejected'):
+                hook.publish_macos(state,a,report)
+        self.assertEqual([call.args[0] for call in public.call_args_list],['release-transition-seal'])
+        self.assertTrue(manifest.exists())
+        self.assertTrue(Path(a['staged_files'][0]).exists())
+
     def test_tampered_actual_manifest_never_calls_seal(self):
         state,a,manifest,report,_=self.candidate();manifest.write_bytes(b'foreign')
         with self.assertRaises(hook.Refusal):hook.publish_macos(state,a,report)
