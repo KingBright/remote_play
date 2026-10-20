@@ -68,6 +68,44 @@ fn view_binding_matches<T>(
             .is_some_and(|previous| Arc::ptr_eq(&previous, active))
 }
 
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ComputerUseFence {
+    device: String,
+    scope: ShareScope,
+    service_epoch: Option<u64>,
+    owner_epoch: u64,
+    subscription: u32,
+    source_revision: u32,
+    source: CaptureSource,
+    source_started: Instant,
+    video_epoch: remote_core::video_recovery::VideoEpoch,
+    input: Option<protocol::realtime_input::InputBinding>,
+}
+pub(crate) type ComputerUseObservation = super::computer_use::Observation<
+    WorkspaceConnection, ComputerUseFence, MacDecodedVideoFrame>;
+
+struct ComputerUseInput<'a> {
+    connection: &'a WorkspaceConnection,
+    binding: protocol::realtime_input::InputBinding,
+}
+impl super::computer_use::InputPort for ComputerUseInput<'_> {
+    fn send(&mut self, event: super::computer_use::Event) -> bool {
+        use super::computer_use::Event;
+        let event = match event {
+            Event::Move { x, y } => InputEvent::MouseMoveAbsolute { x, y },
+            Event::Button { button, pressed: true } => InputEvent::MouseDown(button),
+            Event::Button { button, pressed: false } => InputEvent::MouseUp(button),
+            Event::Key { key_code, pressed } => InputEvent::Key { key_code, pressed, modifiers: 0 },
+            Event::Scroll { delta_x, delta_y } => InputEvent::MouseScroll { delta_x, delta_y },
+        };
+        self.connection.try_bound_input(self.binding, Some(event))
+    }
+    fn release(&mut self) -> bool {
+        self.connection.try_bound_input(self.binding, None)
+    }
+}
+
 struct ViewSession {
     session: OriginalGuiSession,
     frame: FrameSlot,
@@ -196,6 +234,7 @@ pub(crate) struct OriginalOwner {
     #[cfg(any(unix, windows))]
     observed_service_epoch: std::sync::atomic::AtomicU64,
     pool: Mutex<Pool>,
+    computer_use_epoch: std::sync::atomic::AtomicU64,
     pending_exit_connections: Mutex<Vec<Arc<WorkspaceConnection>>>,
     updates: tokio::sync::watch::Sender<u64>,
     presentation_visible: std::sync::atomic::AtomicBool,
@@ -233,6 +272,7 @@ impl OriginalOwner {
             updates,
             presentation_visible: std::sync::atomic::AtomicBool::new(true),
             input_focused: std::sync::atomic::AtomicBool::new(true),
+            computer_use_epoch: std::sync::atomic::AtomicU64::new(0),
             pool: Mutex::new(Pool {
                 sessions: Vec::new(),
                 tabs: SessionTabsState::default(),
@@ -439,6 +479,7 @@ impl OriginalOwner {
     }
     pub fn select(&self, id: u32) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
         if let Some(index) = p.sessions.iter().position(|e| e.session.conn.id == id) {
             if let Some(e) = p.active_mut() {
                 e.session.release_input();
@@ -453,6 +494,7 @@ impl OriginalOwner {
     }
     pub fn close_session(&self, id: u32) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
         let Some(index) = p.sessions.iter().position(|e| e.session.conn.id == id) else { return; };
         let was_active = p.active().is_some_and(|e| e.session.conn.id == id);
         let count = p.sessions.len();
@@ -587,6 +629,7 @@ impl OriginalOwner {
         if let Some(message) = rejected {
             let mut p = self.pool.lock().unwrap();
             if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
+            self.revoke_computer_use();
             if let Some(e) = p.active_mut() {
                 e.session.release_input(); e.session.set_presentation_hidden(true);
             }
@@ -604,6 +647,7 @@ impl OriginalOwner {
         let (attempt, receive_dir, mut receive_cancel, receive_claim) = {
             let mut p = self.pool.lock().unwrap();
             if !p.receive_matches(key, receive) { return Err("Receive lease expired or was superseded".into()); }
+            self.revoke_computer_use();
             let existing = p.sessions.iter().position(|e| e.session.key == key).map(|index| {
                 let s = &p.sessions[index].session;
                 SessionCandidate { index, health: SessionHealth {
@@ -772,6 +816,7 @@ impl OriginalOwner {
     }
     pub async fn disconnect_active(&self) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
         if let Some(connecting) = p.tabs.connecting().cloned() {
             p.pending_settings.take(&connecting.peer.device_id, connecting.attempt);
         }
@@ -932,8 +977,114 @@ impl OriginalOwner {
         let source = e.session.source;
         Self::switch_session_source(e, source, w, h, fps, bitrate)
     }
+
+    // Call only while holding pool: explicit local user intent cannot race a
+    // receipt minted from the state immediately before that intent is applied.
+    fn revoke_computer_use(&self) {
+        use std::sync::atomic::Ordering;
+        let epoch = self.computer_use_epoch.load(Ordering::Relaxed);
+        self.computer_use_epoch.store(epoch.saturating_add(1), Ordering::Release);
+    }
+
+    fn computer_use_fence(&self, s: &OriginalGuiSession)
+        -> Result<ComputerUseFence, super::computer_use::Rejection> {
+        use super::computer_use::Rejection;
+        use std::sync::atomic::Ordering;
+        let scope = remote_core::shared_files::current_share_scope();
+        if scope.is_none() { return Err(Rejection::Unpaired); }
+        let owner_epoch = self.computer_use_epoch.load(Ordering::Acquire);
+        if owner_epoch == u64::MAX { return Err(Rejection::StaleSession); }
+        let mut service_epoch = None;
+        #[cfg(any(unix, windows))]
+        if let Some(epoch) = self.backend.frontend_epoch() {
+            let epoch = epoch.load(Ordering::Acquire);
+            if epoch != self.observed_service_epoch.load(Ordering::Acquire) {
+                return Err(Rejection::StaleSession);
+            }
+            service_epoch = Some(epoch);
+        }
+        if !s.connected || !s.confirmed || s.pending.is_some()
+            || s.video_error.is_some() || s.paused || s.presentation_hidden
+            || !s.conn.peer_is_responsive() {
+            return Err(Rejection::FrameUnavailable);
+        }
+        let frame = s.texture.as_ref().ok_or(Rejection::FrameUnavailable)?;
+        if !s.current_video_frame(frame.video_epoch, frame.decoded_at) {
+            return Err(Rejection::FrameUnavailable);
+        }
+        Ok(ComputerUseFence {
+            device: s.key.clone(), scope, service_epoch, owner_epoch,
+            subscription: s.video_id, source_revision: s.source_revision(),
+            source: s.source, source_started: s.first_frame_after,
+            video_epoch: frame.video_epoch,
+            input: s.conn.input_binding(s.video_id, s.source_revision()),
+        })
+    }
+
+    /// Trusted in-process adapter only. The caller must already be authorized
+    /// for this device and possess its selected-source binding. Access is an
+    /// upper bound, not a permission grant; Control also requires can_input().
+    /// Native frame handles are returned unchanged: no CPU readback, new capture
+    /// or claim of physical presentation. A wire/export adapter is still needed.
+    pub(crate) fn observe_bound_computer_use(
+        &self, binding: &SourceViewBinding, expected_device: &str,
+        expected_source: CaptureSource, access: super::computer_use::Access,
+    ) -> Result<ComputerUseObservation, super::computer_use::Rejection> {
+        use super::computer_use::{Access, Observation, Rejection};
+        let p = self.pool.lock().unwrap();
+        let s = &p.active().ok_or(Rejection::NoSession)?.session;
+        let fence = self.computer_use_fence(s)?;
+        if s.key != expected_device || s.source != expected_source
+            || !binding.matches(&s.conn, fence.scope) {
+            return Err(Rejection::StaleSession);
+        }
+        if access == Access::Control && (!s.can_input() || fence.input.is_none()) {
+            return Err(Rejection::InputNotAllowed);
+        }
+        if access == Access::Control && (!s.keys.is_empty() || !s.mouse.is_empty() || s.modifiers != 0) {
+            return Err(Rejection::InputBusy);
+        }
+        Ok(Observation::new(&s.conn, fence, s.texture.as_ref().unwrap().clone(),
+            access, Instant::now()))
+    }
+
+    /// Dispatch to the exact observed host grant, under the same session lock.
+    /// This does not refocus, unlock, reconnect, start video or refresh a lease.
+    /// Success means queued locally, not an acknowledgement of remote effects.
+    pub(crate) fn act_bound_computer_use(
+        &self, observation: &mut ComputerUseObservation, action: super::computer_use::Action,
+    ) -> Result<super::computer_use::Queued, super::computer_use::Rejection> {
+        use super::computer_use::Rejection;
+        let mut p = self.pool.lock().unwrap();
+        let s = &mut p.active_mut().ok_or_else(|| {
+            observation.invalidate(); Rejection::NoSession
+        })?.session;
+        let fence = self.computer_use_fence(s).inspect_err(|_| observation.invalidate())?;
+        if !s.keys.is_empty() || !s.mouse.is_empty() || s.modifiers != 0 {
+            observation.invalidate();
+            return Err(Rejection::InputBusy);
+        }
+        let binding = fence.input.ok_or_else(|| {
+            observation.invalidate(); Rejection::InputNotAllowed
+        })?;
+        let connection = s.conn.clone();
+        let mut port = ComputerUseInput { connection: &connection, binding };
+        let result = observation.act(&connection, &fence, Instant::now(), s.can_input(), action, &mut port);
+        if result.is_ok() || matches!(result, Err(Rejection::QueueRejected { .. })) {
+            // Require a new observation after every attempted effect, including
+            // for other receipts captured concurrently from the same picture.
+            self.revoke_computer_use();
+        }
+        if matches!(result, Err(Rejection::QueueRejected { .. })) {
+            s.locked = true;
+            s.error = "Computer-use input queue rejected; exact-grant release attempted, remote result unknown".into();
+        }
+        result
+    }
+
     pub fn queue_viewing_input(&self, event: InputEvent) -> bool {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
         let Some(e) = p.active_mut() else {
             return false;
         };
@@ -978,6 +1129,7 @@ impl OriginalOwner {
     }
     pub fn set_input_locked(&self, locked: bool) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
 
         if let Some(e) = p.active_mut() {
             if locked {
@@ -988,6 +1140,7 @@ impl OriginalOwner {
     }
     pub fn release_input(&self) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
 
         if let Some(e) = p.active_mut() {
             e.session.release_input();
@@ -997,6 +1150,7 @@ impl OriginalOwner {
         self.presentation_visible.store(visible, std::sync::atomic::Ordering::Release);
         self.input_focused.store(focused, std::sync::atomic::Ordering::Release);
         let mut p = self.pool.lock().unwrap();
+        if !visible || !focused { self.revoke_computer_use(); }
         if let Some(e) = p.active_mut() {
             e.session.set_presentation_hidden(!visible);
             e.session.set_input_focused(focused);
@@ -1004,6 +1158,7 @@ impl OriginalOwner {
     }
     pub fn set_media_paused(&self, paused: bool) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
 
         if let Some(e) = p.active_mut()
             && e.session.paused != paused
@@ -1306,6 +1461,7 @@ impl OriginalOwner {
 
     pub fn close_all(&self) {
         let mut p = self.pool.lock().unwrap();
+        self.revoke_computer_use();
         p.directed_receive = None;
         p.tabs.clear();
         p.pending_settings.clear();

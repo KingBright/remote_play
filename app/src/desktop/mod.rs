@@ -23,6 +23,8 @@ pub(crate) use model::OriginalGuiSession;
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod original_owner;
 #[cfg(feature = "gpui-restoration")]
+pub(crate) mod computer_use;
+#[cfg(feature = "gpui-restoration")]
 mod original_presenter;
 mod requests;
 

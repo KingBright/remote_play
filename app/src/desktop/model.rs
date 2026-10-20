@@ -528,6 +528,8 @@ impl<Texture, Pan: Default> SessionState<Texture, Pan> {
             && !recovery.waiting
             && decoded_at >= self.first_frame_after.max(recovery.began_at)
     }
+    pub(crate) fn source_revision(&self) -> u32 { self.source_revision }
+
     pub fn input_command(&self, event: InputEvent) -> SessionCommand {
         SessionCommand::SourceInput {id:self.video_id,source_revision:self.source_revision,event}
     }

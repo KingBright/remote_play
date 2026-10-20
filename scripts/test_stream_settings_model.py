@@ -50,6 +50,8 @@ SESSION_CLOCK_TESTS = {
     "relay-transport": ("remote_core", "relay::tests"),
     "discovery-observation": ("remote_core", "discovery::tests"),
     "desktop-network": ("weavelo_app", "network_diagnostics::tests"),
+    "computer-use": ("weavelo_app", "computer_use"),
+    "computer-use-input": ("weavelo_app", "desktop::model::static_input_tests"),
     "bridge-network": ("remote_client_bridge", "network_diagnostics::tests"),
     "pairing-qr": ("remote_core", "pairing_qr::tests"),
     "pairing-image": ("remote_core", "pairing_image::tests"),

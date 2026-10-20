@@ -45,6 +45,15 @@ For release-script checks in the primary checkout, use
 user bytecode files. A focused Rust run verifies the primary source entry. Earlier compiled evidence
 remains tied to its recorded source hashes, profiles and original build location.
 
+## Owner-local computer-use validation
+
+The owner-local computer-use interface has fixed focused modes `computer-use`
+and `computer-use-input`. They compile the actual application library with its
+GPUI/Tokio dependencies and run the receipt and existing source/input-boundary
+tests. `platform-macos-check` also checks the product binary with native video.
+These checks do not establish Octendra dispatcher integration, GPU pixel export,
+physical presentation, remote execution acknowledgement or device acceptance.
+
 ## Linux X11 test compilation on the existing Mac
 
 `python3 -B scripts/test_stream_settings_model.py --mode linux-x11-check`
