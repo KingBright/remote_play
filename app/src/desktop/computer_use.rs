@@ -84,10 +84,11 @@ impl<C, Fence: PartialEq, Frame> Observation<C, Fence, Frame> {
 
     pub(super) fn invalidate(&mut self) { self.consumed = true; }
 
-    pub(super) fn act(
+    /// Shared by dispatch and snapshot export. The owner keeps its session lock
+    /// through validation and byte selection; a retained frame is not authority.
+    pub(super) fn validate_current(
         &mut self, connection: &Arc<C>, current: &Fence, now: Instant,
-        input_allowed: bool, action: Action, port: &mut impl InputPort,
-    ) -> Result<Queued, Rejection> {
+    ) -> Result<(), Rejection> {
         if self.consumed { return Err(Rejection::Consumed); }
         if self.fence != *current || !self.connection.upgrade()
             .is_some_and(|old| Arc::ptr_eq(&old, connection)) {
@@ -99,6 +100,14 @@ impl<C, Fence: PartialEq, Frame> Observation<C, Fence, Frame> {
             self.consumed = true;
             return Err(Rejection::Expired);
         }
+        Ok(())
+    }
+
+    pub(super) fn act(
+        &mut self, connection: &Arc<C>, current: &Fence, now: Instant,
+        input_allowed: bool, action: Action, port: &mut impl InputPort,
+    ) -> Result<Queued, Rejection> {
+        self.validate_current(connection, current, now)?;
         if self.access != Access::Control || !input_allowed {
             self.consumed = true;
             return Err(Rejection::InputNotAllowed);
@@ -233,6 +242,27 @@ mod tests {
             assert_eq!(port.calls, 0); assert_eq!(port.releases, 0);
         }
     }
+    #[test]
+    fn read_only_export_validation_neither_grants_control_nor_consumes_receipt() {
+        let c = Arc::new(42); let now = Instant::now();
+        let mut o = observation(&c, Access::Observe, now);
+        assert_eq!(o.validate_current(&c, &[1; 7], now), Ok(()));
+        assert_eq!(o.validate_current(&c, &[1; 7], now), Ok(()));
+        let mut port = Recorder::default();
+        assert_eq!(o.act(&c, &[1; 7], now, true, key(), &mut port), Err(Rejection::InputNotAllowed));
+        assert!(port.sent.is_empty());
+    }
+
+    #[test]
+    fn export_validation_rejects_expiry_and_changed_generation() {
+        let c = Arc::new(42); let now = Instant::now();
+        let mut expired = observation(&c, Access::Observe, now - Duration::from_secs(31));
+        assert_eq!(expired.validate_current(&c, &[1; 7], now), Err(Rejection::Expired));
+        let mut stale = observation(&c, Access::Observe, now);
+        assert_eq!(stale.validate_current(&c, &[2; 7], now), Err(Rejection::StaleSession));
+        assert_eq!(stale.validate_current(&c, &[1; 7], now), Err(Rejection::Consumed));
+    }
+
     #[test]
     fn scroll_keeps_normalized_position_and_bounded_delta() {
         let c = Arc::new(42); let now = Instant::now(); let mut o = observation(&c, Access::Control, now);

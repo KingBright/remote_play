@@ -50,7 +50,10 @@ remains tied to its recorded source hashes, profiles and original build location
 The owner-local computer-use interface has fixed focused modes `computer-use`
 and `computer-use-input`. They compile the actual application library with its
 GPUI/Tokio dependencies and run the receipt and existing source/input-boundary
-tests. `platform-macos-check` also checks the product binary with native video.
+tests. `computer-use-pixels` runs the bounded CPU RGBA layout/byte tests in the
+actual client crate. Export revalidates the session before selecting bytes;
+native buffers report `NativeReadbackUnsupported` and CPU color metadata remains
+`Unspecified`. `platform-macos-check` also checks the product binary with native video.
 These checks do not establish Octendra dispatcher integration, GPU pixel export,
 physical presentation, remote execution acknowledgement or device acceptance.
 

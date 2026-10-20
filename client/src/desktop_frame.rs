@@ -92,3 +92,21 @@ pub fn rgba(frame: &crate::MacDecodedVideoFrame) -> Result<RgbaFrame, String> {
         })
     }
 }
+
+
+/// Snapshot-only boundary. Never use the renderer's conversion as a hidden
+/// native readback fallback: synchronization/color provenance is not implemented.
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+pub fn observation_rgba(
+    frame: &crate::MacDecodedVideoFrame, maximum: usize,
+) -> Result<crate::observation_pixels::CpuRgba, crate::observation_pixels::PixelError> {
+    use remote_core::{VideoFrame, VideoFrameHandleKind};
+    use crate::observation_pixels::PixelError;
+    if !matches!(frame.handle_kind(), VideoFrameHandleKind::CpuMemory) {
+        return Err(PixelError::NativeReadbackUnsupported);
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    { crate::observation_pixels::CpuRgba::from_decoded(frame.width, frame.height, frame.rgba.clone(), maximum) }
+    #[cfg(target_os = "macos")]
+    { let _ = (frame, maximum); Err(PixelError::NativeReadbackUnsupported) }
+}

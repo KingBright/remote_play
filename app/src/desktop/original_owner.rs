@@ -85,6 +85,12 @@ pub(crate) struct ComputerUseFence {
 pub(crate) type ComputerUseObservation = super::computer_use::Observation<
     WorkspaceConnection, ComputerUseFence, MacDecodedVideoFrame>;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ComputerUseExportError {
+    Session(super::computer_use::Rejection),
+    Pixels(client::observation_pixels::PixelError),
+}
+
 struct ComputerUseInput<'a> {
     connection: &'a WorkspaceConnection,
     binding: protocol::realtime_input::InputBinding,
@@ -1046,6 +1052,29 @@ impl OriginalOwner {
         }
         Ok(Observation::new(&s.conn, fence, s.texture.as_ref().unwrap().clone(),
             access, Instant::now()))
+    }
+
+    /// Revalidate the original observation before returning any pixels. This
+    /// synchronous CPU path holds the pool lock through validation/Arc cloning.
+    /// Native buffers explicitly remain unsupported; a future async readback
+    /// must revalidate again after completion and before publishing its bytes.
+    pub(crate) fn export_bound_computer_use(
+        &self, observation: &mut ComputerUseObservation, maximum: usize,
+    ) -> Result<client::observation_pixels::CpuRgba, ComputerUseExportError> {
+        use super::computer_use::Rejection;
+        let p = self.pool.lock().unwrap();
+        let s = &p.active().ok_or_else(|| {
+            observation.invalidate();
+            ComputerUseExportError::Session(Rejection::NoSession)
+        })?.session;
+        let fence = self.computer_use_fence(s).map_err(|error| {
+            observation.invalidate();
+            ComputerUseExportError::Session(error)
+        })?;
+        observation.validate_current(&s.conn, &fence, Instant::now())
+            .map_err(ComputerUseExportError::Session)?;
+        client::desktop_frame::observation_rgba(observation.frame(), maximum)
+            .map_err(ComputerUseExportError::Pixels)
     }
 
     /// Dispatch to the exact observed host grant, under the same session lock.

@@ -4,6 +4,7 @@ pub mod linux_hevc;
 pub mod linux_playback;
 pub mod audio_player;
 pub mod desktop_frame;
+pub mod observation_pixels;
 mod host_config;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
