@@ -1385,6 +1385,16 @@ mod tests {
             String::from_utf8_lossy(&output.stderr));
     }
 
+    #[test]
+    fn retry_reason_remains_visible_until_connection_succeeds() {
+        let diagnostics = RelayTunnelDiagnostics::default();
+        diagnostics.retry(RelayFailure::Timeout);
+        diagnostics.attempt();
+        assert_eq!(diagnostics.snapshot().last_error, Some(RelayFailure::Timeout));
+        diagnostics.connected();
+        assert_eq!(diagnostics.snapshot().last_error, None);
+    }
+
     #[tokio::test]
     async fn websocket_diagnostics_distinguish_registration_pong_and_reconnect() {
         use crate::relay_status::RelayConnectionState;

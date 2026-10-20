@@ -418,3 +418,34 @@ lifecycle 5 passed; release scripts 607 run with 8 conditional skips; Android JV
 the original lifecycle authority/binding, locked offline dependencies and canonical
 shared target; both confirmed unchanged sources and no remaining owned process group.
 Physical discovery and recovery acceptance is recorded separately after deployment.
+
+
+### Physical code16 observation and final code17 follow-up
+
+The one code16 producer and independent APK verification passed: original signer,
+ARM64, 29 JNI symbols, 16 KiB alignment, non-debuggable, 17,333,046 bytes, APK SHA-256
+`e4a9fed569bd4745fcc358134a498309725c90b6270efb9ddd372b5df4f3a439`, native SHA-256
+`022b34a632f4a8a44ab1a557a00ba072273c0b628f40b3eefe0bbd585863a5e2`.
+A single install-r completed at 2026-10-20T05:56:03Z. Installed bytes matched;
+first-install time, CE inode 132535, DE inode 132546 and observed grants were retained.
+Cold launch took 175 ms. The new Settings UI showed runtime group digest prefix
+`e2d45152dc05`, generation 1, reload 0/0 and P2P running. Both relays were connecting
+with registration writes/Pongs 0/0; phone devices and Book background routes were 0.
+
+The existing global Android log level was S, so application logs were unavailable;
+that setting was preserved. PTY UI hierarchy observations emitted only fixed status
+labels, counters, coordinates and public hash prefixes. No hierarchy, invitation or
+QR image was retained. At 06:00Z the phone had default network 136 with Wi-Fi/VPN;
+shell HTTPS requests to the relay and example.com timed out. At 06:01Z, forced
+current public IPv4 addresses removed phone DNS from the test: both TCP connections
+completed, but TLS returned error 35 with no completed handshake. These shell probes
+are independent transport evidence, not application-UID registration proof. They do
+not identify VPN as the cause. Real mutual discovery has not passed in this state.
+
+Final review preserves independent LAN/P2P when local relay binding is unavailable,
+keeps the most recent relay retry reason visible until a connection succeeds, and
+adds connection-attempt counts and a public local-device hash prefix to Settings.
+The follow-up uses code17 so the published code16 artifact is never relabeled.
+The owner has been asked to restore usable phone HTTPS while retaining pairing and
+keeping Weavelo foreground. Physical mutual discovery and outage recovery remain
+pending that condition; no VPN/security configuration was changed by the agent.

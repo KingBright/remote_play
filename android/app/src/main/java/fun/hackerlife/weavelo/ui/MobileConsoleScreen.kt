@@ -987,11 +987,13 @@ private fun SettingsTabContent(
                 Text("CONNECTION STATUS", color = ColorTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 TelemetryLaneRow("Discovery", status.phase, ColorAccentCyan)
                 TelemetryLaneRow("Runtime network", status.networkHash.take(12).ifEmpty { "Starting" }, ColorTextPrimary)
+                TelemetryLaneRow("This device", status.deviceHash.take(12).ifEmpty { "Starting" }, ColorTextPrimary)
                 TelemetryLaneRow("Configuration", "${status.reloadApplied}/${status.reloadRequested} · run ${status.generation}", ColorTextPrimary)
                 TelemetryLaneRow("Routes / Devices", "${status.routes} / ${status.peers}", ColorTextPrimary)
                 TelemetryLaneRow("Direct discovery", status.p2p, ColorTextPrimary)
                 for ((name, relay) in listOf("Control relay" to status.control, "Discovery relay" to status.discovery)) {
                     TelemetryLaneRow(name, relay.state, ColorAccentCyan)
+                    TelemetryLaneRow("Connection attempts", relay.attempts.toString(), ColorTextPrimary)
                     TelemetryLaneRow("Registration writes / Pongs", "${relay.registrationsSent} / ${relay.pongsReceived}", ColorTextPrimary)
                     if (relay.error.isNotEmpty()) TelemetryLaneRow("Relay reason", relay.error, ColorTextSecondary)
                 }

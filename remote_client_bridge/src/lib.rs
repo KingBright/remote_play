@@ -1117,9 +1117,8 @@ async fn run_bridge_network(
                 tasks.push(tokio::spawn(async move { let _ = bindings.discovery.run(discovery_cancel).await; }));
             }
             Startup::TimedOut | Startup::Complete(Err(_)) => {
+                // Preserve independent LAN/P2P discovery when local relay binding fails.
                 diagnostics.failed(NetworkFailure::RelayBindUnavailable);
-                tasks.stop().await;
-                return Err(std::io::Error::other("relay startup unavailable").into());
             }
         }
     }

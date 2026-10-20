@@ -63,12 +63,14 @@ impl RelayTunnelDiagnostics {
         self.update(|s| {
             s.value.state = RelayConnectionState::Connecting;
             s.value.attempts = s.value.attempts.saturating_add(1);
-            s.value.last_error = None;
             s.last_pong = None;
         });
     }
     pub(crate) fn connected(&self) {
-        self.update(|s| s.value.state = RelayConnectionState::Connected);
+        self.update(|s| {
+            s.value.state = RelayConnectionState::Connected;
+            s.value.last_error = None;
+        });
     }
     pub(crate) fn registration_sent(&self) {
         self.update(|s| s.value.registrations_sent = s.value.registrations_sent.saturating_add(1));
