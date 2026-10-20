@@ -65,6 +65,9 @@ object WeaveloClient {
     private val _devices = MutableStateFlow<List<HostDevice>>(emptyList())
     val devices: StateFlow<List<HostDevice>> = _devices.asStateFlow()
 
+    private val _discoveryDiagnostics = MutableStateFlow(DiscoveryDiagnostics())
+    val discoveryDiagnostics: StateFlow<DiscoveryDiagnostics> = _discoveryDiagnostics.asStateFlow()
+
     private val _networkName = MutableStateFlow("")
     val networkName: StateFlow<String> = _networkName.asStateFlow()
 
@@ -353,6 +356,13 @@ object WeaveloClient {
 
     fun refreshDevices() {
         if (!isNativeLoaded) return
+        runCatching {
+            val diagnostics = DiscoveryDiagnostics.parse(nativeGetDiscoveryDiagnosticsJson() ?: "{}")
+            if (diagnostics.transitionKey() != _discoveryDiagnostics.value.transitionKey()) {
+                android.util.Log.i("WeaveloDiscovery", diagnostics.publicEvidenceJson())
+            }
+            _discoveryDiagnostics.value = diagnostics
+        }
         val jsonStr = nativeGetDevicesJson() ?: return
         try {
             val array = org.json.JSONArray(jsonStr)
@@ -439,6 +449,7 @@ object WeaveloClient {
     private external fun nativeRequestKeyframe()
     private external fun nativePollAudioPacket(): ByteArray?
     private external fun nativeGetDevicesJson(): String?
+    private external fun nativeGetDiscoveryDiagnosticsJson(): String?
     private external fun nativeGetNetworkIdentityJson(): String?
     private external fun nativeGetInvitationJson(): String?
     private external fun nativeJoinPairingPayload(payload: String): String?

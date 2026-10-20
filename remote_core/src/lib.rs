@@ -26,6 +26,7 @@ pub mod pairing_qr;
 #[cfg(feature = "pairing-image")]
 pub mod pairing_image;
 pub mod relay;
+pub mod relay_status;
 pub mod role;
 pub mod scheduled_sender;
 pub mod session_crypto;

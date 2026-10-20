@@ -6,6 +6,8 @@ mod workspace_touch;
 #[cfg(feature = "android")]
 pub mod jni_bridge;
 mod startup_diagnostics;
+mod network_diagnostics;
+use network_diagnostics::{NetworkDiagnostics, NetworkFailure, NetworkTasks, P2pPhase, Startup, cancellable_startup};
 mod pairing_export;
 
 #[cfg(feature = "wasm")]
@@ -257,6 +259,7 @@ pub struct RemoteBridgeClient {
     desired_media_paused: AtomicBool,
     network_reload_tx: mpsc::UnboundedSender<()>,
     network_enabled: Arc<AtomicBool>,
+    network_diagnostics: Arc<NetworkDiagnostics>,
 }
 
 impl Default for RemoteBridgeClient {
@@ -309,6 +312,7 @@ impl RemoteBridgeClient {
             desired_media_paused: AtomicBool::new(false),
             network_reload_tx,
             network_enabled: Arc::new(AtomicBool::new(true)),
+            network_diagnostics: Arc::default(),
         };
         client.ensure_discovery(network_reload_rx);
         client
@@ -463,6 +467,10 @@ impl RemoteBridgeClient {
         self.audio_queue.lock().ok()?.pop_front()
     }
 
+    pub fn network_diagnostics_json(&self) -> String {
+        serde_json::to_string(&self.network_diagnostics.snapshot()).unwrap_or_else(|_| "{}".into())
+    }
+
     pub fn devices_json(&self) -> String {
         serde_json::to_string(&*self.devices_rx.borrow()).unwrap_or_else(|_| "[]".to_string())
     }
@@ -512,7 +520,7 @@ impl RemoteBridgeClient {
         );
         self.devices_tx.send_replace(Vec::new());
         self.network_enabled.store(true, Relaxed);
-        let _ = self.network_reload_tx.send(());
+        self.request_discovery_reload();
         Ok((
             format!(
                 "Joined network {}. Discovering members...",
@@ -528,13 +536,21 @@ impl RemoteBridgeClient {
             devices_tx,
             network_reload_rx,
             self.network_enabled.clone(),
+            self.network_diagnostics.clone(),
         ));
+    }
+
+    fn request_discovery_reload(&self) {
+        self.network_diagnostics.request_reload();
+        if self.network_reload_tx.send(()).is_err() {
+            self.network_diagnostics.failed(NetworkFailure::SupervisorUnavailable);
+        }
     }
 
     /// Suspend discovery and route keepalives only after the live session has ended.
     pub fn set_network_enabled(&self, enabled: bool) {
         if self.network_enabled.swap(enabled, Relaxed) != enabled {
-            let _ = self.network_reload_tx.send(());
+            self.request_discovery_reload();
         }
     }
 
@@ -996,277 +1012,222 @@ fn hevc_keyframe(data: &[u8]) -> bool {
     })
 }
 
+type BridgeNetworkError = Box<dyn std::error::Error + Send + Sync>;
+const NETWORK_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn run_bridge_network_supervisor(
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
     mut reload_rx: mpsc::UnboundedReceiver<()>,
     enabled: Arc<AtomicBool>,
+    diagnostics: Arc<NetworkDiagnostics>,
 ) {
     loop {
         if !enabled.load(Relaxed) {
-            if reload_rx.recv().await.is_none() {
-                break;
-            }
+            diagnostics.paused();
+            if reload_rx.recv().await.is_none() { break; }
             continue;
         }
+        // Only the most recent persisted configuration needs a runtime.
+        while reload_rx.try_recv().is_ok() {}
+        let requested = diagnostics.requested();
         let (cancel_tx, _) = broadcast::channel(8);
         let network_devices_tx = devices_tx.clone();
         let network_cancel_tx = cancel_tx.clone();
-        let mut network_task =
-            tokio::spawn(
-                async move { run_bridge_network(network_devices_tx, network_cancel_tx).await },
-            );
-
+        let network_cancel_rx = cancel_tx.subscribe();
+        let network_diagnostics = diagnostics.clone();
+        let mut network_task = tokio::spawn(async move {
+            run_bridge_network(network_devices_tx, network_cancel_tx, network_cancel_rx, network_diagnostics, requested).await
+        });
         tokio::select! {
+            biased;
             reload = reload_rx.recv() => {
                 let _ = cancel_tx.send(());
                 let _ = network_task.await;
                 devices_tx.send_replace(Vec::new());
-                if reload.is_none() {
-                    break;
-                }
+                if reload.is_none() { break; }
             }
             result = &mut network_task => {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => eprintln!("Bridge network stopped: {err}"),
-                    Err(err) if !err.is_cancelled() => eprintln!("Bridge network task stopped: {err}"),
-                    Err(_) => {}
-                }
+                diagnostics.failed(if result.as_ref().is_err_and(|e| e.is_panic()) {
+                    NetworkFailure::ComponentPanicked
+                } else { NetworkFailure::ComponentExited });
                 devices_tx.send_replace(Vec::new());
                 tokio::select! {
-                    reload = reload_rx.recv() => {
-                        if reload.is_none() {
-                            break;
-                        }
-                    }
+                    reload = reload_rx.recv() => { if reload.is_none() { break; } }
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 }
             }
         }
     }
+    diagnostics.stopped();
 }
 
 async fn run_bridge_network(
     devices_tx: watch::Sender<Vec<BridgeDiscoveredDevice>>,
     cancel_tx: broadcast::Sender<()>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Subscribe before startup awaits so a background cancellation is not lost.
-    let mut cancel_rx = cancel_tx.subscribe();
+    mut cancel_rx: broadcast::Receiver<()>,
+    diagnostics: Arc<NetworkDiagnostics>,
+    requested: u64,
+) -> Result<(), BridgeNetworkError> {
     let store = AppPrivateMeshConfigStore::new(bridge_device_group_dir());
-    let identity = store.load_or_generate("Weavelo Android")?;
+    let identity = match store.load_or_generate("Weavelo Android") {
+        Ok(identity) => identity,
+        Err(error) => { diagnostics.failed(NetworkFailure::ProfileUnavailable); return Err(error.into()); }
+    };
+    diagnostics.begin(&identity, requested);
     let live_capabilities = publisher_capabilities();
     let announcement = DiscoveryAnnouncement {
-        network_name: identity.network_name.clone(),
-        device_id: identity.node_id.clone(),
-        display_name: identity.display_name.clone(),
-        control_port: PUBLISHING_PORT.load(Relaxed),
-        virtual_ip: None,
-        capabilities: *live_capabilities.borrow(),
-        scope: DiscoveryScope::Lan,
-        ttl: DEFAULT_PEER_TTL,
+        network_name: identity.network_name.clone(), device_id: identity.node_id.clone(),
+        display_name: identity.display_name.clone(), control_port: PUBLISHING_PORT.load(Relaxed),
+        virtual_ip: None, capabilities: *live_capabilities.borrow(), scope: DiscoveryScope::Lan, ttl: DEFAULT_PEER_TTL,
     };
     let discovery_target = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DISCOVERY_PORT));
     let mut discovery_config = DiscoveryRuntimeConfig::lan_default(announcement.clone());
     discovery_config.accept_any_network = false;
     discovery_config.live_capabilities = Some(live_capabilities.clone());
-    let mut network_tasks = Vec::new();
+    let mut tasks = NetworkTasks::default();
 
-    // Unit tests stay hermetic. Android/native builds use the same public P2P + relay
-    // fabric as the desktop app.
     if !cfg!(test) {
-        match start_bridge_p2p(
-            &identity,
-            &announcement,
-            live_capabilities.clone(),
-            discovery_target,
-            cancel_tx.clone(),
-        )
-        .await
-        {
-            Ok(task) => network_tasks.push(task),
-            Err(err) => eprintln!("Bridge P2P unavailable; relay fallback remains active: {err}"),
-        }
-
+        // P2P DNS is independent of LAN and relay startup, bounded and cancellable.
+        let p2p_identity = identity.clone(); let p2p_announcement = announcement.clone();
+        let p2p_capabilities = live_capabilities.clone(); let p2p_cancel = cancel_tx.subscribe();
+        let p2p_diagnostics = diagnostics.clone();
+        tasks.push(tokio::spawn(async move {
+            run_bridge_p2p(p2p_identity, p2p_announcement, p2p_capabilities,
+                discovery_target, p2p_cancel, p2p_diagnostics).await;
+        }));
         let host_target = (announcement.control_port != 0)
             .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
-        match start_bridge_relay(&identity, host_target, discovery_target, cancel_tx.clone()).await {
-            Ok((control_endpoint, discovery_endpoint, routes, tasks)) => {
-                discovery_config
-                    .relay_routes
-                    .push((discovery_endpoint, routes));
+        match cancellable_startup(bind_bridge_relay(&identity, host_target, discovery_target),
+            &mut cancel_rx, NETWORK_STARTUP_TIMEOUT).await {
+            Startup::Cancelled => { tasks.stop().await; return Ok(()); }
+            Startup::Complete(Ok(bindings)) => {
+                let control_endpoint = bindings.control.local_addr()?;
+                let discovery_endpoint = bindings.discovery.local_addr()?;
+                discovery_config.relay_routes.push((discovery_endpoint, bindings.router.routes()));
                 discovery_config.announce_targets.push(discovery_endpoint);
-                discovery_config
-                    .route_overrides
-                    .push(DiscoveryRouteOverride {
-                        source: discovery_endpoint,
-                        endpoint: control_endpoint,
-                        scope: DiscoveryScope::Relay,
-                    });
-                network_tasks.extend(tasks);
+                discovery_config.route_overrides.push(DiscoveryRouteOverride {
+                    source: discovery_endpoint, endpoint: control_endpoint, scope: DiscoveryScope::Relay,
+                });
+                diagnostics.attach_relays(bindings.control.diagnostics(), bindings.discovery.diagnostics());
+                let router_cancel = cancel_tx.subscribe();
+                let control_cancel = cancel_tx.subscribe();
+                let discovery_cancel = cancel_tx.subscribe();
+                tasks.push(tokio::spawn(async move { let _ = bindings.router.run(control_endpoint, router_cancel).await; }));
+                tasks.push(tokio::spawn(async move { let _ = bindings.control.run(control_cancel).await; }));
+                tasks.push(tokio::spawn(async move { let _ = bindings.discovery.run(discovery_cancel).await; }));
             }
-            Err(err) => eprintln!("Bridge relay unavailable; LAN/P2P remain active: {err}"),
+            Startup::TimedOut | Startup::Complete(Err(_)) => {
+                diagnostics.failed(NetworkFailure::RelayBindUnavailable);
+                tasks.stop().await;
+                return Err(std::io::Error::other("relay startup unavailable").into());
+            }
         }
     }
 
     let (events_tx, mut events_rx) = mpsc::unbounded_channel();
     let (snapshot_tx, mut snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
-    let discovery_cancel_rx = cancel_tx.subscribe();
-    let discovery_task = tokio::spawn(run_discovery_runtime(
-        discovery_config,
-        events_tx,
-        snapshot_tx,
-        discovery_cancel_rx,
-    ));
-    let event_task = tokio::spawn(async move {
+    let discovery_cancel = cancel_tx.subscribe();
+    tasks.push(tokio::spawn(async move { let _ = run_discovery_runtime(discovery_config, events_tx, snapshot_tx, discovery_cancel).await; }));
+    let event_diagnostics = diagnostics.clone();
+    tasks.push(tokio::spawn(async move {
         while let Some(event) = events_rx.recv().await {
-            if let remote_core::discovery::DiscoveryEvent::Error(err) = event {
-                eprintln!("Bridge discovery: {err}");
-            }
+            if matches!(event, remote_core::discovery::DiscoveryEvent::Error(_)) { event_diagnostics.discovery_error(); }
         }
-    });
-    loop {
+    }));
+    diagnostics.discovering();
+    let mut health = tokio::time::interval(Duration::from_millis(250));
+    let result = loop {
         tokio::select! {
-            _ = cancel_rx.recv() => break,
+            biased;
+            _ = cancel_rx.recv() => break Ok(()),
+            _ = health.tick() => {
+                if let Some(failure) = tasks.finished_failure().await {
+                    diagnostics.failed(failure);
+                    break Err(std::io::Error::other("network component stopped").into());
+                }
+            }
             changed = snapshot_rx.changed() => {
                 if changed.is_err() {
-                    break;
+                    diagnostics.failed(NetworkFailure::DiscoveryStopped);
+                    break Err(std::io::Error::other("discovery worker stopped").into());
                 }
                 let snapshot = snapshot_rx.borrow().clone();
-                devices_tx.send_replace(devices_from_snapshot(&snapshot));
+                let devices = devices_from_snapshot(&snapshot);
+                let hashes = devices.iter().take(64).map(|device| remote_core::mesh::public_metadata_fingerprint(&device.device_id)).collect();
+                diagnostics.peers(snapshot.len(), hashes, devices.len());
+                devices_tx.send_replace(devices);
             }
         }
-    }
-
+    };
     let _ = cancel_tx.send(());
-    discovery_task.abort();
-    event_task.abort();
-    let _ = discovery_task.await;
-    let _ = event_task.await;
-    for task in network_tasks {
-        task.abort();
-        let _ = task.await;
-    }
-    Ok(())
+    tasks.stop().await;
+    result
 }
 
-async fn start_bridge_p2p(
-    identity: &MeshConfig,
-    announcement: &DiscoveryAnnouncement,
-    live_capabilities: watch::Receiver<DiscoveryCapabilities>,
-    discovery_target: SocketAddr,
-    cancel_tx: broadcast::Sender<()>,
-) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
-    let rendezvous_name = std::env::var("WEAVELO_P2P_RENDEZVOUS")
-        .unwrap_or_else(|_| DEFAULT_P2P_RENDEZVOUS.to_string());
+async fn bind_bridge_p2p(
+    identity: &MeshConfig, announcement: &DiscoveryAnnouncement,
+    live_capabilities: watch::Receiver<DiscoveryCapabilities>, discovery_target: SocketAddr,
+) -> Result<BoundP2pTunnel, BridgeNetworkError> {
+    let rendezvous_name = std::env::var("WEAVELO_P2P_RENDEZVOUS").unwrap_or_else(|_| DEFAULT_P2P_RENDEZVOUS.to_string());
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
     let rendezvous_addrs = resolve_p2p_rendezvous_addrs(&rendezvous_name, bind_addr).await?;
-    let group_id = derive_p2p_group_id(
-        &identity.network_name,
-        identity.network_secret.expose_secret(),
-    )?;
-    let mut config = P2pTunnelConfig::new(
-        bind_addr,
-        rendezvous_addrs[0],
-        group_id,
-        identity.node_id.clone(),
-        announcement.encode()?,
-    )?
-    .with_rendezvous_addrs(rendezvous_addrs)
-    .with_live_capabilities(live_capabilities)
-    .with_routing_key(remote_core::routed_relay::derive_routing_key(
-        identity.network_secret.expose_secret().as_bytes(),
-    ))
-    .with_discovery_target_addr(discovery_target);
+    let group_id = derive_p2p_group_id(&identity.network_name, identity.network_secret.expose_secret())?;
+    let mut config = P2pTunnelConfig::new(bind_addr, rendezvous_addrs[0], group_id,
+        identity.node_id.clone(), announcement.encode()?)?
+        .with_rendezvous_addrs(rendezvous_addrs).with_live_capabilities(live_capabilities)
+        .with_routing_key(remote_core::routed_relay::derive_routing_key(identity.network_secret.expose_secret().as_bytes()))
+        .with_discovery_target_addr(discovery_target);
     config.local_target_addr = (announcement.control_port != 0)
         .then(|| SocketAddr::from(([127, 0, 0, 1], announcement.control_port)));
-    let tunnel = BoundP2pTunnel::bind(config).await?;
-    let (snapshot_tx, _snapshot_rx) = watch::channel(Default::default());
-    Ok(tokio::spawn(async move {
-        if let Err(err) = tunnel.run(cancel_tx.subscribe(), snapshot_tx).await {
-            eprintln!("Bridge P2P tunnel stopped: {err}");
-        }
-    }))
+    Ok(BoundP2pTunnel::bind(config).await?)
 }
 
-async fn start_bridge_relay(
-    identity: &MeshConfig,
-    host_target: Option<SocketAddr>,
-    discovery_target: SocketAddr,
-    cancel_tx: broadcast::Sender<()>,
-) -> Result<
-    (
-        SocketAddr,
-        SocketAddr,
-        remote_core::routed_relay::PeerRelayRoutes,
-        Vec<tokio::task::JoinHandle<()>>,
-    ),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let relay_url = std::env::var("WEAVELO_RELAY_SERVER_ADDR")
-        .unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
-    let control_group = derive_relay_group_id(
-        &identity.network_name,
-        identity.network_secret.expose_secret(),
-        "control-device-v1",
-    )?;
-    let discovery_group = derive_relay_group_id(
-        &identity.network_name,
-        identity.network_secret.expose_secret(),
-        "discovery",
-    )?;
-    let router = remote_core::routed_relay::RoutedRelay::bind(
-        identity.node_id.clone(),
-        remote_core::routed_relay::derive_routing_key(
-            identity.network_secret.expose_secret().as_bytes(),
-        ),
-        host_target,
-    )
-    .await?;
+async fn run_bridge_p2p(
+    identity: MeshConfig, announcement: DiscoveryAnnouncement,
+    live_capabilities: watch::Receiver<DiscoveryCapabilities>, discovery_target: SocketAddr,
+    mut cancel: broadcast::Receiver<()>, diagnostics: Arc<NetworkDiagnostics>,
+) {
+    loop {
+        diagnostics.p2p(P2pPhase::Resolving, None);
+        match cancellable_startup(bind_bridge_p2p(&identity, &announcement,
+            live_capabilities.clone(), discovery_target), &mut cancel, NETWORK_STARTUP_TIMEOUT).await {
+            Startup::Cancelled => return,
+            Startup::TimedOut => diagnostics.p2p(P2pPhase::RetryWait, Some(NetworkFailure::StartupTimeout)),
+            Startup::Complete(Err(_)) => diagnostics.p2p(P2pPhase::RetryWait, Some(NetworkFailure::P2pUnavailable)),
+            Startup::Complete(Ok(tunnel)) => {
+                if cancel.try_recv().is_ok() { return; }
+                diagnostics.p2p(P2pPhase::Running, None);
+                let (snapshot_tx, _snapshot_rx) = watch::channel(Default::default());
+                let _ = tunnel.run(cancel.resubscribe(), snapshot_tx).await;
+                diagnostics.p2p(P2pPhase::RetryWait, Some(NetworkFailure::P2pUnavailable));
+            }
+        }
+        tokio::select! { biased;
+            _ = cancel.recv() => return,
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+    }
+}
+
+struct BridgeRelayBindings {
+    router: remote_core::routed_relay::RoutedRelay,
+    control: BoundWebSocketRelayTunnel,
+    discovery: BoundWebSocketRelayTunnel,
+}
+async fn bind_bridge_relay(identity: &MeshConfig, host_target: Option<SocketAddr>, discovery_target: SocketAddr) -> Result<BridgeRelayBindings, BridgeNetworkError> {
+    let relay_url = std::env::var("WEAVELO_RELAY_SERVER_ADDR").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
+    let control_group = derive_relay_group_id(&identity.network_name, identity.network_secret.expose_secret(), "control-device-v1")?;
+    let discovery_group = derive_relay_group_id(&identity.network_name, identity.network_secret.expose_secret(), "discovery")?;
+    let router = remote_core::routed_relay::RoutedRelay::bind(identity.node_id.clone(),
+        remote_core::routed_relay::derive_routing_key(identity.network_secret.expose_secret().as_bytes()), host_target).await?;
     let router_target = router.local_addr()?;
-    let routes = router.routes();
-    let control_tunnel = BoundWebSocketRelayTunnel::bind(
-        WebSocketRelayTunnelConfig::new(
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            relay_url.clone(),
-            control_group,
-            identity.node_id.clone(),
-        )?
-        .with_local_target_addr(router_target),
-    )
-    .await?;
-    let control_endpoint = control_tunnel.local_addr()?;
-    let discovery_tunnel = BoundWebSocketRelayTunnel::bind(
-        WebSocketRelayTunnelConfig::new(
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            relay_url,
-            discovery_group,
-            identity.node_id.clone(),
-        )?
-        .with_local_target_addr(discovery_target),
-    )
-    .await?;
-    let discovery_endpoint = discovery_tunnel.local_addr()?;
-    let control_cancel_tx = cancel_tx.clone();
-    let router_cancel = cancel_tx.subscribe();
-    let discovery_cancel_tx = cancel_tx;
-    let tasks = vec![
-        tokio::spawn(async move {
-            if let Err(error) = router.run(control_endpoint, router_cancel).await {
-                eprintln!("Bridge addressed relay stopped: {error}");
-            }
-        }),
-        tokio::spawn(async move {
-            if let Err(err) = control_tunnel.run(control_cancel_tx.subscribe()).await {
-                eprintln!("Bridge relay control tunnel stopped: {err}");
-            }
-        }),
-        tokio::spawn(async move {
-            if let Err(err) = discovery_tunnel.run(discovery_cancel_tx.subscribe()).await {
-                eprintln!("Bridge relay discovery tunnel stopped: {err}");
-            }
-        }),
-    ];
-    Ok((control_endpoint, discovery_endpoint, routes, tasks))
+    let control = BoundWebSocketRelayTunnel::bind(WebSocketRelayTunnelConfig::new(
+        SocketAddr::from(([127, 0, 0, 1], 0)), relay_url.clone(), control_group, identity.node_id.clone())?
+        .with_local_target_addr(router_target)).await?;
+    let discovery = BoundWebSocketRelayTunnel::bind(WebSocketRelayTunnelConfig::new(
+        SocketAddr::from(([127, 0, 0, 1], 0)), relay_url, discovery_group, identity.node_id.clone())?
+        .with_local_target_addr(discovery_target)).await?;
+    Ok(BridgeRelayBindings { router, control, discovery })
 }
 
 fn devices_from_snapshot(snapshot: &DiscoveryPeerSnapshot) -> Vec<BridgeDiscoveredDevice> {

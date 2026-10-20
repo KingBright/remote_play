@@ -529,6 +529,18 @@ pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetTeleme
 
 #[cfg(feature = "android")]
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativeGetDiscoveryDiagnosticsJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    match env.new_string(client().network_diagnostics_json()) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[cfg(feature = "android")]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_fun_hackerlife_weavelo_WeaveloClient_nativePollVideoFrame(
     env: JNIEnv,
     _class: JClass,

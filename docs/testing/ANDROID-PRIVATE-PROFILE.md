@@ -381,3 +381,40 @@ and any credential-bearing image transfer in the ordinary apps. This Android
 acceptance does not establish desktop package deployment, video/input, file
 transfer or long-duration session behavior. Earlier pending optical-test fixtures
 and unresolved recovery materials remain protected.
+
+
+## 2026-10-20 code16 discovery repair: implementation checks
+
+The owner authorized the existing Book primary checkout and a signature-compatible
+in-place phone upgrade after restoring the phone network. The owner had already
+joined the phone to Book's group. The persisted group name digest matched, but
+code15's device list and Book's supported background route count remained empty.
+A persisted identity alone does not establish which identity a running worker uses.
+
+A fresh-process regression reproduced a real initialization defect: the locked
+bridge dependency graph enables both rustls providers, while JNI does not execute
+the desktop entrypoint's provider bootstrap. Before the fix, the synthetic WSS
+bind followed by TLS client construction panicked with an ambiguous provider;
+after the fix it passed. This proves the code defect, not a recovered historical
+phone panic. WSS binding now reuses the existing shared provider initializer and
+preserves any process-selected provider, certificates and authentication policy.
+
+The Android bridge now starts P2P DNS independently, bounds startup, subscribes to
+cancellation before spawning, observes child completion/panic and aborts/joins its
+owned workers on reload. A runtime generation records the identity actually loaded
+and acknowledges the corresponding reload request. Relay observations distinguish
+connection attempts, successful local registration writes, received Pongs and data.
+Registration writes are not server acknowledgments and Pongs are not peer discovery.
+
+A new read-only JNI observation exposes only fixed states/counters and SHA-256 of
+public network/device identifiers. It never reads invitations, secrets, routing
+capabilities or endpoint URLs. Android parses an explicit whitelist before logging
+state transitions; unknown strings and malformed hashes are discarded. Settings
+shows connection progress and the empty state retains the existing pairing.
+
+Pre-package checks on this source: relay/routed-relay 21 passed; bridge network
+lifecycle 5 passed; release scripts 607 run with 8 conditional skips; Android JVM
+56 passed, compileReleaseKotlin and lintRelease passed. The focused native runs used
+the original lifecycle authority/binding, locked offline dependencies and canonical
+shared target; both confirmed unchanged sources and no remaining owned process group.
+Physical discovery and recovery acceptance is recorded separately after deployment.

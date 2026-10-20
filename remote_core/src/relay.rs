@@ -1,3 +1,4 @@
+use crate::relay_status::{RelayFailure, RelayTunnelDiagnostics, StopObservation, io_failure, websocket_failure};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
@@ -459,6 +460,7 @@ pub struct BoundTcpRelayTunnel {
 pub struct BoundWebSocketRelayTunnel {
     socket: UdpSocket,
     config: WebSocketRelayTunnelConfig,
+    diagnostics: Arc<RelayTunnelDiagnostics>,
 }
 
 impl BoundTcpRelayTunnel {
@@ -561,46 +563,46 @@ impl BoundTcpRelayTunnel {
 
 impl BoundWebSocketRelayTunnel {
     pub async fn bind(config: WebSocketRelayTunnelConfig) -> io::Result<Self> {
+        // JNI/native consumers do not run the desktop entrypoint. Preserve any
+        // process-selected provider and use the existing ring bootstrap for WSS.
+        if config.relay_url.starts_with("wss://") {
+            crate::init_crypto_provider();
+        }
         let socket = UdpSocket::bind(config.bind_addr).await?;
-        Ok(Self { socket, config })
+        Ok(Self { socket, config, diagnostics: Arc::new(RelayTunnelDiagnostics::default()) })
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
+    pub fn diagnostics(&self) -> Arc<RelayTunnelDiagnostics> { self.diagnostics.clone() }
+
     pub async fn run(self, mut cancel_rx: broadcast::Receiver<()>) -> io::Result<()> {
+        let _stopped = StopObservation(self.diagnostics.clone());
         loop {
+            self.diagnostics.attempt();
             tokio::select! {
+                biased;
                 _ = cancel_rx.recv() => return Ok(()),
-                connected = connect_async_with_config(
-                    self.config.relay_url.as_str(),
-                    Some(relay_websocket_config()),
-                    true,
-                ) => {
+                connected = tokio::time::timeout(WEBSOCKET_HANDSHAKE_TIMEOUT, connect_async_with_config(
+                    self.config.relay_url.as_str(), Some(relay_websocket_config()), true,
+                )) => {
                     match connected {
-                        Ok((stream, _response)) => {
-                            if self.config.log_events {
-                                println!("WebSocket relay tunnel connected");
-                            }
+                        Ok(Ok((stream, _response))) => {
+                            self.diagnostics.connected();
+                            if self.config.log_events { eprintln!("WebSocket relay connected"); }
                             match self.run_connected(stream, &mut cancel_rx).await {
                                 Ok(()) => return Ok(()),
-                                Err(err) => {
-                                    if self.config.log_events {
-                                        eprintln!("WebSocket relay tunnel disconnected: {err}");
-                                    }
-                                }
+                                Err(err) => self.diagnostics.retry(io_failure(&err)),
                             }
                         }
-                        Err(err) => {
-                            if self.config.log_events {
-                                eprintln!("WebSocket relay tunnel connect failed: {err}");
-                            }
-                        }
+                        Ok(Err(err)) => self.diagnostics.retry(websocket_failure(&err)),
+                        Err(_) => self.diagnostics.retry(RelayFailure::Timeout),
                     }
                 }
             }
-
+            if self.config.log_events { eprintln!("WebSocket relay retry: {:?}", self.diagnostics.snapshot().last_error); }
             tokio::select! {
                 _ = cancel_rx.recv() => return Ok(()),
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -624,6 +626,7 @@ impl BoundWebSocketRelayTunnel {
         }
         .encode();
         send_websocket_binary(&mut stream, register_packet.clone()).await?;
+        self.diagnostics.registration_sent();
         let mut register_interval = tokio::time::interval(self.config.register_interval);
         let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -634,6 +637,7 @@ impl BoundWebSocketRelayTunnel {
                 _ = cancel_rx.recv() => return Ok(()),
                 _ = register_interval.tick() => {
                     send_websocket_binary(&mut stream, register_packet.clone()).await?;
+                    self.diagnostics.registration_sent();
                 }
                 _ = heartbeat_interval.tick() => {
                     if last_server_message.elapsed() > self.config.heartbeat_timeout {
@@ -646,6 +650,7 @@ impl BoundWebSocketRelayTunnel {
                         .send(Message::Ping(Bytes::new()))
                         .await
                         .map_err(websocket_io_error)?;
+                    self.diagnostics.ping_sent();
                 }
                 message = stream.next() => {
                     let Some(message) = message else {
@@ -658,13 +663,15 @@ impl BoundWebSocketRelayTunnel {
                             if let Some(RelayPacket::Data { payload, .. }) = RelayPacket::decode(&frame)
                                 && let Some(target) = local_target_addr
                             {
+                                self.diagnostics.data_received();
                                 let _ = self.socket.send_to(&payload, target).await;
                             }
                         }
                         Message::Close(_) => {
                             return Err(io::Error::new(io::ErrorKind::ConnectionReset, "WebSocket relay closed"));
                         }
-                        Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+                        Message::Pong(_) => self.diagnostics.pong_received(),
+                        Message::Text(_) | Message::Ping(_) | Message::Frame(_) => {}
                     }
                 }
                 received = self.socket.recv_from(&mut buf) => {
@@ -1352,6 +1359,90 @@ mod tests {
     use crate::net::{MultiplexedPacket, UdpMultiplexer};
     use protocol::ControlMessage;
     use tokio::time::timeout;
+
+    #[test]
+    fn websocket_tls_bootstraps_without_ambient_provider() {
+        const CHILD: &str = "WEAVELO_TEST_FRESH_TLS_BOOTSTRAP";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all().build().unwrap();
+            let config = WebSocketRelayTunnelConfig::new(
+                "127.0.0.1:0".parse().unwrap(),
+                "wss://relay.invalid:443/v1/relay", "synthetic-group", "synthetic-peer",
+            ).unwrap();
+            // Binding is the production entry point; no DNS, profile or gateway is used.
+            let _tunnel = runtime.block_on(BoundWebSocketRelayTunnel::bind(config)).unwrap();
+            let _client = rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "relay::tests::websocket_tls_bootstraps_without_ambient_provider", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(output.status.success(), "Fresh TLS bootstrap failed: {}",
+            String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[tokio::test]
+    async fn websocket_diagnostics_distinguish_registration_pong_and_reconnect() {
+        use crate::relay_status::RelayConnectionState;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+        let (allow_tx, allow_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let Message::Binary(frame) = ws.next().await.unwrap().unwrap() else { panic!("registration missing") };
+            assert!(matches!(RelayPacket::decode(&frame), Some(RelayPacket::Register { .. })));
+            registered_tx.send(()).unwrap();
+            allow_rx.await.unwrap();
+            // Reading alone must not be mistaken for receiving a Pong on the client.
+            while let Some(Ok(message)) = ws.next().await {
+                if let Message::Ping(payload) = message {
+                    ws.send(Message::Pong(payload)).await.unwrap();
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(ws);
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                if let Message::Ping(payload) = message {
+                    if ws.send(Message::Pong(payload)).await.is_err() { break; }
+                }
+            }
+        });
+        let config = WebSocketRelayTunnelConfig::new("127.0.0.1:0".parse().unwrap(),
+            format!("ws://{address}/relay"), "synthetic-group", "synthetic-peer").unwrap()
+            .with_heartbeat(Duration::from_millis(20), Duration::from_millis(200));
+        let tunnel = BoundWebSocketRelayTunnel::bind(config).await.unwrap();
+        let diagnostics = tunnel.diagnostics();
+        let (cancel, rx) = broadcast::channel(2);
+        let task = tokio::spawn(tunnel.run(rx));
+        timeout(Duration::from_secs(2), registered_rx).await.unwrap().unwrap();
+        let before_pong = diagnostics.snapshot();
+        assert!(before_pong.registrations_sent > 0);
+        assert_eq!(before_pong.pongs_received, 0);
+        assert!(before_pong.last_pong_age_ms.is_none());
+        allow_tx.send(()).unwrap();
+        timeout(Duration::from_secs(4), async {
+            loop {
+                let state = diagnostics.snapshot();
+                if state.attempts >= 2 && state.registrations_sent >= 3 && state.pongs_received >= 2 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        cancel.send(()).unwrap();
+        timeout(Duration::from_secs(1), task).await.unwrap().unwrap().unwrap();
+        assert_eq!(diagnostics.snapshot().state, RelayConnectionState::Stopped);
+        assert!(diagnostics.snapshot().last_pong_age_ms.is_none());
+        server.abort();
+        let _ = server.await;
+    }
 
     #[test]
     fn relay_packet_roundtrips() {

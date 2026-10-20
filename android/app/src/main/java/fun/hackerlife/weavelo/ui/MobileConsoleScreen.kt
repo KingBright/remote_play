@@ -31,6 +31,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import `fun`.hackerlife.weavelo.HostDevice
 import `fun`.hackerlife.weavelo.TelemetrySnapshot
+import `fun`.hackerlife.weavelo.DiscoveryDiagnostics
 import `fun`.hackerlife.weavelo.SessionState
 
 // Obsidian Stream 统一设计系统色彩定义
@@ -46,6 +47,7 @@ val ColorTextSecondary = Color(0xFF8B949E)
 fun MobileConsoleScreen(
     telemetry: TelemetrySnapshot,
     devices: List<HostDevice> = emptyList(),
+    discoveryDiagnostics: DiscoveryDiagnostics = DiscoveryDiagnostics(),
     nativeAvailable: Boolean = false,
     networkName: String = "",
     joiningNetwork: Boolean = false,
@@ -206,6 +208,7 @@ fun MobileConsoleScreen(
                         nativeAvailable = nativeAvailable,
                         sessionState = sessionState,
                         telemetry = telemetry,
+                        discoveryDiagnostics = discoveryDiagnostics,
                         manualEndpoint = manualEndpoint,
                         onManualEndpointChange = { manualEndpoint = it },
                         advancedConnection = advancedConnection,
@@ -234,6 +237,7 @@ fun MobileConsoleScreen(
                     )
                     "Settings" -> SettingsTabContent(
                         nativeAvailable = nativeAvailable,
+                        discoveryDiagnostics = discoveryDiagnostics,
                         sessionState = sessionState
                     )
                 }
@@ -388,6 +392,7 @@ private fun DevicesTabContent(
     nativeAvailable: Boolean,
     sessionState: SessionState,
     telemetry: TelemetrySnapshot,
+    discoveryDiagnostics: DiscoveryDiagnostics,
     manualEndpoint: String,
     onManualEndpointChange: (String) -> Unit,
     advancedConnection: Boolean,
@@ -461,7 +466,7 @@ private fun DevicesTabContent(
                         .padding(16.dp)
                 ) {
                     Text(
-                        "No network members discovered yet. Scan an invitation from one of your existing devices to link this phone to your private mesh.",
+                        discoveryDiagnostics.emptyMessage,
                         color = ColorTextSecondary,
                         fontSize = 13.sp
                     )
@@ -937,6 +942,7 @@ private fun SecurityTabContent(
 @Composable
 private fun SettingsTabContent(
     nativeAvailable: Boolean,
+    discoveryDiagnostics: DiscoveryDiagnostics,
     sessionState: SessionState
 ) {
     LazyColumn(
@@ -968,6 +974,29 @@ private fun SettingsTabContent(
                 TelemetryLaneRow("Session State", sessionState.name, ColorAccentCyan)
                 TelemetryLaneRow("Decoders", "Hardware MediaCodec (H.264/HEVC)", ColorTextPrimary)
                 TelemetryLaneRow("Audio Engine", "AudioTrack + Opus Decoder", ColorTextPrimary)
+            }
+        }
+
+        item {
+            Column(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(ColorSurfaceCard).border(1.dp, ColorBorderFine, RoundedCornerShape(12.dp)).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                val status = discoveryDiagnostics
+                Text("CONNECTION STATUS", color = ColorTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                TelemetryLaneRow("Discovery", status.phase, ColorAccentCyan)
+                TelemetryLaneRow("Runtime network", status.networkHash.take(12).ifEmpty { "Starting" }, ColorTextPrimary)
+                TelemetryLaneRow("Configuration", "${status.reloadApplied}/${status.reloadRequested} · run ${status.generation}", ColorTextPrimary)
+                TelemetryLaneRow("Routes / Devices", "${status.routes} / ${status.peers}", ColorTextPrimary)
+                TelemetryLaneRow("Direct discovery", status.p2p, ColorTextPrimary)
+                for ((name, relay) in listOf("Control relay" to status.control, "Discovery relay" to status.discovery)) {
+                    TelemetryLaneRow(name, relay.state, ColorAccentCyan)
+                    TelemetryLaneRow("Registration writes / Pongs", "${relay.registrationsSent} / ${relay.pongsReceived}", ColorTextPrimary)
+                    if (relay.error.isNotEmpty()) TelemetryLaneRow("Relay reason", relay.error, ColorTextSecondary)
+                }
+                if (status.failure.isNotEmpty()) TelemetryLaneRow("Discovery reason", status.failure, ColorTextSecondary)
+                Text("Registration writes are local sends. Pongs confirm a relay response; the device list confirms discovery.", color = ColorTextSecondary, fontSize = 11.sp)
             }
         }
 

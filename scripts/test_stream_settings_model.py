@@ -46,6 +46,9 @@ SESSION_CLOCK_TESTS = {
     "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
     "mesh-profile": ("remote_core", "mesh::tests"),
+    "relay-bootstrap": ("remote_core", "relay::tests::websocket_tls_bootstraps_without_ambient_provider"),
+    "relay-transport": ("remote_core", "relay::tests"),
+    "bridge-network": ("remote_client_bridge", "network_diagnostics::tests"),
     "pairing-qr": ("remote_core", "pairing_qr::tests"),
     "pairing-image": ("remote_core", "pairing_image::tests"),
     "bridge-invitation": ("remote_client_bridge", "pairing_export::tests"),
@@ -80,7 +83,7 @@ def validation_command(cargo, target, mode):
     if mode in SESSION_CLOCK_TESTS:
         package, test_filter = SESSION_CLOCK_TESTS[mode]
         features = {"pairing-image": ["--features", "pairing-image"],
-                    "bridge-invitation": ["--features", "android"]}.get(mode, [])
+                    "bridge-invitation": ["--features", "android"], "bridge-network": ["--features", "android"]}.get(mode, [])
         return [cargo, "test", *shared, "-p", package, "--lib", *features,
                 test_filter, "--", "--nocapture"]
     if mode == "service-contract":

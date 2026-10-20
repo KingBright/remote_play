@@ -64,6 +64,7 @@ class MainActivity : ComponentActivity() {
             val telemetry by WeaveloClient.telemetry.collectAsState()
             val sessionError by WeaveloClient.sessionError.collectAsState()
             val devices by WeaveloClient.devices.collectAsState()
+            val discoveryDiagnostics by WeaveloClient.discoveryDiagnostics.collectAsState()
             val networkName by WeaveloClient.networkName.collectAsState()
             var joiningNetwork by remember { mutableStateOf(false) }
             var sendFileOnConnect by remember { mutableStateOf(false) }
@@ -143,6 +144,7 @@ class MainActivity : ComponentActivity() {
                     MobileConsoleScreen(
                         telemetry = telemetry,
                         devices = devices,
+                        discoveryDiagnostics = discoveryDiagnostics,
                         nativeAvailable = WeaveloClient.nativeAvailable && !joiningNetwork,
                         networkName = networkName,
                         joiningNetwork = joiningNetwork,

@@ -50,7 +50,25 @@ pub struct MeshConfig {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PublicMeshIdentity {
+    pub network_name_sha256: String,
+    pub device_id_sha256: String,
+}
+
+/// Stable comparison of public metadata; callers must not pass credentials/capabilities.
+pub fn public_metadata_fingerprint(value: &str) -> String {
+    format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(value.as_bytes()))
+}
+
 impl MeshConfig {
+    /// Hash public identity metadata only; never export invitation or secret material.
+    pub fn public_identity(&self) -> PublicMeshIdentity {
+        PublicMeshIdentity {
+            network_name_sha256: public_metadata_fingerprint(&self.network_name),
+            device_id_sha256: public_metadata_fingerprint(&self.node_id),
+        }
+    }
     pub fn generate(display_name: impl Into<String>) -> Self {
         Self {
             network_name: format!("weavelo-{}", hex_random::<8>()),
