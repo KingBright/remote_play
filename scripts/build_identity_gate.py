@@ -52,6 +52,15 @@ BUILD_ENV = ('PATH', 'HOME', 'TMPDIR', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOL
              'PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_gnu', 'PKG_CONFIG_LIBDIR_x86_64_unknown_linux_gnu',
              'PKG_CONFIG_PATH_x86_64_unknown_linux_gnu', 'PKG_CONFIG_ALLOW_CROSS_x86_64_unknown_linux_gnu',
              'BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu')
+# CMake/cc use these developer-prompt inputs to find MSVC and the Windows SDK.
+# Keep them in the Windows identity digest without forwarding the whole prompt.
+WINDOWS_BUILD_ENV = (
+    'COMSPEC', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+    'VSINSTALLDIR', 'VCINSTALLDIR', 'VCTOOLSINSTALLDIR', 'VCTOOLSVERSION',
+    'VISUALSTUDIOVERSION', 'WINDOWSSDKDIR', 'WINDOWSSDKVERSION',
+    'WINDOWSSDKLIBVERSION', 'UNIVERSALCRTSDKDIR', 'UCRTVERSION',
+    'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH',
+)
 
 
 class IdentityRejected(RuntimeError):
@@ -243,7 +252,8 @@ def build_environment() -> dict[str, str]:
     if os.environ.get('WEAVELO_VALIDATION_SYSROOT'):
         from test_stream_settings_model import validation_environment
         values = validation_environment('lifecycle-linux-native-build')
-    return {key: values[key] for key in BUILD_ENV if key in values}
+    keys = BUILD_ENV + (WINDOWS_BUILD_ENV if sys.platform == 'win32' else ())
+    return {key: values[key] for key in keys if key in values}
 
 
 def environment_digest() -> str:

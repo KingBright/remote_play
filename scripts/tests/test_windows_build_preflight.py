@@ -1,5 +1,6 @@
 """Packaging preflight never grants policy or starts a compiler through a refusal."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,6 +9,48 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import build_windows_current as windows
+
+
+class WindowsBuildEnvironmentTests(unittest.TestCase):
+    def test_developer_prompt_survives_filter_without_private_or_policy_values(self):
+        prompt = {
+            'PATH': r'C:\VS\bin',
+            'INCLUDE': r'C:\VS\include',
+            'LIB': r'C:\VS\lib',
+            'VISUALSTUDIOVERSION': '17.0',
+            'VSINSTALLDIR': r'C:\VS',
+            'VCTOOLSINSTALLDIR': r'C:\VS\VC\Tools\MSVC\14.44',
+            'WINDOWSSDKDIR': r'C:\SDK',
+            'WINDOWSSDKVERSION': '10.0.26100.0',
+            'PROGRAMFILES(X86)': r'C:\Program Files (x86)',
+            'VSCMD_ARG_TGT_ARCH': 'x64',
+        }
+        inherited = dict(prompt, PRIVATE_TOKEN='synthetic-secret',
+                         PSEXECUTIONPOLICYPREFERENCE='Restricted')
+        with patch.object(sys, 'platform', 'win32'), \
+                patch.dict(os.environ, inherited, clear=True):
+            self.assertEqual(windows.gate.build_environment(), prompt)
+            self.assertEqual(windows.gate.compiler_environment_record(), prompt)
+            self.assertEqual(dict(os.environ), inherited)
+
+    def test_selected_visual_studio_and_sdk_are_part_of_build_identity(self):
+        prompt = {'PATH': 'compiler', 'VISUALSTUDIOVERSION': '17.0',
+                  'VSINSTALLDIR': 'vs-current', 'WINDOWSSDKVERSION': 'sdk-current'}
+        with patch.object(sys, 'platform', 'win32'), \
+                patch.dict(os.environ, prompt, clear=True):
+            before = windows.gate.environment_digest()
+            for key in ('VISUALSTUDIOVERSION', 'VSINSTALLDIR', 'WINDOWSSDKVERSION'):
+                with self.subTest(key=key), patch.dict(os.environ, {key: 'changed'}):
+                    self.assertNotEqual(windows.gate.environment_digest(), before)
+
+    def test_windows_prompt_fields_do_not_change_other_platform_identities(self):
+        with patch.object(sys, 'platform', 'linux'), \
+                patch.dict(os.environ, {'PATH': 'compiler'}, clear=True):
+            before = windows.gate.environment_digest()
+            with patch.dict(os.environ, {'VISUALSTUDIOVERSION': '17.0'}):
+                self.assertEqual(windows.gate.build_environment(), {'PATH': 'compiler'})
+                self.assertEqual(windows.gate.environment_digest(), before)
+
 
 class WindowsPackagingPreflightTests(unittest.TestCase):
     def report(self, policy='RemoteSigned', zone=0, signature='NotSigned'):
