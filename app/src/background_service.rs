@@ -23,7 +23,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Shutdown { generation: String, executable_sha256: String }, Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
+enum Request { Shutdown { generation: String, executable_sha256: String }, Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, NetworkDiagnostics { generation: String, executable_sha256: String }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -42,7 +42,18 @@ struct Snapshot {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Response { StopPrepared { generation: String, executable_sha256: String, pid: u32, cleanup_verified: bool }, Negotiated { generation: String, executable_sha256: String, selection: Result<Selection, service_contract::Rejection> }, Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
+enum Response { StopPrepared { generation: String, executable_sha256: String, pid: u32, cleanup_verified: bool }, Negotiated { generation: String, executable_sha256: String, selection: Result<Selection, service_contract::Rejection> }, NetworkDiagnostics(ServiceNetworkSnapshot), Snapshot(Snapshot), Rejected(String), ConnectionDiagnostics(Vec<host::lifecycle::ConnectionLifecycleSnapshot>) }
+
+/// Deliberately separate from Snapshot: contains no pairing or raw device data.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceNetworkSnapshot {
+    generation: String,
+    executable_sha256: String,
+    pid: u32,
+    build_identity: Option<serde_json::Value>,
+    network: crate::network_diagnostics::NetworkSnapshot,
+}
 
 pub(crate) use crate::private_ipc::private_directory;
 #[cfg(unix)]
@@ -185,6 +196,16 @@ fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: Stri
     if let Request::InspectConnection{connection_id}=request {
         return Response::ConnectionDiagnostics(host::lifecycle::inspect_connection(connection_id));
     }
+    if let Request::NetworkDiagnostics { generation: expected, executable_sha256: hash } = request {
+        if expected != generation || hash != executable_sha256 {
+            return Response::Rejected("Background generation or executable changed".into());
+        }
+        return Response::NetworkDiagnostics(ServiceNetworkSnapshot {
+            generation, executable_sha256, pid: std::process::id(),
+            build_identity: crate::build_identity::compiled(),
+            network: runtime.owner.network_snapshot(),
+        });
+    }
     let Some(pairing) = &runtime.mesh_pairing else { return Response::Rejected("Background pairing is unavailable".into()); };
     let changing = !matches!(request, Request::Snapshot);
     if changing && !matches!(runtime.owner.runtime().lock().unwrap().role_state(), remote_core::role::RoleState::Idle) {
@@ -195,7 +216,7 @@ fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: Stri
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
         Request::Reload(message) => pairing.request_runtime_reload(message),
-        Request::Shutdown{..}|Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}=>unreachable!(),
+        Request::Shutdown{..}|Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}|Request::NetworkDiagnostics{..}=>unreachable!(),
     };
     let peers = runtime.owner.discovery_snapshot_rx().map(|rx| rx.borrow().clone()).unwrap_or_default();
     Response::Snapshot(Snapshot { schema: SCHEMA, owner_mode, version: env!("CARGO_PKG_VERSION").into(), generation, executable_sha256, pid: std::process::id(), peers, pairing })
@@ -211,14 +232,15 @@ fn answer_negotiation(expected: String, hash: String, offer: Offer, generation: 
 }
 
 #[derive(Clone)]
-pub struct Client { profile: PathBuf, executable_sha256: String, cached: Arc<Mutex<Snapshot>>, contract: Arc<Mutex<Option<Selection>>>, transition: Arc<Mutex<()>> }
+pub struct Client { profile: PathBuf, executable_sha256: String, cached: Arc<Mutex<Snapshot>>, contract: Arc<Mutex<Option<Selection>>>, transition: Arc<Mutex<()>>, network: Arc<Mutex<Option<crate::network_diagnostics::NetworkSnapshot>>> }
 impl Client {
     pub fn connect(profile: &Path) -> Result<Self, Error> {
         let executable_sha256 = executable_hash()?;
         let snapshot = request(profile, &Request::Snapshot, &executable_sha256)?;
         let contract = negotiate(profile, &snapshot, &executable_sha256)?;
+        let network = request_network(profile, &snapshot.generation, &executable_sha256).ok().map(|s| s.network);
         refresh_secret(profile)?;
-        Ok(Self { profile: profile.into(), executable_sha256, cached: Arc::new(Mutex::new(snapshot)), contract: Arc::new(Mutex::new(Some(contract))), transition: Arc::new(Mutex::new(())) })
+        Ok(Self { profile: profile.into(), executable_sha256, cached: Arc::new(Mutex::new(snapshot)), contract: Arc::new(Mutex::new(Some(contract))), transition: Arc::new(Mutex::new(())), network: Arc::new(Mutex::new(network)) })
     }
     fn exchange(&self, command: Request) -> Result<DiscoveryPeerSnapshot, Error> {
         self.transition(|| {
@@ -235,6 +257,8 @@ impl Client {
             if generation != snapshot.generation || invite != snapshot.pairing.invite_code {
                 refresh_secret(&self.profile)?;
             }
+            *self.network.lock().unwrap() = request_network(
+                &self.profile, &snapshot.generation, &self.executable_sha256).ok().map(|s| s.network);
             Ok((snapshot, contract))
         })
     }
@@ -264,9 +288,11 @@ impl Client {
     pub fn background_pid(&self) -> u32 { self.cached.lock().unwrap().pid }
     pub fn status(&self) -> serde_json::Value {
         let cached = self.cached.lock().unwrap();
+        let diagnostics = request_network(&self.profile, &cached.generation, &self.executable_sha256).ok();
         serde_json::json!({"schema": SCHEMA, "role": if cached.owner_mode==OwnerMode::Background {"background-service"}else{"standalone-gui"}, "pid": cached.pid,
             "version": cached.version, "executable_sha256": cached.executable_sha256,
             "service_contract": *self.contract.lock().unwrap(),
+            "network_diagnostics": diagnostics,
             "discovered_routes": cached.peers.len(), "profile": self.profile})
     }
     pub fn shutdown_verified(&self) -> Result<serde_json::Value, Error> {
@@ -298,7 +324,9 @@ impl Client {
     pub async fn frontend_runtime(&self) -> Result<UnifiedRuntimeHandle, Error> {
         if self.owner_mode()!=OwnerMode::Background{return Err("Standalone GUI already owns its runtime".into());}
         let (tx, rx) = watch::channel(self.cached.lock().unwrap().peers.clone());
-        let owner = Arc::new(UnifiedServiceOwner::from_background_snapshot(rx).await?);
+        let mut owner = UnifiedServiceOwner::from_background_snapshot(rx).await?;
+        owner.frontend_network = Some(self.network.clone());
+        let owner = Arc::new(owner);
         let epoch = owner.frontend_epoch().unwrap();
         let mut runtime = UnifiedRuntimeHandle::from_workspace_owner(owner);
         runtime.mesh_pairing = Some(MeshPairingControl::from_backend(Arc::new(self.clone())));
@@ -322,6 +350,7 @@ impl Client {
     fn unavailable(&self) {
         let mut cached = self.cached.lock().unwrap();
         *self.contract.lock().unwrap() = None;
+        *self.network.lock().unwrap() = None;
         // Invalidate once per outage, not on every poll.
         if cached.generation != "unavailable" {
             cached.generation = "unavailable".into();
@@ -360,10 +389,22 @@ fn request(profile: &Path, command: &Request, executable_sha256: &str) -> Result
     let snapshot = match exchange_response(profile, command)? {
         Response::Snapshot(snapshot) => snapshot,
         Response::Rejected(_) => return Err("Background service rejected the operation".into()),
-        Response::StopPrepared{..}|Response::ConnectionDiagnostics(_)|Response::Negotiated{..}=>return Err("Expected background Snapshot".into()),
+        Response::StopPrepared{..}|Response::ConnectionDiagnostics(_)|Response::Negotiated{..}|Response::NetworkDiagnostics(_)=>return Err("Expected background Snapshot".into()),
     };
     validate_snapshot(&snapshot, profile, executable_sha256)?;
     Ok(snapshot)
+}
+fn request_network(profile: &Path, generation: &str, hash: &str) -> Result<ServiceNetworkSnapshot, Error> {
+    validate_network_response(exchange_response(profile, &Request::NetworkDiagnostics {
+        generation: generation.into(), executable_sha256: hash.into(),
+    })?, generation, hash)
+}
+fn validate_network_response(response: Response, generation: &str, hash: &str) -> Result<ServiceNetworkSnapshot, Error> {
+    match response {
+        Response::NetworkDiagnostics(snapshot)
+            if snapshot.generation == generation && snapshot.executable_sha256 == hash => Ok(snapshot),
+        _ => Err("Background network diagnostics unavailable or owner changed".into()),
+    }
 }
 fn validate_snapshot(snapshot: &Snapshot, profile: &Path, executable_sha256: &str) -> Result<(), Error> {
     if snapshot.executable_sha256 != executable_sha256 || snapshot.schema != SCHEMA || snapshot.version != env!("CARGO_PKG_VERSION") || snapshot.pairing.config_dir != profile {
@@ -446,6 +487,24 @@ pub async fn run(mut config: UnifiedRuntimeConfig) -> Result<(), Error> {
 #[cfg(test)]
 mod service_contract_tests {
     use super::*;
+
+    #[test]
+    fn safe_network_response_has_no_pairing_and_requires_exact_owner() {
+        let response = || Response::NetworkDiagnostics(ServiceNetworkSnapshot {
+            generation: "fixture-generation".into(), executable_sha256: "fixture-hash".into(),
+            pid: 42, build_identity: None,
+            network: crate::network_diagnostics::NetworkSnapshot::default(),
+        });
+        let encoded = serde_json::to_string(&response()).unwrap();
+        for forbidden in ["pairing", "invite_code", "network_secret", "device_id", "group_id"] {
+            assert!(!encoded.contains(forbidden));
+        }
+        let decoded = serde_json::from_str(&encoded).unwrap();
+        assert!(validate_network_response(decoded, "fixture-generation", "fixture-hash").is_ok());
+        assert!(validate_network_response(response(), "other-generation", "fixture-hash").is_err());
+        assert!(validate_network_response(response(), "fixture-generation", "other-hash").is_err());
+        assert!(validate_network_response(Response::Snapshot(snapshot()), "fixture-generation", "fixture-hash").is_err());
+    }
 
     #[test]
     fn full_exit_rejects_normal_restart_and_independent_activation_policies() {
@@ -717,6 +776,7 @@ mod service_contract_tests {
                 cached: Arc::new(Mutex::new(cached)),
                 contract: Arc::new(Mutex::new(Some(offer.negotiate(&offer).unwrap()))),
                 transition: Arc::new(Mutex::new(())),
+                network: Arc::new(Mutex::new(None)),
             };
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -767,6 +827,7 @@ mod service_contract_tests {
             cached: Arc::new(Mutex::new(cached)),
             contract: Arc::new(Mutex::new(Some(offer.negotiate(&offer).unwrap()))),
             transition: Arc::new(Mutex::new(())),
+            network: Arc::new(Mutex::new(None)),
         };
         client.unavailable();
         assert!(client.contract.lock().unwrap().is_none());

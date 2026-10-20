@@ -14,11 +14,12 @@ pub mod desktop;
 mod original_design;
 pub mod preferences;
 mod telemetry_display;
+pub mod network_diagnostics;
 
 use remote_core::discovery::{
     DEFAULT_PEER_TTL, DiscoveredPeer, DiscoveryAnnouncement, DiscoveryCapabilities, DiscoveryEvent,
     DiscoveryPeerSnapshot, DiscoveryRouteOverride, DiscoveryRuntimeConfig, DiscoveryScope,
-    WEAVELO_DISCOVERY_ENV, discovery_port_from_env, run_discovery_runtime,
+    WEAVELO_DISCOVERY_ENV, discovery_port_from_env, run_discovery_runtime_observed,
 };
 use remote_core::mesh::{AppPrivateMeshConfigStore, MeshStoreError, default_app_private_mesh_dir};
 use remote_core::net::{DEFAULT_CONTROL_PORT, UdpMultiplexer, UdpSender};
@@ -219,6 +220,7 @@ pub struct UnifiedAppRuntime {
     next_source_request: u32,
     active_capture_supports_input: bool,
     capture_source_error: Option<String>,
+    discovery_projection: network_diagnostics::Projection,
 }
 
 impl UnifiedAppRuntime {
@@ -235,6 +237,7 @@ impl UnifiedAppRuntime {
             next_source_request: 0x4000_0000,
             active_capture_supports_input: true,
             capture_source_error: None,
+            discovery_projection: network_diagnostics::Projection::default(),
         }
     }
 
@@ -387,6 +390,11 @@ impl UnifiedAppRuntime {
             if !seen.contains(device_id) {
                 device.online = false;
             }
+        }
+        self.discovery_projection = network_diagnostics::Projection::from_snapshot(snapshot);
+        if self.discovery_projection.observation.is_some() {
+            self.discovery_projection.unique_devices = Some(self.devices.len());
+            self.discovery_projection.online_devices = Some(self.devices.values().filter(|d| d.online).count());
         }
     }
 
@@ -1433,6 +1441,8 @@ impl Drop for UnifiedDiscoveryRuntime {
 
 pub struct UnifiedServiceOwner {
     runtime: Arc<Mutex<UnifiedAppRuntime>>,
+    network_diagnostics: Arc<network_diagnostics::NetworkDiagnostics>,
+    frontend_network: Option<Arc<Mutex<Option<network_diagnostics::NetworkSnapshot>>>>,
     #[cfg(any(unix, windows))]
     frontend_epoch: Option<Arc<std::sync::atomic::AtomicU64>>,
     p2p_runtime: Option<ReloadableP2pRuntime>,
@@ -1457,6 +1467,7 @@ impl UnifiedServiceOwner {
         config: UnifiedServiceOwnerConfig,
     ) -> Result<Self, UnifiedServiceOwnerError> {
         let runtime = Arc::new(Mutex::new(UnifiedAppRuntime::new(config.app)));
+        let network_diagnostics = Arc::new(network_diagnostics::NetworkDiagnostics::default());
         let mut tasks = Vec::new();
         let client_active_session_id = config
             .client_receiver
@@ -1472,6 +1483,7 @@ impl UnifiedServiceOwner {
                 let runtime = match start_unified_p2p_runtime(p2p_config).await {
                     Ok(runtime) => Some(runtime),
                     Err(err) => {
+                        network_diagnostics.failure(network_diagnostics::NetworkFailure::P2pStart);
                         eprintln!(
                             "Weavelo P2P unavailable; relay fallback remains active: {err}"
                         );
@@ -1487,9 +1499,10 @@ impl UnifiedServiceOwner {
 
         let relay_runtime = match config.relay {
             Some(relay_config) => {
-                let runtime = match start_unified_relay_runtime(relay_config).await {
+                let runtime = match start_unified_relay_runtime(relay_config, &network_diagnostics).await {
                     Ok(runtime) => Some(runtime),
                     Err(err) => {
+                        network_diagnostics.failure(network_diagnostics::NetworkFailure::RelayStart);
                         eprintln!("Weavelo relay unavailable; LAN/P2P remain active: {err}");
                         None
                     }
@@ -1524,7 +1537,7 @@ impl UnifiedServiceOwner {
                 }
                 let (snapshot_tx, snapshot_rx) = watch::channel(DiscoveryPeerSnapshot::default());
                 let discovery =
-                    spawn_unified_discovery_runtime(discovery_config, snapshot_tx.clone());
+                    spawn_unified_discovery_runtime(discovery_config, snapshot_tx.clone(), network_diagnostics.discovery());
                 tasks.push(spawn_discovery_snapshot_bridge(
                     runtime.clone(),
                     snapshot_rx.clone(),
@@ -1605,12 +1618,15 @@ impl UnifiedServiceOwner {
                 p2p_runtime.clone(),
                 relay_runtime.clone(),
                 discovery_runtime.clone(),
+                network_diagnostics.clone(),
                 reload_config,
             ));
         }
 
         Ok(Self {
             runtime,
+            network_diagnostics,
+            frontend_network: None,
             #[cfg(any(unix, windows))]
             frontend_epoch: None,
             p2p_runtime,
@@ -1661,6 +1677,25 @@ impl UnifiedServiceOwner {
 
     pub fn discovery_snapshot_rx(&self) -> Option<watch::Receiver<DiscoveryPeerSnapshot>> {
         self.discovery_snapshot_rx.clone()
+    }
+
+    pub fn network_snapshot(&self) -> network_diagnostics::NetworkSnapshot {
+        let peers = self.discovery_snapshot_rx.as_ref().map(|rx| rx.borrow().clone());
+        self.network_snapshot_for(peers.as_ref())
+    }
+
+    pub(crate) fn network_snapshot_for(&self, peers: Option<&DiscoveryPeerSnapshot>) -> network_diagnostics::NetworkSnapshot {
+        let projection = self.runtime.lock().unwrap().discovery_projection.clone();
+        if let Some(frontend) = &self.frontend_network {
+            let mut snapshot = frontend.lock().unwrap().clone().unwrap_or_default();
+            snapshot.ipc_snapshot = peers.map(network_diagnostics::Projection::from_snapshot);
+            snapshot.gui_projection = Some(projection);
+            return snapshot;
+        }
+        let mut snapshot = self.network_diagnostics.snapshot();
+        snapshot.owner_snapshot = peers.map(network_diagnostics::Projection::from_snapshot).unwrap_or_default();
+        snapshot.owner_projection = projection;
+        snapshot
     }
 
     pub fn owns_discovery(&self) -> bool {
@@ -2214,7 +2249,10 @@ async fn start_unified_p2p_runtime(
 
 async fn start_unified_relay_runtime(
     config: UnifiedRelayRuntimeConfig,
+    diagnostics: &network_diagnostics::NetworkDiagnostics,
 ) -> Result<UnifiedRelayRuntime, UnifiedServiceOwnerError> {
+    let groups = network_diagnostics::RelayGroups::new(
+        diagnostics.generation(), &config.control_group_id, &config.discovery_group_id);
     let (cancel_tx, _) = broadcast::channel(1);
     let router = remote_core::routed_relay::RoutedRelay::bind(
         config.peer_id.clone(),
@@ -2245,6 +2283,7 @@ async fn start_unified_relay_runtime(
     )
     .await?;
     let discovery_endpoint = discovery_tunnel.local_addr()?;
+    diagnostics.attach_relays(groups, control_tunnel.diagnostics(), discovery_tunnel.diagnostics());
 
     let tasks = vec![
         AbortOnDropTask(tokio::spawn({
@@ -2288,6 +2327,14 @@ enum UnifiedRelayTunnel {
 }
 
 impl UnifiedRelayTunnel {
+    fn diagnostics(&self) -> Option<Arc<remote_core::relay_status::RelayTunnelDiagnostics>> {
+        match self {
+            Self::WebSocket(tunnel) => Some(tunnel.diagnostics()),
+            // TCP has no equivalent observer; zero would falsely report an idle tunnel.
+            Self::Tcp(_) => None,
+        }
+    }
+
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
         match self {
             Self::Tcp(tunnel) => tunnel.local_addr(),
@@ -2345,6 +2392,7 @@ fn relay_discovery_group(group_id: &str) -> String {
 fn spawn_unified_discovery_runtime(
     discovery_config: DiscoveryRuntimeConfig,
     snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
+    diagnostics: Arc<remote_core::discovery_status::DiscoveryDiagnostics>,
 ) -> UnifiedDiscoveryRuntime {
     let announcement = discovery_config.announcement.clone();
     let route_overrides = discovery_config.route_overrides.clone();
@@ -2360,7 +2408,7 @@ fn spawn_unified_discovery_runtime(
         })),
         AbortOnDropTask(tokio::spawn(async move {
             if let Err(err) =
-                run_discovery_runtime(discovery_config, events_tx, snapshot_tx, cancel_rx).await
+                run_discovery_runtime_observed(discovery_config, events_tx, snapshot_tx, cancel_rx, diagnostics).await
             {
                 eprintln!("Unified discovery runtime stopped: {err}");
             }
@@ -2380,6 +2428,7 @@ fn spawn_unified_runtime_reload_task(
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
+    diagnostics: Arc<network_diagnostics::NetworkDiagnostics>,
     mut reload_config: UnifiedRuntimeReloadConfig,
 ) -> AbortOnDropTask {
     AbortOnDropTask(tokio::spawn(async move {
@@ -2389,10 +2438,12 @@ fn spawn_unified_runtime_reload_task(
                 p2p_runtime.clone(),
                 relay_runtime.clone(),
                 discovery_runtime.clone(),
+                diagnostics.clone(),
                 &reload_config.runtime,
             )
             .await
             {
+                diagnostics.failure(network_diagnostics::NetworkFailure::Reload);
                 eprintln!("Unified runtime reload failed: {err}");
             }
         }
@@ -2404,8 +2455,10 @@ async fn reload_unified_runtime_components(
     p2p_runtime: Option<ReloadableP2pRuntime>,
     relay_runtime: Option<ReloadableRelayRuntime>,
     discovery_runtime: Option<ReloadableDiscoveryRuntime>,
+    diagnostics: Arc<network_diagnostics::NetworkDiagnostics>,
     config: &UnifiedRuntimeConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    diagnostics.begin_reload();
     // Stop discovery first so a newly selected device group cannot mix old and new peers.
     if let Some(discovery_state) = &discovery_runtime {
         let old_discovery = discovery_state
@@ -2441,9 +2494,15 @@ async fn reload_unified_runtime_components(
                     Ok(new_p2p) => {
                         *p2p_state.runtime.lock().expect("p2p runtime lock") = Some(new_p2p);
                     }
-                    Err(err) => eprintln!("Weavelo P2P reload failed: {err}"),
+                    Err(err) => {
+                        diagnostics.failure(network_diagnostics::NetworkFailure::P2pStart);
+                        eprintln!("Weavelo P2P reload failed: {err}");
+                    },
                 },
-                Err(err) => eprintln!("Weavelo P2P reload config failed: {err}"),
+                Err(err) => {
+                    diagnostics.failure(network_diagnostics::NetworkFailure::P2pStart);
+                    eprintln!("Weavelo P2P reload config failed: {err}");
+                },
             }
         }
     }
@@ -2455,8 +2514,9 @@ async fn reload_unified_runtime_components(
             .expect("relay runtime lock")
             .take();
         drop(old_relay);
+        diagnostics.clear_relays();
         match build_unified_relay_config(config) {
-            Ok(Some(relay_config)) => match start_unified_relay_runtime(relay_config).await {
+            Ok(Some(relay_config)) => match start_unified_relay_runtime(relay_config, &diagnostics).await {
                 Ok(new_relay) => {
                     if let Some(discovery) = discovery_config.as_mut() {
                         discovery
@@ -2473,22 +2533,29 @@ async fn reload_unified_runtime_components(
                     }
                     *relay_state.runtime.lock().expect("relay runtime lock") = Some(new_relay);
                 }
-                Err(err) => eprintln!("Weavelo relay reload failed: {err}"),
+                Err(err) => {
+                    diagnostics.failure(network_diagnostics::NetworkFailure::RelayStart);
+                    eprintln!("Weavelo relay reload failed: {err}");
+                },
             },
             Ok(None) => {}
-            Err(err) => eprintln!("Weavelo relay reload config failed: {err}"),
+            Err(err) => {
+                diagnostics.failure(network_diagnostics::NetworkFailure::RelayStart);
+                eprintln!("Weavelo relay reload config failed: {err}");
+            },
         }
     }
 
     if let (Some(discovery_state), Some(discovery_config)) = (discovery_runtime, discovery_config) {
         let discovery =
-            spawn_unified_discovery_runtime(discovery_config, discovery_state.snapshot_tx.clone());
+            spawn_unified_discovery_runtime(discovery_config, discovery_state.snapshot_tx.clone(), diagnostics.discovery());
         *discovery_state
             .runtime
             .lock()
             .expect("discovery runtime lock") = Some(discovery);
     }
 
+    diagnostics.reload_finished();
     Ok(())
 }
 
@@ -3192,6 +3259,7 @@ mod tests {
             None,
             None,
             Some(discovery_state.clone()),
+            Arc::new(network_diagnostics::NetworkDiagnostics::default()),
             &config,
         )
         .await

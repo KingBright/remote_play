@@ -81,7 +81,7 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
     };
 
     match command.as_str() {
-        "--gui-status-json" | "--gui-receive" | "--gui-stop-receive" => {
+        "--gui-status-json" | "--gui-network-diagnostics-json" | "--gui-receive" | "--gui-stop-receive" => {
             #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
             {
                 let config = weavelo_app::UnifiedRuntimeConfig::from_env()?;

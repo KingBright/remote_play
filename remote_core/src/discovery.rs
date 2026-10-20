@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, watch};
+use crate::discovery_status::{DiscoveryDiagnostics, DiscoveryFailure, DiscoveryStamp};
 
 pub const DISCOVERY_MAGIC: &[u8; 8] = b"RPDISC1\0";
 pub const DEFAULT_DISCOVERY_PORT: u16 = 38117;
@@ -276,6 +277,8 @@ pub struct DiscoveryRouteOverride {
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryPeerSnapshot {
     peers: Vec<DiscoveredPeer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observation: Option<DiscoveryStamp>,
 }
 
 impl DiscoveryPeerSnapshot {
@@ -289,6 +292,13 @@ impl DiscoveryPeerSnapshot {
 
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
+    }
+
+    pub fn observation(&self) -> Option<DiscoveryStamp> { self.observation }
+
+    pub fn observed(mut self, diagnostics: &DiscoveryDiagnostics) -> Self {
+        self.observation = Some(diagnostics.next_stamp());
+        self
     }
 }
 
@@ -392,6 +402,7 @@ impl DiscoveryPeerCache {
     pub fn snapshot(&self) -> DiscoveryPeerSnapshot {
         DiscoveryPeerSnapshot {
             peers: self.peers.clone(),
+            observation: None,
         }
     }
 }
@@ -442,7 +453,42 @@ pub async fn run_discovery_runtime(
     config: DiscoveryRuntimeConfig,
     events_tx: tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>,
     snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
+    cancel_rx: broadcast::Receiver<()>,
+) -> Result<(), DiscoveryError> {
+    run_discovery_runtime_inner(config, events_tx, snapshot_tx, cancel_rx, None).await
+}
+
+/// Same discovery protocol and filters, with local observations only.
+pub async fn run_discovery_runtime_observed(
+    config: DiscoveryRuntimeConfig,
+    events_tx: tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>,
+    snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
+    cancel_rx: broadcast::Receiver<()>,
+    diagnostics: Arc<DiscoveryDiagnostics>,
+) -> Result<(), DiscoveryError> {
+    let _stopped = crate::discovery_status::StopObservation(Some(diagnostics.clone()));
+    let result = run_discovery_runtime_inner(config, events_tx, snapshot_tx, cancel_rx, Some(diagnostics.clone())).await;
+    if result.is_err() { diagnostics.failure(DiscoveryFailure::Startup); }
+    result
+}
+
+fn publish_discovery_snapshot(
+    cache: &DiscoveryPeerCache,
+    sender: &watch::Sender<DiscoveryPeerSnapshot>,
+    diagnostics: Option<&DiscoveryDiagnostics>,
+) -> DiscoveryPeerSnapshot {
+    let mut snapshot = cache.snapshot();
+    if let Some(diagnostics) = diagnostics { snapshot = snapshot.observed(diagnostics); }
+    sender.send_replace(snapshot.clone());
+    snapshot
+}
+
+async fn run_discovery_runtime_inner(
+    config: DiscoveryRuntimeConfig,
+    events_tx: tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>,
+    snapshot_tx: watch::Sender<DiscoveryPeerSnapshot>,
     mut cancel_rx: broadcast::Receiver<()>,
+    diagnostics: Option<Arc<DiscoveryDiagnostics>>,
 ) -> Result<(), DiscoveryError> {
     config.announcement.validate()?;
     config.announcement.encode_with_capabilities(config.live_capabilities.as_ref())?;
@@ -468,12 +514,20 @@ pub async fn run_discovery_runtime(
     let relay_routes = config.relay_routes.clone();
     let expected_network = config.announcement.network_name.clone();
     let own_device = config.announcement.device_id.clone();
+    if let Some(diagnostics) = &diagnostics { diagnostics.running(true); }
+    // Publish the initial empty snapshot before receiver/pruner tasks can publish.
+    publish_discovery_snapshot(&cache.lock().expect("discovery cache lock"), &snapshot_tx, diagnostics.as_deref());
 
     let send_socket = socket.clone();
     let send_announcement = config.announcement.clone();
     let live_capabilities = config.live_capabilities.clone();
     let send_targets = config.announce_targets.clone();
     let sender_events_tx = events_tx.clone();
+    let sender_diagnostics = diagnostics.clone();
+    let relay_targets: Vec<_> = config.route_overrides.iter()
+        .filter(|route| route.scope == DiscoveryScope::Relay).map(|route| route.source)
+        .chain(config.relay_routes.iter().map(|(source, _)| *source)).collect();
+    let sender_relay_targets = relay_targets.clone();
     let mut send_cancel_rx = cancel_rx.resubscribe();
     let sender_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.announce_interval);
@@ -484,15 +538,25 @@ pub async fn run_discovery_runtime(
                     let send_packet = match send_announcement.encode_with_capabilities(live_capabilities.as_ref()) {
                         Ok(packet) => packet,
                         Err(error) => {
+                            if let Some(d) = &sender_diagnostics { d.failure(DiscoveryFailure::Encode); }
                             let _ = sender_events_tx.send(DiscoveryEvent::Error(error.to_string()));
                             continue;
                         }
                     };
                     for target in &send_targets {
-                        if let Err(err) = send_socket.send_to(&send_packet, target).await {
-                            let _ = sender_events_tx.send(DiscoveryEvent::Error(format!(
-                                "discovery announce to {target} failed: {err}"
-                            )));
+                        match send_socket.send_to(&send_packet, target).await {
+                            Ok(_) => if let Some(d) = &sender_diagnostics {
+                                d.traffic(sender_relay_targets.contains(target), |c| c.sends += 1);
+                            },
+                            Err(err) => {
+                                if let Some(d) = &sender_diagnostics {
+                                    d.traffic(sender_relay_targets.contains(target), |c| c.send_errors += 1);
+                                    d.failure(DiscoveryFailure::Send);
+                                }
+                                let _ = sender_events_tx.send(DiscoveryEvent::Error(format!(
+                                    "discovery announce to {target} failed: {err}"
+                                )));
+                            }
                         }
                     }
                 }
@@ -504,6 +568,7 @@ pub async fn run_discovery_runtime(
     let recv_cache = cache.clone();
     let recv_snapshot_tx = snapshot_tx.clone();
     let receiver_events_tx = events_tx.clone();
+    let receiver_diagnostics = diagnostics.clone();
     let mut recv_cancel_rx = cancel_rx.resubscribe();
     let receiver_task = tokio::spawn(async move {
         let mut buffer = [0u8; DISCOVERY_RECV_BUFFER_LEN];
@@ -513,16 +578,34 @@ pub async fn run_discovery_runtime(
                 result = recv_socket.recv_from(&mut buffer) => {
                     match result {
                         Ok((len, source)) => {
+                            let relay = relay_targets.contains(&source);
+                            if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.received += 1); }
                             match DiscoveryAnnouncement::decode(&buffer[..len]) {
                                 Ok(announcement) => {
+                                    if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.decoded += 1); }
+                                    let relay_route = relay_routes.iter().find(|(from,_)| *from == source);
+                                    // Preserve the existing stricter routed-relay network filter.
+                                    if (!config.accept_any_network || relay_route.is_some()) && announcement.network_name != expected_network {
+                                        if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.rejected_network += 1); }
+                                        continue;
+                                    }
+                                    if announcement.device_id == own_device {
+                                        if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.rejected_self += 1); }
+                                        continue;
+                                    }
                                     let now_ms = unix_now_ms();
                                     let mut route_override = route_overrides
                                         .iter()
                                         .copied()
                                         .find(|route_override| route_override.source == source);
-                                    if let Some((_, routes)) = relay_routes.iter().find(|(from,_)| *from == source) {
-                                        if announcement.network_name != expected_network || announcement.device_id == own_device { continue; }
-                                        let Ok(endpoint) = routes.endpoint(&announcement.device_id).await else { continue; };
+                                    if let Some((_, routes)) = relay_route {
+                                        let Ok(endpoint) = routes.endpoint(&announcement.device_id).await else {
+                                            if let Some(d) = &receiver_diagnostics {
+                                                d.traffic(relay, |c| c.rejected_route += 1);
+                                                d.failure(DiscoveryFailure::Route);
+                                            }
+                                            continue;
+                                        };
                                         route_override = Some(DiscoveryRouteOverride { source, endpoint, scope: DiscoveryScope::Relay });
                                     }
                                     let (peer, snapshot) = {
@@ -533,15 +616,18 @@ pub async fn run_discovery_runtime(
                                             now_ms,
                                             route_override,
                                         );
-                                        (peer, cache.snapshot())
+                                        let snapshot = peer.as_ref().map(|_| publish_discovery_snapshot(
+                                            &cache, &recv_snapshot_tx, receiver_diagnostics.as_deref()));
+                                        (peer, snapshot)
                                     };
-                                    if let Some(peer) = peer {
-                                        let _ = recv_snapshot_tx.send(snapshot.clone());
+                                    if let (Some(peer), Some(snapshot)) = (peer, snapshot) {
+                                        if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.accepted += 1); }
                                         let _ = receiver_events_tx.send(DiscoveryEvent::PeerSeen(peer));
                                         let _ = receiver_events_tx.send(DiscoveryEvent::Snapshot(snapshot));
                                     }
                                 }
                                 Err(err) => {
+                                    if let Some(d) = &receiver_diagnostics { d.traffic(relay, |c| c.rejected_format += 1); }
                                     let _ = receiver_events_tx.send(DiscoveryEvent::Error(format!(
                                         "discovery packet from {source} ignored: {err}"
                                     )));
@@ -549,6 +635,7 @@ pub async fn run_discovery_runtime(
                             }
                         }
                         Err(err) => {
+                            if let Some(d) = &receiver_diagnostics { d.failure(DiscoveryFailure::Receive); }
                             let _ = receiver_events_tx.send(DiscoveryEvent::Error(format!(
                                 "discovery receive failed: {err}"
                             )));
@@ -562,6 +649,7 @@ pub async fn run_discovery_runtime(
     let prune_cache = cache.clone();
     let prune_snapshot_tx = snapshot_tx.clone();
     let pruner_events_tx = events_tx.clone();
+    let pruner_diagnostics = diagnostics.clone();
     let mut prune_cancel_rx = cancel_rx.resubscribe();
     let pruner_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.prune_interval);
@@ -573,10 +661,11 @@ pub async fn run_discovery_runtime(
                     let (expired, snapshot) = {
                         let mut cache = prune_cache.lock().expect("discovery cache lock");
                         let expired = cache.prune_expired(now_ms);
-                        (expired, cache.snapshot())
+                        let snapshot = (!expired.is_empty()).then(|| publish_discovery_snapshot(
+                            &cache, &prune_snapshot_tx, pruner_diagnostics.as_deref()));
+                        (expired, snapshot)
                     };
-                    if !expired.is_empty() {
-                        let _ = prune_snapshot_tx.send(snapshot.clone());
+                    if let Some(snapshot) = snapshot {
                         for peer in expired {
                             let _ = pruner_events_tx.send(DiscoveryEvent::PeerExpired(peer));
                         }
@@ -587,7 +676,6 @@ pub async fn run_discovery_runtime(
         }
     });
 
-    let _ = snapshot_tx.send(cache.lock().expect("discovery cache lock").snapshot());
     let _ = cancel_rx.recv().await;
     let _ = sender_task.await;
     let _ = receiver_task.await;
@@ -1057,6 +1145,61 @@ mod tests {
             .expect("relay route should be present");
         assert_eq!(relay.endpoint, relay_endpoint);
         assert_eq!(relay.source, relay_source);
+    }
+
+    #[tokio::test]
+    async fn observed_discovery_counts_filters_and_keeps_relay_distinct() {
+        use std::sync::atomic::AtomicU64;
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local = sample_announcement();
+        let mut config = DiscoveryRuntimeConfig::lan_on_port(local.clone(), 0);
+        config.bind_addr = "127.0.0.1:0".parse().unwrap();
+        config.announce_targets = vec![udp.local_addr().unwrap()];
+        config.route_overrides.push(DiscoveryRouteOverride {
+            source: relay.local_addr().unwrap(),
+            endpoint: "127.0.0.1:9001".parse().unwrap(),
+            scope: DiscoveryScope::Relay,
+        });
+        let diagnostics = Arc::new(DiscoveryDiagnostics::new(7, Arc::new(AtomicU64::new(0))));
+        let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (snapshots, rx) = watch::channel(DiscoveryPeerSnapshot::default());
+        let (cancel, cancel_rx) = broadcast::channel(1);
+        let task = tokio::spawn(run_discovery_runtime_observed(config, events, snapshots, cancel_rx, diagnostics.clone()));
+        let mut buffer = [0; 2048];
+        let (_, target) = tokio::time::timeout(Duration::from_secs(2), udp.recv_from(&mut buffer)).await.unwrap().unwrap();
+        udp.send_to(b"not-a-discovery-packet", target).await.unwrap();
+        let other_network = DiscoveryAnnouncement { network_name: "synthetic-other".into(), ..local.clone() };
+        udp.send_to(&other_network.encode().unwrap(), target).await.unwrap();
+        udp.send_to(&local.encode().unwrap(), target).await.unwrap();
+        let peer = DiscoveryAnnouncement { device_id: "synthetic-peer".into(), ..local };
+        let packet = peer.encode().unwrap();
+        udp.send_to(&packet, target).await.unwrap();
+        relay.send_to(&packet, target).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = diagnostics.snapshot();
+                if state.udp.accepted == 1 && state.relay.accepted == 1 { break; }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let state = diagnostics.snapshot();
+        assert_eq!(state.udp.received, 4);
+        assert_eq!(state.udp.decoded, 3);
+        assert_eq!(state.udp.rejected_format, 1);
+        assert_eq!(state.udp.rejected_network, 1);
+        assert_eq!(state.udp.rejected_self, 1);
+        assert_eq!(state.relay.received, 1);
+        assert!(state.udp.sends >= 1);
+        assert_eq!(rx.borrow().len(), 2);
+        assert_eq!(rx.borrow().observation().unwrap().runtime_generation, 7);
+        assert!(rx.borrow().observation().unwrap().sequence >= 3);
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert!(!serialized.contains("synthetic-peer"));
+        assert!(!serialized.contains("synthetic-other"));
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        assert!(!diagnostics.snapshot().running);
     }
 
     #[tokio::test]

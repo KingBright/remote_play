@@ -706,6 +706,8 @@ impl BoundWebSocketRelayTunnel {
         let mut heartbeat_interval = tokio::time::interval(self.config.heartbeat_interval);
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_server_message = Instant::now();
+        let mut heartbeat_sequence = 0u64;
+        let mut pending_ping = None;
 
         loop {
             tokio::select! {
@@ -721,10 +723,13 @@ impl BoundWebSocketRelayTunnel {
                             "WebSocket relay heartbeat timed out",
                         ));
                     }
+                    heartbeat_sequence = heartbeat_sequence.wrapping_add(1);
+                    let payload = Bytes::copy_from_slice(&heartbeat_sequence.to_be_bytes());
                     stream
-                        .send(Message::Ping(Bytes::new()))
+                        .send(Message::Ping(payload.clone()))
                         .await
                         .map_err(websocket_io_error)?;
+                    pending_ping = Some(payload);
                     self.diagnostics.ping_sent();
                 }
                 message = stream.next() => {
@@ -735,17 +740,25 @@ impl BoundWebSocketRelayTunnel {
                     last_server_message = Instant::now();
                     match message {
                         Message::Binary(frame) => {
-                            if let Some(RelayPacket::Data { payload, .. }) = RelayPacket::decode(&frame)
-                                && let Some(target) = local_target_addr
-                            {
+                            if let Some(RelayPacket::Data { payload, .. }) = RelayPacket::decode(&frame) {
                                 self.diagnostics.data_received();
-                                let _ = self.socket.send_to(&payload, target).await;
+                                if let Some(target) = local_target_addr {
+                                    let _ = self.socket.send_to(&payload, target).await;
+                                }
                             }
                         }
                         Message::Close(_) => {
                             return Err(io::Error::new(io::ErrorKind::ConnectionReset, "WebSocket relay closed"));
                         }
-                        Message::Pong(_) => self.diagnostics.pong_received(),
+                        Message::Pong(payload) => {
+                            // Only an echo of this connection's outstanding ping is
+                            // a heartbeat observation. It is not a registration ACK
+                            // or evidence that another device received a data frame.
+                            if pending_ping.as_ref() == Some(&payload) {
+                                pending_ping = None;
+                                self.diagnostics.pong_received();
+                            }
+                        }
                         Message::Text(_) | Message::Ping(_) | Message::Frame(_) => {}
                     }
                 }
@@ -759,6 +772,7 @@ impl BoundWebSocketRelayTunnel {
                     }
                     .encode();
                     send_websocket_binary(&mut stream, encoded).await?;
+                    self.diagnostics.data_sent();
                 }
             }
         }
@@ -1468,6 +1482,57 @@ mod tests {
         assert_eq!(diagnostics.snapshot().last_error, Some(RelayFailure::Timeout));
         diagnostics.connected();
         assert_eq!(diagnostics.snapshot().last_error, None);
+    }
+
+    #[tokio::test]
+    async fn websocket_diagnostics_ignore_unsolicited_pong_and_observe_data_roundtrip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, ready) = tokio::sync::oneshot::channel();
+        let (resume, allowed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            ws.send(Message::Pong(Bytes::from_static(b"unsolicited"))).await.unwrap();
+            sent.send(()).unwrap();
+            allowed.await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                match message {
+                    Message::Ping(payload) => { if ws.send(Message::Pong(payload)).await.is_err() { break; } }
+                    Message::Binary(frame) if matches!(RelayPacket::decode(&frame), Some(RelayPacket::Data { .. })) => {
+                        if ws.send(Message::Binary(frame)).await.is_err() { break; }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let config = WebSocketRelayTunnelConfig::new("127.0.0.1:0".parse().unwrap(),
+            format!("ws://{address}/relay"), "synthetic-group", "synthetic-peer").unwrap()
+            .with_heartbeat(Duration::from_millis(50), Duration::from_secs(2));
+        let tunnel = BoundWebSocketRelayTunnel::bind(config).await.unwrap();
+        let endpoint = tunnel.local_addr().unwrap();
+        let diagnostics = tunnel.diagnostics();
+        let (cancel, rx) = broadcast::channel(1);
+        let task = tokio::spawn(tunnel.run(rx));
+        ready.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(diagnostics.snapshot().pongs_received, 0);
+        resume.send(()).unwrap();
+        let local = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        local.send_to(b"synthetic-payload", endpoint).await.unwrap();
+        let mut received = [0; 64];
+        let count = timeout(Duration::from_secs(2), local.recv(&mut received)).await.unwrap().unwrap();
+        assert_eq!(&received[..count], b"synthetic-payload");
+        timeout(Duration::from_secs(2), async {
+            while diagnostics.snapshot().pongs_received == 0 { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        let state = diagnostics.snapshot();
+        assert_eq!(state.data_frames_sent, 1);
+        assert_eq!(state.data_frames_received, 1);
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

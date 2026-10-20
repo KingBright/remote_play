@@ -653,6 +653,12 @@ impl RestoredDashboard {
             let generation = adapter.generation.clone();
             let mut newly_accepted = false;
             let response = match command.request {
+                Request::NetworkDiagnostics => serde_json::json!({
+                    "ok":true, "generation":generation, "pid":std::process::id(),
+                    "executable_sha256":adapter.executable_sha256,
+                    "build_identity":crate::build_identity::compiled(),
+                    "network":self.owner.network_snapshot(),
+                }),
                 Request::Status => serde_json::json!({"ok":true,"generation":generation,
                     "renderer":crate::gui_backend::ORIGINAL_RENDERER,"executable_sha256":adapter.executable_sha256,
                     "lease":adapter.lease.as_ref().map(|lease| serde_json::json!({"request_id":lease.request_id,

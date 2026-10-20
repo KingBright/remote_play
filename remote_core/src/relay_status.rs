@@ -1,9 +1,9 @@
 //! Local, credential-free observations. A registration write is not a server ACK.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::time::Instant;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayConnectionState {
     #[default]
@@ -14,7 +14,7 @@ pub enum RelayConnectionState {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayStage {
     #[default]
@@ -27,7 +27,7 @@ pub enum RelayStage {
     Active,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayFailure {
     Timeout,
@@ -39,7 +39,7 @@ pub enum RelayFailure {
     Other,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RelayTunnelSnapshot {
     pub state: RelayConnectionState,
     pub stage: RelayStage,
@@ -58,6 +58,7 @@ pub struct RelayTunnelSnapshot {
     pub registrations_sent: u64,
     pub pings_sent: u64,
     pub pongs_received: u64,
+    pub data_frames_sent: u64,
     pub data_frames_received: u64,
     pub last_pong_age_ms: Option<u64>,
     pub last_error: Option<RelayFailure>,
@@ -162,6 +163,9 @@ impl RelayTunnelDiagnostics {
         self.update(|s| {
             s.value.data_frames_received = s.value.data_frames_received.saturating_add(1)
         });
+    }
+    pub(crate) fn data_sent(&self) {
+        self.update(|s| s.value.data_frames_sent = s.value.data_frames_sent.saturating_add(1));
     }
     pub(crate) fn retry(&self, failure: RelayFailure) {
         self.update(|s| {

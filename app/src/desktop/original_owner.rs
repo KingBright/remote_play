@@ -407,6 +407,15 @@ impl OriginalOwner {
             }
         }
     }
+
+    pub(crate) fn network_snapshot(&self) -> crate::network_diagnostics::NetworkSnapshot {
+        let mut snapshot = self.backend.network_snapshot();
+        if snapshot.gui_projection.is_none() {
+            // A standalone GUI projects the owner's runtime directly.
+            snapshot.gui_projection = Some(snapshot.owner_projection.clone());
+        }
+        snapshot
+    }
     pub fn can_change_network(&self) -> bool {
         let p = self.pool.lock().unwrap();
         p.tabs.can_change_network(p.sessions.len())

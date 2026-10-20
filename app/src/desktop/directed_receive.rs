@@ -21,6 +21,7 @@ const ADMISSION_MS: u64 = 5_000;
 #[serde(deny_unknown_fields)]
 pub(crate) enum Request {
     Status,
+    NetworkDiagnostics,
     Receive {
         generation: String,
         request_id: String,
@@ -171,7 +172,7 @@ impl Adapter {
         if projected.is_none_or(|value|now_ms>value){self.admission_clock=Some((now_ms,instant));}
         let now_ms=projected.map_or(now_ms,|value|now_ms.max(value));
         match request {
-            Request::Status => Ok(()),
+            Request::Status | Request::NetworkDiagnostics => Ok(()),
             Request::Receive {
                 generation,
                 request_id,
@@ -289,6 +290,7 @@ pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Val
     };
     let request = match args {
         [cmd] if cmd == "--gui-status-json" => Request::Status,
+        [cmd] if cmd == "--gui-network-diagnostics-json" => Request::NetworkDiagnostics,
         [cmd, source] | [cmd, source, _] if cmd == "--gui-receive" => {
             let seconds: u64 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(60);
             if !(1..=120).contains(&seconds) { return Err("Receive duration must be 1..120 seconds".into()); }

@@ -9,6 +9,7 @@ pub mod clock;
 pub mod clock_sync;
 pub mod data_plane;
 pub mod discovery;
+pub mod discovery_status;
 mod file_delivery;
 pub mod file_transfer;
 pub mod file_transfer_runtime;

@@ -43,6 +43,8 @@ class ServiceContractEntryTests(unittest.TestCase):
         'mesh-profile': ('remote_core', 'mesh::tests'),
         'relay-bootstrap': ('remote_core', 'relay::tests::websocket_tls_bootstraps_without_ambient_provider'),
         'relay-transport': ('remote_core', 'relay::tests'),
+        'discovery-observation': ('remote_core', 'discovery::tests'),
+        'desktop-network': ('weavelo_app', 'network_diagnostics::tests'),
         'bridge-network': ('remote_client_bridge', 'network_diagnostics::tests'),
         'pairing-qr': ('remote_core', 'pairing_qr::tests'),
         'pairing-image': ('remote_core', 'pairing_image::tests'),
