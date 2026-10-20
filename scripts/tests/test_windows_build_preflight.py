@@ -24,6 +24,7 @@ class WindowsBuildEnvironmentTests(unittest.TestCase):
             'WINDOWSSDKVERSION': '10.0.26100.0',
             'PROGRAMFILES(X86)': r'C:\Program Files (x86)',
             'PROGRAMDATA': r'C:\ProgramData',
+            'SYSTEMDRIVE': 'C:',
             'VSCMD_ARG_TGT_ARCH': 'x64',
         }
         inherited = dict(prompt, PRIVATE_TOKEN='synthetic-secret',
@@ -37,12 +38,12 @@ class WindowsBuildEnvironmentTests(unittest.TestCase):
     def test_selected_visual_studio_and_sdk_are_part_of_build_identity(self):
         prompt = {'PATH': 'compiler', 'VISUALSTUDIOVERSION': '17.0',
                   'VSINSTALLDIR': 'vs-current', 'WINDOWSSDKVERSION': 'sdk-current',
-                  'PROGRAMDATA': 'vs-instance-data'}
+                  'PROGRAMDATA': 'vs-instance-data', 'SYSTEMDRIVE': 'C:'}
         with patch.object(sys, 'platform', 'win32'), \
                 patch.dict(os.environ, prompt, clear=True):
             before = windows.gate.environment_digest()
             for key in ('VISUALSTUDIOVERSION', 'VSINSTALLDIR', 'WINDOWSSDKVERSION',
-                        'PROGRAMDATA'):
+                        'PROGRAMDATA', 'SYSTEMDRIVE'):
                 with self.subTest(key=key), patch.dict(os.environ, {key: 'changed'}):
                     self.assertNotEqual(windows.gate.environment_digest(), before)
 
@@ -53,6 +54,23 @@ class WindowsBuildEnvironmentTests(unittest.TestCase):
             with patch.dict(os.environ, {'VISUALSTUDIOVERSION': '17.0'}):
                 self.assertEqual(windows.gate.build_environment(), {'PATH': 'compiler'})
                 self.assertEqual(windows.gate.environment_digest(), before)
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Native Windows known-folder query')
+    def test_native_msbuild_common_data_directory_survives_filter(self):
+        admitted = {key: os.environ[key]
+                    for key in windows.gate.BUILD_ENV + windows.gate.WINDOWS_BUILD_ENV
+                    if key in os.environ}
+        with patch.dict(os.environ, admitted, clear=True):
+            filtered = windows.gate.build_environment()
+        # MSBuild FileTracker initializes this through the same .NET API.
+        result = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-Command',
+             '[Console]::Write([Environment]::GetFolderPath('
+             '[Environment+SpecialFolder]::CommonApplicationData))'],
+            env=filtered, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip(), 'MSBuild needs a nonempty common data path')
+        self.assertTrue(Path(result.stdout.strip()).is_dir())
 
 
 class WindowsPackagingPreflightTests(unittest.TestCase):
