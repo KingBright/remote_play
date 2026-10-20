@@ -23,6 +23,7 @@ class WindowsBuildEnvironmentTests(unittest.TestCase):
             'WINDOWSSDKDIR': r'C:\SDK',
             'WINDOWSSDKVERSION': '10.0.26100.0',
             'PROGRAMFILES(X86)': r'C:\Program Files (x86)',
+            'PROGRAMDATA': r'C:\ProgramData',
             'VSCMD_ARG_TGT_ARCH': 'x64',
         }
         inherited = dict(prompt, PRIVATE_TOKEN='synthetic-secret',
@@ -35,11 +36,13 @@ class WindowsBuildEnvironmentTests(unittest.TestCase):
 
     def test_selected_visual_studio_and_sdk_are_part_of_build_identity(self):
         prompt = {'PATH': 'compiler', 'VISUALSTUDIOVERSION': '17.0',
-                  'VSINSTALLDIR': 'vs-current', 'WINDOWSSDKVERSION': 'sdk-current'}
+                  'VSINSTALLDIR': 'vs-current', 'WINDOWSSDKVERSION': 'sdk-current',
+                  'PROGRAMDATA': 'vs-instance-data'}
         with patch.object(sys, 'platform', 'win32'), \
                 patch.dict(os.environ, prompt, clear=True):
             before = windows.gate.environment_digest()
-            for key in ('VISUALSTUDIOVERSION', 'VSINSTALLDIR', 'WINDOWSSDKVERSION'):
+            for key in ('VISUALSTUDIOVERSION', 'VSINSTALLDIR', 'WINDOWSSDKVERSION',
+                        'PROGRAMDATA'):
                 with self.subTest(key=key), patch.dict(os.environ, {key: 'changed'}):
                     self.assertNotEqual(windows.gate.environment_digest(), before)
 
