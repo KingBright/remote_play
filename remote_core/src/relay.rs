@@ -1,4 +1,4 @@
-use crate::relay_status::{RelayFailure, RelayTunnelDiagnostics, StopObservation, io_failure, websocket_failure};
+use crate::relay_status::{RelayFailure, RelayStage, RelayTunnelDiagnostics, StopObservation, io_failure, websocket_failure, tls_io_failure};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{WebSocketStream, accept_async_with_config, connect_async_with_config};
+use tokio_tungstenite::{WebSocketStream, accept_async_with_config};
 
 const RELAY_MAGIC: &[u8; 4] = b"RPR1";
 const REGISTER_PACKET: u8 = 1;
@@ -561,6 +561,82 @@ impl BoundTcpRelayTunnel {
     }
 }
 
+struct ObservedRelayTransport {
+    socket: TcpStream,
+    diagnostics: Arc<RelayTunnelDiagnostics>,
+}
+impl tokio::io::AsyncRead for ObservedRelayTransport {
+    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buffer: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<io::Result<()>> {
+        let before = buffer.filled().len();
+        let result = std::pin::Pin::new(&mut self.socket).poll_read(cx, buffer);
+        self.diagnostics.transport_bytes(false, buffer.filled().len().saturating_sub(before));
+        result
+    }
+}
+impl tokio::io::AsyncWrite for ObservedRelayTransport {
+    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buffer: &[u8]) -> std::task::Poll<io::Result<usize>> {
+        let result = std::pin::Pin::new(&mut self.socket).poll_write(cx, buffer);
+        if let std::task::Poll::Ready(Ok(count)) = &result { self.diagnostics.transport_bytes(true, *count); }
+        result
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> { std::pin::Pin::new(&mut self.socket).poll_flush(cx) }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> { std::pin::Pin::new(&mut self.socket).poll_shutdown(cx) }
+}
+
+async fn connect_observed_websocket(
+    url: &str,
+    diagnostics: &Arc<RelayTunnelDiagnostics>,
+) -> Result<(WebSocketStream<tokio_tungstenite::MaybeTlsStream<ObservedRelayTransport>>,
+    tokio_tungstenite::tungstenite::handshake::client::Response), RelayFailure> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::MaybeTlsStream;
+    let request = url.into_client_request().map_err(|_| RelayFailure::Protocol)?;
+    let uri = request.uri();
+    let host = uri.host().ok_or(RelayFailure::Protocol)?.trim_matches(['[', ']']).to_owned();
+    let tls = uri.scheme_str() == Some("wss");
+    let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
+    diagnostics.stage(RelayStage::Dns);
+    let addresses = tokio::net::lookup_host((host.as_str(), port)).await.map_err(|error| {
+        diagnostics.connection_error(error.raw_os_error(), None);
+        io_failure(&error)
+    })?.collect::<Vec<_>>();
+    diagnostics.dns_resolved(&addresses);
+    if addresses.is_empty() { return Err(RelayFailure::Connection); }
+    diagnostics.stage(RelayStage::Tcp);
+    let socket = TcpStream::connect(addresses.as_slice()).await.map_err(|error| {
+        diagnostics.connection_error(error.raw_os_error(), None);
+        io_failure(&error)
+    })?;
+    socket.set_nodelay(true).map_err(|error| {
+        diagnostics.connection_error(error.raw_os_error(), None);
+        io_failure(&error)
+    })?;
+    diagnostics.tcp_connected();
+    let socket = ObservedRelayTransport { socket, diagnostics: diagnostics.clone() };
+    let stream = if tls {
+        diagnostics.stage(RelayStage::Tls);
+        // Identical root set and builder to locked tokio-tungstenite 0.28's default.
+        // Split only so EOF during TLS cannot be reported as a WebSocket failure.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let name = rustls::pki_types::ServerName::try_from(host).map_err(|_| RelayFailure::Protocol)?;
+        let stream = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, socket).await.map_err(|error| {
+            diagnostics.connection_error(error.raw_os_error(), None);
+            tls_io_failure(&error)
+        })?;
+        diagnostics.tls_connected();
+        MaybeTlsStream::Rustls(stream)
+    } else { MaybeTlsStream::Plain(socket) };
+    diagnostics.stage(RelayStage::Websocket);
+    tokio_tungstenite::client_async_with_config(request, stream, Some(relay_websocket_config())).await.map_err(|error| {
+        let status = if let tokio_tungstenite::tungstenite::Error::Http(response) = &error { Some(response.status().as_u16()) } else { None };
+        let errno = if let tokio_tungstenite::tungstenite::Error::Io(io) = &error { io.raw_os_error() } else { None };
+        diagnostics.connection_error(errno, status);
+        websocket_failure(&error)
+    })
+}
+
 impl BoundWebSocketRelayTunnel {
     pub async fn bind(config: WebSocketRelayTunnelConfig) -> io::Result<Self> {
         // JNI/native consumers do not run the desktop entrypoint. Preserve any
@@ -585,9 +661,8 @@ impl BoundWebSocketRelayTunnel {
             tokio::select! {
                 biased;
                 _ = cancel_rx.recv() => return Ok(()),
-                connected = tokio::time::timeout(WEBSOCKET_HANDSHAKE_TIMEOUT, connect_async_with_config(
-                    self.config.relay_url.as_str(), Some(relay_websocket_config()), true,
-                )) => {
+                connected = tokio::time::timeout(WEBSOCKET_HANDSHAKE_TIMEOUT,
+                    connect_observed_websocket(self.config.relay_url.as_str(), &self.diagnostics)) => {
                     match connected {
                         Ok(Ok((stream, _response))) => {
                             self.diagnostics.connected();
@@ -597,7 +672,7 @@ impl BoundWebSocketRelayTunnel {
                                 Err(err) => self.diagnostics.retry(io_failure(&err)),
                             }
                         }
-                        Ok(Err(err)) => self.diagnostics.retry(websocket_failure(&err)),
+                        Ok(Err(failure)) => self.diagnostics.retry(failure),
                         Err(_) => self.diagnostics.retry(RelayFailure::Timeout),
                     }
                 }
@@ -1452,6 +1527,73 @@ mod tests {
         assert!(diagnostics.snapshot().last_pong_age_ms.is_none());
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn connection_stage_distinguishes_silent_tls_from_silent_websocket() {
+        for (scheme, expected) in [("wss", RelayStage::Tls), ("ws", RelayStage::Websocket)] {
+            crate::init_crypto_provider();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                while socket.read(&mut buf).await.unwrap_or(0) > 0 {}
+            });
+            let diagnostics = Arc::new(RelayTunnelDiagnostics::default());
+            diagnostics.attempt();
+            assert!(timeout(Duration::from_millis(100), connect_observed_websocket(
+                &format!("{scheme}://{address}/relay"), &diagnostics)).await.is_err());
+            diagnostics.retry(RelayFailure::Timeout);
+            let value = diagnostics.snapshot();
+            assert_eq!(value.last_failure_stage, Some(expected));
+            assert_eq!(value.dns_results, 1);
+            assert_eq!(value.tcp_connections, 1);
+            assert_eq!(value.tls_handshakes, 0);
+            assert_eq!(value.websocket_upgrades, 0);
+            if scheme == "wss" { assert!(value.tls_bytes_sent > 0); assert_eq!(value.tls_bytes_received, 0); }
+            timeout(Duration::from_secs(1), server).await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejection_exports_status_without_headers_or_payload() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nX-Private: credential-canary\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        });
+        let diagnostics = Arc::new(RelayTunnelDiagnostics::default());
+        diagnostics.attempt();
+        let failure = match connect_observed_websocket(&format!("ws://{address}/relay"), &diagnostics).await {
+            Err(failure) => failure,
+            Ok(_) => panic!("unexpected upgrade"),
+        };
+        diagnostics.retry(failure);
+        let value = diagnostics.snapshot();
+        assert_eq!(value.last_failure_stage, Some(RelayStage::Websocket));
+        assert_eq!(value.http_status, Some(403));
+        assert!(!serde_json::to_string(&value).unwrap().contains("credential-canary"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn dns_comparison_keeps_address_hashes_and_benchmark_count_only() {
+        let diagnostics = RelayTunnelDiagnostics::default();
+        let addresses = ["198.18.1.2:8443", "198.19.1.2:8443", "198.20.1.2:8443", "198.17.1.2:8443"]
+            .map(|address| address.parse().unwrap());
+        diagnostics.dns_resolved(&addresses);
+        let value = diagnostics.snapshot();
+        assert_eq!(value.dns_results, 4);
+        assert_eq!(value.dns_benchmark_count, 2);
+        assert_eq!(value.dns_address_sha256.len(), 4);
+        assert!(value.dns_address_sha256.iter().all(|hash| hash.len() == 64));
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(!json.contains("198."));
+        assert!(!json.contains("8443"));
     }
 
     #[test]

@@ -65,6 +65,11 @@ object WeaveloClient {
     private val _devices = MutableStateFlow<List<HostDevice>>(emptyList())
     val devices: StateFlow<List<HostDevice>> = _devices.asStateFlow()
 
+    private val _appNetwork = MutableStateFlow(AppNetworkStatus())
+    val appNetwork: StateFlow<AppNetworkStatus> = _appNetwork.asStateFlow()
+    private var networkObservation: AppNetworkObservation? = null
+    fun checkRelayTransport() { networkObservation?.runProbe() }
+
     private val _discoveryDiagnostics = MutableStateFlow(DiscoveryDiagnostics())
     val discoveryDiagnostics: StateFlow<DiscoveryDiagnostics> = _discoveryDiagnostics.asStateFlow()
 
@@ -115,6 +120,10 @@ object WeaveloClient {
 
     fun initialize(context: Context): Boolean {
         appContext = context.applicationContext
+        if (networkObservation == null) {
+            runCatching { AppNetworkObservation(context.applicationContext).also { it.start() } }
+                .onSuccess { networkObservation = it }
+        }
         if (!isNativeLoaded) return false
         val initialized = try {
             nativeInit(context.filesDir.absolutePath)
@@ -355,6 +364,7 @@ object WeaveloClient {
     }
 
     fun refreshDevices() {
+        networkObservation?.let { _appNetwork.value = it.read() }
         if (!isNativeLoaded) return
         runCatching {
             val diagnostics = DiscoveryDiagnostics.parse(nativeGetDiscoveryDiagnosticsJson() ?: "{}")

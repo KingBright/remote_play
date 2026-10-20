@@ -21,6 +21,9 @@ bytes = "1.11.1"
 futures-util = { version = "0.3.32", features = ["sink"] }
 rustls = { version = "0.23", features = ["ring"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
+# Expose the already-locked TLS transport stages without changing roots/provider policy.
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "=0.26.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 qrcode = { version = "0.14", default-features = false }

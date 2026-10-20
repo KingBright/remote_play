@@ -493,3 +493,40 @@ condition and retain the current group. No VPN, security or global-log setting w
 changed. Desktop GUI Computer Use consent is still unconfirmed; supported CLI
 status was used without reading raw Snapshot or collecting invitation data.
 Cross-group desktop membership changes remain deferred until Book/phone work.
+
+
+## Application transport diagnostic validation
+
+The application reports its own default-network observation separately from
+shell observations. Existing network-state permission is reused; the code does
+not bind/request a network or change VPN, proxy, security or pairing settings.
+The production relay path distinguishes DNS, TCP, TLS, WebSocket upgrade,
+registration sends and received Pongs. It retains a bounded handshake/retry loop
+and the existing provider, trust-root and authentication policies.
+
+Independent same-UID platform TLS/WS and HTTPS controls help locate the first
+failing boundary. Strict certificate/hostname and standard WS response checks
+remain enabled. The local diagnostic record uses fixed error categories,
+counters, numeric status codes and bounded identifier/address hashes. Raw error
+messages, response headers, endpoints, credentials and pairing capabilities are
+excluded. Detailed per-device network observations remain owner-controlled local
+evidence and are not repository publication material.
+
+Two direct Cargo edges reference already-locked TLS libraries. No dependency
+version or checksum changed. Original lifecycle reassessment retained authority,
+shared-cache targets, budgets and coverage while refreshing only the lock digest.
+Focused relay regression: 25 passed, 0 failed. Android JVM: 59 passed,
+0 failures/errors/skips. Release Kotlin compilation and lint passed. Required
+release-script regression: 607 total, 599 passed, 0 failed, 8 conditional skips.
+Synthetic tests cover silent TLS versus silent WS, HTTP rejection/redaction,
+standard WS response validation and safe application/native evidence separation.
+
+The original formal producer and independent verifier accepted the current signed
+ARM64 candidate, code19, with 29 JNI exports, 16 KiB alignment and non-debuggable
+status. APK SHA-256:
+`73bf7b95d6b4948ba2b31acf834a04dd6aca2d23ad9f4506348ad19c601e13ff`.
+Physical mutual discovery and outage recovery remain incomplete; private evidence
+and any required owner action are retained locally. A successful build, TLS
+attempt or TCP connection is not counted as successful peer discovery.
+The history consolidation changes documentation and synthetic test identifiers
+only; the installed candidate's production source bytes are unchanged.

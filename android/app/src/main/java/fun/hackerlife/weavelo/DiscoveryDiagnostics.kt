@@ -5,7 +5,11 @@ import kotlinx.serialization.json.*
 /** Public runtime observations only. Never parse invitations, capabilities or endpoint URLs. */
 data class RelayDiagnostics(
     val state: String = "idle", val attempts: Long = 0, val registrationsSent: Long = 0,
-    val pongsReceived: Long = 0, val dataFramesReceived: Long = 0, val error: String = ""
+    val pongsReceived: Long = 0, val dataFramesReceived: Long = 0, val error: String = "",
+    val stage: String = "idle", val failedStage: String = "", val dnsResults: Long = 0,
+    val tcpConnections: Long = 0, val tlsHandshakes: Long = 0, val websocketUpgrades: Long = 0,
+    val tlsBytesSent: Long = 0, val tlsBytesReceived: Long = 0, val errno: Int? = null, val httpStatus: Int? = null,
+    val dnsHashes: List<String> = emptyList(), val dnsBenchmarkCount: Long = 0
 )
 data class DiscoveryDiagnostics(
     val phase: String = "starting", val generation: Long = 0,
@@ -37,6 +41,14 @@ data class DiscoveryDiagnostics(
             put("state", value.state); put("attempts", value.attempts)
             put("registrations_sent", value.registrationsSent); put("pongs_received", value.pongsReceived)
             put("data_frames_received", value.dataFramesReceived); put("error", value.error)
+            put("stage", value.stage); put("last_failure_stage", value.failedStage)
+            put("dns_results", value.dnsResults); put("tcp_connections", value.tcpConnections)
+            put("tls_handshakes", value.tlsHandshakes); put("websocket_upgrades", value.websocketUpgrades)
+            put("tls_bytes_sent", value.tlsBytesSent); put("tls_bytes_received", value.tlsBytesReceived)
+            put("errno", value.errno?.let(::JsonPrimitive) ?: JsonNull)
+            put("http_status", value.httpStatus?.let(::JsonPrimitive) ?: JsonNull)
+            put("dns_address_sha256", JsonArray(value.dnsHashes.map(::JsonPrimitive)))
+            put("dns_benchmark_count", value.dnsBenchmarkCount)
         }
         put("relay_control", relay(control)); put("relay_discovery", relay(discovery))
     }.toString()
@@ -53,7 +65,15 @@ data class DiscoveryDiagnostics(
                 val value = obj[name] as? JsonObject ?: JsonObject(emptyMap())
                 return RelayDiagnostics(value.word("state", setOf("idle", "connecting", "connected", "retry_wait", "stopped"), "idle"),
                     value.number("attempts"), value.number("registrations_sent"), value.number("pongs_received"),
-                    value.number("data_frames_received"), value.word("last_error", setOf("timeout", "connection", "tls", "protocol", "closed", "other")))
+                    value.number("data_frames_received"), value.word("last_error", setOf("timeout", "connection", "tls", "tls_certificate", "protocol", "closed", "other")),
+                    value.word("stage", setOf("idle", "dns", "tcp", "tls", "websocket", "registration", "active"), "idle"),
+                    value.word("last_failure_stage", setOf("idle", "dns", "tcp", "tls", "websocket", "registration", "active")),
+                    value.number("dns_results"), value.number("tcp_connections"), value.number("tls_handshakes"), value.number("websocket_upgrades"),
+                    value.number("tls_bytes_sent"), value.number("tls_bytes_received"),
+                    (value["last_os_error"] as? JsonPrimitive)?.intOrNull,
+                    (value["http_status"] as? JsonPrimitive)?.intOrNull?.takeIf { it in 100..599 },
+                    (value["dns_address_sha256"] as? JsonArray)?.take(16)?.map(::hash)?.filter(String::isNotEmpty).orEmpty(),
+                    value.number("dns_benchmark_count"))
             }
             val identity = obj["identity"] as? JsonObject
             return DiscoveryDiagnostics(

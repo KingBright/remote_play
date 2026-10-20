@@ -32,6 +32,11 @@ import androidx.compose.runtime.setValue
 import `fun`.hackerlife.weavelo.HostDevice
 import `fun`.hackerlife.weavelo.TelemetrySnapshot
 import `fun`.hackerlife.weavelo.DiscoveryDiagnostics
+import `fun`.hackerlife.weavelo.AppNetworkStatus
+import `fun`.hackerlife.weavelo.WeaveloClient
+import `fun`.hackerlife.weavelo.publicConnectionEvidence
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import `fun`.hackerlife.weavelo.SessionState
 
 // Obsidian Stream 统一设计系统色彩定义
@@ -48,6 +53,7 @@ fun MobileConsoleScreen(
     telemetry: TelemetrySnapshot,
     devices: List<HostDevice> = emptyList(),
     discoveryDiagnostics: DiscoveryDiagnostics = DiscoveryDiagnostics(),
+    appNetwork: AppNetworkStatus = AppNetworkStatus(),
     nativeAvailable: Boolean = false,
     networkName: String = "",
     joiningNetwork: Boolean = false,
@@ -236,6 +242,7 @@ fun MobileConsoleScreen(
                         onBrowseFiles = onBrowseFiles
                     )
                     "Settings" -> SettingsTabContent(
+                        appNetwork = appNetwork,
                         nativeAvailable = nativeAvailable,
                         discoveryDiagnostics = discoveryDiagnostics,
                         sessionState = sessionState
@@ -941,10 +948,20 @@ private fun SecurityTabContent(
 
 @Composable
 private fun SettingsTabContent(
+    appNetwork: AppNetworkStatus,
     nativeAvailable: Boolean,
     discoveryDiagnostics: DiscoveryDiagnostics,
     sessionState: SessionState
 ) {
+    var connectionDetails by remember { mutableStateOf<String?>(null) }
+    connectionDetails?.let { evidence ->
+        AlertDialog(onDismissRequest = { connectionDetails = null },
+            title = { Text("Public connection diagnostics") },
+            text = { Text(evidence, fontFamily = FontFamily.Monospace, fontSize = 10.sp,
+                modifier = Modifier.verticalScroll(rememberScrollState())) },
+            confirmButton = { TextButton(onClick = { connectionDetails = publicConnectionEvidence(appNetwork, discoveryDiagnostics) }) { Text("Refresh diagnostics") } },
+            dismissButton = { TextButton(onClick = { connectionDetails = null }) { Text("Close diagnostics") } })
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -985,6 +1002,8 @@ private fun SettingsTabContent(
             ) {
                 val status = discoveryDiagnostics
                 Text("CONNECTION STATUS", color = ColorTextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = { connectionDetails = publicConnectionEvidence(appNetwork, status) }) { Text("Connection details") }
+                TextButton(onClick = { WeaveloClient.checkRelayTransport() }) { Text("Check relay transport") }
                 TelemetryLaneRow("Discovery", status.phase, ColorAccentCyan)
                 TelemetryLaneRow("Runtime network", status.networkHash.take(12).ifEmpty { "Starting" }, ColorTextPrimary)
                 TelemetryLaneRow("This device", status.deviceHash.take(12).ifEmpty { "Starting" }, ColorTextPrimary)
