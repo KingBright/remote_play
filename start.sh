@@ -10,7 +10,7 @@ Weavelo uses the unified original-GPUI product and formal identity-bound produce
   scripts/build_android_release.sh
   python3 scripts/install_linux_desktop.py --help
 Existing Weavelo installation: python3 scripts/install_macos_unified.py --help
-First RemotePlay -> Weavelo migration: python3 scripts/migrate_macos_identity.py --help
+First legacy-identity migration: python3 scripts/migrate_macos_identity.py --help
 These commands require reviewed build/signing expectations. This launcher performs no action.
 GUIDANCE
 exit 64

@@ -67,7 +67,7 @@ fn handshake_stage(payload: &[u8]) -> Option<&'static str> {
 fn trace_handshake(stage: &str, peer: &str, payload: &[u8]) {
     if let Some(message) = handshake_stage(payload) {
         eprintln!(
-            "RP_SESSION_ROUTE t_ms={} stage={} peer={} message={}",
+            "WEAVELO_SESSION_ROUTE t_ms={} stage={} peer={} message={}",
             crate::session_crypto::now_unix_ms(),
             stage,
             peer,
@@ -589,7 +589,7 @@ impl RoutedRelay {
                         if matches!(&transport,RouteTransport::P2p(_)){trace_handshake("p2p_verified_receive",&envelope.source,&envelope.payload);}
                         self.receive(envelope).await;
                     }else if matches!(&transport,RouteTransport::P2p(_))&&rejection_log_at.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)){
-                        eprintln!("RP_SESSION_ROUTE t_ms={} stage=p2p_rejected_datagram loopback_port={}",crate::session_crypto::now_unix_ms(),from.port());rejection_log_at=Some(Instant::now());
+                        eprintln!("WEAVELO_SESSION_ROUTE t_ms={} stage=p2p_rejected_datagram loopback_port={}",crate::session_crypto::now_unix_ms(),from.port());rejection_log_at=Some(Instant::now());
                     }
                     // Legacy broadcast datagrams are deliberately rejected, never guessed/routed.
                 },

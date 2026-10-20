@@ -3,14 +3,14 @@
 use std::{env, path::PathBuf};
 mod build_toolchain;
 fn main() {
-    println!("cargo:rerun-if-env-changed=RP_VERIFIED_FFMPEG_INCLUDE");
+    println!("cargo:rerun-if-env-changed=WEAVELO_VERIFIED_FFMPEG_INCLUDE");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
         || env::var_os("CARGO_FEATURE_NATIVE_LINUX_VIDEO").is_none()
     {
         return;
     }
     let headers = PathBuf::from(
-        env::var_os("RP_VERIFIED_FFMPEG_INCLUDE")
+        env::var_os("WEAVELO_VERIFIED_FFMPEG_INCLUDE")
             .expect("native-linux-video needs explicitly verified FFmpeg 8.x development headers"),
     );
     assert!(headers.join("libavcodec/avcodec.h").is_file());

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in signed fixtures + real, independently labelled user launchd review.
 
-Never touches the installed app, production launch agent, Remote Hosts or TCC.
+Never touches the installed app, production launch agent, Octendra or TCC.
 Only the label created by this invocation is bootstrapped, crashed and removed.
 Raw receipts stay in the explicitly selected private evidence directory.
 """

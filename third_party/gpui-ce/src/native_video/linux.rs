@@ -156,7 +156,7 @@ impl DmaVideoFrame {
 #[cfg(feature = "native-video-validation")]
 impl DmaVideoFrame {
     /// Render a retained synthetic frame with the production shader into a small
-    /// offscreen target. Requires RP_BLADE_NATIVE_PIXEL_TEST=1 and is not part of
+    /// offscreen target. Requires WEAVELO_BLADE_NATIVE_PIXEL_TEST=1 and is not part of
     /// playback. The returned 96x64 RGBA pixels are validation-only readback.
     pub fn validation_pixels(&self, rotation: super::Rotation) -> Result<Vec<[u8; 4]>, String> {
         use std::os::fd::AsFd;

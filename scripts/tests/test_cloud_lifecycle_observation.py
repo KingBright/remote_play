@@ -1,6 +1,6 @@
 """Environment-specific observation fixtures. No Cargo, real cache or cleanup.
 
-Set RP_LIFECYCLE_TEST_HELPER to the verified official 2.0.2 helper when it is not
+Set WEAVELO_LIFECYCLE_TEST_HELPER to the verified official 2.0.2 helper when it is not
 installed at the usual location. The production checker has no env override.
 """
 import hashlib
@@ -45,13 +45,13 @@ class CloudLifecycleObservationTests(unittest.TestCase):
     def setUpClass(cls):
         if os.name != "posix":
             raise unittest.SkipTest("Official lifecycle helper currently requires POSIX")
-        supplied = os.environ.get("RP_LIFECYCLE_TEST_HELPER")
+        supplied = os.environ.get("WEAVELO_LIFECYCLE_TEST_HELPER")
         cls.helper = Path(supplied) if supplied else (
             Path.home() / ".codex/skills/rust-project-lifecycle/scripts/rust_storage.py")
         if not cls.helper.is_file():
             if supplied:
                 raise RuntimeError("Explicit lifecycle test helper is unavailable")
-            raise unittest.SkipTest("Set RP_LIFECYCLE_TEST_HELPER to the verified official 2.0.2 helper")
+            raise unittest.SkipTest("Set WEAVELO_LIFECYCLE_TEST_HELPER to the verified official 2.0.2 helper")
         spec = importlib.util.spec_from_file_location("rp_cloud_lifecycle_test_helper", cls.helper)
         module = importlib.util.module_from_spec(spec)
         previous = sys.dont_write_bytecode

@@ -337,7 +337,7 @@ impl NativeVideo {
 // not a second hand-written Vulkan shader. No call is present in normal playback.
 #[cfg(feature = "native-video-validation")]
 pub(super) fn validation_pixels(frame: DmaVideoFrame) -> Result<Vec<[u8; 4]>, String> {
-    if std::env::var("RP_BLADE_NATIVE_PIXEL_TEST").as_deref() != Ok("1") {
+    if std::env::var("WEAVELO_BLADE_NATIVE_PIXEL_TEST").as_deref() != Ok("1") {
         return Err("explicit compositor readback validation flag required".into());
     }
     let gpu = Arc::new(

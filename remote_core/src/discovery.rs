@@ -935,7 +935,7 @@ mod tests {
     #[test]
     fn discovery_packet_rejects_wrong_network_or_bad_shape() {
         assert_eq!(
-            DiscoveryAnnouncement::decode(b"not remote play").unwrap_err(),
+            DiscoveryAnnouncement::decode(b"not a discovery announcement").unwrap_err(),
             DiscoveryError::InvalidMagic
         );
 

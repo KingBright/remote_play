@@ -1,4 +1,4 @@
-# RemotePlay 移动端 (iOS / Android / iPadOS) UI & 交互设计规范
+# Weavelo 移动端 (iOS / Android / iPadOS) UI & 交互设计规范
 
 > [!IMPORTANT]
 > **跨端统一设计哲学 (Unified Obsidian Stream Architecture)**：
@@ -20,7 +20,7 @@
 
 #### 结构与功能模块：
 - **状态顶部栏 (Status Header)**：
-  - 极简标题 `RemotePlay`；
+  - 极简标题 `Weavelo`；
   - 右侧微型磨砂胶囊 `Mesh: 10.144.0.5`，带 4px 微动呼吸绿点；
 - **快速动作栏 (Quick Actions)**：
   - `[Scan QR to Pair 扫码配对]`：手机扫电脑端二维码免密加入私有 Mesh 组网；
@@ -73,6 +73,6 @@
 
 ## 📁 规范文档索引
 
-- 移动端设计规范：[`docs/MOBILE_UI_UX_DESIGN.md`](file:///Users/jinliang/remote_play/docs/MOBILE_UI_UX_DESIGN.md)
-- 全平台设计总览：[`docs/UI_UX_SPECIFICATION.md`](file:///Users/jinliang/remote_play/docs/UI_UX_SPECIFICATION.md)
+- 移动端设计规范：[MOBILE_UI_UX_DESIGN.md](MOBILE_UI_UX_DESIGN.md)
+- 全平台设计总览：[UI_UX_SPECIFICATION.md](UI_UX_SPECIFICATION.md)
 - 桌面端验收报告：[`walkthrough.md`](file:///Users/jinliang/.gemini/antigravity/brain/a55ce59b-1cef-4f11-9fe6-01ad1cf11456/walkthrough.md)

@@ -1,6 +1,6 @@
 # Validation from the primary main checkout
 
-All subsequent edits and validation use the primary RemotePlay repository on
+All subsequent edits and validation use the primary Weavelo repository on
 `main`. The historical task source copies and their Git references are retained
 only in recoverable local archives. They are not development or build inputs.
 

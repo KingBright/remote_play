@@ -341,10 +341,10 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "requires DISPLAY and an independently observed RP_X11_EXPECTED_ROOT; metadata only"]
+    #[ignore = "requires DISPLAY and an independently observed WEAVELO_X11_EXPECTED_ROOT; metadata only"]
     fn linux_x11_command_reads_root_metadata_without_capturing() {
         let display = std::env::var("DISPLAY").expect("explicit X11 display required");
-        let expected = std::env::var("RP_X11_EXPECTED_ROOT")
+        let expected = std::env::var("WEAVELO_X11_EXPECTED_ROOT")
             .expect("independently observed root geometry required");
         let (width, height) = expected.split_once('x').expect("expected WIDTHxHEIGHT");
         let expected = (

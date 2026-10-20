@@ -33,11 +33,13 @@ class WindowsRuntimeEnvironmentTests(unittest.TestCase):
     def test_restored_product_does_not_reenter_inherited_acceptance_mode(self):
         parent = {"WEAVELO_RESTORED_TEST_DEVICE": "old-peer",
                   "WEAVELO_RESTORED_TEST_OUTPUT": "old-result",
-                  "RP_MEDIA_ACCEPTANCE": "1", "RP_MEDIA_ACCEPTANCE_EXTRA": "stale"}
+                  "RP_MEDIA_ACCEPTANCE": "1", "RP_MEDIA_ACCEPTANCE_EXTRA": "stale",
+                  "WEAVELO_MEDIA_ACCEPTANCE": "1",
+                  "WEAVELO_MEDIA_ACCEPTANCE_EVENT": "stale"}
         restored = production_environment(parent, profile="existing-paired-profile")
         self.assertEqual(set(restored), {"WEAVELO_HEADLESS", "WEAVELO_PASSIVE_HOST",
                                        "WEAVELO_DEVICE_GROUP_DIR"})
-        self.assertEqual(len(parent), 4)
+        self.assertEqual(len(parent), 6)
 
     def test_roles_preserve_existing_identity_paths_and_security_settings(self):
         parent = {"PSExecutionPolicyPreference": "Restricted",

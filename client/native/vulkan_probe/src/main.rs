@@ -154,9 +154,9 @@ fn access_units(bytes:&[u8])->Result<Vec<&[u8]>,E>{
  starts.push(bytes.len());Ok(starts.windows(2).map(|p|&bytes[p[0]..p[1]]).collect())
 }
 fn main()->Result<(),E>{
- require(std::env::var("RP_NATIVE_DRM_TEST").as_deref()==Ok("1"),"explicit local GPU validation flag required")?;
+ require(std::env::var("WEAVELO_NATIVE_DRM_TEST").as_deref()==Ok("1"),"explicit local GPU validation flag required")?;
  require(unsafe{rp_linux_frame_info_size()}==std::mem::size_of::<FrameInfo>(),"native FFI frame metadata layout mismatch")?;
- let input=std::env::var("RP_NATIVE_DRM_FIXTURE")?;let reference=std::fs::read(std::env::var("RP_NATIVE_DRM_REFERENCE")?)?;let bytes=std::fs::read(&input)?;let units=access_units(&bytes)?;
+ let input=std::env::var("WEAVELO_NATIVE_DRM_FIXTURE")?;let reference=std::fs::read(std::env::var("WEAVELO_NATIVE_DRM_REFERENCE")?)?;let bytes=std::fs::read(&input)?;let units=access_units(&bytes)?;
  let node=CString::new("/dev/dri/renderD128")?;let mut raw=ptr::null_mut();ffcheck(unsafe{rp_linux_decoder_create(node.as_ptr(),&mut raw)})?;let decoder=Decoder(raw);
  let gpu=unsafe{Gpu::new(Path::new(node.to_str()?))?};let started=Instant::now();let mut total=0;
  let mut drain=||->Result<(),E>{loop{let mut raw=ptr::null_mut();let result=ffcheck(unsafe{rp_linux_decoder_receive(decoder.0,&mut raw)})?;if result==0{return Ok(());}

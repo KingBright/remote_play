@@ -43,7 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::env::set_var("WEAVELO_DEVICE_GROUP_DIR", &profile);
         std::env::set_var("WEAVELO_RESTORED_TEST_OUTPUT", root.join("gui.json"));
         std::env::set_var("WEAVELO_RESTORED_TEST_SECONDS", "180");
-        std::env::set_var("RP_LOOPBACK_PRODUCT_OBSERVATIONS", "1");
+        std::env::set_var("WEAVELO_LOOPBACK_PRODUCT_OBSERVATIONS", "1");
     }
     let mut preferences = weavelo_app::preferences::UserPreferences::default();
     preferences.ui.pause_when_inactive = false;

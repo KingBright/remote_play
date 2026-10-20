@@ -9,7 +9,7 @@ publish = false
 [workspace]
 
 [lib]
-path = "src/remoteplay.rs"
+path = "src/weavelo.rs"
 
 [features]
 default = []

@@ -797,7 +797,7 @@ pub fn candidate_routes(
     device_id: &str,
 ) -> Vec<(String, std::net::SocketAddr)> {
     use remote_core::discovery::DiscoveryScope;
-    let mut routes: Vec<_> = snapshot
+    let routes: Vec<_> = snapshot
         .peers()
         .iter()
         .filter(|p| p.announcement.device_id == device_id && p.announcement.control_port != 0)
@@ -814,9 +814,82 @@ pub fn candidate_routes(
             )
         })
         .collect();
+    order_unique_routes(routes)
+}
+
+/// Preserve preferred routes while trying each endpoint at most once. Sorting by
+/// priority does not group equal endpoints, so adjacent-only deduplication is not
+/// sufficient (LAN A, P2P B, Relay A).
+fn order_unique_routes(
+    mut routes: Vec<(u8, String, std::net::SocketAddr)>,
+) -> Vec<(String, std::net::SocketAddr)> {
     routes.sort_by_key(|p| p.0);
-    routes.dedup_by_key(|p| p.2);
+    let mut endpoints = BTreeSet::new();
+    routes.retain(|p| endpoints.insert(p.2));
     routes.into_iter().map(|p| (p.1, p.2)).collect()
+}
+
+#[cfg(test)]
+mod candidate_route_order_tests {
+    use super::order_unique_routes;
+    use std::net::SocketAddr;
+
+    fn route(rank: u8, label: &str, endpoint: &str) -> (u8, String, SocketAddr) {
+        (rank, label.into(), endpoint.parse().unwrap())
+    }
+
+    #[test]
+    fn separated_duplicate_does_not_consume_bounded_send_attempt() {
+        let routes = order_unique_routes(vec![
+            route(3, "Mesh", "127.0.0.1:9003"),
+            route(2, "Relay", "127.0.0.1:9001"),
+            route(1, "P2p", "127.0.0.1:9002"),
+            route(0, "Lan", "127.0.0.1:9001"),
+        ]);
+        // Directed screen send tries at most three candidates. A duplicate
+        // must not displace the third distinct endpoint.
+        let attempted: Vec<_> = routes.iter().take(3).map(|p| p.0.as_str()).collect();
+        assert_eq!(attempted, ["Lan", "P2p", "Mesh"]);
+        assert_eq!(routes.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_endpoint_keeps_the_preferred_scope() {
+        let routes = order_unique_routes(vec![
+            route(2, "Relay", "127.0.0.1:9001"),
+            route(1, "P2p", "127.0.0.1:9001"),
+            route(0, "Lan", "127.0.0.1:9001"),
+        ]);
+        assert_eq!(routes, vec![("Lan".into(), "127.0.0.1:9001".parse().unwrap())]);
+    }
+
+    #[test]
+    fn unique_routes_keep_priority_and_equal_priority_order() {
+        let routes = order_unique_routes(vec![
+            route(2, "Relay", "127.0.0.1:9004"),
+            route(1, "P2p first", "127.0.0.1:9002"),
+            route(0, "Lan", "127.0.0.1:9001"),
+            route(1, "P2p second", "127.0.0.1:9003"),
+        ]);
+        let labels: Vec<_> = routes.iter().map(|p| p.0.as_str()).collect();
+        assert_eq!(labels, ["Lan", "P2p first", "P2p second", "Relay"]);
+    }
+
+    #[test]
+    fn endpoint_identity_includes_port_address_family_and_ipv6_scope() {
+        let endpoints = [
+            "127.0.0.1:9001", "127.0.0.1:9002", "[::1]:9001",
+            "[fe80::1%2]:9001", "[fe80::1%3]:9001",
+        ];
+        let routes = order_unique_routes(endpoints.iter()
+            .map(|endpoint| route(0, "Lan", endpoint)).collect());
+        assert_eq!(routes.len(), endpoints.len());
+    }
+
+    #[test]
+    fn empty_candidate_list_stays_empty() {
+        assert!(order_unique_routes(Vec::new()).is_empty());
+    }
 }
 
 /// Classify the host error without claiming the user forgot to grant permission.

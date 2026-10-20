@@ -8,8 +8,8 @@ use fixture::access_units;
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use client::windows_hevc::WindowsHevcDecoder;
     use std::{path::PathBuf, time::Instant};
-    let path = PathBuf::from(std::env::var("RP_NATIVE_HEVC_FIXTURE")?);
-    let out = PathBuf::from(std::env::var("RP_NATIVE_HEVC_RECEIPT")?);
+    let path = PathBuf::from(std::env::var("WEAVELO_NATIVE_HEVC_FIXTURE")?);
+    let out = PathBuf::from(std::env::var("WEAVELO_NATIVE_HEVC_RECEIPT")?);
     if out.exists() {
         return Err("refusing to overwrite test receipt".into());
     }

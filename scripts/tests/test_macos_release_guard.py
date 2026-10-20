@@ -231,7 +231,7 @@ class PreservedConfigurationTests(unittest.TestCase):
             self.assertNotEqual(before,installer.preserve_hashes(home,home/'not-present.plist'))
 
 
-@unittest.skipUnless(sys.platform=='darwin' and os.environ.get('RP_SIGNING_INTEGRATION')=='1','explicit macOS integration run only')
+@unittest.skipUnless(sys.platform=='darwin' and os.environ.get('WEAVELO_SIGNING_INTEGRATION')=='1','explicit macOS integration run only')
 class NativeSignatureTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -1,16 +1,16 @@
-RemotePlay networking is product-native. The route policy is **LAN direct → RemotePlay P2P direct → RemotePlay Relay**. No third-party overlay network or sidecar is required.
+Weavelo networking is product-native. The route policy is **LAN direct → Weavelo P2P direct → Weavelo Relay**. No third-party overlay network or sidecar is required.
 
-# RemotePlay Networking
+# Weavelo Networking
 
 ## Product Route
 
-RemotePlay owns the complete connectivity path. The runtime selects one route per remote device in this order:
+Weavelo owns the complete connectivity path. The runtime selects one route per remote device in this order:
 
-1. **LAN direct** — use local discovery and send RemotePlay UDP datagrams straight to the peer.
-2. **RemotePlay P2P direct** — use the `bw` rendezvous node only to exchange observed UDP endpoints and coordinate hole punching, then send RemotePlay datagrams peer-to-peer.
-3. **RemotePlay Relay** — if no direct path is usable, use the NAS WebSocket relay as the final fallback.
+1. **LAN direct** — use local discovery and send Weavelo UDP datagrams straight to the peer.
+2. **Weavelo P2P direct** — use the `bw` rendezvous node only to exchange observed UDP endpoints and coordinate hole punching, then send Weavelo datagrams peer-to-peer.
+3. **Weavelo Relay** — if no direct path is usable, use the NAS WebSocket relay as the final fallback.
 
-The selected route is represented by the same local RemotePlay UDP endpoint, so capture, video/audio packetization, input, clipboard and file-transfer code do not need separate transport implementations.
+The selected route is represented by the same local Weavelo UDP endpoint, so capture, video/audio packetization, input, clipboard and file-transfer code do not need separate transport implementations.
 
 ```text
 same LAN
@@ -37,7 +37,7 @@ Changing device groups reloads P2P, relay and discovery together so no component
 
 ## LAN Discovery
 
-RemotePlay discovery uses the compact `RPDISC1` UDP announcement on port `38117` by default. Announcements contain device id, display name, capabilities and control port, but never the private group secret.
+Weavelo discovery uses the compact `RPDISC1` UDP announcement on port `38117` by default. Announcements contain device id, display name, capabilities and control port, but never the private group secret.
 
 The discovery cache keeps multiple route candidates for the same device. The unified app ranks them:
 
@@ -62,9 +62,9 @@ p.hackerlife.fun:3478/udp
 - discovery announcement
 - last-seen timestamp
 
-It does **not** proxy video, audio, input or file data. Once `Punch` / `PunchAck` or real peer traffic confirms the path, RemotePlay publishes a `DiscoveryScope::P2p` candidate locally. Candidate discovery alone is not enough to select P2P.
+It does **not** proxy video, audio, input or file data. Once `Punch` / `PunchAck` or real peer traffic confirms the path, Weavelo publishes a `DiscoveryScope::P2p` candidate locally. Candidate discovery alone is not enough to select P2P.
 
-One public UDP socket is shared by the local app, while each remote peer receives an independent loopback route socket. This lets one RemotePlay instance maintain direct paths to several devices without one candidate overwriting another.
+One public UDP socket is shared by the local app, while each remote peer receives an independent loopback route socket. This lets one Weavelo instance maintain direct paths to several devices without one candidate overwriting another.
 
 Server deployment lives under `deploy/bw/`.
 
@@ -76,7 +76,7 @@ Public endpoint:
 wss://relay.hackerlife.fun:8443/v1/relay
 ```
 
-The NAS relay is the last fallback only. The client opens local control/discovery tunnel endpoints; existing RemotePlay UDP packets are wrapped in the small `RPR1` relay envelope and forwarded over WebSocket. Caddy terminates TLS and proxies `/v1/relay` to the Rust relay service.
+The NAS relay is the last fallback only. The client opens local control/discovery tunnel endpoints; existing Weavelo UDP packets are wrapped in the small `RPR1` relay envelope and forwarded over WebSocket. Caddy terminates TLS and proxies `/v1/relay` to the Rust relay service.
 
 Deployment files live under `deploy/nas/`.
 
@@ -84,26 +84,26 @@ Deployment files live under `deploy/nas/`.
 
 
 ```text
-REMOTE_PLAY_P2P=1
-REMOTE_PLAY_P2P_RENDEZVOUS=p.hackerlife.fun:3478
-REMOTE_PLAY_RELAY=1
-REMOTE_PLAY_RELAY_SERVER_ADDR=wss://relay.hackerlife.fun:8443/v1/relay
-REMOTE_PLAY_DISCOVERY=1
+WEAVELO_P2P=1
+WEAVELO_P2P_RENDEZVOUS=p.hackerlife.fun:3478
+WEAVELO_RELAY=1
+WEAVELO_RELAY_SERVER_ADDR=wss://relay.hackerlife.fun:8443/v1/relay
+WEAVELO_DISCOVERY=1
 ```
 
 Useful development overrides:
 
 ```text
-REMOTE_PLAY_P2P_BIND_ADDR=0.0.0.0:0
-REMOTE_PLAY_P2P_LOG=1
-REMOTE_PLAY_RELAY_LOG=1
-REMOTE_PLAY_DISCOVERY_PORT=38117
+WEAVELO_P2P_BIND_ADDR=0.0.0.0:0
+WEAVELO_P2P_LOG=1
+WEAVELO_RELAY_LOG=1
+WEAVELO_DISCOVERY_PORT=38117
 ```
 
 
 ## Performance Rules
 
-- LAN and P2P paths carry native RemotePlay UDP datagrams without an extra media serialization layer.
+- LAN and P2P paths carry native Weavelo UDP datagrams without an extra media serialization layer.
 - Rendezvous never enters the media hot path.
 - Stale P2P candidates are not promoted to the device list.
 - Relay is a reachability fallback, not a preferred route.

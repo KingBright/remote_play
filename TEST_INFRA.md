@@ -1,4 +1,4 @@
-# E2E Test Infra: remote_play Streaming Pipeline Optimization
+# E2E Test Infra: weavelo Streaming Pipeline Optimization
 
 ## Test Philosophy
 - Opaque-box, requirement-driven. No dependency on implementation design internals.

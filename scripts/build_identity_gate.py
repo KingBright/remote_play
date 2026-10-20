@@ -39,7 +39,7 @@ FEATURES = {'macos': ['gpui-restoration'],
             'windows': ['gpui-restoration', 'native-windows-video']}
 BUILD_ENV = ('PATH', 'HOME', 'TMPDIR', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN', 'SDKROOT',
              'MACOSX_DEPLOYMENT_TARGET', 'CC', 'CXX', 'AR', 'CPATH', 'LIBRARY_PATH',
-             'PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR', 'RP_VERIFIED_FFMPEG_INCLUDE',
+             'PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR', 'WEAVELO_VERIFIED_FFMPEG_INCLUDE',
              'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
              'INCLUDE', 'LIB', 'LIBPATH',
              'WEAVELO_VALIDATION_SYSROOT', 'WEAVELO_VALIDATION_SYSROOT_MANIFEST',

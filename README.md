@@ -13,9 +13,9 @@ Weavelo 是面向 macOS、Windows、Linux、Android 和 Web 的跨设备远程�
 
 ## 当前状态
 
-品牌源码正在完成首次身份迁移审查。编译、签名、安装、系统权限和实际画面/输入验收分别记录；旧 RemotePlay 的链路结果不代表 Weavelo 新版验收。当前不要直接应用未放行的迁移计划。
+品牌迁移按设备分别核验。编译、签名、安装、系统权限和实际画面/输入验收分别记录；历史版本的链路结果不代表 Weavelo 新版验收。实际迁移使用已审核的计划和原事务记录。
 
-原仓库仍为 [KingBright/remote_play](https://github.com/KingBright/remote_play)，改名目标是 `KingBright/weavelo`；这里只记录计划，未创建新仓库、重写历史或推送本地源码。完整映射与门禁见[身份迁移计划](docs/plans/WEAVELO-IDENTITY-MIGRATION.md)。
+仓库为 [KingBright/weavelo](https://github.com/KingBright/weavelo)，已完成原仓库的原地改名并保留 Git 历史。最新代码、当前部署、URL 与历史证据的边界见[品牌切换清单](docs/plans/WEAVELO-BRAND-CUTOVER.md)；首次身份迁移机制见[身份迁移计划](docs/plans/WEAVELO-IDENTITY-MIGRATION.md)。
 
 ## 构建
 
@@ -45,9 +45,9 @@ python3 -B scripts/build_identity_gate.py build --help
 - 已有 Weavelo 的 macOS 升级使用 `scripts/install_macos_unified.py`，先生成计划。
 - 首次旧身份迁移使用独立的 `scripts/migrate_macos_identity.py`；原 compatible-upgrade 门禁不接受不同 Bundle ID。
 - Linux desktop/hicolor 首次安装使用 `scripts/install_linux_desktop.py`。目标独占创建；同内容既有文件只读保留，不同内容拒绝覆盖。
-- 任何实际迁移都需要已审核的计划哈希、产物证据与备份。当前官方交付机制尚缺显式身份转换接口，旧交付记录保持受保护。
+- 任何实际迁移都需要已审核的计划哈希、产物证据与备份。源码目录和默认交付名称变化必须经过官方生命周期事务，已有交付记录保持受保护。
 
-历史 `start.sh` 已退役，不再构建拆分 host/client、临时签名或结束其他进程。
+历史 `start.sh` 和 `setup_stable_signing.sh` 已退役，不再构建拆分 host/client、生成签名身份或结束其他进程。
 
 ## 验证与文档
 

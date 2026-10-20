@@ -326,8 +326,8 @@ fn publish(state: &State, raw: *mut c_void) -> Result<DmaVideoFrame, E> {
             state.stats.clone(),
         )
     }?;
-    if i.pts == 0 && std::env::var("RP_BLADE_NATIVE_PIXEL_TEST").as_deref() == Ok("1") {
-        let reference = std::fs::read(std::env::var("RP_BLADE_NATIVE_REFERENCE")?)?;
+    if i.pts == 0 && std::env::var("WEAVELO_BLADE_NATIVE_PIXEL_TEST").as_deref() == Ok("1") {
+        let reference = std::fs::read(std::env::var("WEAVELO_BLADE_NATIVE_REFERENCE")?)?;
         // Validate before publishing to the live window, so no other Vulkan
         // queue is simultaneously acquiring this source's foreign ownership.
         let reports = validate_pixels(&frame, &i, &reference)?;
@@ -408,14 +408,14 @@ fn decode(state: Arc<State>, input: PathBuf) -> Result<(), E> {
     Ok(())
 }
 fn main() -> Result<(), E> {
-    if std::env::var("RP_BLADE_NATIVE_WINDOW_TEST").as_deref() != Ok("1") {
+    if std::env::var("WEAVELO_BLADE_NATIVE_WINDOW_TEST").as_deref() != Ok("1") {
         return Err("explicit native window test flag required".into());
     }
-    let output = PathBuf::from(std::env::var("RP_BLADE_NATIVE_RECEIPT")?);
+    let output = PathBuf::from(std::env::var("WEAVELO_BLADE_NATIVE_RECEIPT")?);
     if output.exists() {
         return Err("receipt already exists".into());
     }
-    let input = PathBuf::from(std::env::var("RP_BLADE_NATIVE_FIXTURE")?);
+    let input = PathBuf::from(std::env::var("WEAVELO_BLADE_NATIVE_FIXTURE")?);
     let state = Arc::new(State {
         latest: Mutex::new(None),
         seen: Mutex::new(BTreeSet::new()),

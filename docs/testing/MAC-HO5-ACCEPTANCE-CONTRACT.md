@@ -19,7 +19,7 @@ PID and permission observations before testing. Cube was offline at the latest
 inventory check. No Mac/Windows bidirectional physical acceptance has completed.
 
 For Linux native video, verify FFmpeg 8.x headers and ABI 62/60 libraries before
-setting `RP_VERIFIED_FFMPEG_INCLUDE`. Preserve platform video buffers and actual
+setting `WEAVELO_VERIFIED_FFMPEG_INCLUDE`. Preserve platform video buffers and actual
 capture color metadata; inspect encoded SPS where metadata changes. A successful
 property setter, decode or UI submission does not establish presentation.
 

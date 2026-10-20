@@ -107,7 +107,7 @@ pub(super) struct MediaCycle {
 }
 impl MediaCycle {
     pub fn from_env()->Option<Result<Self,String>> {
-        if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref()!=Ok("1") {return None;}
+        if std::env::var("WEAVELO_MEDIA_ACCEPTANCE").as_deref()!=Ok("1") {return None;}
         Some((|| {
             if !cfg!(target_os="macos") || std::env::var_os("WEAVELO_RESTORED_TEST_SEQUENCE").is_some() {return Err("media cycle requires macOS single-device mode".into());}
             let device=std::env::var("WEAVELO_RESTORED_TEST_DEVICE").map_err(|_|"exact device required")?;

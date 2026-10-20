@@ -1,7 +1,7 @@
 // Only synthetic test windows; exits automatically. It never inspects other applications.
 import AppKit
 import CoreGraphics
-let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_DIR"]!)
+let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WEAVELO_WINDOW_FIXTURE_DIR"]!)
 var windows: [String:NSWindow] = [:]
 var clicks = ["A":0,"B":0]
 var keys = ["A":0,"B":0]

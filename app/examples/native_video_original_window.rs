@@ -123,11 +123,11 @@ mod probe {
     }
     pub fn run() {
         let path = std::path::PathBuf::from(
-            std::env::var("RP_NATIVE_WINDOW_RECEIPT").expect("explicit receipt required"),
+            std::env::var("WEAVELO_NATIVE_WINDOW_RECEIPT").expect("explicit receipt required"),
         );
         assert!(!path.exists(), "do not overwrite evidence");
         assert_eq!(
-            std::env::var("RP_NATIVE_VIDEO_GPU_TEST").as_deref(),
+            std::env::var("WEAVELO_NATIVE_VIDEO_GPU_TEST").as_deref(),
             Ok("1")
         );
         let color = VideoColor {

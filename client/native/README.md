@@ -14,7 +14,7 @@ Tests passed for generated 8-bit and 10-bit HEVC, with three repeats each. Every
 
 The validation was built against the official signed FFmpeg 8.1.2 headers matching HO5's installed `libavcodec.so.62` and `libavutil.so.60`. The public source archive SHA-256 is `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`; the signing fingerprint verified was `FCF986EA15E6E293A5644F10B4322F04D67658D8`. Headers were configured only in a private staging directory; no system package or graphics driver was installed or replaced.
 
-`RP_VERIFIED_FFMPEG_INCLUDE` is mandatory for the validation build. ABI layout size and runtime library major versions are checked. Its own Cargo.lock pins the small validation dependency graph; the product Cargo.lock has not changed. Do not ship the machine's entire FFmpeg build or assume this development setup is a portable redistribution package. Release packaging and license/capability verification remain required.
+`WEAVELO_VERIFIED_FFMPEG_INCLUDE` is mandatory for the validation build. ABI layout size and runtime library major versions are checked. Its own Cargo.lock pins the small validation dependency graph; the product Cargo.lock has not changed. Do not ship the machine's entire FFmpeg build or assume this development setup is a portable redistribution package. Release packaging and license/capability verification remain required.
 
 ## Integration gate
 

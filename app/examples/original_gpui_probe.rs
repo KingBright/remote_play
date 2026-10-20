@@ -119,12 +119,12 @@ impl Render for OriginalDesignProbe {
     }
 }
 fn main() {
-    let output = std::env::var("RP_GPUI_PROBE_RECEIPT").expect("explicit receipt path required");
+    let output = std::env::var("WEAVELO_GPUI_PROBE_RECEIPT").expect("explicit receipt path required");
     assert!(
         !std::path::Path::new(&output).exists(),
         "receipt already exists"
     );
-    let seconds = std::env::var("RP_GPUI_PROBE_SECONDS")
+    let seconds = std::env::var("WEAVELO_GPUI_PROBE_SECONDS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(12)

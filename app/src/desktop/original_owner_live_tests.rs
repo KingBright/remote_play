@@ -8,10 +8,10 @@ use std::{collections::BTreeMap, time::Duration};
 #[ignore = "requires explicit authorized profile and two own named synthetic windows"]
 async fn restored_owner_sequential_relay_devices_never_reuse_old_picture() {
     let output = std::path::PathBuf::from(
-        std::env::var("RP_RESTORED_SWITCH_OUTPUT").expect("explicit report path"),
+        std::env::var("WEAVELO_RESTORED_SWITCH_OUTPUT").expect("explicit report path"),
     );
     assert!(output.is_absolute() && !output.exists());
-    let run = std::env::var("RP_RESTORED_SWITCH_RUN").expect("unique fixture namespace");
+    let run = std::env::var("WEAVELO_RESTORED_SWITCH_RUN").expect("unique fixture namespace");
     assert!(run.starts_with("20261001-restored-"));
     let mut report = serde_json::json!({"passed":false,"renderer_controller":"OriginalOwner","transport":"Relay",
         "only_named_synthetic_windows":true,"input_sent":false,"desktop_subscribed":false,
@@ -28,7 +28,7 @@ async fn restored_owner_sequential_relay_devices_never_reuse_old_picture() {
     assert!(matches!(result, Ok(Ok(()))));
 }
 async fn run_sequence(run: &str, report: &mut serde_json::Value) -> Result<(), Error> {
-    let original = AppPrivateMeshConfigStore::new(std::env::var("RP_RESTORED_SWITCH_PROFILE")?)
+    let original = AppPrivateMeshConfigStore::new(std::env::var("WEAVELO_RESTORED_SWITCH_PROFILE")?)
         .load()?
         .ok_or("authorized profile missing")?;
     let root = tempfile::tempdir()?;

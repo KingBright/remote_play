@@ -512,7 +512,7 @@ pub(crate) mod validation {
     }
     pub(crate) fn run() -> Result<()> {
         ensure!(
-            std::env::var("RP_NATIVE_VIDEO_GPU_TEST").as_deref() == Ok("1"),
+            std::env::var("WEAVELO_NATIVE_VIDEO_GPU_TEST").as_deref() == Ok("1"),
             "explicit GPU-test approval flag required"
         );
         let (device, context) = hardware_device()?;

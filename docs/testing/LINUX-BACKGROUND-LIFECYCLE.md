@@ -180,7 +180,7 @@ export PKG_CONFIG_ALLOW_CROSS_x86_64_unknown_linux_gnu=1
 export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="--target=x86_64-unknown-linux-gnu --sysroot=$WEAVELO_VALIDATION_SYSROOT"
 export CFLAGS_x86_64_unknown_linux_gnu="--sysroot=$WEAVELO_VALIDATION_SYSROOT -isystem $WEAVELO_VALIDATION_SYSROOT/usr/include"
 export CXXFLAGS_x86_64_unknown_linux_gnu="$CFLAGS_x86_64_unknown_linux_gnu"
-export RP_VERIFIED_FFMPEG_INCLUDE="$WEAVELO_VALIDATION_SYSROOT/usr/include/ffmpeg"
+export WEAVELO_VERIFIED_FFMPEG_INCLUDE="$WEAVELO_VALIDATION_SYSROOT/usr/include/ffmpeg"
 python3 -B scripts/test_stream_settings_model.py --mode lifecycle-linux-native-build \
   --lifecycle-authority "$PWD/docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json" \
   --lifecycle-binding "$PWD/.rust-storage/linux-cross-validation-binding.json" \

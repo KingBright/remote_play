@@ -8,7 +8,7 @@ Every success, error, operation timeout and SIGINT/SIGTERM cancellation runs bou
 
 ## Prepare the target
 
-Compile `scripts/acceptance/GuardedWindowControlFixture.swift` with `xcrun swiftc`, AppKit and CoreGraphics. Only after the bounded live test is authorized, launch it with `RP_WINDOW_FIXTURE_DIR` pointing at a new private test directory and `RP_WINDOW_FIXTURE_NONCE` set to a fresh 32-character hexadecimal identifier.
+Compile `scripts/acceptance/GuardedWindowControlFixture.swift` with `xcrun swiftc`, AppKit and CoreGraphics. Only after the bounded live test is authorized, launch it with `WEAVELO_WINDOW_FIXTURE_DIR` pointing at a new private test directory and `WEAVELO_WINDOW_FIXTURE_NONCE` set to a fresh 32-character hexadecimal identifier.
 
 The fixture has two own windows and exits after 180 seconds. Read its `state.json` for the actual PID and A/B Window IDs. It reports mouse/key down/up counts, normalized click point and event source PID only for its own windows. A source PID of zero is unknown, not proof of a particular injector. It does not observe other apps. Its `command.json` supports an explicit `quit` action; use that to close only this fixture after the client has cleaned up.
 

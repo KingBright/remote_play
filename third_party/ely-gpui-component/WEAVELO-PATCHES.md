@@ -1,4 +1,4 @@
-# RemotePlay CE core profile
+# Weavelo CE core profile
 
 Source: [Ely-GPUI-Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components/tree/f756043853ca93407e2da5d07cfe520c84f90963), revision `f756043853ca93407e2da5d07cfe520c84f90963`.
 `UPSTREAM.json` records original SHA-256 values for every selected upstream file.
@@ -16,10 +16,10 @@ terminal, WebView, Android/Web backend, or catalog dependencies are included.
 ## Compatibility changes
 
 - `Cargo.toml`: one `gpui-ce =0.3.3` dependency, no gpui-pre/platform dependency;
-  compile only `src/remoteplay.rs`. The core profile compiles on the existing Rust 1.94.1;
+  compile only `src/weavelo.rs`. The core profile compiled on Rust 1.94.1;
   upstream's full crate still declares Rust 1.95. `rust-embed =8.11.0` uses the existing
   cached version rather than upstream 8.12. No toolchain replacement or version drift.
-- `src/remoteplay.rs`: explicit module/export profile; validate assets and register original
+- `src/weavelo.rs`: explicit module/export profile; validate assets and register original
   fonts before initializing the single Ely Theme and ElyFocus key bindings. Test initialization
   avoids native font registration; the product always uses fallible full initialization.
 - `src/primitives/focus.rs`: use CE focus/focus-next/focus-prev signatures without an App
@@ -44,5 +44,5 @@ unverified. Do not represent this profile as upstream's full native/Web accessib
 ## Attribution
 
 Ely remains MIT, Copyright (c) 2026 Ely GPUI Component contributors. Fonts retain their
-OFL notices and Lucide icons their ISC notice in assets. RemotePlay changes are recorded
+OFL notices and Lucide icons their ISC notice in assets. Weavelo changes are recorded
 here; original file identities/hashes are not replaced by local hashes.

@@ -2,14 +2,14 @@
 import AppKit
 import CoreGraphics
 import AVFoundation
-let mediaMode = ProcessInfo.processInfo.environment["RP_MEDIA_FIXTURE"] == "1"
-let mediaNonce = ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_NONCE"] ?? UUID().uuidString
+let mediaMode = ProcessInfo.processInfo.environment["WEAVELO_MEDIA_FIXTURE"] == "1"
+let mediaNonce = ProcessInfo.processInfo.environment["WEAVELO_WINDOW_FIXTURE_NONCE"] ?? UUID().uuidString
 var mediaEngine: AVAudioEngine?
 var toneRunning = false
 var toneError = ""
 final class TonePhase { var value: Double = 0 }
 func stopFixture() { mediaEngine?.stop(); app.terminate(nil) }
-let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_DIR"]!)
+let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["WEAVELO_WINDOW_FIXTURE_DIR"]!)
 var windows: [String:NSWindow] = [:]
 var clicks = ["A":0,"B":0]
 var keys = ["A":0,"B":0]
@@ -87,7 +87,7 @@ class FixtureView:NSView {
 let app=NSApplication.shared;app.setActivationPolicy(.regular)
 for (label,x) in [("A",150.0),("B",800.0)] {
     let w=NSWindow(contentRect:NSRect(x:x,y:220,width:540,height:380),styleMask:[.titled,.closable,.resizable],backing:.buffered,defer:false)
-    w.title = mediaMode ? "Weavelo Media Fixture \(mediaNonce) \(label)" : "Weavelo scoped-window acceptance " + (ProcessInfo.processInfo.environment["RP_WINDOW_FIXTURE_NONCE"] ?? "missing-nonce")
+    w.title = mediaMode ? "Weavelo Media Fixture \(mediaNonce) \(label)" : "Weavelo scoped-window acceptance " + (ProcessInfo.processInfo.environment["WEAVELO_WINDOW_FIXTURE_NONCE"] ?? "missing-nonce")
     w.acceptsMouseMovedEvents=true;w.isReleasedWhenClosed=false;w.contentView=FixtureView(label);w.makeKeyAndOrderFront(nil);windows[label]=w
 }
 if mediaMode {

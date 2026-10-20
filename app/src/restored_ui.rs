@@ -1266,7 +1266,7 @@ impl RestoredDashboard {
         }
         // Passive observations only; a fixture must use real product controls.
         // No command file can select a source, connect, unlock or inject input.
-        if std::env::var_os("RP_LOOPBACK_PRODUCT_OBSERVATIONS").is_some() {
+        if std::env::var_os("WEAVELO_LOOPBACK_PRODUCT_OBSERVATIONS").is_some() {
             let tabs = self.owner.session_tabs();
             let observation = serde_json::json!({"elapsed_ms":self.started.elapsed().as_millis(),
                 "render_calls":self.render_calls,"status":self.status,"drawer_open":self.drawer_open,

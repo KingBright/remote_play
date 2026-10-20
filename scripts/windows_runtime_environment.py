@@ -11,7 +11,8 @@ def production_environment(inherited: Mapping[str, str], *, profile: str,
     """Restore the product's default host/viewer role, including from a test parent."""
     result = dict(inherited)
     for name in tuple(result):
-        if name.startswith(("WEAVELO_RESTORED_TEST_", "RP_MEDIA_ACCEPTANCE")):
+        if name.startswith(("WEAVELO_RESTORED_TEST_", "WEAVELO_MEDIA_ACCEPTANCE",
+                            "RP_MEDIA_ACCEPTANCE")):
             del result[name]
     result.update(WEAVELO_HEADLESS="0", WEAVELO_PASSIVE_HOST="1",
                   WEAVELO_DEVICE_GROUP_DIR=profile)

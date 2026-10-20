@@ -1,7 +1,7 @@
-# Project: remote_play Streaming Pipeline Optimization
+# Project: weavelo Streaming Pipeline Optimization
 
 ## Architecture
-`remote_play` 是一个低延迟跨平台桌面与游戏远程串流系统。核心流媒体管线由 8 个端到端阶段构成：
+`weavelo` 是一个低延迟跨平台桌面与游戏远程串流系统。核心流媒体管线由 8 个端到端阶段构成：
 ```
 [Host 端]
   (S1) 屏幕捕获 (ScreenCaptureKit/Linux) 

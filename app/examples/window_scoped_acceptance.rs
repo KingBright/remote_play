@@ -69,7 +69,7 @@ async fn wait(
 }
 #[tokio::main]
 async fn main() -> Result<(), E> {
-    let root = PathBuf::from(std::env::var("RP_WINDOW_FIXTURE_DIR")?);
+    let root = PathBuf::from(std::env::var("WEAVELO_WINDOW_FIXTURE_DIR")?);
     let output = root.join("acceptance.json");
     let mut report = serde_json::json!({"only_synthetic_windows":true,"desktop_subscribed":false,"passed":false});
     let result = tokio::time::timeout(Duration::from_secs(70), run(&root, &mut report)).await;
@@ -86,11 +86,11 @@ async fn main() -> Result<(), E> {
 async fn run(root: &std::path::Path, report: &mut serde_json::Value) -> Result<(), E> {
     let initial = state(root)?;
     let pid = initial["pid"].as_i64().ok_or("missing fixture PID")? as i32;
-    let identity = AppPrivateMeshConfigStore::new(std::env::var("RP_PROBE_PROFILE")?)
+    let identity = AppPrivateMeshConfigStore::new(std::env::var("WEAVELO_PROBE_PROFILE")?)
         .load()?
         .ok_or("missing authorized identity")?;
     remote_core::session_crypto::use_paired_session_secret(identity.network_secret.expose_secret());
-    let target = std::env::var("RP_PROBE_TARGET")?.parse()?;
+    let target = std::env::var("WEAVELO_PROBE_TARGET")?.parse()?;
     let temp = tempfile::tempdir()?;
     let (conn, mut events) = WorkspaceConnection::connect(target, temp.path().into()).await?;
     conn.control(SessionCommand::ListSources { request_id: 900 })

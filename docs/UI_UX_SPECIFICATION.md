@@ -1,6 +1,6 @@
-# RemotePlay 跨平台 UI & UX 设计系统总览 (Desktop & Mobile)
+# Weavelo 跨平台 UI & UX 设计系统总览 (Desktop & Mobile)
 
-本文档归档了 RemotePlay 全平台的 UI & 交互设计系统。
+本文档归档了 Weavelo 全平台的 UI & 交互设计系统。
 
 ---
 
@@ -18,7 +18,7 @@
    - 竖屏控制中心 (Mobile Portrait Dashboard)
    - 横屏 100% 满屏远程触控操控 (Mobile Landscape Screen-First Viewport)
    - 触控与手势模式体系（直触 Direct Touch / 虚拟触控板 Virtual Trackpad / 虚拟手柄 Gamepad）
-   - 详见完整文档：[docs/MOBILE_UI_UX_DESIGN.md](file:///Users/jinliang/remote_play/docs/MOBILE_UI_UX_DESIGN.md)
+   - 详见完整文档：[MOBILE_UI_UX_DESIGN.md](MOBILE_UI_UX_DESIGN.md)
 
 ---
 

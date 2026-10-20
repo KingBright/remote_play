@@ -675,7 +675,7 @@ fn aperture(media: &IMFMediaType) -> Result<Option<[u32; 4]>> {
 }
 
 fn trace(message: &str) {
-    if std::env::var_os("RP_NATIVE_MF_TRACE").is_some() {
+    if std::env::var_os("WEAVELO_NATIVE_MF_TRACE").is_some() {
         eprintln!("MF_STAGE {message}");
     }
 }

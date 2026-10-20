@@ -285,8 +285,8 @@ mod check {
         )
     }
     pub fn run() -> Result<(), E> {
-        let path = PathBuf::from(std::env::var("RP_NATIVE_HEVC_FIXTURE")?);
-        let output = PathBuf::from(std::env::var("RP_NATIVE_HEVC_RECEIPT")?);
+        let path = PathBuf::from(std::env::var("WEAVELO_NATIVE_HEVC_FIXTURE")?);
+        let output = PathBuf::from(std::env::var("WEAVELO_NATIVE_HEVC_RECEIPT")?);
         if output.exists() {
             return Err("refusing to overwrite validation receipt".into());
         }

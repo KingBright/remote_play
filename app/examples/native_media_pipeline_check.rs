@@ -12,8 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sync::atomic::Ordering,
         time::{Duration, Instant},
     };
-    let input = std::fs::read(std::env::var("RP_NATIVE_HEVC_FIXTURE")?)?;
-    let output = PathBuf::from(std::env::var("RP_NATIVE_HEVC_RECEIPT")?);
+    let input = std::fs::read(std::env::var("WEAVELO_NATIVE_HEVC_FIXTURE")?)?;
+    let output = PathBuf::from(std::env::var("WEAVELO_NATIVE_HEVC_RECEIPT")?);
     if output.exists() || input.len() > 32 * 1024 * 1024 {
         return Err("invalid output or fixture bound".into());
     }

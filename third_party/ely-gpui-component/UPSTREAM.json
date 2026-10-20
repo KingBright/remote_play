@@ -3,7 +3,7 @@
   "revision": "f756043853ca93407e2da5d07cfe520c84f90963",
   "upstream_rust_version": "1.95",
   "upstream_gpui": "gpui-pre =0.3.8",
-  "profile": "RemotePlay CE core: assets, theme, focus, icon, button, spinner",
+  "profile": "Weavelo CE core: assets, theme, focus, icon, button, spinner",
   "upstream_sha256": {
     "Cargo.toml": "2847afbb0173a0061e7829c62ff189b6536b8796d860393f6a379752f4d3b042",
     "LICENSE": "c69028b5957f4ded637dc55a4a412b209c014414ece49efefa60fa811a4c0312",
@@ -354,7 +354,7 @@
     "assets/fonts/ibm-plex-sans/IBMPlexSans-LICENSE.txt": "91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360",
     "assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5"
   },
-  "remoteplay_modified_upstream_files": [
+  "weavelo_modified_upstream_files": [
     "src/buttons/button.rs",
     "src/primitives/focus.rs",
     "src/theme/tokens.rs",

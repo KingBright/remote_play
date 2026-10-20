@@ -1,8 +1,8 @@
-# RemotePlay release invariants
+# Weavelo release invariants
 
 ## macOS signing and deployment
 
-- The authorized release identity is pinned in `deploy/macos/signing-policy.json`. A name such as `RemotePlay Local` alone is not sufficient: verify the exact certificate and designated requirement.
+- The authorized release identity is pinned in `deploy/macos/signing-policy.json`. A certificate's display name alone is not sufficient: verify the exact certificate and designated requirement.
 - Use `scripts/package_macos_unified.sh` for production packaging. A build machine without the existing signing private key may compile, but must return the binary to the authorized signing machine. Never add an ad-hoc fallback, create a replacement certificate automatically, or copy signing private keys through tools.
 - Use `scripts/publish_desktop_nas.sh` to publish. Its macOS guard must pass before any upload. A checksum, successful codesign integrity check alone, or an agent's claim is not proof of authorization-compatible identity.
 - Use `python3 scripts/install_macos_unified.py PACKAGE.zip` for a deployment plan and append `--apply` only for an authorized compatible update. Do not replace installed apps with a raw build or bypass the old/new identity comparison.
@@ -13,7 +13,7 @@
 
 ## Regression checks
 
-Run `./scripts/test_release.sh` from the primary `main` checkout for release tests. On the existing signing Mac, `RP_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
+Run `./scripts/test_release.sh` from the primary `main` checkout for release tests. On the existing signing Mac, `WEAVELO_SIGNING_INTEGRATION=1` additionally runs native signed/ad-hoc/tamper tests using disposable non-running fixtures. No test resets system permissions or launches the fixture app.
 
 ## Desktop visual quality and migration invariants
 
@@ -73,7 +73,7 @@ Keep one verified current artifact per platform in the established default outpu
 and retain necessary shared compilation caches. The existing public authority owns
 atomic output replacement and exact temporary cleanup; do not create generations,
 archive directories or APK snapshots. Production macOS uses `~/rust-target` and
-`package/macos/RemotePlay-macos-arm64.zip`; Android uses its default `app-release.apk`.
+`package/macos/Weavelo-macos-arm64.zip`; Android uses its default `app-release.apk`.
 Use the formal packaging scripts; bare release Gradle packaging requires their
 active public transaction. Debug/native incremental builds do not publish artifacts.
 Wait for failed producers before cleaning their temporary files; recover interrupted

@@ -10,10 +10,10 @@ type E = Box<dyn std::error::Error + Send + Sync>;
 #[tokio::main]
 async fn main() -> Result<(), E> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let target = std::env::var("RP_GUI_CAPTURE_TARGET")?.parse()?;
-    let pid = std::env::var("RP_GUI_CAPTURE_PID")?.parse::<i32>()?;
-    let title = std::env::var("RP_GUI_CAPTURE_TITLE")?;
-    let output = PathBuf::from(std::env::var("RP_GUI_CAPTURE_OUTPUT")?);
+    let target = std::env::var("WEAVELO_GUI_CAPTURE_TARGET")?.parse()?;
+    let pid = std::env::var("WEAVELO_GUI_CAPTURE_PID")?.parse::<i32>()?;
+    let title = std::env::var("WEAVELO_GUI_CAPTURE_TITLE")?;
+    let output = PathBuf::from(std::env::var("WEAVELO_GUI_CAPTURE_OUTPUT")?);
     if pid <= 0
         || title != "Weavelo restored GUI review"
         || !output.is_absolute()
@@ -21,7 +21,7 @@ async fn main() -> Result<(), E> {
     {
         return Err("Explicit unique test window and fresh local output required".into());
     }
-    let config = AppPrivateMeshConfigStore::new(std::env::var("RP_GUI_CAPTURE_PROFILE")?)
+    let config = AppPrivateMeshConfigStore::new(std::env::var("WEAVELO_GUI_CAPTURE_PROFILE")?)
         .load()?
         .ok_or("authorized identity missing")?;
     remote_core::session_crypto::use_paired_session_secret(config.network_secret.expose_secret());

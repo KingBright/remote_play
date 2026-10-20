@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !parent.is_absolute() || !output.is_absolute() || output.exists() {
         return Err("Use a fresh absolute acceptance directory and output file".into());
     }
-    if std::env::var("RP_MEDIA_ACCEPTANCE").as_deref() == Ok("1") {
+    if std::env::var("WEAVELO_MEDIA_ACCEPTANCE").as_deref() == Ok("1") {
         if std::env::var("WEAVELO_RESTORED_TEST_SECONDS").ok()
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|seconds| (5..=180).contains(seconds)).is_none() {
