@@ -495,11 +495,26 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--apply', action='store_true')
     p.add_argument('--plan-sha256')
+    p.add_argument('--linux-update', action='store_true',
+                   help='Update the existing same-profile Linux installation with retained rollback')
+    p.add_argument('--prepare-update', action='store_true',
+                   help='Seal an already observed Linux compiler output and record its installation plan')
+    p.add_argument('--recover-update', action='store_true',
+                   help='Recover only the original journal-bound Linux update by restoring its old image')
+    p.add_argument('--reconcile-update', action='store_true',
+                   help='Verify an already running Linux update after an exact reviewed CPUWeight change')
+    p.add_argument('--configuration-sha256')
     for name in ('build-receipt','release-manifest','release-archive','compiler-binary'):
         p.add_argument('--'+name,type=Path)
     for name in ('build-receipt-sha256','manifest-sha256','archive-sha256','expected-commit','identity-sha256','old-binary-sha256'):
         p.add_argument('--'+name)
     args = p.parse_args()
+    if args.linux_update:
+        from linux_current_update import run
+        run(args)
+        return
+    require(not args.prepare_update and not args.recover_update and not args.reconcile_update,
+            'Linux update mode required')
     install = NativeInstall(args)
     if args.apply:
         require(args.plan_sha256 is not None, 'Reviewed plan required')

@@ -1,5 +1,42 @@
 # Linux 同身份后台服务 / GUI 分离方案
 
+## 已安装版本的同身份更新
+
+原 `install_native_first_identity.py` 的显式 `--linux-update` 入口使用
+`linux_current_update.py` 更新已经存在的独立 GUI 服务。它不切换后台角色，
+不修改 unit、drop-in、自启动意图、桌面条目或配对文件，也不重新编译。
+
+先用 `--linux-update --prepare-update`，同时传入独立核验的
+`--build-receipt`、`--build-receipt-sha256`、`--compiler-binary`、
+`--expected-commit`、`--identity-sha256`、`--old-binary-sha256`。
+入口验证原安装 journal、release manifest、实际 `/proc` 映像及空闲会话，
+通过原 `build_identity_gate.seal_tree` 封装现有编译产物，并在原私有 journal
+的 `linux_update` 中记录计划。只返回不含配对内容的摘要；真实计划不提交到仓库。
+
+准备完成后，审阅计划摘要，再使用同一入口的
+`--linux-update --apply --plan-sha256 REVIEWED_SHA`。安装会重新核对 inode、
+哈希、权限、xattr、服务策略、profile 和 owner generation，只停止已核验的原服务；
+原子交换应用目录后保留原 inode 到原事务目录的固定 `previous-app`。
+原 release manifest 和首次安装证据保留。成功必须有新 `/proc` 映像、
+连续稳定的 owner/GUI 状态和未变化的配对文件，不能只凭服务 running 宣称完成。
+
+未知、已有或中断的更新不会重新准备或重复 apply。用原计划摘要及
+`--linux-update --recover-update --plan-sha256 REVIEWED_SHA` 检查并恢复原映像；
+外来文件、配置或身份漂移会保留现场并拒绝恢复。一次更新保留一份必要的安装回滚，
+不产生分发归档、历史成品代数或另一套发布登记。后续更新需先处理原事务和回滚归属。
+已处于后台分离模式的安装不适用此入口。实际设备发现、扫码、视频呈现和输入验收
+仍须分别完成。
+
+若新 owner 已通过实际映像核验，随后仅运行时资源配置
+`/run/user/UID/systemd/user.control/weavelo.service.d/50-CPUWeight.conf`
+变化而触发保护，可先独立读取其准确内容及当前配置摘要，再显式使用
+`--linux-update --reconcile-update --plan-sha256 REVIEWED_SHA
+--configuration-sha256 OBSERVED_SHA`。此步骤只允许该文件的 CPUWeight 差异，
+再次核对原 owner、配对文件、主 unit、其他 drop-in、新旧映像和 manifest；
+它不停止或启动服务、不交换程序、不写任何资源配置。原失败记录和计划保留，
+审阅后的配置与执行器摘要写入同一 journal，不能用此入口接受其他配置漂移。
+配置差异与写入者归因分别记录，不能从该文件名或启动时间推定具体写入者。
+
 `scripts/linux_background_lifecycle_plan.py` 是原安装流程的纯方案工具，复用 `background_lifecycle_plan.require_separated_entries` 的产品能力检查。没有 apply、systemctl、子进程、profile 读写或凭据创建入口。它只生成一份内容寻址的私有方案及可选回滚预览，不是新安装器或发布权威。能力 JSON、声明的 PID 和输入 inode 都不是原生身份或归属证明；真实操作仍须由原生产者重新核验。
 
 ## 具体变化
