@@ -504,6 +504,7 @@ def main():
     p.add_argument('--reconcile-update', action='store_true',
                    help='Verify an already running Linux update after an exact reviewed CPUWeight change')
     p.add_argument('--configuration-sha256')
+    p.add_argument('--update-id', help='Canonical UUID for a separate subsequent Linux update; preserves all earlier journals')
     for name in ('build-receipt','release-manifest','release-archive','compiler-binary'):
         p.add_argument('--'+name,type=Path)
     for name in ('build-receipt-sha256','manifest-sha256','archive-sha256','expected-commit','identity-sha256','old-binary-sha256'):
@@ -513,7 +514,7 @@ def main():
         from linux_current_update import run
         run(args)
         return
-    require(not args.prepare_update and not args.recover_update and not args.reconcile_update,
+    require(not args.prepare_update and not args.recover_update and not args.reconcile_update and not args.update_id,
             'Linux update mode required')
     install = NativeInstall(args)
     if args.apply:

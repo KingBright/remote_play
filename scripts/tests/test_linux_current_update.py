@@ -18,11 +18,11 @@ class Fixture(update.LinuxUpdate):
         self.work = root
         self.live = root/'live'; self.live.mkdir()
         self.exe = self.live/'weavelo'; self.exe.write_bytes(b'old')
-        self.payload = root/'payload'; self.payload.mkdir()
+        self.payload = root/'update-payload'; self.payload.mkdir()
         self.stage = self.payload/'Weavelo'; self.stage.mkdir()
         (self.stage/'weavelo').write_bytes(b'new')
         self.previous = root/'previous'
-        self.manifest = self.payload/'manifest.json'; self.manifest.write_text('{}')
+        self.manifest = self.payload/update.gate.MANIFEST; self.manifest.write_text('{}')
         self.journal = root/'journal.json'
         receipt = root/'receipt.json'; receipt.write_text('{}')
         self.config = {'unchanged': True}
@@ -41,6 +41,7 @@ class Fixture(update.LinuxUpdate):
         self.expected = update.digest(self.plan)
         self.root = {'untouched_original': {'value': 1},
                      'linux_update': {'phase': 'prepared', 'plan': self.plan, 'plan_sha256': self.expected}}
+        self.update_id = None
 
     def owner(self, unused):
         return {'pid': self.pid, 'generation': 'generation'}
@@ -75,6 +76,50 @@ class Fixture(update.LinuxUpdate):
         return {'pid': self.pid, 'verified_fixture': True}
 
 
+class NextFixture(Fixture):
+    """Real separate journals and filesystem transitions, synthetic service only."""
+    def __init__(self, previous, update_id, content):
+        self.__dict__.update(previous.__dict__)
+        self.events = []
+        self.update_id = update_id
+        self.original_journal = self.work/'journal.json'
+        self.transaction = self.work/'updates'/update_id
+        self.journal = self.transaction/'journal.json'
+        self.payload = self.transaction/'update-payload'
+        self.stage = self.payload/'Weavelo'
+        self.previous = self.transaction/'previous-app'
+        self.manifest = self.payload/update.gate.MANIFEST
+        self.journal_state = None
+        self.root = {'schema': 1, 'kind': 'weavelo-linux-update-transaction', 'update_id': update_id}
+        self.repo = Path(update.__file__).resolve().parents[1]
+        candidate = self.work/('candidate-'+update_id); candidate.write_bytes(content)
+        receipt = self.work/('receipt-'+update_id+'.json'); receipt.write_text('{}')
+        self.args = SimpleNamespace(compiler_binary=candidate, build_receipt=receipt,
+            build_receipt_sha256=update.gate.hash_file(receipt), expected_commit='b'*40,
+            identity_sha256='c'*64, old_binary_sha256=update.gate.hash_file(self.exe))
+
+    def pins(self):
+        return {'compiler_binary_sha256': update.gate.hash_file(self.args.compiler_binary)}
+
+    def save(self, document):
+        update.LinuxUpdate.save(self, document)
+
+    def check(self, document, expected):
+        return update.LinuxUpdate.check(self, document, expected)
+
+    def profile_state(self):
+        return self.profile
+
+    def configuration(self):
+        return self.config
+
+    def ctl(self, action):
+        self.events.append(action)
+        self.pid = 0 if action == 'stop' else 99999998
+        if action == 'start' and self.fail_new and self.exe.read_bytes() == self.args.compiler_binary.read_bytes():
+            raise RuntimeError('Synthetic next-update startup failure')
+
+
 class UpdateTests(unittest.TestCase):
     def setUp(self):
         if not hasattr(os, 'listxattr'):
@@ -88,6 +133,11 @@ class UpdateTests(unittest.TestCase):
         self.verify.start(); self.addCleanup(self.verify.stop)
         self.native = patch.object(update.gate, 'verify_running_linux', return_value={'verified': True})
         self.native.start(); self.addCleanup(self.native.stop)
+        def seal(payload, *args, **kwargs):
+            (payload/update.gate.MANIFEST).write_text('{}')
+            return {'manifest_sha256': update.gate.hash_file(payload/update.gate.MANIFEST)}
+        sealer = patch.object(update.gate, 'seal_tree', side_effect=seal)
+        sealer.start(); self.addCleanup(sealer.stop)
 
     def test_success_retains_exact_previous_inode_and_original_journal(self):
         a = self.adapter
@@ -175,6 +225,138 @@ class UpdateTests(unittest.TestCase):
         a.apply(a.expected); a.events.clear()
         with self.assertRaises(RuntimeError):
             a.apply(a.expected)
+        self.assertEqual(a.events, [])
+
+    def next_update(self, name='11111111-1111-4111-8111-111111111111', previous=None, content=b'next'):
+        original = self.adapter
+        if previous is None:
+            original.apply(original.expected)
+            original.root.update(phase='installed_and_running_verified', plan={
+                'new_binary_sha256': original.plan['old_binary_sha256'],
+                'source_commit': 'd'*40, 'build_identity_sha256': 'e'*64})
+            original.root['plan_sha256'] = update.digest(original.root['plan'])
+            original.original_journal = original.journal
+            update.atomic_state(original.journal, original.root, initial=True)
+            previous = original
+        return NextFixture(previous, name, content)
+
+    def test_independent_second_and_third_prepare_commit_preserve_all_predecessors(self):
+        a = self.next_update()
+        original_journal = update.state(a.original_journal)
+        original_backup = update.tree(self.adapter.previous)
+        old_live = update.tree(a.live)
+        with a.lock():
+            prepared = a.prepare()
+        self.assertEqual(prepared['phase'], 'prepared')
+        self.assertEqual(a.root['linux_update']['plan']['old_manifest_path'], str(self.adapter.manifest))
+        with a.lock():
+            result = a.apply(prepared['plan_sha256'])
+        self.assertEqual(result['phase'], 'committed')
+        self.assertEqual(update.tree(a.previous), old_live)
+        second_journal = update.state(a.journal)
+        second_backup = update.tree(a.previous)
+        b = self.next_update('22222222-2222-4222-8222-222222222222', a, b'third')
+        with b.lock():
+            planned = b.prepare()
+        self.assertEqual(b.root['predecessor']['journal'], str(a.journal))
+        with b.lock():
+            b.apply(planned['plan_sha256'])
+        self.assertEqual(b.exe.read_bytes(), b'third')
+        self.assertEqual(update.state(a.original_journal), original_journal)
+        self.assertEqual(update.tree(self.adapter.previous), original_backup)
+        self.assertEqual(update.state(a.journal), second_journal)
+        self.assertEqual(update.tree(a.previous), second_backup)
+
+    def test_next_transaction_failure_restores_its_immediate_predecessor(self):
+        a = self.next_update(); original = update.state(a.original_journal)
+        old = update.tree(a.live)
+        with a.lock():
+            plan = a.prepare()
+        a.fail_new = True
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'original image restored'):
+            a.apply(plan['plan_sha256'])
+        self.assertEqual(update.tree(a.live), old)
+        self.assertEqual(a.root['linux_update']['phase'], 'rolled_back')
+        self.assertEqual(update.state(a.original_journal), original)
+
+    def test_duplicate_prepare_commit_and_unknown_outcome_never_replay(self):
+        a = self.next_update()
+        with a.lock():
+            plan = a.prepare()
+        journal = update.state(a.journal)
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'Observe the original'):
+            a.prepare()
+        self.assertEqual(update.state(a.journal), journal)
+        a.root['linux_update']['phase'] = 'start_requested'
+        a.save(a.root['linux_update'])
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'do not replay'):
+            a.apply(plan['plan_sha256'])
+        self.assertEqual(a.events, [])
+        # Explicit recovery resolves this transaction; prepare never invents completion.
+        with a.lock():
+            a.rollback(a.root['linux_update'], plan['plan_sha256'])
+        self.assertEqual(a.root['linux_update']['phase'], 'rolled_back')
+
+    def test_duplicate_committed_next_transaction_cannot_restart_or_exchange(self):
+        a = self.next_update()
+        with a.lock():
+            plan = a.prepare()
+        with a.lock():
+            a.apply(plan['plan_sha256'])
+        a.events.clear(); before = update.state(a.journal)
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'do not replay'):
+            a.apply(plan['plan_sha256'])
+        self.assertEqual(a.events, [])
+        self.assertEqual(update.state(a.journal), before)
+
+    def test_pending_or_uncertain_transaction_blocks_a_new_id_and_historical_recovery(self):
+        a = self.next_update()
+        with a.lock():
+            a.prepare()
+        b = self.next_update('22222222-2222-4222-8222-222222222222', a)
+        for phase in ('prepared', 'start_requested', 'recovery_required', 'unknown'):
+            a.root['linux_update']['phase'] = phase; a.save(a.root['linux_update'])
+            with self.subTest(phase=phase), self.assertRaisesRegex(RuntimeError, 'pending or uncertain'):
+                with b.lock():
+                    b.prepare()
+            self.assertFalse(b.transaction.exists())
+        self.adapter.journal_state = update.state(self.adapter.journal)
+        with self.assertRaisesRegex(RuntimeError, 'pending or uncertain'):
+            with self.adapter.lock():
+                pass
+
+    def test_untrusted_update_id_cannot_read_or_create_a_transaction(self):
+        for name in ('../escape', 'UPPERCASE', '11111111111141118111111111111111'):
+            with self.subTest(name=name), patch.object(update.sys, 'platform', 'linux'), \
+                    patch.object(update.os, 'getuid', return_value=1000), \
+                    patch.object(update.gate, 'read_json') as read:
+                with self.assertRaises((ValueError, RuntimeError)):
+                    update.LinuxUpdate(SimpleNamespace(update_id=name))
+                read.assert_not_called()
+
+    def test_foreign_predecessor_or_orphan_namespace_is_preserved(self):
+        a = self.next_update()
+        with a.lock():
+            plan = a.prepare()
+        before = a.original_journal.read_bytes()
+        a.original_journal.write_bytes(before+b'\n')
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'Predecessor journal changed'):
+            a.apply(plan['plan_sha256'])
+        self.assertEqual(a.events, [])
+        a.original_journal.write_bytes(before)
+        orphan = a.transaction.parent/'33333333-3333-4333-8333-333333333333'
+        orphan.mkdir(mode=0o700)
+        with self.assertRaises(FileNotFoundError):
+            with a.lock():
+                pass
+        self.assertTrue(orphan.is_dir())
+
+    def test_wrong_predecessor_pin_never_creates_a_transaction(self):
+        a = self.next_update()
+        a.args.old_binary_sha256 = 'f'*64
+        with a.lock(), self.assertRaisesRegex(RuntimeError, 'unique committed predecessor'):
+            a.prepare()
+        self.assertFalse(a.transaction.exists())
         self.assertEqual(a.events, [])
 
     def test_active_lease_pending_and_missing_sessions_fail_closed(self):

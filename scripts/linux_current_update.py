@@ -1,7 +1,7 @@
 """Same-profile Linux update adapter for the original native installer.
 
-The original installation journal owns this one update and its retained previous
-app. Packaging uses the original release sealer; no compiler, new identity,
+The original installation journal and every completed update stay immutable when
+starting a separately identified next update. Packaging uses the original release sealer; no compiler, new identity,
 service configuration change, credential copy or public release is involved.
 """
 from contextlib import contextmanager
@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 
 import build_identity_gate as gate
 from install_native_first_identity import atomic_state, digest, inventory, real_path, require
@@ -88,19 +89,100 @@ class LinuxUpdate:
         self.profile = self.home/'.config/weavelo/mesh'
         self.unit = self.home/'.config/systemd/user/weavelo.service'
         self.work = self.home/'.local/state/weavelo-identity-migration'
-        self.journal = self.work/'journal.json'
-        self.payload = self.work/'update-payload'
+        self.update_id = getattr(args, 'update_id', None)
+        if self.update_id is not None:
+            require(str(uuid.UUID(self.update_id)) == self.update_id,
+                    'Update ID must be a canonical UUID')
+        self.original_journal = self.work/'journal.json'
+        original = gate.read_json(self.original_journal)
+        require(original.get('phase') == 'installed_and_running_verified'
+                and original.get('plan_sha256') == digest(original.get('plan')),
+                'Original completed installation journal required')
+        self.transaction = self.work/'updates'/self.update_id if self.update_id else self.work
+        self.journal = self.transaction/'journal.json'
+        self.payload = self.transaction/'update-payload'
         self.stage = self.payload/'Weavelo'
-        self.previous = self.work/'previous-app'
+        self.previous = self.transaction/'previous-app'
         self.manifest = self.payload/gate.MANIFEST
         for directory in (self.work, self.profile):
             require(state(directory)['mode'] == 0o700, 'Existing private installation directory required')
-        require(state(self.journal)['mode'] == 0o600, 'Existing private installation journal required')
-        self.root = gate.read_json(self.journal)
-        require(self.root.get('phase') == 'installed_and_running_verified'
-                and self.root.get('plan_sha256') == digest(self.root.get('plan')),
-                'Original completed installation journal required')
-        self.journal_state = state(self.journal)
+        require(state(self.original_journal)['mode'] == 0o600, 'Existing private installation journal required')
+        if self.update_id and not self.journal.exists():
+            require(not self.transaction.exists() and not self.transaction.is_symlink(),
+                    'Unrecorded transaction directory preserved; inspect its original operation')
+            self.root = {'schema': 1, 'kind': 'weavelo-linux-update-transaction',
+                         'update_id': self.update_id}
+            self.journal_state = None
+        else:
+            require(state(self.journal)['mode'] == 0o600, 'Private transaction journal required')
+            self.root = gate.read_json(self.journal)
+            if self.update_id:
+                require(self.root.get('schema') == 1
+                        and self.root.get('kind') == 'weavelo-linux-update-transaction'
+                        and self.root.get('update_id') == self.update_id,
+                        'Transaction identity differs')
+            self.journal_state = state(self.journal)
+
+    def journals(self):
+        """Bounded metadata inventory under the one original update authority."""
+        yield self.original_journal, gate.read_json(self.original_journal), self.work
+        directory = self.work/'updates'
+        if not directory.exists() and not directory.is_symlink():
+            return
+        require(state(directory)['mode'] == 0o700, 'Private update namespace required')
+        entries = list(directory.iterdir())
+        require(len(entries) <= 256, 'Update journal review limit reached; preserve history')
+        for entry in sorted(entries):
+            require(str(uuid.UUID(entry.name)) == entry.name and state(entry)['mode'] == 0o700,
+                    'Unknown update directory preserved')
+            path = entry/'journal.json'
+            require(state(path)['mode'] == 0o600, 'Incomplete transaction; inspect original operation')
+            document = gate.read_json(path)
+            require(document.get('schema') == 1
+                    and document.get('kind') == 'weavelo-linux-update-transaction'
+                    and document.get('update_id') == entry.name, 'Update journal identity differs')
+            yield path, document, entry
+
+    def guard_other_transactions(self):
+        for path, document, _ in self.journals():
+            if path == self.journal:
+                continue
+            previous = document.get('linux_update')
+            if previous is None:
+                require(path == self.original_journal, 'Incomplete transaction; inspect original operation')
+                continue
+            require(previous.get('phase') in ('committed', 'rolled_back')
+                    and previous.get('plan_sha256') == digest(previous.get('plan')),
+                    'Another update is pending or uncertain; observe/recover its original transaction')
+
+    def old_release(self):
+        """Resolve the actual installed inode to exactly one verified predecessor."""
+        if not self.update_id:
+            old = self.root['plan']
+            return (self.work/'installed-manifest.json', self.root['manifest_sha256'],
+                    old['source_commit'], old['build_identity_sha256'], old['new_binary_sha256'])
+        live = tree(self.live)
+        matches = []
+        for path, document, folder in self.journals():
+            if path == self.journal:
+                continue
+            previous = document.get('linux_update')
+            if previous and previous['phase'] == 'committed':
+                plan = previous['plan']
+                if plan['binary_sha256'] == self.args.old_binary_sha256 and plan['candidate_app'] == live:
+                    matches.append((path, previous['plan_sha256'], folder/'update-payload'/gate.MANIFEST,
+                                    plan['manifest_sha256'], plan['source_commit'],
+                                    plan['identity_sha256'], plan['binary_sha256']))
+            if path == self.original_journal:
+                plan = document['plan']
+                if plan['new_binary_sha256'] == self.args.old_binary_sha256:
+                    matches.append((path, document['plan_sha256'], folder/'installed-manifest.json',
+                                    document['manifest_sha256'], plan['source_commit'],
+                                    plan['build_identity_sha256'], plan['new_binary_sha256']))
+        require(len(matches) == 1, 'Installed image has no unique committed predecessor; preserve state')
+        path, plan_sha, manifest, manifest_sha, commit, identity, binary = matches[0]
+        self.root['predecessor'] = {'journal': str(path), 'state': state(path), 'plan_sha256': plan_sha}
+        return manifest, manifest_sha, commit, identity, binary
 
     @contextmanager
     def lock(self):
@@ -113,15 +195,18 @@ class LinuxUpdate:
                     and stat.S_ISREG(m.st_mode) and stat.S_IMODE(m.st_mode) == 0o600,
                     'Unknown update lock')
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            require(state(self.journal) == self.journal_state, 'Installation journal changed')
+            observed = state(self.journal) if self.journal.exists() or self.journal.is_symlink() else None
+            require(observed == self.journal_state, 'Installation journal changed')
+            self.guard_other_transactions()
             yield
         finally:
             os.close(fd)
 
     def save(self, update):
-        require(state(self.journal) == self.journal_state, 'Installation journal changed externally')
+        observed = state(self.journal) if self.journal.exists() or self.journal.is_symlink() else None
+        require(observed == self.journal_state, 'Installation journal changed externally')
         self.root['linux_update'] = update
-        atomic_state(self.journal, self.root)
+        atomic_state(self.journal, self.root, initial=self.journal_state is None)
         self.journal_state = state(self.journal)
 
     def service(self):
@@ -204,18 +289,21 @@ class LinuxUpdate:
         return receipt
 
     def prepare(self):
+        self.guard_other_transactions()
         require('linux_update' not in self.root, 'Observe the original update; never replace its journal')
         require(not any(p.exists() or p.is_symlink() for p in (self.payload, self.previous)),
                 'Existing update payload/rollback preserved')
         r = self.pins()
-        old = self.root['plan']
-        require(old['new_binary_sha256'] == self.args.old_binary_sha256,
+        old_manifest, manifest_sha, old_commit, old_identity, old_binary = self.old_release()
+        require(old_binary == self.args.old_binary_sha256,
                 'Installed journal differs from independently reviewed old image')
-        old_manifest = self.work/'installed-manifest.json'
-        gate.verify_install(self.live, old_manifest, self.root['manifest_sha256'],
-                            old['source_commit'], old['build_identity_sha256'], self.exe, self.exe)
+        gate.verify_install(self.live, old_manifest, manifest_sha,
+                            old_commit, old_identity, self.exe, self.exe)
         plan = {'schema': 1, 'kind': 'weavelo-linux-same-profile-update',
                 'old_app': tree(self.live), 'old_manifest': state(old_manifest),
+                'old_manifest_path': str(old_manifest),
+                **({'update_id': self.update_id, 'predecessor': self.root['predecessor']}
+                   if self.update_id else {}),
                 'profile': self.profile_state(), 'configuration': self.configuration(),
                 'old_owner': self.owner(self.args.old_binary_sha256),
                 'old_binary_sha256': self.args.old_binary_sha256,
@@ -227,6 +315,14 @@ class LinuxUpdate:
                 'installer_sha256': gate.hash_file(Path(__file__)),
                 'entry_sha256': gate.hash_file(self.repo/'scripts/install_native_first_identity.py')}
         update = {'phase': 'preparing', 'plan': plan}
+        if self.update_id:
+            namespace = self.transaction.parent
+            if not namespace.exists():
+                namespace.mkdir(mode=0o700)
+                sync(namespace.parent)
+            require(state(namespace)['mode'] == 0o700, 'Private update namespace required')
+            self.transaction.mkdir(mode=0o700)
+            sync(namespace)
         self.save(update)
         self.payload.mkdir(mode=0o700)
         self.stage.mkdir(mode=0o700)
@@ -252,7 +348,11 @@ class LinuxUpdate:
         configuration = update.get('reconciliation', {}).get('configuration', plan['configuration'])
         require(self.configuration() == configuration, 'Service configuration changed')
         require(self.profile_state() == plan['profile'], 'Profile changed; preserve credentials')
-        require(state(self.work/'installed-manifest.json') == plan['old_manifest'], 'Original release evidence changed')
+        require(state(Path(plan.get('old_manifest_path', self.work/'installed-manifest.json'))) == plan['old_manifest'],
+                'Original release evidence changed')
+        predecessor = plan.get('predecessor')
+        if predecessor:
+            require(state(Path(predecessor['journal'])) == predecessor['state'], 'Predecessor journal changed')
         return plan
 
     def ctl(self, action):
@@ -368,7 +468,7 @@ class LinuxUpdate:
         require(update.get('phase') == 'recovery_required' and update.get('owner'),
                 'Only an originally verified new owner can be reconciled')
         require(self.profile_state() == plan['profile'], 'Profile changed; preserve credentials')
-        require(state(self.work/'installed-manifest.json') == plan['old_manifest'],
+        require(state(Path(plan.get('old_manifest_path', self.work/'installed-manifest.json'))) == plan['old_manifest'],
                 'Original release evidence changed')
         require(tree(self.live) == plan['candidate_app'] and tree(self.previous) == plan['old_app'],
                 'Installed/rollback inode or bytes differ')
@@ -395,6 +495,7 @@ class LinuxUpdate:
     def report(self, update):
         plan = update['plan']
         return {'phase': update['phase'], 'plan_sha256': update.get('plan_sha256'),
+                'update_id': getattr(self, 'update_id', None),
                 'source_commit': plan['source_commit'], 'binary_sha256': plan['binary_sha256'],
                 'manifest_sha256': plan.get('manifest_sha256'), 'manifest': str(self.manifest),
                 'journal': str(self.journal), 'previous_app': str(self.previous),

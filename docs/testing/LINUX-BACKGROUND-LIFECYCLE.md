@@ -263,3 +263,30 @@ python3 -B scripts/build_identity_gate.py candidate-manifest \
 双窗口回归使用两个独占随机loopback端口、真实WorkspaceConnection和OriginalOwner，分别验证全部确认及一个缺失回执的结果。host正反回归使用现有native-worker/withheld-stop夹具；进程观察用真实自有子进程证明超时不能当退出。原 `gui-input-status`、`host-control`、`lifecycle-service-contract`、`clock-workspace` 入口及macOS/Linux/Windows固定编译检查复用主main、共享缓存、原观察绑定、源码守护和收尾验证。它们不连接真实peer、不注入OS输入、不生成真实配对，不代替已安装产品关窗、全退出、重连和后台存活验收。
 
 冻结feba70a候选未改变，新实现尚不在该二进制中。后续包含这些功能的发布须沿原生产者重新冻结真实源码/配置/identity与回执，不能把文档提交或本地测试重标成已部署的源码来源。当前三组六方向的真机状态仍未测，DNS/ACL/配对和暂停上传边界保持。
+
+## 连续的同 profile 更新事务
+
+原首轮 `linux_update` 及其 `previous-app` 保留。后续更新通过同一
+`install_native_first_identity.py --linux-update` 接口传入 `--update-id UUID`，
+分别在原安装工作目录的 `updates/UUID/` 内保存日志、密封 payload 和直接前驱
+的回滚 inode，不覆盖原日志或任一既有备份。全程仍使用原 `update.lock`。
+
+准备命令沿用独立核验的 Linux 原生 observed-build 回执、源码/identity、编译
+程序和旧镜像摘要，并增加 `--update-id UUID --prepare-update`。执行、恢复及
+原资源差异核对使用同一个 UUID 和准备结果中的 `--plan-sha256`；不得换 ID
+重放结果未知的安装。无 UUID 的历史首轮操作保持原行为。
+
+准备时从原权威下的已提交记录中匹配实际安装 inode、旧镜像摘要及密封
+manifest，且必须唯一；执行时还核对前驱日志、profile、服务配置及安装器
+本身未变。任一其他事务处于准备、启动、恢复或未知状态，均阻断新事务。
+重复 prepare/apply 拒绝重放；失败后的显式恢复只操作选定事务的原记录。
+未知目录、未落盘日志和已有 pending 文件一律保留，不清空或推断为成功。
+
+固定回归：
+
+```sh
+python3 -B -m unittest discover -s scripts/tests -p test_linux_current_update.py -v
+```
+
+它覆盖第二、第三轮 prepare/commit、原记录和备份不变、启动失败恢复、重复请求、未知结果、跨
+事务互斥及不可信路径；原生 renameat2 测试必须在 Linux 执行后单独记录。
