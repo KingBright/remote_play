@@ -449,3 +449,47 @@ The follow-up uses code17 so the published code16 artifact is never relabeled.
 The owner has been asked to restore usable phone HTTPS while retaining pairing and
 keeping Weavelo foreground. Physical mutual discovery and outage recovery remain
 pending that condition; no VPN/security configuration was changed by the agent.
+
+
+### Final code17 package and physical upgrade
+
+Build input was the clean primary-main commit
+`b004c30be7a362a35aa6b4478ed86e2f1265026b`. The original formal upgrade producer
+completed native build, release assembly, lint, all 56 JVM tests, APK verification,
+atomic publication and temporary-stage cleanup. Independent verification read the
+published bytes without replacing the producer's receipt. The final native guarded
+relay suite passed 22 tests, including retained retry-reason and reconnect evidence.
+
+| Field | Verified value |
+| --- | --- |
+| Version | 2.0.0-alpha.9, code17 |
+| APK size | 17,330,301 bytes |
+| APK SHA-256 | `d5be69bd7435e8dbc37d46d556cbfdd997fd66a21f3dda93ca0f060062fe644f` |
+| Native SHA-256 | `607daed7b12e63df4d3fd52f09c89f405ea04255910a6b081352bdbded87a04b` |
+| Original signer SHA-256 | `215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5` |
+| Native gates | ARM64 only, 29 JNI entry points, 16 KiB alignment, non-debuggable |
+| Current output | `android/app/build/outputs/apk/release/app-upgrade.apk` |
+
+After online/installed-code16 hash checks, exactly one code17 install-r at
+2026-10-20T06:05:12Z returned Success. Installed APK bytes matched. First install
+remained 2026-10-19 10:04:33; CE/DE inodes remained 132535/132546. Camera and
+notifications remained granted; microphone remained ungranted. Cold launch was
+159 ms. No uninstall, data reset, permission change, credential export or re-pair
+was performed.
+
+The real Settings UI showed runtime network `e2d45152dc05`, local node
+`cf2fe17cf319` (distinct from Book `152f52b34b89`), generation 1, reload 0/0,
+P2P running, routes/devices 0/0. Both relays had attempted 2 connections, last
+reason closed, registration/Pongs 0/0. Book's supported background status still
+reported 0 routes. A fresh credential-free Book WSS upgrade to the same relay
+returned HTTP101 with verified TLS; the probe intentionally timed out after 4s
+without sending registration data. Existing established TCP sockets alone were
+never counted as registration, heartbeat or mutual visibility.
+
+Remaining acceptance blocker: actual phone relay transport has not reached its
+first successful registration/Pong, and real mutual visibility/outage recovery are
+pending usable phone network. Owner assistance was requested to restore that
+condition and retain the current group. No VPN, security or global-log setting was
+changed. Desktop GUI Computer Use consent is still unconfirmed; supported CLI
+status was used without reading raw Snapshot or collecting invitation data.
+Cross-group desktop membership changes remain deferred until Book/phone work.
