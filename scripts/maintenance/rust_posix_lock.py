@@ -13,6 +13,7 @@ import pwd
 import stat
 import subprocess
 import sys
+import time
 import uuid
 
 
@@ -108,11 +109,16 @@ def live(pid):
 
 
 @contextmanager
-def directory_guard(fd):
-    try:
-        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    except BlockingIOError as error:
-        raise LockRefused('Shared cleanup PID admission/recovery is active') from error
+def directory_guard(fd,release=False):
+    deadline=time.monotonic()+5
+    while True:
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            break
+        except BlockingIOError as error:
+            if not release or time.monotonic()>=deadline:
+                raise LockRefused('Shared cleanup PID admission/recovery is active') from error
+            time.sleep(.01)
     try:
         yield
     finally:
@@ -171,7 +177,7 @@ def cleanup_lock(path,native_tool=None):
             if owned:
                 # The FD remains bound to the checked directory. Never unlink a
                 # replacement owner's PID file or follow a replacement home alias.
-                with directory_guard(directory):
+                with directory_guard(directory,release=True):
                     if read_pid(directory,path.name)==owned:
                         os.unlink(path.name,dir_fd=directory)
         finally:

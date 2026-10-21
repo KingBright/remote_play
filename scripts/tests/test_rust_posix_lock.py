@@ -16,6 +16,32 @@ MODULE=HERE/'rust_posix_lock.py'
 if not MODULE.exists():MODULE=HERE.parent/'maintenance/rust_posix_lock.py'
 spec=importlib.util.spec_from_file_location('posix_lock_fixture',MODULE)
 p=importlib.util.module_from_spec(spec);spec.loader.exec_module(p)
+repair_spec=importlib.util.spec_from_file_location('repair_fixture',MODULE.with_name('repair_linux_release_helper.py'))
+repair=importlib.util.module_from_spec(repair_spec);repair_spec.loader.exec_module(repair)
+
+
+class AdapterTests(unittest.TestCase):
+    def test_earlier_inline_helper_preserves_other_source_and_project_flock(self):
+        original=b'''VERSION="fixture"\n@contextlib.contextmanager
+def lock(project, global_cleanup=False):
+    owned = False
+    safe_absolute(GLOBAL_LOCK)
+    tool = shutil.which('shlock')
+    yield load(root)
+    GLOBAL_LOCK.unlink()
+
+def artifact_path():pass
+'''
+        after=repair.patched(original)
+        compile(after,'fixture','exec')
+        self.assertTrue(after.startswith(b'VERSION="fixture"\n'))
+        self.assertTrue(after.endswith(b'def artifact_path():pass\n'))
+        self.assertIn(b'fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)',after)
+        self.assertEqual(repair.patched(after),after)
+
+    def test_unknown_inline_lock_is_never_rewritten(self):
+        with self.assertRaises(ValueError):
+            repair.patched(b'@contextlib.contextmanager\ndef lock(project):pass\ndef artifact_path():pass\n')
 
 
 class TrustedPathTests(unittest.TestCase):

@@ -28,12 +28,40 @@ def cleanup_lock(enabled=True):
 
 '''
 
+LOCK='''@contextlib.contextmanager
+def lock(project, global_cleanup=False):
+    root, policy, registry = load(project)
+    with (root / STATE / 'lock').open('r') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refusal('project build/registration/cleanup lock is held')
+        try:
+            with cleanup_lock(global_cleanup):
+                yield load(root)
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+'''
+
 
 def sha(raw):return hashlib.sha256(raw).hexdigest()
 
 
 def patched(raw):
-    text=raw.decode();start=text.index('@contextlib.contextmanager\ndef cleanup_lock(')
+    text=raw.decode()
+    if '@contextlib.contextmanager\ndef cleanup_lock(' not in text:
+        # HO5 retains the earlier helper with the same PID protocol inlined in
+        # lock(). Upgrade only that checked function, retaining all companions.
+        start=text.index('@contextlib.contextmanager\ndef lock(')
+        end=text.index('def artifact_path(',start)
+        previous=text[start:end]
+        if not all(x in previous for x in ['owned = False','safe_absolute(GLOBAL_LOCK)',
+                "shutil.which('shlock')",'GLOBAL_LOCK.unlink()','yield load(root)']):
+            raise ValueError('Unrecognized inline cleanup lock; review exact source')
+        return (text[:start]+BODY+LOCK+text[end:]).encode()
+    start=text.index('@contextlib.contextmanager\ndef cleanup_lock(')
     end=text.index('@contextlib.contextmanager\ndef lock(',start)
     previous=text[start:end]
     if "adapter=companion('rust_posix_lock')" in previous:return raw
