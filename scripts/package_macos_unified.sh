@@ -22,7 +22,7 @@ fi
 [[ "${WEAVELO_APP_NAME:-Weavelo}" == "Weavelo" ]] || { echo "Release app identity cannot be overridden" >&2; exit 1; }
 [[ "${WEAVELO_BUNDLE_ID:-$BUNDLE_ID}" == "$BUNDLE_ID" ]] || { echo "Release bundle ID cannot be overridden" >&2; exit 1; }
 # Check before a long build and before touching any previous package.
-python3 "$ROOT_DIR/scripts/macos_release_guard.py" preflight "${DESKTOP_ARGS[@]}"
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" preflight ${DESKTOP_ARGS[@]+"${DESKTOP_ARGS[@]}"}
 : "${WEAVELO_BUILD_RECEIPT:?Run the existing build_identity_gate.py build first}"
 : "${WEAVELO_BUILD_RECEIPT_SHA256:?Pin the observed build receipt}"
 : "${WEAVELO_EXPECTED_COMMIT:?Pin the reviewed source commit}"
@@ -45,7 +45,7 @@ CHECK_VERSION
 BINARY="$(python3 "$ROOT_DIR/scripts/verify_prebuilt_binary.py" \
   --binary "$WEAVELO_PREBUILT_BINARY" --sha256 "$WEAVELO_PREBUILT_SHA256")"
 python3 "$ROOT_DIR/scripts/verify_desktop_gui.py" --binary "$BINARY" --platform macos --version "$VERSION"
-python3 "$ROOT_DIR/scripts/macos_release_guard.py" package "${DESKTOP_ARGS[@]}" \
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" package ${DESKTOP_ARGS[@]+"${DESKTOP_ARGS[@]}"} \
   --binary "$BINARY" --output "$TARGET_DIR/package/macos" \
   --version "$VERSION" --build "$BUILD_NUMBER" \
   --build-receipt "$WEAVELO_BUILD_RECEIPT" \

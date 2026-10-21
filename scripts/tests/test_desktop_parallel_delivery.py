@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -137,6 +138,21 @@ class ParallelDesktopTests(unittest.TestCase):
             out.writestr(preparation.MARKER,json.dumps({'installable':False}))
         with self.assertRaisesRegex(guard.ReleaseRejected,'top-level'):
             with guard.verified_archive(archive,guard.load_policy(guard.DESKTOP_POLICY_FILE)):pass
+
+    @unittest.skipUnless(Path('/bin/bash').exists(),'Bash argument-composition fixture')
+    def test_system_bash_keeps_empty_legacy_and_nonempty_desktop_guard_arguments(self):
+        fixture=self.home/'shell-fixture';(fixture/'scripts').mkdir(parents=True)
+        (fixture/'scripts/macos_release_guard.py').write_text('import sys,json;print(json.dumps(sys.argv[1:]))')
+        text=(desktop.ROOT/'scripts/package_macos_unified.sh').read_text()
+        lines=[line.rstrip().rstrip('\\').rstrip() for line in text.splitlines()
+               if line.startswith('python3 "$ROOT_DIR/scripts/macos_release_guard.py"')]
+        self.assertEqual(len(lines),2)
+        for args,selected in [('()',[]),('( --desktop )',['--desktop'])]:
+            for line,operation in zip(lines,['preflight','package']):
+                command='ROOT_DIR='+str(fixture)+'; DESKTOP_ARGS='+args+'; '+line
+                done=subprocess.run(['/bin/bash','-uc',command],capture_output=True,text=True)
+                self.assertEqual(done.returncode,0,done.stderr)
+                self.assertEqual(json.loads(done.stdout),[operation,*selected])
 
     def test_signed_desktop_mode_retains_preflight_and_explicit_preparation_uses_original_producer(self):
         with patch.object(lifecycle,'producer',side_effect=RuntimeError('original producer')), \
