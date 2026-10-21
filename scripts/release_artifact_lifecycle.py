@@ -20,7 +20,7 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-HELPER = Path.home() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
+HELPER = Path.home().resolve() / '.codex/skills/rust-project-lifecycle/scripts/rust_storage.py'
 AUTHORITY = 'docs/plans/ARTIFACT-LIFECYCLE-ADOPTION.json'
 LOCK_ENV = 'WEAVELO_RELEASE_LOCK_FD'
 PID_ENV = 'WEAVELO_RELEASE_PRODUCER_PID'
@@ -28,7 +28,7 @@ ANDROID_UPGRADE_ENV = 'WEAVELO_ANDROID_UPGRADE_CANDIDATE'
 TRANSITION_ENV = 'WEAVELO_TRANSITION_INTENT_SHA256'
 ANDROID_SIGNER = '215aedabf17f40a454ad381d9027772eef9446346cae3db031cac2a5ae51c3a5'
 ENTRIES = {'macos': 'package_macos_unified.sh', 'android-release': 'build_android_release.sh',
-           'android-native': 'build_android_native.sh'}
+           'android-native': 'build_android_native.sh', 'linux-desktop': 'package_linux_desktop.sh'}
 
 
 class Refusal(RuntimeError):
@@ -82,6 +82,16 @@ def macos_output_root():
     require(target.is_absolute() and target.resolve() == (Path.home() / 'rust-target').resolve(),
             'Production macOS packaging requires the existing ~/rust-target Cargo output; remove the target override')
     return target.resolve() / 'package/macos'
+
+
+def linux_output_root():
+    require(sys.platform.startswith('linux'), 'Native Linux packaging required')
+    result = subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps', '--locked', '--offline'],
+                            cwd=ROOT, capture_output=True, text=True, timeout=30)
+    require(result.returncode == 0, 'Cannot resolve the existing Linux Cargo output')
+    target = Path(json.loads(result.stdout)['target_directory']).resolve(strict=True)
+    require(target == (ROOT / 'target').resolve(strict=True), 'Keep the existing native Linux cache')
+    return target / 'package/linux'
 
 
 def android_upgrade_mode():
@@ -200,9 +210,12 @@ def producer(kind):
         except BlockingIOError as error:
             raise Refusal('Another Weavelo release/JNI producer is active') from error
         # Existing authority remains mandatory; never create an independent current ledger.
-        macos_root = macos_output_root() if kind == 'macos' else (Path.home() / 'rust-target/package/macos').resolve()
-        public('release-setup', '--authority', ROOT / AUTHORITY, '--output-root', macos_root,
-               '--output-root', android_files()[0].parent)
+        if kind == 'linux-desktop':
+            public('release-setup', '--authority', ROOT / AUTHORITY, '--output-root', linux_output_root())
+        else:
+            macos_root = macos_output_root() if kind == 'macos' else (Path.home() / 'rust-target/package/macos').resolve()
+            public('release-setup', '--authority', ROOT / AUTHORITY, '--output-root', macos_root,
+                   '--output-root', android_files()[0].parent)
         public('release-preflight', '--producer-pid', state['producer_pid'])
         prepared = True
         write_state(fd, state)

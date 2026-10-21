@@ -1,6 +1,8 @@
 #!/bin/sh
 # Independent desktop entry; never resolve the retained executable from PATH.
-export WEAVELO_DEVICE_GROUP_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/weavelo/desktop"
+export WEAVELO_DEVICE_GROUP_DIR="$HOME/.config/weavelo/desktop"
 export WEAVELO_HOST_BIND_ADDR=0.0.0.0:39273
 export WEAVELO_DISCOVERY_PORT=38119
+export WEAVELO_RELAY=0
+export WEAVELO_P2P=0
 exec "$HOME/.local/opt/weavelo/desktop/weavelo" "$@"

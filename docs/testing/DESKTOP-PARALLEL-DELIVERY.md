@@ -73,3 +73,52 @@ Studio mode uses the existing native release configuration and shared cache;
 the JSON identity input is included in its before/after source guard. The actual
 product build also exports and verifies runtime default ports and disabled
 implicit relay/P2P before its bundle can be prepared.
+
+## Linux independent archive and first install
+
+`bash scripts/package_linux_desktop.sh` reuses an already observed native Linux
+x64 binary; it never invokes Cargo build. Its required arguments are `--binary`,
+`--binary-sha256`, `--build-receipt`, `--build-receipt-sha256`,
+`--expected-commit` and `--expected-identity-sha256`. The original producer lock
+and public current-output authority own `target/package/linux/Weavelo-desktop-linux-x64.zip`
+and its `.verification.json` companion. The sealed manifest retains the binary's
+original source commit; the companion separately records packaging source.
+This Linux package has verified source/hash provenance, not a signing claim.
+
+The archive includes the binary, original manifest, installer and its small
+standard-library verification dependencies, identity, launcher/service templates
+and icon. It contains no profile, credentials, user configuration or shared
+libraries. Runtime system dependencies must already be present on the target.
+
+The read-only installation plan is:
+
+```sh
+python3 -B scripts/install_linux_independent.py PACKAGE.zip \
+  --expected-archive-sha256 ARCHIVE_SHA256 --expected-manifest-sha256 MANIFEST_SHA256 \
+  --expected-commit BINARY_COMMIT --expected-identity-sha256 BINARY_IDENTITY_SHA256
+```
+
+Use the four independently obtained values from the verified delivery handoff.
+The same entry is included under `Weavelo/scripts/` for offline use after checking
+the archive SHA256 and extracting it into a user-controlled directory. Default
+plan performs no destination writes. Actual first install additionally requires
+`--apply --expected-plan-sha256 PLAN_SHA256`; this round does not apply it on a
+real user home. Every destination must be absent. Any existing app, profile,
+launcher, service, desktop entry, icon, staging directory or journal rejects
+replay. After a partial result inspect `--status` rather than rerunning apply.
+
+Fixed new targets are `~/.local/opt/weavelo/desktop/`, empty private
+`~/.config/weavelo/desktop/`, launcher `~/.local/bin/weavelo-desktop`, service
+`~/.config/systemd/user/weavelo-desktop.service`, and desktop/icon ID
+`fun.hackerlife.weavelo.desktop`. The installed launcher ignores inherited XDG
+profile selection and forces the new profile, ports 39273/38119, relay off and
+P2P off. The unit uses the same profile and ports. No systemctl, desktop cache,
+network, capture/input permission or pairing action runs during installation.
+The retained client and its group remain untouched; new endpoints and normal
+invitation/authorization must be configured separately before connecting.
+
+`python3 -B -m unittest scripts.tests.test_linux_independent_package` runs bounded
+filesystem/package fixtures. Native Linux additionally exercises no-replace
+installation in a temporary home and replay rejection; its synthetic binary is
+never real GUI/input acceptance. Real package verification executes only the
+already pinned binary's no-window ProductInfo path during packaging.
