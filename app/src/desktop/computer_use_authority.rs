@@ -28,6 +28,21 @@ pub(crate) struct Process {
 pub(crate) struct Caller {
     worker: Process,
     agent: Process,
+    authority_digest: String,
+    pub(super) expires_at_ms: u64,
+}
+impl Caller {
+    pub(super) fn owns_peer(&self, peer: Option<i32>) -> bool {
+        peer.is_some_and(|pid| pid == self.worker.pid || pid == self.agent.pid)
+    }
+}
+fn authority_digest(root: &[u8], worker: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update((root.len() as u64).to_be_bytes());
+    hash.update(root);
+    hash.update(worker);
+    format!("{:x}", hash.finalize())
 }
 fn owned(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
     #[cfg(unix)]
@@ -180,15 +195,20 @@ impl Authority {
             .launch
             .as_ref()
             .ok_or("octendra_authority_not_configured")?;
-        let root: Value =
-            serde_json::from_slice(&owned(path, 16384)?).map_err(|_| "authority_invalid")?;
+        let root_bytes = owned(path, 16384)?;
+        let root: Value = serde_json::from_slice(&root_bytes).map_err(|_| "authority_invalid")?;
         let (actor, lease_id) = call.identity();
         let worker_path = path
             .parent()
             .ok_or("authority_invalid")?
             .join(format!("desktop-worker-{lease_id}.json"));
-        let worker: Value = serde_json::from_slice(&owned(&worker_path, 16384)?)
-            .map_err(|_| "task_authority_invalid")?;
+        let worker_bytes = owned(&worker_path, 16384)?;
+        let worker: Value =
+            serde_json::from_slice(&worker_bytes).map_err(|_| "task_authority_invalid")?;
+        let authority_digest = authority_digest(&root_bytes, &worker_bytes);
+        let expires_at_ms = worker["expires_at_ms"]
+            .as_u64()
+            .ok_or("task_authority_invalid")?;
         authorize(
             &root,
             &worker,
@@ -209,18 +229,32 @@ impl Authority {
             if worker != saved.worker || agent != saved.agent {
                 return Err("worker_process_changed");
             }
-            Caller { worker, agent }
+            Caller {
+                worker,
+                agent,
+                authority_digest,
+                expires_at_ms,
+            }
         } else {
             let agent = process(peer.parent)?;
             let caller = Caller {
                 worker: peer,
                 agent,
+                authority_digest,
+                expires_at_ms,
             };
-            if !matches!(call, Call::Open { .. }) && saved.is_some_and(|s| s != &caller) {
-                return Err("caller_process_changed");
-            }
             caller
         };
+        if !matches!(call, Call::Open { .. })
+            && saved.is_some_and(|s| s.worker != caller.worker || s.agent != caller.agent)
+        {
+            return Err("caller_process_changed");
+        }
+        if !matches!(call, Call::Open { .. } | Call::Close { .. })
+            && saved.is_some_and(|s| s != &caller)
+        {
+            return Err("caller_or_authority_changed");
+        }
         if root["worker_sha256"] != caller.worker.hash
             || root["agent_sha256"] != caller.agent.hash
             || root["worker_path"].as_str().map(Path::new) != Some(caller.worker.path.as_path())
@@ -253,7 +287,9 @@ fn authorize(
     if version == 0
         || root["enabled"] != true
         || root["observe"] != true
-        || root["input"] != false
+        || !root["input"].is_boolean()
+        || worker["allow_input"] != root["input"]
+        || (root["input"] == true && root["weavelo"]["input_platform"] != "macos")
         || root["identity"]["owner"] != actor.owner
         || root["identity"]["device_id"] != actor.executor_device_id
         || root["identity"]["desktop_id"] != target.desktop_id()
@@ -262,7 +298,6 @@ fn authorize(
         || (directory != profile && directory != profile.join("gui-state"))
         || worker["weavelo"] != root["weavelo"]
         || worker["enabled"] != true
-        || worker["allow_input"] != false
         || worker["app_id"] != "fun.hackerlife.octendra.desktop-worker"
         || worker["desktop_session"] != "weavelo"
         || root["desktop_session"] != "weavelo"
@@ -288,10 +323,12 @@ fn authorize(
     if let Call::Open {
         target: requested,
         max_bytes,
+        control,
         ..
     } = call
     {
-        if requested != &target
+        if root["input"] != *control
+            || requested != &target
             || root["max_frame_bytes"]
                 .as_u64()
                 .is_none_or(|n| *max_bytes as u64 > n)
@@ -301,6 +338,9 @@ fn authorize(
         {
             return Err("authority_target_or_budget_mismatch");
         }
+    }
+    if matches!(call, Call::Act { .. }) && root["input"] != true {
+        return Err("input_not_authorized");
     }
     Ok(())
 }

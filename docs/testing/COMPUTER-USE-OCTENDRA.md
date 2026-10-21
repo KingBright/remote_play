@@ -1,10 +1,11 @@
-# Octendra → selected Weavelo source: observe-only bridge
+# Octendra → selected Weavelo source: observation and bounded gestures
 
 This route consumes an existing, explicit Octendra desktop authorization. It does
 not make terminal/code permission into desktop permission, start a stream, choose
 a default source, grant OS permissions, create credentials or open a listener.
 Only an already selected, visible, paired viewing session can supply pixels.
-Input requests remain unavailable; USB HID usages are not platform keycodes.
+Input additionally requires explicit control in both existing authority records,
+the original host input grant, and the exact exported observation receipt.
 
 The Octendra executor UUID stays in `identity.device_id`. The separately approved
 `weavelo.target` contains the Weavelo peer ID, typed capture source and exact
@@ -16,7 +17,7 @@ domains; the remote peer is never substituted for the executor.
 
 Octendra's existing `desktop-launch.json` gains an optional `weavelo` route. Old
 local-window grants do not authorize this route. The route requires observe=true,
-input=false, desktop_session=`weavelo`, an exact target, current GUI generation,
+desktop_session=`weavelo`, an exact target, current GUI generation,
 GUI executable digest and profile. Existing worker/Agent executable pins,
 owner/task/capability checks, operation journal and short leases remain in use.
 
@@ -37,7 +38,7 @@ authority path, automatic grant discovery or profile fallback.
 Before an operation, the GUI compares the current launch authority and the
 existing per-task `desktop-worker-<open-operation-id>.json` record. It checks the
 owner, task, executor, capability version, peer/source, generation, bytes and
-expiry. The socket's kernel peer PID identifies the real worker; executable pins
+expiry. Exact authority bytes are pinned for the lease; changes revoke it. The socket's kernel peer PID identifies the real worker; executable pins
 and the actual approved Agent parent are checked using fixed process metadata
 and executable paths, never process arguments. Cached-frame export revalidates
 through that same Agent/worker relationship. Missing or changed authority fails
@@ -79,6 +80,40 @@ synthetic identities/bytes and do not constitute live desktop authorization.
 synthetic IOSurface-backed buffers. No test captures a private screen.
 
 This source increment does not install either product, alter a live profile,
-activate a capability, establish live remote-device acceptance or complete input
-dispatch. Use ordinary signed installation and the existing authorization process
-before live observation acceptance. Real input remains out of this route.
+activate a capability or establish live remote-device acceptance. Use ordinary
+signed installation and the existing authorization process before live acceptance.
+No real input is tested without an already authorized dedicated test window.
+
+## Bounded input contract
+
+An observe-only root (`input=false`) remains read-only. Control requires root
+`input=true`, task `allow_input=true`, and an explicit matching route field
+`input_platform="macos"`. This is the owner's declaration of the remote key space,
+not OS detection: the current Weavelo session protocol does not carry remote OS
+identity. Never infer the target OS from the executor. Only approve this route
+for a known Mac target. Unsupported platform declarations fail closed.
+
+Supported desktop-protocol batches are exactly one of:
+
+- PointerMove, ButtonDown, matching ButtonUp (one click).
+- KeyDown, matching KeyUp (one mapped non-modifier USB HID key).
+- PointerMove, Wheel (each delta bounded to ±1200).
+
+HID usages use the existing explicit Mac key table; e.g. HID A (4) becomes Mac
+keycode 0, Return (40) becomes 36. Unknown keys, modifiers, held controls, dragging
+and arbitrary batches are rejected. Pointer coordinates are checked against the
+exact returned FrameRef, then normalized into the selected source; no global
+monitor position or default pointer is substituted.
+
+Observe mints Control only with the existing can_input/focus/visibility/source
+checks and retains the actual observation used for pixel export. Act consumes that
+exact source revision/frame sequence once, and retires the lease before dispatch.
+A subsequent gesture must Close → Open → Observe; the old owner epoch is never
+refreshed after an effect. The owner rechecks its task/lease deadline after waiting
+for the session lock and rejects a closed IPC reply before the first effect. Original decoded-frame TTL and connection/source/input-grant
+revocation remain independent checks.
+
+A success is local queue admission (`effect_confirmed=false`), not proof of a
+remote effect. Partial queue rejection attempts release on the exact old grant.
+Transport failure or input-result ambiguity is OutcomeUnknown and must not replay.
+The existing Agent operation journal, recovery guard and cleanup remain in use.

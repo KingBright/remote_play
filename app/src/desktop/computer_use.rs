@@ -15,7 +15,8 @@ pub(crate) enum Access {
 
 /// Normalized source coordinates, never desktop pixels or a default target.
 /// Deliberately excludes held keys, dragging, modifiers and arbitrary batches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Click { x: u16, y: u16, button: u8 },
     KeyPress { key_code: u16 },

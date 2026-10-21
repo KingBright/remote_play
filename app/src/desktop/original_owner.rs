@@ -1099,9 +1099,16 @@ impl OriginalOwner {
     /// Success means queued locally, not an acknowledgement of remote effects.
     pub(crate) fn act_bound_computer_use(
         &self, observation: &mut ComputerUseObservation, action: super::computer_use::Action,
+        deadline: Instant, cancelled: &impl Fn() -> bool,
     ) -> Result<super::computer_use::Queued, super::computer_use::Rejection> {
         use super::computer_use::Rejection;
         let mut p = self.pool.lock().unwrap();
+        // Queue admission may wait behind another owner operation. Enforce the
+        // original task/lease deadline after that wait, before the first effect.
+        if Instant::now() >= deadline || cancelled() {
+            observation.invalidate();
+            return Err(Rejection::Expired);
+        }
         let s = &mut p.active_mut().ok_or_else(|| {
             observation.invalidate(); Rejection::NoSession
         })?.session;

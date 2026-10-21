@@ -27,6 +27,7 @@ fn fixture() -> (Value, Value, Actor, Call) {
         lease_id: "33333333-3333-3333-3333-333333333333".into(),
         lease_ms: 1000,
         max_bytes: 1024,
+        control: false,
     };
     (root, worker, actor, call)
 }
@@ -84,4 +85,48 @@ fn absent_locator_is_unavailable_without_trusting_request_paths_or_process_names
     let authority = Authority::new(dir.path(), "1-2", &"c".repeat(64));
     assert!(!authority.configured());
     assert!(authority.verify(&fixture().3, None, None).is_err());
+}
+
+#[test]
+fn control_requires_both_existing_grants_and_explicit_remote_mac_key_space() {
+    let (mut root, mut worker, actor, mut call) = fixture();
+    let Call::Open { control, .. } = &mut call else {
+        unreachable!()
+    };
+    *control = true;
+    assert!(check(&root, &worker, &actor, &call).is_err());
+    root["input"] = json!(true);
+    worker["allow_input"] = json!(true);
+    assert!(check(&root, &worker, &actor, &call).is_err());
+    root["weavelo"]["input_platform"] = json!("macos");
+    worker["weavelo"] = root["weavelo"].clone();
+    assert!(check(&root, &worker, &actor, &call).is_ok());
+    let act = Call::Act {
+        actor: actor.clone(),
+        lease_id: call.identity().1.into(),
+        source_revision: 7,
+        frame_sequence: 3,
+        action: super::super::computer_use::Action::KeyPress { key_code: 0 },
+    };
+    assert!(check(&root, &worker, &actor, &act).is_ok());
+    root["input"] = json!(false);
+    worker["allow_input"] = json!(false);
+    assert!(check(&root, &worker, &actor, &act).is_err());
+}
+
+#[test]
+fn authority_fingerprint_pins_both_exact_existing_records() {
+    assert_eq!(
+        authority_digest(b"root", b"worker"),
+        authority_digest(b"root", b"worker")
+    );
+    assert_ne!(
+        authority_digest(b"root", b"worker"),
+        authority_digest(b"root2", b"worker")
+    );
+    assert_ne!(
+        authority_digest(b"root", b"worker"),
+        authority_digest(b"root", b"worker2")
+    );
+    assert_ne!(authority_digest(b"ab", b"c"), authority_digest(b"a", b"bc"));
 }

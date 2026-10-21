@@ -656,7 +656,7 @@ impl RestoredDashboard {
                 let owner=self.owner.clone();
                 tokio::task::spawn_blocking(move || {
                     if !command.reply.is_closed() {
-                        let result=dispatcher.dispatch(&owner,call,command.peer_pid);
+                        let result=dispatcher.dispatch(&owner,call,command.peer_pid,|| command.reply.is_closed());
                         let _=command.reply.send(crate::desktop::directed_receive::Reply::observation(result));
                     }
                 });
@@ -672,7 +672,7 @@ impl RestoredDashboard {
                     "network":self.owner.network_snapshot(),
                 }),
                 Request::Status => serde_json::json!({"ok":true,"generation":generation,
-                    "computer_use":{"protocol":1,"observe":adapter.computer_use.configured(),"input":false,"max_bytes":16*1024*1024},
+                    "computer_use":{"protocol":1,"observe":adapter.computer_use.configured(),"input":adapter.computer_use.configured(),"max_bytes":16*1024*1024},
                     "renderer":crate::gui_backend::ORIGINAL_RENDERER,"executable_sha256":adapter.executable_sha256,
                     "lease":adapter.lease.as_ref().map(|lease| serde_json::json!({"request_id":lease.request_id,
                         "source_device_id":lease.source,"remaining_ms":lease.expires.saturating_duration_since(Instant::now()).as_millis()})),
