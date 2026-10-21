@@ -84,13 +84,16 @@ and public current-output authority own `target/package/linux/Weavelo-desktop-li
 and its `.verification.json` companion. The sealed manifest retains the binary's
 original source commit; the companion separately records packaging source.
 This Linux package has verified source/hash provenance, not a signing claim.
+The installed public helper's original shared cleanup exclusion is mandatory.
+An unsupported home alias or missing `shlock` blocks packaging; this entry does
+not change that lock, modify the helper, or select an alternate output authority.
 
 The archive includes the binary, original manifest, installer and its small
 standard-library verification dependencies, identity, launcher/service templates
 and icon. It contains no profile, credentials, user configuration or shared
 libraries. Runtime system dependencies must already be present on the target.
 
-The read-only installation plan is:
+The read-only installation plan requires Python 3.11 or newer:
 
 ```sh
 python3 -B scripts/install_linux_independent.py PACKAGE.zip \
