@@ -241,7 +241,17 @@ impl Dispatcher {
                 })?;
             let output = self.run(owner, call.clone(), caller.clone(), &cancelled)?;
             if output.pixels.is_some() {
-                self.1.verify(&call, peer, Some(&caller))?;
+                self.1.verify(&call, peer, Some(&caller)).inspect_err(|_| {
+                    // A failed post-readback authorization check also retires
+                    // its exact lease; restoring files cannot revive that frame.
+                    if let Ok(mut state) = self.0.lock() {
+                        if state.as_ref().is_some_and(|lease| {
+                            lease.caller == caller && lease.id == call.identity().1
+                        }) {
+                            state.take();
+                        }
+                    }
+                })?;
             }
             Ok(output)
         })();
