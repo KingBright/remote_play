@@ -51,6 +51,7 @@ SESSION_CLOCK_TESTS = {
     "discovery-observation": ("remote_core", "discovery::tests"),
     "desktop-network": ("weavelo_app", "network_diagnostics::tests"),
     "computer-use": ("weavelo_app", "computer_use"),
+    "computer-use-process": ("weavelo_app", "computer_use_process_"),
     "computer-use-input": ("weavelo_app", "desktop::model::static_input_tests"),
     "computer-use-pixels": ("client", "observation_pixels::"),
     "bridge-network": ("remote_client_bridge", "network_diagnostics::tests"),
@@ -75,6 +76,14 @@ PLATFORM_CHECKS = {
 
 def validation_command(cargo, target, mode):
     shared = ["--offline", "--locked", "--target-dir", str(target)]
+    if mode == "computer-use-process":
+        return [sys.executable, "-B", str(Path(__file__).with_name("build_identity_gate.py")), "process-integration",
+                "--repo", str(Path(__file__).resolve().parents[1]),
+                "--identity", os.environ.get("WEAVELO_TEST_BUILD_IDENTITY", ""),
+                "--identity-sha256", os.environ.get("WEAVELO_TEST_BUILD_IDENTITY_SHA256", ""),
+                "--worker", os.environ.get("WEAVELO_TEST_OCTENDRA_WORKER", ""),
+                "--worker-sha256", os.environ.get("WEAVELO_TEST_OCTENDRA_WORKER_SHA256", ""),
+                "--output", os.environ.get("WEAVELO_TEST_PROCESS_RECEIPT", "")]
     if mode == "pairing-fixture":
         return [cargo, "run", *shared, "-p", "remote_core", "--example", "synthetic_pairing_qr"]
     if mode == "pairing-join":
@@ -90,7 +99,7 @@ def validation_command(cargo, target, mode):
         features = {"pairing-image": ["--features", "pairing-image"],
                     "bridge-invitation": ["--features", "android"], "bridge-network": ["--features", "android"]}.get(mode, [])
         return [cargo, "test", *shared, "-p", package, "--lib", *features,
-                test_filter, "--", "--nocapture"]
+                test_filter, "--", "--nocapture", *(["--ignored", "--test-threads=1"] if mode == "computer-use-process" else [])]
     if mode == "service-contract":
         return [cargo, "test", *shared, "-p", "weavelo_app", "--lib",
                 "service_contract", "--", "--nocapture"]
@@ -130,6 +139,19 @@ def validation_environment(mode):
     env = os.environ.copy()
     env.pop("RUST_LOG", None)
     env["CARGO_TERM_COLOR"] = "never"
+    if mode == "computer-use-process":
+        if any(name in env for name in ("WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
+            raise ValueError("diagnostic development build must not inherit product identity inputs")
+        env.pop("CARGO_TERM_COLOR", None)
+        for name in ("WEAVELO_TEST_BUILD_IDENTITY", "WEAVELO_TEST_BUILD_IDENTITY_SHA256", "WEAVELO_TEST_PROCESS_RECEIPT"):
+            if not env.get(name):
+                raise ValueError("process integration requires reviewed identity and evidence bindings")
+        worker = Path(env.get("WEAVELO_TEST_OCTENDRA_WORKER", ""))
+        expected = env.get("WEAVELO_TEST_OCTENDRA_WORKER_SHA256", "")
+        if sys.platform != "darwin" or not worker.is_absolute() or worker.is_symlink() or not worker.is_file():
+            raise ValueError("process integration requires a real absolute Mac worker executable")
+        if len(expected) != 64 or hashlib.sha256(worker.read_bytes()).hexdigest() != expected:
+            raise ValueError("process integration worker differs from the independently pinned build")
     if (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode == "lifecycle-linux-native-build" or mode in ("pairing-fixture", "pairing-join", "service-contract", "media-acceptance-build", "input-loss-build", "input-loss-tests", "gui-input-status")) and any(name in env for name in (
             "WEAVELO_BUILD_IDENTITY_FILE", "WEAVELO_BUILD_IDENTITY_RS")):
         raise ValueError("diagnostic development build must not inherit product identity inputs")
@@ -313,7 +335,7 @@ def private_validation_log(root, mode):
 
 def execute_guarded_command(command, root, target, env, observation, sources, hashes, mode):
     build_timeout = (MACOS_CHECK_BUILD_TIMEOUT_SECONDS
-                     if mode == "platform-macos-check" else BUILD_TIMEOUT_SECONDS)
+                     if mode in ("platform-macos-check", "computer-use-process") else BUILD_TIMEOUT_SECONDS)
     with private_validation_log(root, mode) as (log_path, log, receipt_path, receipt):
         print(f"Live private log: {log_path}", flush=True)
         print(f"Validation receipt: {receipt_path}", flush=True)

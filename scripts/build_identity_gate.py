@@ -479,14 +479,14 @@ class BuildInputs:
         except BaseException:
             self.__exit__(*sys.exc_info()); raise
 
-    def run(self, command, *, env, **kwargs):
+    def run(self, command, *, env, wait_timeout=None, **kwargs):
         self.state['phase'] = 'starting'; self.save(); self.settled = False
         child = None
         try:
             child = subprocess.Popen(command, cwd=self.repo, env=env,
                                      pass_fds=(self.fd, self.release_fd), start_new_session=True, **kwargs)
             self.state.update(phase='running', pgid=child.pid); self.save()
-            return child.wait()
+            return child.wait() if wait_timeout is None else child.wait(timeout=wait_timeout)
         finally:
             if child is not None:
                 try:
@@ -668,6 +668,73 @@ def compiler_environment_record() -> dict:
     tools['python'] = {'sha256':hash_file(Path(sys.executable).resolve(strict=True))}
     return {'variables':env,'tools':tools,'verified_sysroot_manifest_sha256':hash_file(manifest)}
 
+
+
+def process_integration(repo: Path, expected: dict, worker: Path, worker_sha: str,
+                        output: Path) -> dict:
+    """Release-only test harness under the original identity producer.
+    This never emits an observed-build/package receipt or changes live authority.
+    """
+    from test_stream_settings_model import MACOS_CHECK_BUILD_TIMEOUT_SECONDS
+    config = expected['configuration']
+    validate_identity(expected, expected['source']['commit'], expected['identity_sha256'])
+    require(sys.platform == 'darwin' and config['platform'] == 'macos'
+            and config['profile'] == 'release' and config['target'] == 'aarch64-apple-darwin',
+            'Process integration requires the fixed native Mac release configuration')
+    source = source_snapshot(repo, expected['source']['commit'],
+                             expected_patch=expected['source']['patch_sha256'])
+    require(identity(source, config) == expected, 'Integration source differs from reviewed identity')
+    require(toolchain_digest() == config['toolchain_sha256']
+            and environment_digest() == config['environment_sha256'],
+            'Integration compiler environment changed')
+    require(hash_file(worker) == sha(worker_sha), 'Integration worker changed')
+    directory = repo / '.rust-storage' / 'validation-logs'
+    require(output.parent == directory and not output.exists() and not output.is_symlink(),
+            'New integration evidence must stay in the existing private validation directory')
+    command = compiler_command(config)
+    require(command[1] == 'build' and '--bin' in command, 'Unexpected fixed compiler command')
+    command[1] = 'test'
+    at = command.index('--bin')
+    del command[at:at + 2]
+    command.extend(['--lib', 'computer_use_process_', '--', '--ignored', '--test-threads=1', '--nocapture'])
+    target = shared_target(repo)
+    fd, name = tempfile.mkstemp(prefix='computer-use-process-identity-', suffix='.log', dir=directory)
+    print('Identity process log: ' + name, flush=True)
+    previous = signal.getsignal(signal.SIGTERM)
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        with os.fdopen(fd, 'w+b', buffering=0) as log, BuildInputs(repo, target, expected) as inputs:
+            module_hash = hash_file(inputs.module)
+            env = inputs.environment()
+            env.update(WEAVELO_TEST_OCTENDRA_WORKER=str(worker),
+                       WEAVELO_TEST_OCTENDRA_WORKER_SHA256=worker_sha)
+            try:
+                code = inputs.run(command, env=env, wait_timeout=MACOS_CHECK_BUILD_TIMEOUT_SECONDS,
+                                  stdout=log, stderr=subprocess.STDOUT)
+            finally:
+                log.seek(max(0, os.fstat(log.fileno()).st_size - 65536))
+                tail = log.read().decode('utf-8', errors='replace')
+                print(tail, flush=True)
+            require(code == 0 and inputs.settled, 'Process integration failed; no passing receipt')
+            require('test result: ok. 2 passed; 0 failed;' in tail
+                    and tail.count('ACTUAL_WORKER_IPC_AUTHORITY verified_calls=') == 2,
+                    'Both real-worker fixture cases must actually execute')
+            require(read_json(inputs.document) == expected and hash_file(inputs.module) == module_hash
+                    and environment_digest() == config['environment_sha256']
+                    and toolchain_digest() == config['toolchain_sha256'], 'Integration identity inputs changed')
+            require(source_snapshot(repo, expected['source']['commit'],
+                    expected_patch=expected['source']['patch_sha256']) == source
+                    and hash_file(worker) == worker_sha,
+                    'Integration inputs changed while running')
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return {'schema': 1, 'kind': 'computer-use-process-integration', 'passed': True,
+            'build_identity': expected, 'worker_sha256': worker_sha,
+            'command': command, 'source_unchanged': True, 'passed_tests': 2,
+            'original_identity_producer': True, 'log': name,
+            'real_screen': False, 'os_input': False, 'release_authorized': False}
 
 def observed_build(repo: Path, expected: dict, target: Path | None = None, *, lifecycle_binding: Path | None = None, defer_linux_observation: bool = False) -> dict:
     """Only this fixed build path may mint a build receipt; no loose-binary import.
@@ -1025,6 +1092,13 @@ def main() -> None:
     build.add_argument('--lifecycle-binding', type=Path, help='Linux only: refreshed observation binding; original authority/cache/budgets remain fixed')
     build.add_argument('--output', type=Path, required=True)
     build.add_argument('--defer-linux-observation', action='store_true', help='Compile a real identity-bearing Linux release; explicitly no runtime receipt')
+    integration = commands.add_parser('process-integration')
+    integration.add_argument('--repo', type=Path, required=True)
+    integration.add_argument('--identity', type=Path, required=True)
+    integration.add_argument('--identity-sha256', required=True)
+    integration.add_argument('--worker', type=Path, required=True)
+    integration.add_argument('--worker-sha256', required=True)
+    integration.add_argument('--output', type=Path, required=True)
     for name in ('candidate-manifest', 'observe-linux'):
         step = commands.add_parser(name)
         step.add_argument('--binary', type=Path, required=True)
@@ -1081,6 +1155,10 @@ def main() -> None:
             result = identity(s, read_json(args.configuration))
             output_sha = write_new(args.output, result)
             result = {'identity_file_sha256': output_sha, 'build_identity': result, 'compiled': False}
+        elif args.command == 'process-integration':
+            result = process_integration(args.repo, read_json(args.identity, args.identity_sha256),
+                                         args.worker, args.worker_sha256, args.output)
+            result = {'integration_receipt_sha256': write_new(args.output, result), 'integration': result}
         elif args.command == 'build':
             result = observed_build(args.repo, read_json(args.identity, args.identity_sha256), args.target,
                                     lifecycle_binding=args.lifecycle_binding, defer_linux_observation=args.defer_linux_observation)

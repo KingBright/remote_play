@@ -46,6 +46,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         'discovery-observation': ('remote_core', 'discovery::tests'),
         'desktop-network': ('weavelo_app', 'network_diagnostics::tests'),
         'computer-use': ('weavelo_app', 'computer_use'),
+        'computer-use-process': ('weavelo_app', 'computer_use_process_'),
         'computer-use-input': ('weavelo_app', 'desktop::model::static_input_tests'),
         'computer-use-pixels': ('client', 'observation_pixels::'),
         'bridge-network': ('remote_client_bridge', 'network_diagnostics::tests'),
@@ -126,6 +127,8 @@ class ServiceContractEntryTests(unittest.TestCase):
     def test_session_clock_modes_have_only_fixed_locked_offline_package_filters(self):
         self.assertEqual(runner.SESSION_CLOCK_TESTS, self.SESSION_CLOCK_CASES)
         for mode, (package, test_filter) in self.SESSION_CLOCK_CASES.items():
+            if mode == 'computer-use-process':
+                continue  # Explicit reviewed-identity producer, checked separately below.
             with self.subTest(mode=mode):
                 features = {'pairing-image': ['--features', 'pairing-image'],
                             'bridge-invitation': ['--features', 'android'], 'bridge-network': ['--features', 'android']}.get(mode, [])
@@ -133,6 +136,40 @@ class ServiceContractEntryTests(unittest.TestCase):
                     '/existing/cargo', 'test', '--offline', '--locked', '--target-dir',
                     '/existing/target', '-p', package, '--lib', *features, test_filter, '--', '--nocapture',
                 ])
+
+    def test_process_mode_binds_reviewed_identity_and_worker_to_original_producer(self):
+        bindings = {
+            'WEAVELO_TEST_BUILD_IDENTITY': '/reviewed/identity.json',
+            'WEAVELO_TEST_BUILD_IDENTITY_SHA256': 'a' * 64,
+            'WEAVELO_TEST_OCTENDRA_WORKER': '/existing/worker',
+            'WEAVELO_TEST_OCTENDRA_WORKER_SHA256': 'b' * 64,
+            'WEAVELO_TEST_PROCESS_RECEIPT': '/private/new-result.json',
+        }
+        with patch.dict(os.environ, bindings, clear=True):
+            command = validation_command('/unused/cargo', Path('/existing/target'), 'computer-use-process')
+        root = Path(runner.__file__).resolve().parents[1]
+        self.assertEqual(command, [sys.executable, '-B', str(root/'scripts/build_identity_gate.py'),
+            'process-integration', '--repo', str(root), '--identity', bindings['WEAVELO_TEST_BUILD_IDENTITY'],
+            '--identity-sha256', 'a'*64, '--worker', '/existing/worker', '--worker-sha256', 'b'*64,
+            '--output', '/private/new-result.json'])
+
+    def test_process_mode_rejects_changed_worker_before_compilation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            worker = Path(folder).resolve()/'worker'; worker.write_bytes(b'synthetic worker')
+            bindings = {
+                'WEAVELO_TEST_BUILD_IDENTITY': '/reviewed/identity.json',
+                'WEAVELO_TEST_BUILD_IDENTITY_SHA256': 'a'*64,
+                'WEAVELO_TEST_PROCESS_RECEIPT': '/private/new-result.json',
+                'WEAVELO_TEST_OCTENDRA_WORKER': str(worker),
+                'WEAVELO_TEST_OCTENDRA_WORKER_SHA256': 'b'*64,
+            }
+            with patch.dict(os.environ, bindings, clear=True), patch.object(runner.sys, 'platform', 'darwin'):
+                with self.assertRaisesRegex(ValueError, 'independently pinned build'):
+                    validation_environment('computer-use-process')
+            bindings['WEAVELO_TEST_OCTENDRA_WORKER_SHA256'] = hashlib.sha256(worker.read_bytes()).hexdigest()
+            bindings['RUST_LOG'] = 'trace'
+            with patch.dict(os.environ, bindings, clear=True), patch.object(runner.sys, 'platform', 'darwin'):
+                self.assertNotIn('RUST_LOG', validation_environment('computer-use-process'))
 
     def test_pairing_modes_keep_actual_module_fixture_and_source_identity_guards(self):
         for mode, arguments in (
@@ -175,8 +212,9 @@ class ServiceContractEntryTests(unittest.TestCase):
 
     def test_session_clock_modes_refuse_product_identity_and_remove_runtime_log_overrides(self):
         for mode in self.SESSION_CLOCK_CASES:
-            with self.subTest(mode=mode), patch.dict(os.environ, {'RUST_LOG': 'trace'}):
-                self.assertNotIn('RUST_LOG', validation_environment(mode))
+            if mode != 'computer-use-process':  # Its positive case requires reviewed bindings, tested above.
+                with self.subTest(mode=mode), patch.dict(os.environ, {'RUST_LOG': 'trace'}):
+                    self.assertNotIn('RUST_LOG', validation_environment(mode))
             for key in ('WEAVELO_BUILD_IDENTITY_FILE', 'WEAVELO_BUILD_IDENTITY_RS'):
                 with self.subTest(mode=mode, key=key), patch.dict(os.environ, {key: '/fixture/identity'}):
                     with self.assertRaisesRegex(ValueError, 'product identity inputs'):

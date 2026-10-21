@@ -1,5 +1,43 @@
 # Octendra → selected Weavelo source: observation and bounded gestures
 
+
+## Opt-in process integration on Mac Studio
+
+Build the actual Octendra worker from its primary main checkout using the existing
+`scripts/dev-verify.py --exec cargo build --release --offline --locked -p octendra-code --bin octendra-code`.
+Pin that observed executable through `WEAVELO_TEST_OCTENDRA_WORKER` (absolute path)
+and `WEAVELO_TEST_OCTENDRA_WORKER_SHA256`. Prepare a current source identity with
+the existing `build_identity_gate.py configuration`, `inspect-source` and `prepare`
+commands, then set `WEAVELO_TEST_BUILD_IDENTITY` to its absolute JSON path and
+`WEAVELO_TEST_BUILD_IDENTITY_SHA256` to the independently observed file digest.
+Set `WEAVELO_TEST_PROCESS_RECEIPT` to a new absolute JSON path in the existing
+private `.rust-storage/validation-logs` directory. Then run:
+
+```sh
+python3 -B scripts/test_stream_settings_model.py --mode computer-use-process
+```
+
+This mode runs only the two new opt-in process cases. It uses the release profile:
+hashing large unoptimized development executables is not representative of the
+production worker's startup/IPC budget. It reuses the original identity producer
+lock, immutable generated-input checks and native GPUI build budget; no profile or
+target-cache settings change. The resulting `computer-use-process-integration`
+evidence cannot substitute for an observed product build or package receipt.
+
+The tests start the real worker entry point with private temporary authority
+records. The actual GUI private socket supplies kernel peer PID; the production
+authority verifier checks worker and parent executable hashes and task bindings.
+The cases verify source/frame identity, explicit HID A to Mac keycode 0, rejection
+of a repeated gesture, and revocation before fixture input. Worker exit is awaited;
+the owned test group is also covered by the fixed runner's cleanup receipt.
+
+The parent is the test executable standing in for the Agent. Pixels and the host
+input sink are synthetic. These cases therefore verify process/transport/authority
+integration, not a real remote viewing session, desktop window or OS injection.
+Installed profiles, live authority files, pairing and OS permissions are untouched.
+Real observation/input acceptance still requires compatible signed installation
+and an already authorized dedicated temporary window.
+
 This route consumes an existing, explicit Octendra desktop authorization. It does
 not make terminal/code permission into desktop permission, start a stream, choose
 a default source, grant OS permissions, create credentials or open a listener.
