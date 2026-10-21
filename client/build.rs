@@ -1,8 +1,16 @@
-//! Build only the explicitly enabled Linux native ABI wrapper. Other platforms
-//! and ordinary builds do not require FFmpeg headers or invoke a C compiler.
+//! Platform ABI bridges: macOS observation and opt-in Linux native video.
+//! FFmpeg headers are required only for native-linux-video.
 use std::{env, path::PathBuf};
 mod build_toolchain;
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cc::Build::new().file("native/macos_observation.m")
+            .flag("-fobjc-arc").flag("-fblocks").compile("weavelo_observation");
+        for framework in ["Foundation", "CoreImage", "CoreGraphics", "CoreVideo"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rerun-if-changed=native/macos_observation.m");
+    }
     println!("cargo:rerun-if-env-changed=WEAVELO_VERIFIED_FFMPEG_INCLUDE");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
         || env::var_os("CARGO_FEATURE_NATIVE_LINUX_VIDEO").is_none()

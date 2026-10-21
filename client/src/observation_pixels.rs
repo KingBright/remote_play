@@ -1,6 +1,8 @@
 //! Bounded CPU snapshot bytes for observation, separate from the renderer.
-//! No YUV conversion, native mapping, scaling, cropping or color inference.
+//! Native macOS snapshots use Core Image color conversion, never renderer fallback.
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 
 pub const MAX_OBSERVATION_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DIMENSION: u32 = 8192;
@@ -13,6 +15,8 @@ pub enum PixelError {
     LengthMismatch,
     SizeLimit,
     ArithmeticOverflow,
+    ColorMetadataUnavailable,
+    NativeReadbackFailed,
 }
 impl std::fmt::Display for PixelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -26,6 +30,8 @@ pub enum ColorMetadata {
     /// The software decoder's RGBA buffer carries no range/matrix/transfer/
     /// primaries metadata. Never relabel it sRGB/BT.709 or invent SPA numbers.
     Unspecified,
+    /// Core Image converted declared source color into sRGB RGBA8, opaque alpha.
+    Srgb,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +72,7 @@ impl RgbaLayout {
 pub struct CpuRgba {
     layout: RgbaLayout,
     pixels: Arc<Vec<u8>>,
+    color: ColorMetadata,
 }
 impl CpuRgba {
     pub(crate) fn from_decoded(width: u32, height: u32, pixels: Arc<Vec<u8>>,
@@ -73,11 +80,11 @@ impl CpuRgba {
         let stride = usize::try_from(width).ok().and_then(|w| w.checked_mul(4))
             .ok_or(PixelError::ArithmeticOverflow)?;
         let layout = RgbaLayout::validate(width, height, stride, pixels.len(), maximum)?;
-        Ok(Self { layout, pixels })
+        Ok(Self { layout, pixels, color: ColorMetadata::Unspecified })
     }
     pub fn layout(&self) -> RgbaLayout { self.layout }
     pub fn pixels(&self) -> &[u8] { &self.pixels }
-    pub fn color(&self) -> ColorMetadata { ColorMetadata::Unspecified }
+    pub fn color(&self) -> ColorMetadata { self.color }
 }
 
 #[cfg(test)]

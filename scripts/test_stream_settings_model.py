@@ -52,7 +52,7 @@ SESSION_CLOCK_TESTS = {
     "desktop-network": ("weavelo_app", "network_diagnostics::tests"),
     "computer-use": ("weavelo_app", "computer_use"),
     "computer-use-input": ("weavelo_app", "desktop::model::static_input_tests"),
-    "computer-use-pixels": ("client", "observation_pixels::tests"),
+    "computer-use-pixels": ("client", "observation_pixels::"),
     "bridge-network": ("remote_client_bridge", "network_diagnostics::tests"),
     "pairing-qr": ("remote_core", "pairing_qr::tests"),
     "pairing-image": ("remote_core", "pairing_image::tests"),
@@ -490,8 +490,9 @@ def guarded_run(args, root, parser):
             "third_party/gpui-ce/build.rs", "third_party/gpui-ce/src/platform/linux/x11/client.rs")]
         print("Linux X11 tests: compile check only; no native execution", flush=True)
     if requires_workspace_source_guard(args.mode):
-        paths = subprocess.check_output(["git", "ls-files", "*.rs", "Cargo.toml", "Cargo.lock"], cwd=root, text=True).splitlines()
-        paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "*.rs"], cwd=root, text=True).splitlines()
+        inputs = ["*.rs", "*.m", "*.c", "*.h", "Cargo.toml", "Cargo.lock"]
+        paths = subprocess.check_output(["git", "ls-files", *inputs], cwd=root, text=True).splitlines()
+        paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", *inputs], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
     sources.extend([root / "scripts/test_stream_settings_model.py", root / "scripts/check_artifact_lifecycle.py"])
     if args.mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check", "lifecycle-linux-native-build"):
