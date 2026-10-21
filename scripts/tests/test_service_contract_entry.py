@@ -41,6 +41,7 @@ class ServiceContractEntryTests(unittest.TestCase):
         'clock-display': ('weavelo_app', 'telemetry_display::tests'),
         'clock-renderer': ('client', 'render_timing::tests'),
         'mesh-profile': ('remote_core', 'mesh::tests'),
+        'desktop-identity': ('remote_core', 'desktop_identity::tests'),
         'relay-bootstrap': ('remote_core', 'relay::tests::websocket_tls_bootstraps_without_ambient_provider'),
         'relay-transport': ('remote_core', 'relay::tests'),
         'discovery-observation': ('remote_core', 'discovery::tests'),
@@ -132,9 +133,11 @@ class ServiceContractEntryTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 features = {'pairing-image': ['--features', 'pairing-image'],
                             'bridge-invitation': ['--features', 'android'], 'bridge-network': ['--features', 'android']}.get(mode, [])
+                native = (['--profile','release','--target','aarch64-apple-darwin','-j','2']
+                          if mode == 'desktop-identity' and runner.sys.platform == 'darwin' else [])
                 self.assertEqual(validation_command('/existing/cargo', Path('/existing/target'), mode), [
                     '/existing/cargo', 'test', '--offline', '--locked', '--target-dir',
-                    '/existing/target', '-p', package, '--lib', *features, test_filter, '--', '--nocapture',
+                    '/existing/target', '-p', package, '--lib', *features, *native, test_filter, '--', '--nocapture',
                 ])
 
     def test_process_mode_binds_reviewed_identity_and_worker_to_original_producer(self):

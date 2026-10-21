@@ -1,7 +1,8 @@
 ﻿param(
     [string]$FfmpegPath = $env:WEAVELO_FFMPEG_BIN,
     [switch]$SkipBuild,
-    [string]$BuildReceipt
+    [string]$BuildReceipt,
+    [switch]$Desktop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
     $targetDir = [IO.Path]::GetFullPath((Join-Path $root $env:CARGO_TARGET_DIR))
 }
 $releaseExe = Join-Path $targetDir 'release\weavelo.exe'
-$packageRoot = Join-Path $targetDir 'package\windows'
+$packageRoot = Join-Path $targetDir $(if ($Desktop) { 'package\windows\desktop' } else { 'package\windows' })
 $appDir = Join-Path $packageRoot 'Weavelo'
 $zipPath = Join-Path $packageRoot 'Weavelo-Windows-x64.zip'
 
@@ -45,6 +46,16 @@ if (-not [string]::IsNullOrWhiteSpace($BuildReceipt)) {
     if ($LASTEXITCODE -ne 0) { throw 'Compiled Windows identity verification failed.' }
 }
 
+$desktopIdentity = Get-Content -LiteralPath (Join-Path $root 'deploy\desktop\product-identity.json') -Raw | ConvertFrom-Json
+$compiledProduct = (& $releaseExe --product-info-json | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0) { throw 'Actual compiled desktop identity unavailable.' }
+if ($Desktop) {
+    if ($compiledProduct.desktop_identity.application_id -ne $desktopIdentity.application_id) {
+        throw 'The new desktop package requires the independent application namespace.'
+    }
+} elseif ($compiledProduct.desktop_identity.application_id -eq $desktopIdentity.application_id) {
+    throw 'Use -Desktop for this binary; the retained package output is not replaced.'
+}
 $productVersion = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
 & (Join-Path $root 'scripts\verify_desktop_gui.ps1') -Binary $releaseExe -Version $productVersion
 
@@ -98,7 +109,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $appDir 'bin') | Out-Null
 Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $appDir 'weavelo.exe')
 Copy-Item -LiteralPath $ffmpeg -Destination (Join-Path $appDir 'bin\ffmpeg.exe')
 Copy-Item -LiteralPath (Join-Path $root 'assets\brand\weavelo\favicon.ico') -Destination (Join-Path $appDir 'Weavelo.ico')
-@{name='Weavelo';appUserModelId='fun.hackerlife.weavelo';icon='Weavelo.ico'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $appDir 'application-identity.json') -Encoding UTF8
+@{name='Weavelo';appUserModelId=$(if ($Desktop) { $desktopIdentity.application_id } else { 'fun.hackerlife.weavelo' });icon='Weavelo.ico'} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $appDir 'application-identity.json') -Encoding UTF8
+if ($Desktop) { Copy-Item -LiteralPath (Join-Path $root 'deploy\desktop\product-identity.json') -Destination (Join-Path $appDir 'desktop-identity.json') }
 Set-Content -LiteralPath (Join-Path $appDir 'ffmpeg-license.txt') -Value $licenseText -Encoding UTF8
 
 $sourceManifest = Join-Path $root 'source-manifest.json'

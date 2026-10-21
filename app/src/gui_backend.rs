@@ -24,6 +24,8 @@ pub struct ProductInfo {
     pub separated_lifecycle: bool,
     pub background_entry: Option<&'static str>,
     pub frontend_entry: Option<&'static str>,
+    pub desktop_identity: &'static remote_core::desktop_identity::DesktopIdentity,
+    pub desktop_runtime: serde_json::Value,
 }
 
 pub fn product_info() -> ProductInfo {
@@ -42,6 +44,12 @@ pub fn product_info() -> ProductInfo {
         separated_lifecycle: SEPARATED_LIFECYCLE_COMPILED,
         background_entry: SEPARATED_LIFECYCLE_COMPILED.then_some("--background-service"),
         frontend_entry: SEPARATED_LIFECYCLE_COMPILED.then_some("--gui"),
+        desktop_identity: remote_core::desktop_identity::identity(),
+        desktop_runtime: {
+            let config = crate::UnifiedRuntimeConfig::app_defaults();
+            serde_json::json!({"control_port":config.host_bind_addr.port(), "discovery_port":config.discovery_port,
+                "implicit_relay":config.relay_endpoint.is_some(), "implicit_p2p":config.enable_p2p})
+        },
     }
 }
 

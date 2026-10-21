@@ -8,7 +8,7 @@ use std::{
 };
 
 pub(super) fn validate_launchd(value: &Value, executable: &str) -> Result<(), String> {
-    if value["Label"] != "fun.hackerlife.weavelo.host"
+    if value["Label"] != remote_core::desktop_identity::identity().service_label
         || value["ProgramArguments"] != serde_json::json!([executable, "--background-service"])
         || value.get("Program").is_some_and(|p| p != executable)
     {
@@ -116,7 +116,7 @@ pub(super) fn verify(
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let home = std::env::var_os("HOME").ok_or("Existing service home required")?;
         let path = std::path::PathBuf::from(home)
-            .join("Library/LaunchAgents/fun.hackerlife.weavelo.host.plist");
+            .join(format!("Library/LaunchAgents/{}.plist", remote_core::desktop_identity::identity().service_label));
         let m = path.symlink_metadata()?;
         if !m.is_file()
             || m.uid() != unsafe { libc::geteuid() }
@@ -135,9 +135,9 @@ pub(super) fn verify(
             executable.to_str().ok_or("Executable path is not UTF-8")?,
         )?;
         // Check the loaded original job belongs to this PID; no service mutation.
-        let label = format!("gui/{}/fun.hackerlife.weavelo.host", unsafe {
+        let label = format!("gui/{}/{}", unsafe {
             libc::geteuid()
-        });
+        }, remote_core::desktop_identity::identity().service_label);
         let loaded = String::from_utf8(output(
             Command::new("/bin/launchctl").args(["print", &label]),
         )?)?;
@@ -155,7 +155,7 @@ pub(super) fn verify(
         let bytes = output(Command::new("systemctl").args([
             "--user",
             "show",
-            "weavelo.service",
+            &remote_core::desktop_identity::identity().linux_service,
             "-p",
             "MainPID",
             "-p",

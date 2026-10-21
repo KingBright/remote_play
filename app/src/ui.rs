@@ -43,7 +43,7 @@ pub async fn run_unified_gui(
             appearance,
             weavelo_themes(), cx);
         let window_options = WindowOptions {
-            app_id: Some("fun.hackerlife.weavelo".into()),
+            app_id: Some(remote_core::desktop_identity::identity().application_id.clone()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(80.0), px(60.0)),
                 size(px(1280.0), px(800.0)),
@@ -436,7 +436,7 @@ impl UnifiedDashboard {
         let host_stats = self.host_stats.clone();
 
         let window_options = WindowOptions {
-            app_id: Some("fun.hackerlife.weavelo".into()),
+            app_id: Some(remote_core::desktop_identity::identity().application_id.clone()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(200.0), px(120.0)),
                 size(px(854.0), px(480.0)),

@@ -1,0 +1,17 @@
+[Unit]
+Description=Weavelo desktop background service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/opt/weavelo/desktop/weavelo --background-service
+Environment=WEAVELO_DEVICE_GROUP_DIR=%h/.config/weavelo/desktop
+Environment=WEAVELO_HOST_BIND_ADDR=0.0.0.0:39273
+Environment=WEAVELO_DISCOVERY_PORT=38119
+Environment=WEAVELO_RELAY=0
+Environment=WEAVELO_P2P=0
+Environment=WEAVELO_HEADLESS=1
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

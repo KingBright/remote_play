@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod desktop_identity;
 pub mod client_session;
 pub mod clipboard_file_runtime;
 pub mod clipboard_plane;

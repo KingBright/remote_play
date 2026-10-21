@@ -415,24 +415,28 @@ pub fn default_app_private_mesh_dir() -> PathBuf {
             .join("Library")
             .join("Application Support")
             .join("Weavelo")
-            .join("NativeMesh");
+            .join(&crate::desktop_identity::identity().profile_directory);
     }
     #[cfg(target_os = "windows")]
     if let Some(appdata) = env::var_os("APPDATA").and_then(non_empty_env_path) {
-        return PathBuf::from(appdata).join("Weavelo").join("Mesh");
+        return PathBuf::from(appdata).join("Weavelo").join(&crate::desktop_identity::identity().profile_directory);
     }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let profile_folder = "desktop";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let profile_folder = "mesh";
     #[cfg(not(target_os = "windows"))]
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").and_then(non_empty_env_path) {
-        return PathBuf::from(config_home).join("weavelo").join("mesh");
+        return PathBuf::from(config_home).join("weavelo").join(profile_folder);
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(home) = env::var_os("HOME").and_then(non_empty_env_path) {
         return PathBuf::from(home)
             .join(".config")
             .join("weavelo")
-            .join("mesh");
+            .join(profile_folder);
     }
-    env::temp_dir().join("weavelo").join("mesh")
+    env::temp_dir().join("weavelo").join(profile_folder)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

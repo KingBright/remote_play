@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "product": "Weavelo",
+  "application_id": "fun.hackerlife.weavelo.desktop",
+  "install_directory": "Weavelo",
+  "profile_directory": "Desktop",
+  "service_label": "fun.hackerlife.weavelo.desktop.host",
+  "linux_service": "weavelo-desktop.service",
+  "control_port": 39273,
+  "discovery_port": 38119
+}

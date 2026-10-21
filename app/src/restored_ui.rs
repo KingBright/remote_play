@@ -133,7 +133,7 @@ fn open_restored_window(
     let primary = instance.is_some();
     let attached = instance.as_ref().is_some_and(|i| i.is_frontend());
     let options = WindowOptions {
-            app_id: Some("fun.hackerlife.weavelo".into()),
+            app_id: Some(remote_core::desktop_identity::identity().application_id.clone()),
         window_bounds: Some(WindowBounds::Windowed(bounds(
             point(px(80.), px(60.)),
             size(px(1280.), px(800.)),
@@ -839,7 +839,7 @@ impl RestoredDashboard {
         let host_stats = self.host_stats.clone();
 
         let window_options = WindowOptions {
-            app_id: Some("fun.hackerlife.weavelo".into()),
+            app_id: Some(remote_core::desktop_identity::identity().application_id.clone()),
             window_bounds: Some(WindowBounds::Windowed(bounds(
                 point(px(200.0), px(120.0)),
                 size(px(854.0), px(480.0)),

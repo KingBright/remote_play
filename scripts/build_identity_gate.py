@@ -331,10 +331,19 @@ def verify_candidate(repo: Path, binary: Path, expected: dict, expected_binary_s
             'stream_acceptance': 'not_evaluated'}
 
 
-def authorized_mac_app(app: Path) -> dict:
-    from macos_release_guard import load_policy, verify_app, ReleaseRejected
+def macos_policy_for_product(info: dict):
+    from macos_release_guard import load_policy, DESKTOP_POLICY_FILE
+    if info.get('desktop_identity') is None:
+        return load_policy()  # Retained manifests keep their original identity.
+    from desktop_identity import identity as desktop_identity
+    require(info['desktop_identity'] == desktop_identity(), 'Unreviewed desktop application namespace')
+    return load_policy(DESKTOP_POLICY_FILE)
+
+
+def authorized_mac_app(app: Path, product: dict | None = None) -> dict:
+    from macos_release_guard import verify_app, ReleaseRejected
     try:
-        return verify_app(app, load_policy())
+        return verify_app(app, macos_policy_for_product(product or {}))
     except ReleaseRejected as error:
         raise IdentityRejected('Native authorized macOS signature verification failed') from error
 
@@ -842,7 +851,7 @@ def seal_tree(stage: Path, build_receipt: dict, expected_commit: str, expected_i
                 'Native pinned signing verification and original compiler artifact required')
         require(hash_file(compiler_binary) == compiler_sha, 'Compiler handoff differs from observed build')
         product_info(compiler_binary, expected, compiler_sha)
-        signing = authorized_mac_app(app)
+        signing = authorized_mac_app(app, build_receipt['product_info'])
         require(signing['executable_sha256'] == final_sha, 'Signed artifact changed')
         require(signing['version'] == expected['configuration']['version'], 'Signed version/build contract mismatch')
         signing = {k: signing[k] for k in ('bundle_id', 'certificate_sha1', 'designated_requirement',
@@ -893,8 +902,7 @@ def manifest_document(raw: bytes, expected_sha: str, expected_commit: str, expec
     else:
         require(type(m.get('signing')) is dict and m['signing'].get('signature_verified') is True,
                 'Missing authorized signer verification')
-        from macos_release_guard import load_policy
-        policy = load_policy()
+        policy = macos_policy_for_product(m['product_info'])
         require(m['signing'].get('bundle_id') == policy.bundle_id and
                 m['signing'].get('certificate_sha1') == policy.certificate_sha1 and
                 m['signing'].get('designated_requirement') == policy.requirement,
@@ -989,7 +997,7 @@ def verify_install(app: Path, manifest_path: Path, expected_manifest: str, expec
     platform = m['build_identity']['configuration']['platform']
     if platform == 'macos':
         require(sys.platform == 'darwin', 'Native macOS signer/upgrade verification unavailable')
-        actual = authorized_mac_app(app)
+        actual = authorized_mac_app(app, m['product_info'])
         require(actual['executable_sha256'] == m['binary_sha256'], 'Installed signed executable changed')
     info = product_info(expected, m['build_identity'], m['binary_sha256'])
     require(info == m['product_info'], 'Installed product metadata differs from sealed artifact')

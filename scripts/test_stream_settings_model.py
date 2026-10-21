@@ -46,6 +46,7 @@ SESSION_CLOCK_TESTS = {
     "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
     "mesh-profile": ("remote_core", "mesh::tests"),
+    "desktop-identity": ("remote_core", "desktop_identity::tests"),
     "relay-bootstrap": ("remote_core", "relay::tests::websocket_tls_bootstraps_without_ambient_provider"),
     "relay-transport": ("remote_core", "relay::tests"),
     "discovery-observation": ("remote_core", "discovery::tests"),
@@ -84,6 +85,11 @@ def validation_command(cargo, target, mode):
                 "--worker", os.environ.get("WEAVELO_TEST_OCTENDRA_WORKER", ""),
                 "--worker-sha256", os.environ.get("WEAVELO_TEST_OCTENDRA_WORKER_SHA256", ""),
                 "--output", os.environ.get("WEAVELO_TEST_PROCESS_RECEIPT", "")]
+    if mode == "desktop-identity" and sys.platform == "darwin":
+        # Match the existing Studio product configuration/cache. This new fixed
+        # namespace test does not introduce a profile, target store or override.
+        return [cargo, "test", *shared, "-p", "remote_core", "--lib", "--profile", "release",
+                "--target", "aarch64-apple-darwin", "-j", "2", "desktop_identity::tests", "--", "--nocapture"]
     if mode == "pairing-fixture":
         return [cargo, "run", *shared, "-p", "remote_core", "--example", "synthetic_pairing_qr"]
     if mode == "pairing-join":
@@ -517,6 +523,8 @@ def guarded_run(args, root, parser):
         paths += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", *inputs], cwd=root, text=True).splitlines()
         sources = [root / path for path in sorted(set(paths))]
     sources.extend([root / "scripts/test_stream_settings_model.py", root / "scripts/check_artifact_lifecycle.py"])
+    if args.mode == "desktop-identity":
+        sources.append(root / "deploy/desktop/product-identity.json")
     if args.mode in ("linux-x11-check", "platform-linux-check", "lifecycle-linux-native-check", "lifecycle-linux-native-build"):
         sources.extend(root / "scripts/cmake" / name for name in
                        ("linux_zig_tool.py", "linux-zig-cc", "linux-zig-cxx", "linux-zig-ar", "linux_clang_link.py", "linux-clang-link", "linux-zig-ranlib", "linux-zig-toolchain.cmake", "linux_cmake.py", "linux-cmake"))

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "bundle_id": "fun.hackerlife.weavelo.desktop",
+  "executable": "weavelo",
+  "app_name": "Weavelo",
+  "certificate_sha1": "8eaa97365d97b8a987cdf1232430eddf9aba8ecf",
+  "purpose": "Independent Weavelo desktop application; original authorized signing certificate, retained clients unchanged."
+}

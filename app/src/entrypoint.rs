@@ -172,7 +172,7 @@ mod tests {
 fn set_windows_application_identity() -> Result<(), Box<dyn Error + Send + Sync>> {
     #[link(name = "shell32")]
     unsafe extern "system" { fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32; }
-    let app_id: Vec<u16> = "fun.hackerlife.weavelo".encode_utf16().chain(Some(0)).collect();
+    let app_id: Vec<u16> = remote_core::desktop_identity::identity().application_id.encode_utf16().chain(Some(0)).collect();
     let result = unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) };
     if result < 0 { return Err(format!("Weavelo application identity failed: {result:#x}").into()); }
     Ok(())

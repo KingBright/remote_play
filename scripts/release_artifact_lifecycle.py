@@ -598,8 +598,10 @@ def stop_child_group(child):
 
 
 def run(kind, arguments):
-    if kind == 'macos':
-        check = subprocess.run([sys.executable, '-B', str(ROOT / 'scripts/macos_release_guard.py'), 'preflight'])
+    if kind == 'macos' and arguments != ['--prepare-desktop']:
+        require(arguments in ([], ['--desktop']), 'Unknown macOS packaging mode')
+        check = subprocess.run([sys.executable, '-B', str(ROOT / 'scripts/macos_release_guard.py'), 'preflight',
+                                *(['--desktop'] if arguments == ['--desktop'] else [])])
         require(check.returncode == 0, 'Signing preflight failed before release lifecycle changes')
     with producer(kind) as (fd, state):
         if kind == 'android-release':

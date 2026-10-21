@@ -508,7 +508,7 @@ mod service_contract_tests {
 
     #[test]
     fn full_exit_rejects_normal_restart_and_independent_activation_policies() {
-        let good=serde_json::json!({"Label":"fun.hackerlife.weavelo.host","ProgramArguments":["/fixture/weavelo","--background-service"],"RunAtLoad":true,"KeepAlive":{"SuccessfulExit":false}});
+        let good=serde_json::json!({"Label":"fun.hackerlife.weavelo.desktop.host","ProgramArguments":["/fixture/weavelo","--background-service"],"RunAtLoad":true,"KeepAlive":{"SuccessfulExit":false}});
         stop_policy::validate_launchd(&good,"/fixture/weavelo").unwrap();
         for (key,value) in [("KeepAlive",serde_json::json!(true)),("StartInterval",serde_json::json!(30)),
             ("MachServices",serde_json::json!({"fixture":true})),("ProgramArguments",serde_json::json!(["/wrong","--background-service"]))] {

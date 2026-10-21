@@ -24,6 +24,7 @@ import build_identity_gate as identity_gate
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_FILE = ROOT / 'deploy/macos/signing-policy.json'
+DESKTOP_POLICY_FILE = ROOT / 'deploy/macos/desktop-signing-policy.json'
 
 
 class ReleaseRejected(RuntimeError):
@@ -285,6 +286,47 @@ def packaging_workspace(output: Path, owned: Path | None):
         shutil.rmtree(stage)
 
 
+def assemble_app(stage: Path, binary: Path, version: str, build: str, policy: Policy) -> Path:
+    """Shared bundle layout only. This grants no release/signature authority."""
+    version_key(version); build_key(build)
+    desktop = None
+    if policy.bundle_id == 'fun.hackerlife.weavelo.desktop':
+        from desktop_identity import identity
+        desktop = identity()
+        info = json.loads(run([str(binary), '--product-info-json']))
+        if info.get('desktop_identity') != desktop:
+            raise ReleaseRejected('Binary does not implement the independent desktop namespace')
+        defaults = info.get('desktop_runtime', {})
+        if defaults != {'control_port': desktop['control_port'], 'discovery_port': desktop['discovery_port'],
+                        'implicit_relay': False, 'implicit_p2p': False}:
+            raise ReleaseRejected('Binary defaults collide with the retained service/backend')
+    app = stage / 'Weavelo.app'
+    macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
+    macos.mkdir(parents=True); resources.mkdir(parents=True)
+    shutil.copy2(binary, macos / policy.executable); os.chmod(macos / policy.executable, 0o755)
+    info = {'CFBundleExecutable': policy.executable, 'CFBundleIdentifier': policy.bundle_id,
+            'CFBundleName': policy.app_name, 'CFBundleDisplayName': policy.app_name,
+            'CFBundleShortVersionString': version.split('-')[0], 'CFBundleVersion': build,
+            'WeaveloReleaseVersion': version, 'CFBundlePackageType': 'APPL',
+            'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
+            'NSMicrophoneUsageDescription': 'Weavelo uses the microphone when talkback is enabled.',
+            'NSScreenCaptureUsageDescription': 'Weavelo captures your screen only for authorized remote viewing.'}
+    icon = Path(__file__).resolve().parents[1] / 'assets/brand/weavelo/AppIcon.icns'
+    if not icon.is_file() or icon.is_symlink():
+        raise ReleaseRejected('Final Weavelo icon is required before signing')
+    shutil.copyfile(icon, resources / 'AppIcon.icns')
+    info['CFBundleIconFile'] = 'AppIcon'
+    (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+    (resources / 'VERSION').write_text(version + '\n')
+    if desktop is not None:
+        (resources / 'desktop-identity.json').write_text(json.dumps(desktop, indent=2) + '\n')
+    (resources / 'release-identity.json').write_text(json.dumps({
+        'schema': 1, 'version': version, 'build': build, 'bundle_id': policy.bundle_id,
+        'certificate_sha1': policy.certificate_sha1, 'designated_requirement': policy.requirement,
+    }, indent=2) + '\n')
+    return app
+
+
 def package(binary: Path, output: Path, version: str, build: str, policy: Policy, *,
             archive: Path | None = None, receipt: Path | None = None,
             workspace: Path | None = None, current_archive: Path | None = None,
@@ -300,28 +342,7 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
     if archive.exists() or archive.is_symlink() or receipt.exists() or receipt.is_symlink():
         raise ReleaseRejected('Output already exists; update current through the production entrypoint')
     with packaging_workspace(output, workspace) as stage:
-        app = stage / 'Weavelo.app'
-        macos = app / 'Contents/MacOS'; resources = app / 'Contents/Resources'
-        macos.mkdir(parents=True); resources.mkdir(parents=True)
-        shutil.copy2(binary, macos / policy.executable); os.chmod(macos / policy.executable, 0o755)
-        info = {'CFBundleExecutable': policy.executable, 'CFBundleIdentifier': policy.bundle_id,
-                'CFBundleName': policy.app_name, 'CFBundleDisplayName': policy.app_name,
-                'CFBundleShortVersionString': version.split('-')[0], 'CFBundleVersion': build,
-                'WeaveloReleaseVersion': version, 'CFBundlePackageType': 'APPL',
-                'LSMinimumSystemVersion': '13.0', 'NSHighResolutionCapable': True,
-                'NSMicrophoneUsageDescription': 'Weavelo uses the microphone when talkback is enabled.',
-                'NSScreenCaptureUsageDescription': 'Weavelo captures your screen only for authorized remote viewing.'}
-        icon = Path(__file__).resolve().parents[1] / 'assets/brand/weavelo/AppIcon.icns'
-        if not icon.is_file() or icon.is_symlink():
-            raise ReleaseRejected('Final Weavelo icon is required before signing')
-        shutil.copyfile(icon, resources / 'AppIcon.icns')
-        info['CFBundleIconFile'] = 'AppIcon'
-        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
-        (resources / 'VERSION').write_text(version + '\n')
-        (resources / 'release-identity.json').write_text(json.dumps({
-            'schema': 1, 'version': version, 'build': build, 'bundle_id': policy.bundle_id,
-            'certificate_sha1': policy.certificate_sha1, 'designated_requirement': policy.requirement,
-        }, indent=2) + '\n')
+        app = assemble_app(stage, binary, version, build, policy)
         # No mutation of signed bundle contents is permitted after this point.
         run(['/usr/bin/codesign', '--force', '--sign', signer, '--timestamp=none',
              '--identifier', policy.bundle_id, '-r', '=designated => ' + policy.requirement, str(app)])
@@ -360,22 +381,24 @@ def package(binary: Path, output: Path, version: str, build: str, policy: Policy
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    sub.add_parser('preflight')
+    sub.add_parser('preflight').add_argument('--desktop', action='store_true')
     for name in ['verify-app', 'verify-archive', 'verify-stage']:
         child = sub.add_parser(name); child.add_argument('path', type=Path)
+        child.add_argument('--desktop', action='store_true')
         if name == 'verify-stage': child.add_argument('--macos-only', action='store_true')
         if name == 'verify-archive':
             child.add_argument('--expected-commit')
             child.add_argument('--expected-identity-sha256')
             child.add_argument('--expected-manifest-sha256')
     child = sub.add_parser('package')
+    child.add_argument('--desktop', action='store_true')
     child.add_argument('--binary', type=Path, required=True); child.add_argument('--output', type=Path, required=True)
     child.add_argument('--version', required=True); child.add_argument('--build', required=True)
     child.add_argument('--build-receipt', type=Path)
     child.add_argument('--build-receipt-sha256')
     child.add_argument('--expected-commit')
     child.add_argument('--expected-identity-sha256')
-    args = parser.parse_args(); policy = load_policy()
+    args = parser.parse_args(); policy = load_policy(DESKTOP_POLICY_FILE if getattr(args, 'desktop', False) else POLICY_FILE)
     if args.command == 'preflight': result = {'signing_identity': preflight(policy), 'ad_hoc_fallback': False}
     elif args.command == 'verify-app': result = verify_app(args.path, policy)
     elif args.command == 'verify-archive':
@@ -406,7 +429,7 @@ def main() -> None:
                 raise ReleaseRejected('Missing build output')
             output = args.output.resolve()
             lifecycle.require(output == lifecycle.macos_output_root(), 'Use the configured default macOS package directory')
-            archive = output / 'Weavelo-macos-arm64.zip'
+            archive = output / ('Weavelo-desktop-macos-arm64.zip' if args.desktop else 'Weavelo-macos-arm64.zip')
             files = [archive, archive.with_suffix('.verification.json')]
             current = None
             if any(path.exists() or path.is_symlink() for path in files):
@@ -415,8 +438,8 @@ def main() -> None:
                                       identity_expectations=recorded.get('build_identity_expectations')) as (_, checked):
                     lifecycle.require(all(recorded.get(key) == value for key, value in checked.items()),
                                       'Existing current archive differs from its original verified receipt')
-            admission = lifecycle.admit(delivery, 'macos-arm64-release', files, current=current,
-                                        aux_stage=output / '.weavelo-macos-package.pending')
+            admission = lifecycle.admit(delivery, 'macos-desktop-arm64-release' if args.desktop else 'macos-arm64-release', files, current=current,
+                                        aux_stage=output / ('.weavelo-desktop-macos-package.pending' if args.desktop else '.weavelo-macos-package.pending'))
             staged_archive, staged_receipt = map(Path, admission['staged_files'])
             result = package(args.binary, output, args.version, args.build, policy,
                              archive=staged_archive, receipt=staged_receipt,

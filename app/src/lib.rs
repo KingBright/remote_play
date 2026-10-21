@@ -840,16 +840,16 @@ impl UnifiedRuntimeConfig {
         Self {
             display_name: "Weavelo".to_string(),
             mesh_dir: default_app_private_mesh_dir(),
-            host_bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_CONTROL_PORT)),
+            host_bind_addr: SocketAddr::from(([0, 0, 0, 0], remote_core::desktop_identity::identity().control_port)),
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
-            discovery_port: remote_core::discovery::DEFAULT_DISCOVERY_PORT,
-            enable_p2p: true,
-            p2p_rendezvous: DEFAULT_P2P_RENDEZVOUS.to_string(),
+            discovery_port: remote_core::desktop_identity::identity().discovery_port,
+            enable_p2p: false,
+            p2p_rendezvous: String::new(),
             p2p_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
             p2p_log_events: false,
-            relay_endpoint: Some(UnifiedRelayEndpoint::WebSocket(
-                DEFAULT_RELAY_SERVER_URL.to_string(),
-            )),
+            // A new installation must explicitly select its new service. Never
+            // register it through the retained maintenance backend by default.
+            relay_endpoint: None,
             relay_control_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_discovery_bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             relay_log_events: false,
@@ -873,12 +873,17 @@ impl UnifiedRuntimeConfig {
             config.display_name = display_name.trim().to_string();
         }
         config.mesh_dir = default_app_private_mesh_dir();
+        if remote_core::desktop_identity::retained_profile(&config.mesh_dir) {
+            return Err("The independent Weavelo desktop cannot attach to the retained client's profile".into());
+        }
         config.host_bind_addr =
             env_socket_addr("WEAVELO_HOST_BIND_ADDR", config.host_bind_addr)?;
         config.client_bind_addr =
             env_socket_addr("WEAVELO_CLIENT_BIND_ADDR", config.client_bind_addr)?;
-        config.discovery_port = discovery_port_from_env()?;
-        config.enable_p2p = env_flag_or(WEAVELO_P2P_ENV, true);
+        if std::env::var_os(remote_core::discovery::WEAVELO_DISCOVERY_PORT_ENV).is_some() {
+            config.discovery_port = discovery_port_from_env()?;
+        }
+        config.enable_p2p = env_flag_or(WEAVELO_P2P_ENV, config.enable_p2p);
         if let Ok(value) = std::env::var(WEAVELO_P2P_RENDEZVOUS_ENV)
             && !value.trim().is_empty()
         {
@@ -2994,16 +2999,15 @@ mod tests {
     }
 
     #[test]
-    fn app_defaults_enable_the_managed_public_relay_fallback() {
+    fn desktop_identity_app_defaults_require_explicit_new_backends() {
         let config = UnifiedRuntimeConfig::app_defaults();
-
-        assert!(config.relay_endpoint.is_some());
-        assert_eq!(
-            config.relay_endpoint,
-            Some(UnifiedRelayEndpoint::WebSocket(
-                DEFAULT_RELAY_SERVER_URL.to_string()
-            ))
-        );
+        assert!(config.relay_endpoint.is_none());
+        assert!(!config.enable_p2p);
+        assert!(config.p2p_rendezvous.is_empty());
+        assert_eq!(config.host_bind_addr.port(), remote_core::desktop_identity::identity().control_port);
+        assert_eq!(config.discovery_port, remote_core::desktop_identity::identity().discovery_port);
+        assert_ne!(config.host_bind_addr.port(), DEFAULT_CONTROL_PORT);
+        assert_ne!(config.discovery_port, remote_core::discovery::DEFAULT_DISCOVERY_PORT);
     }
 
     #[test]

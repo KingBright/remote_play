@@ -7,10 +7,22 @@ if [[ -z "${WEAVELO_RELEASE_LOCK_FD:-}" ]]; then
 fi
 python3 -B "$ROOT_DIR/scripts/release_artifact_lifecycle.py" check-lock macos
 cd "$ROOT_DIR"
+MODE="${1:-}"
+if [[ "$MODE" == "--prepare-desktop" && "$#" == 1 ]]; then
+  exec python3 -B "$ROOT_DIR/scripts/prepare_macos_desktop.py"
+fi
+DESKTOP_ARGS=()
+BUNDLE_ID=fun.hackerlife.weavelo
+if [[ "$MODE" == "--desktop" && "$#" == 1 ]]; then
+  DESKTOP_ARGS=(--desktop)
+  BUNDLE_ID=fun.hackerlife.weavelo.desktop
+elif [[ "$#" != 0 ]]; then
+  echo "Unknown fixed macOS packaging mode" >&2; exit 1
+fi
 [[ "${WEAVELO_APP_NAME:-Weavelo}" == "Weavelo" ]] || { echo "Release app identity cannot be overridden" >&2; exit 1; }
-[[ "${WEAVELO_BUNDLE_ID:-fun.hackerlife.weavelo}" == "fun.hackerlife.weavelo" ]] || { echo "Release bundle ID cannot be overridden" >&2; exit 1; }
+[[ "${WEAVELO_BUNDLE_ID:-$BUNDLE_ID}" == "$BUNDLE_ID" ]] || { echo "Release bundle ID cannot be overridden" >&2; exit 1; }
 # Check before a long build and before touching any previous package.
-python3 "$ROOT_DIR/scripts/macos_release_guard.py" preflight
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" preflight "${DESKTOP_ARGS[@]}"
 : "${WEAVELO_BUILD_RECEIPT:?Run the existing build_identity_gate.py build first}"
 : "${WEAVELO_BUILD_RECEIPT_SHA256:?Pin the observed build receipt}"
 : "${WEAVELO_EXPECTED_COMMIT:?Pin the reviewed source commit}"
@@ -33,7 +45,7 @@ CHECK_VERSION
 BINARY="$(python3 "$ROOT_DIR/scripts/verify_prebuilt_binary.py" \
   --binary "$WEAVELO_PREBUILT_BINARY" --sha256 "$WEAVELO_PREBUILT_SHA256")"
 python3 "$ROOT_DIR/scripts/verify_desktop_gui.py" --binary "$BINARY" --platform macos --version "$VERSION"
-python3 "$ROOT_DIR/scripts/macos_release_guard.py" package \
+python3 "$ROOT_DIR/scripts/macos_release_guard.py" package "${DESKTOP_ARGS[@]}" \
   --binary "$BINARY" --output "$TARGET_DIR/package/macos" \
   --version "$VERSION" --build "$BUILD_NUMBER" \
   --build-receipt "$WEAVELO_BUILD_RECEIPT" \
