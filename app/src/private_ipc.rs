@@ -16,6 +16,15 @@ mod unix {
         time::Duration,
     };
     pub type Client = UnixStream;
+    pub fn peer_pid(socket:&tokio::net::UnixStream)->Option<i32> {
+        #[cfg(target_os="macos")] {
+            use std::os::fd::AsRawFd;
+            let mut pid=0i32;let mut len=std::mem::size_of::<i32>() as libc::socklen_t;
+            let ok=unsafe {libc::getsockopt(socket.as_raw_fd(),libc::SOL_LOCAL,libc::LOCAL_PEERPID,(&mut pid as *mut i32).cast(),&mut len)};
+            (ok==0 && len as usize==std::mem::size_of::<i32>() && pid>1).then_some(pid)
+        }
+        #[cfg(not(target_os="macos"))] {let _=socket;None}
+    }
     pub struct Listener {
         inner: tokio::net::UnixListener,
     }

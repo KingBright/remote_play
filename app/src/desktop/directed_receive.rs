@@ -17,11 +17,20 @@ const SOCKET: &str = "gui-receive.sock";
 const LIMIT: usize = 4096;
 const MAX_LEASE_MS: u64 = 120_000;
 const ADMISSION_MS: u64 = 5_000;
+#[cfg(all(test,unix))]
+#[path="computer_use_transport_tests.rs"]
+mod computer_use_transport_tests;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Request {
     Status,
     NetworkDiagnostics,
+    ComputerUse {
+        generation: String,
+        request_id: String,
+        deadline_ms: u64,
+        call: super::computer_use_ipc::Call,
+    },
     Receive {
         generation: String,
         request_id: String,
@@ -40,10 +49,12 @@ pub(crate) enum Request {
 }
 pub(crate) struct Command {
     pub request: Request,
+    pub peer_pid: Option<i32>,
     pub reply: oneshot::Sender<Reply>,
 }
 pub(crate) struct Reply {
     body: serde_json::Value,
+    pixels: Option<std::sync::Arc<Vec<u8>>>,
     revoke_on_drop: Option<(
         std::sync::Weak<super::original_owner::OriginalOwner>,
         String,
@@ -53,6 +64,7 @@ impl From<serde_json::Value> for Reply {
     fn from(body: serde_json::Value) -> Self {
         Self {
             body,
+            pixels: None,
             revoke_on_drop: None,
         }
     }
@@ -68,8 +80,12 @@ impl Reply {
             .to_owned();
         Self {
             body,
+            pixels: None,
             revoke_on_drop: Some((std::sync::Arc::downgrade(owner), request)),
         }
+    }
+    pub fn observation(output: super::computer_use_ipc::Output) -> Self {
+        Self {body:output.body,pixels:output.pixels,revoke_on_drop:None}
     }
     fn written(&mut self) {
         self.revoke_on_drop = None;
@@ -91,6 +107,7 @@ pub(crate) struct Adapter {
     pub generation: String,
     pub executable_sha256: String,
     pub commands: mpsc::Receiver<Command>,
+    pub computer_use: std::sync::Arc<super::computer_use_ipc::Dispatcher>,
     pub lease: Option<Lease>,
     seen: HashMap<String,u64>,
     admission_clock: Option<(u64,Instant)>,
@@ -125,20 +142,32 @@ impl Adapter {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos()
         );
+        let computer_use=std::sync::Arc::new(super::computer_use_ipc::Dispatcher::new(directory,&generation,&executable_sha256));
         let (tx, commands) = mpsc::channel(8);
         let task = tokio::spawn(async move {
             // Serial, bounded requests. A stalled same-user client holds this
             // adapter for at most two seconds, never the GUI or media runtime.
             while let Ok(mut socket) = listener.accept().await {
-                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                #[cfg(target_os="macos")]
+                let peer_pid=crate::private_ipc::peer_pid(&socket);
+                #[cfg(not(target_os="macos"))]
+                let peer_pid=None;
+                let decoded = tokio::time::timeout(Duration::from_secs(2), async {
                     let mut header = [0; 4];
                     socket.read_exact(&mut header).await?;
                     let size = length(header)?;
                     let mut bytes = vec![0; size];
                     socket.read_exact(&mut bytes).await?;
                     let request: Request = serde_json::from_slice(&bytes)?;
+                    Ok::<_,Error>(request)
+                }).await;
+                let Ok(Ok(request))=decoded else {continue;};
+                // Only admitted observation work gets a longer completion budget;
+                // reading a partial client frame retains its original two seconds.
+                let budget=if matches!(&request,Request::ComputerUse {call:super::computer_use_ipc::Call::Observe {..},..}) {35} else {2};
+                let _ = tokio::time::timeout(Duration::from_secs(budget), async {
                     let (reply, response) = oneshot::channel();
-                    tx.try_send(Command { request, reply })
+                    tx.try_send(Command { request, reply, peer_pid })
                         .map_err(|_| "GUI command queue is busy")?;
                     // A reply owns its exact cancellation receipt even while
                     // queued inside oneshot. Timeout after send but before recv
@@ -149,6 +178,7 @@ impl Adapter {
                         .write_all(&(bytes.len() as u32).to_be_bytes())
                         .await?;
                     socket.write_all(&bytes).await?;
+                    if let Some(pixels)=&response.pixels {socket.write_all(pixels.as_slice()).await?;}
                     response.written(); // Kernel write only; no presentation claim.
                     Ok::<(), Error>(())
                 })
@@ -161,6 +191,7 @@ impl Adapter {
             executable_sha256,
             generation,
             commands,
+            computer_use,
             lease: None,
             seen: HashMap::new(),
             admission_clock:None,
@@ -173,6 +204,11 @@ impl Adapter {
         let now_ms=projected.map_or(now_ms,|value|now_ms.max(value));
         match request {
             Request::Status | Request::NetworkDiagnostics => Ok(()),
+            Request::ComputerUse {generation,request_id,deadline_ms,call} => {
+                valid_request(&self.generation,generation,request_id,*deadline_ms,now_ms)?;
+                if !call.valid() {return Err("Invalid computer-use request");}
+                Ok(())
+            }
             Request::Receive {
                 generation,
                 request_id,

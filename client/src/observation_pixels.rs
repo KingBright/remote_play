@@ -85,6 +85,7 @@ impl CpuRgba {
     pub fn layout(&self) -> RgbaLayout { self.layout }
     pub fn pixels(&self) -> &[u8] { &self.pixels }
     pub fn color(&self) -> ColorMetadata { self.color }
+    pub fn into_pixels(self) -> Arc<Vec<u8>> { self.pixels }
 }
 
 #[cfg(test)]

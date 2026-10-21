@@ -81,6 +81,7 @@ impl<C, Fence: PartialEq, Frame> Observation<C, Fence, Frame> {
     }
 
     pub(crate) fn frame(&self) -> &Arc<Frame> { &self.frame }
+    pub(super) fn fence(&self) -> &Fence { &self.fence }
 
     pub(super) fn invalidate(&mut self) { self.consumed = true; }
 

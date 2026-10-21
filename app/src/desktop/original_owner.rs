@@ -871,6 +871,16 @@ impl OriginalOwner {
         let p = self.pool.lock().unwrap();
         p.active().is_some_and(|e| binding.matches(&e.session.conn, remote_core::shared_files::current_share_scope()))
     }
+    pub(crate) fn computer_use_target_binding(&self, device: &str, source: CaptureSource, connection: u32) -> Option<SourceViewBinding> {
+        let p=self.pool.lock().ok()?;
+        let s=&p.active()?.session;
+        (s.key==device && s.source==source && s.conn.id==connection)
+            .then(||SourceViewBinding::new(&s.conn,remote_core::shared_files::current_share_scope()))
+    }
+    pub(crate) fn computer_use_source_revision(observation: &ComputerUseObservation) -> u64 {
+        // Wire revisions are nonzero; the session's u32 revision may start at zero.
+        u64::from(observation.fence().source_revision)+1
+    }
     pub async fn request_bound_capture_sources(&self, binding: &SourceViewBinding) -> Result<(), Error> {
         let mut p = self.pool.lock().unwrap();
         let e = p.active_mut().ok_or("No active connection")?;
@@ -1051,18 +1061,17 @@ impl OriginalOwner {
             return Err(Rejection::InputBusy);
         }
         Ok(Observation::new(&s.conn, fence, s.texture.as_ref().unwrap().clone(),
-            access, Instant::now()))
+            access, s.texture.as_ref().unwrap().decoded_at))
     }
 
     /// Revalidate the original observation before returning any pixels. This
     /// Native completion runs outside the pool lock so local revoke/selection
     /// stays responsive. Recheck the original receipt after completion and before
     /// returning pixels; a retained frame never preserves authority.
-    pub(crate) fn export_bound_computer_use(
-        &self, observation: &mut ComputerUseObservation, maximum: usize,
-    ) -> Result<client::observation_pixels::CpuRgba, ComputerUseExportError> {
+    pub(crate) fn validate_bound_computer_use(
+        &self, observation: &mut ComputerUseObservation,
+    ) -> Result<(), ComputerUseExportError> {
         use super::computer_use::Rejection;
-        let validate = |observation: &mut ComputerUseObservation| {
             let p = self.pool.lock().unwrap();
             let s = &p.active().ok_or_else(|| {
                 observation.invalidate();
@@ -1074,11 +1083,14 @@ impl OriginalOwner {
             })?;
             observation.validate_current(&s.conn, &fence, Instant::now())
                 .map_err(ComputerUseExportError::Session)
-        };
-        validate(observation)?;
+    }
+    pub(crate) fn export_bound_computer_use(
+        &self, observation: &mut ComputerUseObservation, maximum: usize,
+    ) -> Result<client::observation_pixels::CpuRgba, ComputerUseExportError> {
+        self.validate_bound_computer_use(observation)?;
         let pixels = client::desktop_frame::observation_rgba(observation.frame(), maximum)
             .map_err(ComputerUseExportError::Pixels)?;
-        validate(observation)?;
+        self.validate_bound_computer_use(observation)?;
         Ok(pixels)
     }
 

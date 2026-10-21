@@ -25,6 +25,10 @@ pub(crate) mod original_owner;
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod computer_use;
 #[cfg(feature = "gpui-restoration")]
+pub(crate) mod computer_use_ipc;
+#[cfg(feature = "gpui-restoration")]
+mod computer_use_authority;
+#[cfg(feature = "gpui-restoration")]
 mod original_presenter;
 mod requests;
 

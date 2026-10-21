@@ -651,8 +651,20 @@ impl RestoredDashboard {
                 let _ = command.reply.send(serde_json::json!({"ok":false,"error":error}).into()); continue;
             }
             let generation = adapter.generation.clone();
+            if let Request::ComputerUse {call,..}=command.request {
+                let dispatcher=adapter.computer_use.clone();
+                let owner=self.owner.clone();
+                tokio::task::spawn_blocking(move || {
+                    if !command.reply.is_closed() {
+                        let result=dispatcher.dispatch(&owner,call,command.peer_pid);
+                        let _=command.reply.send(crate::desktop::directed_receive::Reply::observation(result));
+                    }
+                });
+                continue;
+            }
             let mut newly_accepted = false;
             let response = match command.request {
+                Request::ComputerUse {..} => unreachable!(),
                 Request::NetworkDiagnostics => serde_json::json!({
                     "ok":true, "generation":generation, "pid":std::process::id(),
                     "executable_sha256":adapter.executable_sha256,
@@ -660,6 +672,7 @@ impl RestoredDashboard {
                     "network":self.owner.network_snapshot(),
                 }),
                 Request::Status => serde_json::json!({"ok":true,"generation":generation,
+                    "computer_use":{"protocol":1,"observe":adapter.computer_use.configured(),"input":false,"max_bytes":16*1024*1024},
                     "renderer":crate::gui_backend::ORIGINAL_RENDERER,"executable_sha256":adapter.executable_sha256,
                     "lease":adapter.lease.as_ref().map(|lease| serde_json::json!({"request_id":lease.request_id,
                         "source_device_id":lease.source,"remaining_ms":lease.expires.saturating_duration_since(Instant::now()).as_millis()})),
