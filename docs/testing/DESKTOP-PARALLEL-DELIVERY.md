@@ -142,3 +142,37 @@ filesystem/package fixtures. Native Linux additionally exercises no-replace
 installation in a temporary home and replay rejection; its synthetic binary is
 never real GUI/input acceptance. Real package verification executes only the
 already pinned binary's no-window ProductInfo path during packaging.
+
+## Windows independent first install
+
+The original formal producer must first create
+`target/package/windows/desktop/Weavelo-Windows-x64.zip` using
+`package_windows_unified.ps1 -Desktop -SkipBuild -BuildReceipt ...`.
+The existing native observed-build receipt and compiler binary remain the inputs;
+do not rebuild a successful binary for an installer-only change. Windows
+`Restricted` still blocks the formal PowerShell package scripts. This installer
+does not select an execution policy, reimplement packaging or consume a loose
+binary as an installable release.
+
+`python -B scripts/install_windows_independent.py` requires
+`--build-receipt-sha256`, `--expected-archive-sha256`, `--expected-commit`
+and `--expected-identity-sha256`. Its default is a read-only, collision-checked
+plan. Apply additionally requires `--apply --expected-plan-sha256 PLAN_SHA256`.
+It verifies the original seven-member Desktop archive against the producer's
+payload, observed receipt, compiled ProductInfo and independent application ID
+before writing destinations.
+
+The new app is `%LOCALAPPDATA%/Weavelo/Desktop/`; the empty private profile is
+`%APPDATA%/Weavelo/Desktop/`. A separate
+`%LOCALAPPDATA%/Weavelo/DesktopInstall/install.json` records the transaction.
+A native exclusive move refuses destination races; new profile security uses
+the existing owner/SYSTEM/Administrators creation API. Existing app/profile,
+staging or journal blocks replay. Inspect `--status` after any partial result.
+
+No old process is stopped; no old profile or group is read, copied or repaired.
+The installer does not start a GUI/service or change startup/security policy.
+Normal invitation, relay configuration and separately authorized GUI acceptance
+remain subsequent steps. Installer source and the pinned runtime source commit
+are reported separately. The synthetic tests and native temporary-home tests in
+`scripts/tests/test_windows_independent_install.py` prove filesystem/package
+boundaries, not real device discovery, transfer or input.

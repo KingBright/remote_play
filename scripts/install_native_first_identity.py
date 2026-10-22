@@ -149,13 +149,23 @@ def reviewed_windows_binding(gate, args, repo):
             'candidate': candidate, 'payload': files}
 
 
-def reviewed_windows_payload(gate, candidate, archive, receipt, pin):
+def reviewed_windows_payload(gate, candidate, archive, receipt, pin, *, independent=False):
     require(gate.hash_file(archive) == pin['archive'], 'Formal archive drift')
     files = inventory(candidate, gate)
     expected = {'application-identity.json', 'build-info.json', 'ffmpeg-license.txt',
                 'weavelo.exe', 'Weavelo.ico', 'bin/ffmpeg.exe'}
+    require(type(independent) is bool, 'Explicit Windows payload scope required')
+    if independent:
+        expected.add('desktop-identity.json')
     require(set(files) == expected and files['weavelo.exe'] == pin['binary'],
             'Original Windows payload differs')
+    if independent:
+        import desktop_identity
+        require(gate.read_json(candidate/'desktop-identity.json') == desktop_identity.identity(),
+                'Independent desktop identity differs')
+        application = gate.read_json(candidate/'application-identity.json')
+        require(application == {'name':'Weavelo', 'appUserModelId':desktop_identity.identity()['application_id'],
+                                'icon':'Weavelo.ico'}, 'Independent application identity differs')
     with zipfile.ZipFile(archive) as z:
         entries = [item for item in z.infolist() if not item.is_dir()]
         names = [item.filename.replace('\\', '/') for item in entries]
