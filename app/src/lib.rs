@@ -1,4 +1,6 @@
 pub mod entrypoint;
+#[cfg(any(unix, windows))]
+mod pairing_cli;
 pub mod service_contract;
 #[cfg(any(unix,windows))]
 pub mod background_service;

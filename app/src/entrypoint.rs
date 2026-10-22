@@ -80,6 +80,19 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
         return Ok(false);
     };
 
+    if command.starts_with("--pairing-") {
+        #[cfg(any(unix, windows))]
+        {
+            let config = weavelo_app::UnifiedRuntimeConfig::from_env()?;
+            let arguments = std::iter::once(command).chain(args).collect::<Vec<_>>();
+            let result = crate::pairing_cli::command(&arguments, &config.mesh_dir)?;
+            println!("{}", serde_json::to_string(&result)?);
+            return Ok(true);
+        }
+        #[cfg(not(any(unix, windows)))]
+        return Err("Native pairing control is unavailable on this platform".into());
+    }
+
     match command.as_str() {
         "--gui-status-json" | "--gui-network-diagnostics-json" | "--gui-receive" | "--gui-stop-receive" => {
             #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
