@@ -3,6 +3,7 @@
 
 Default is a read-only plan. Apply accepts only an identity-bound, original-signer
 release archive. Existing destinations/journals are reported, never overwritten.
+Use --upgrade for the separately version-bound normal upgrade transaction.
 """
 import argparse
 import fcntl
@@ -106,6 +107,10 @@ def apply(archive, home, pins, archive_sha256):
 
 
 def main():
+    if '--upgrade' in sys.argv[1:]:
+        import upgrade_macos_desktop
+        sys.argv.remove('--upgrade')
+        return upgrade_macos_desktop.cli()
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive',nargs='?',type=Path)
     parser.add_argument('--apply',action='store_true')

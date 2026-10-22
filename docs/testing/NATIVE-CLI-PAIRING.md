@@ -37,3 +37,13 @@ The CLI binary must match the running owner's executable. A new CLI build cannot
 control an older installed owner; update the designated independent installation
 through the normal signed deployment path or validate with disposable native
 test owners. Keep the retained installation and group unchanged.
+
+For an existing independent macOS installation, use
+`python3 scripts/install_macos_desktop.py --upgrade` to inspect the current
+executable, installation-record and launch-policy digests. Apply with `--apply`,
+the signed archive, its original source/identity/manifest/archive pins, and
+`--expected-current-executable-sha256`, `--expected-current-install-sha256` and
+`--expected-current-plist-sha256`. This upgrades the independent app through
+normal GUI/background exit, preserves membership and the exact launch policy,
+and verifies the running native pairing CLI. An unfinished transaction requires
+inspection with `--upgrade --status`; it is never automatically replayed.
