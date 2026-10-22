@@ -212,16 +212,20 @@ class NativeControl:
 
     def before(self, expected_sha):
         background = self.query('--background-status-json', False)
-        gui = self.query('--gui-status-json', False)
+        gui = self.query('--gui-network-diagnostics-json', False)
         pids = set()
         if background:
             require(background.get('role') == 'background-service'
                     and background.get('executable_sha256') == expected_sha
                     and background.get('profile') == str(self.paths['profile']),
                     'Unexpected background owner')
+            require(type(background.get('pid')) is int and background['pid'] > 1,
+                    'Authenticated background process id required')
             pids.add(background['pid'])
         if gui and gui.get('ok') is True:
             require(gui.get('executable_sha256') == expected_sha, 'Unexpected GUI owner')
+            require(type(gui.get('pid')) is int and gui['pid'] > 1,
+                    'Authenticated GUI process id required')
             pids.add(gui['pid'])
         else:
             gui = None
@@ -262,7 +266,7 @@ class NativeControl:
             subprocess.run(['/usr/bin/open', '-n', str(self.paths['app']), '--args', '--gui'],
                            check=True, capture_output=True, timeout=15)
             while True:
-                gui = self.query('--gui-status-json', False)
+                gui = self.query('--gui-network-diagnostics-json', False)
                 if gui and gui.get('ok') is True and gui.get('executable_sha256') == expected_sha:
                     require(gui.get('pid') != status.get('pid'), 'GUI and background ownership collided')
                     break
@@ -339,13 +343,20 @@ def exchange(source, target):
     fsync(target.parent)
 
 
-def apply(archive, home, candidate_pins, archive_sha, current_pins):
+def apply(archive, home, candidate_pins, archive_sha, current_pins, resume_sha=None):
     require(gate.hash_file(archive) == gate.sha(archive_sha), 'Candidate archive digest differs')
     policy = guard.load_policy(guard.DESKTOP_POLICY_FILE)
     with guard.verified_archive(archive, policy, identity_expectations=candidate_pins) as (candidate, signed):
         fresh.verified_product(candidate, archive, candidate_pins)
-        context = inspect(home, current_pins)
+        if resume_sha is not None:
+            resume_sha = gate.sha(resume_sha)
+        context = inspect(home, current_pins, transaction_sha=resume_sha)
         selected = context['paths']; registry = context['record_path']
+        if resume_sha is not None:
+            prior = context['previous_transaction']
+            require(prior and prior.get('phase') == 'staged' and prior.get('source') == candidate_pins
+                    and prior.get('archive_sha256') == archive_sha and prior.get('current') == current_pins,
+                    'Only the exact verified pre-stop staged transaction may resume')
         decision = guard.check_upgrade(context['signed'], signed)
         if decision == 'already_installed':
             return {'applied': False, 'outcome': 'already_installed', 'source': candidate_pins}
@@ -354,14 +365,25 @@ def apply(archive, home, candidate_pins, archive_sha, current_pins):
         with os.fdopen(fd, 'r+') as held:
             private(lock); require(os.fstat(held.fileno()).st_ino == lock.lstat().st_ino, 'Installer lock changed')
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            context = inspect(home, current_pins)
+            context = inspect(home, current_pins, transaction_sha=resume_sha)
             stage = selected['app'].parent / '.desktop-upgrade.pending'
-            require(not stage.exists() and not stage.is_symlink(), 'Prior upgrade staging exists; inspect original transaction')
+            require(resume_sha is not None or (not stage.exists() and not stage.is_symlink()),
+                    'Prior upgrade staging exists; inspect original transaction')
             journal = selected['state'] / 'upgrade.json'
             prior_journal_sha = gate.hash_file(journal) if journal.exists() else None
-            data = {'schema': 1, 'kind': 'independent-desktop-upgrade', 'source': candidate_pins,
-                    'archive_sha256': archive_sha, 'current': current_pins,
-                    'staging': str(stage), 'retained_client_modified': False}
+            if resume_sha is not None:
+                data, observed_sha = read_record(journal)
+                require(observed_sha == resume_sha and data.get('phase') == 'staged'
+                        and data.get('kind') == 'independent-desktop-upgrade'
+                        and data.get('staging') == str(stage) and data.get('source') == candidate_pins
+                        and data.get('archive_sha256') == archive_sha and data.get('current') == current_pins,
+                        'Staged transaction version or bindings changed')
+                private(stage, True)
+                data['resumed_from_sha256'] = resume_sha
+            else:
+                data = {'schema': 1, 'kind': 'independent-desktop-upgrade', 'source': candidate_pins,
+                        'archive_sha256': archive_sha, 'current': current_pins,
+                        'staging': str(stage), 'retained_client_modified': False}
             def checkpoint(phase):
                 nonlocal prior_journal_sha
                 require(phase in PHASES, 'Unknown transaction phase')
@@ -376,16 +398,19 @@ def apply(archive, home, candidate_pins, archive_sha, current_pins):
                               phase='upgrade_completed', service_started=True,
                               launch_agent_preserved_sha256=current_pins['plist'])
             require(len(json.dumps(new_record).encode()) < LIMIT - 4096, 'Installation history full; no content discarded')
-            checkpoint('verified')
-            stage.mkdir(mode=0o700)
             staged = stage / 'Weavelo.app'
-            shutil.copytree(candidate, staged, symlinks=False)
+            if resume_sha is None:
+                checkpoint('verified')
+                stage.mkdir(mode=0o700)
+                shutil.copytree(candidate, staged, symlinks=False)
             guard.verify_app(staged, policy)
             candidate_tree = tree_digest(candidate)
             require(tree_digest(staged) == candidate_tree, 'Staged signed application differs')
             checkpoint('staged')
             control = NativeControl(selected)
             before = control.before(current_pins['executable'])
+            data['owners_before'] = {'background_pid': (before.get('background') or {}).get('pid'),
+                                     'frontend_pid': (before.get('gui') or {}).get('pid')}
             checkpoint('stopping')
             control.stop(before)
             checkpoint('stopped')
@@ -425,10 +450,16 @@ def main():
     parser.add_argument('archive', nargs='?', type=Path)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--status', action='store_true')
+    parser.add_argument('--resume-staged', action='store_true')
+    parser.add_argument('--expected-upgrade-sha256')
     for name in ('commit', 'identity-sha256', 'manifest-sha256', 'archive-sha256',
                  'current-executable-sha256', 'current-install-sha256', 'current-plist-sha256'):
         parser.add_argument('--expected-' + name)
     args = parser.parse_args(); home = Path.home()
+    require(not (args.status and args.apply), 'Choose status or apply')
+    require((not args.resume_staged and not args.expected_upgrade_sha256)
+            or (args.apply and args.resume_staged and args.expected_upgrade_sha256),
+            'Explicit staged resume requires apply and the observed upgrade-record digest')
     if args.status:
         path = desktop.paths(home)['state'] / 'upgrade.json'
         result = read_record(path)[0] if path.exists() else {'phase': 'not_started'}
@@ -440,7 +471,8 @@ def main():
                    'install': args.expected_current_install_sha256, 'plist': args.expected_current_plist_sha256}
         require(args.archive and all(pins.values()) and args.expected_archive_sha256
                 and all(current.values()), 'Candidate and current independent version pins required')
-        result = apply(args.archive, home, pins, args.expected_archive_sha256, current)
+        result = apply(args.archive, home, pins, args.expected_archive_sha256, current,
+                       args.expected_upgrade_sha256 if args.resume_staged else None)
     else:
         c = inspect(home)
         result = {'kind': 'independent-desktop-upgrade-plan', 'applied': False,

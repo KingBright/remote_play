@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import upgrade_macos_desktop as upgrade
+NativeControlOriginal = upgrade.NativeControl
 import desktop_identity as desktop
 import macos_release_guard as guard
 
@@ -43,13 +44,14 @@ class UpgradeTests(unittest.TestCase):
         self.registry.write_text(json.dumps(self.record)); self.registry.chmod(0o600)
         self.archive = self.home/'candidate.zip'; self.archive.write_bytes(b'synthetic-archive')
         self.pins = {'commit':'d'*40,'identity_sha256':'e'*64,'manifest_sha256':'f'*64}
-        self.stop_hook = self.start_hook = None
+        self.before_hook = self.stop_hook = self.start_hook = None
         self.calls = []
         owner = self
         class Control:
             def __init__(self, selected): self.selected=selected
             def before(self, expected):
                 owner.calls.append('before')
+                if owner.before_hook: owner.before_hook()
                 return {'background': {'pid':101}, 'gui':{'pid':102}, 'loaded':True}
             def stop(self, before):
                 owner.calls.append('stop')
@@ -87,9 +89,9 @@ class UpgradeTests(unittest.TestCase):
     def current(self):
         return upgrade.inspect(self.home)['pins']
 
-    def apply(self, pins=None):
+    def apply(self, pins=None, resume=None):
         return upgrade.apply(self.archive,self.home,self.pins,upgrade.gate.hash_file(self.archive),
-                             self.current() if pins is None else pins)
+                             self.current() if pins is None else pins, resume_sha=resume)
 
     def app_bytes(self):
         return (self.selected['app']/'Contents/MacOS/weavelo').read_bytes()
@@ -211,6 +213,66 @@ class UpgradeTests(unittest.TestCase):
             with self.assertRaises(guard.ReleaseRejected):self.apply()
             self.assertEqual(json.loads(self.registry.read_text()),data)
         self.assertFalse(self.calls)
+
+
+    def test_authenticated_gui_network_status_has_pid_and_malformed_status_is_refused(self):
+        digest=self.current()['executable']
+        background={'role':'background-service','pid':101,'profile':str(self.selected['profile']),
+                    'executable_sha256':digest}
+        gui={'ok':True,'pid':102,'executable_sha256':digest}
+        control=NativeControlOriginal(self.selected);flags=[]
+        def query(flag,required=True):
+            flags.append(flag)
+            if flag=='--background-status-json':return background
+            if flag=='--gui-network-diagnostics-json':return gui
+            self.fail('Wrong native GUI status command')
+        with patch.object(control,'query',side_effect=query),patch.object(control,'owners',return_value={101,102}),patch.object(control,'loaded',return_value=True):
+            self.assertEqual(control.before(digest)['gui']['pid'],102)
+            self.assertEqual(flags,['--background-status-json','--gui-network-diagnostics-json'])
+            gui.pop('pid')
+            with self.assertRaisesRegex(guard.ReleaseRejected,'GUI process id'):
+                control.before(digest)
+
+    @unittest.skipUnless(sys.platform=='darwin','native atomic directory exchange')
+    def test_exact_pre_stop_staged_transaction_can_resume_without_recopy_or_replay(self):
+        pins=self.current()
+        self.before_hook=lambda: (_ for _ in ()).throw(KeyError('pid'))
+        with self.assertRaises(KeyError):self.apply(pins)
+        journal=self.selected['state']/'upgrade.json';digest=upgrade.gate.hash_file(journal)
+        self.assertEqual(json.loads(journal.read_text())['phase'],'staged')
+        self.assertEqual(self.app_bytes(),b'old-image');self.before_hook=None
+        with self.assertRaises(guard.ReleaseRejected):self.apply(pins,resume='1'*64)
+        wrong=dict(self.pins,commit='1'*40)
+        with self.assertRaisesRegex(guard.ReleaseRejected,'exact verified'):
+            upgrade.apply(self.archive,self.home,wrong,upgrade.gate.hash_file(self.archive),pins,resume_sha=digest)
+        result=self.apply(pins,resume=digest)
+        self.assertEqual(result['phase'],'completed');self.assertEqual(result['resumed_from_sha256'],digest)
+        self.assertEqual(self.calls,['before','before','stop','start'])
+        self.assertEqual(self.app_bytes(),b'new-image')
+
+    def test_explicit_resume_never_crosses_an_unconfirmed_stop(self):
+        pins=self.current()
+        self.stop_hook=lambda: (_ for _ in ()).throw(guard.ReleaseRejected('declined'))
+        with self.assertRaises(guard.ReleaseRejected):self.apply(pins)
+        journal=self.selected['state']/'upgrade.json';digest=upgrade.gate.hash_file(journal)
+        self.assertEqual(json.loads(journal.read_text())['phase'],'stopping')
+        self.stop_hook=None
+        with self.assertRaisesRegex(guard.ReleaseRejected,'pre-stop staged'):
+            self.apply(pins,resume=digest)
+        self.assertEqual(self.calls,['before','stop']);self.assertEqual(self.app_bytes(),b'old-image')
+
+    def test_changed_staged_candidate_is_preserved_and_never_resumed(self):
+        pins=self.current()
+        self.before_hook=lambda: (_ for _ in ()).throw(KeyError('pid'))
+        with self.assertRaises(KeyError):self.apply(pins)
+        journal=self.selected['state']/'upgrade.json';digest=upgrade.gate.hash_file(journal)
+        staged=self.selected['app'].parent/'.desktop-upgrade.pending/Weavelo.app/Contents/MacOS/weavelo'
+        staged.write_bytes(b'user-changed-staged-image');self.before_hook=None
+        with self.assertRaisesRegex(guard.ReleaseRejected,'Staged signed application differs'):
+            self.apply(pins,resume=digest)
+        self.assertEqual(staged.read_bytes(),b'user-changed-staged-image')
+        self.assertEqual(upgrade.gate.hash_file(journal),digest)
+        self.assertEqual(self.calls,['before'])
 
 
 if __name__=='__main__':unittest.main()

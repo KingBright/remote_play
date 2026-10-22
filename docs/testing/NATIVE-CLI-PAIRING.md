@@ -47,3 +47,7 @@ the signed archive, its original source/identity/manifest/archive pins, and
 normal GUI/background exit, preserves membership and the exact launch policy,
 and verifies the running native pairing CLI. An unfinished transaction requires
 inspection with `--upgrade --status`; it is never automatically replayed.
+Only a confirmed `staged` transaction, before any quit/stop request, can be
+explicitly continued with `--resume-staged --expected-upgrade-sha256 DIGEST`
+and the same candidate/current pins. The staged signed bundle is reverified;
+changed records, changed candidates and any later phase remain blocked.
