@@ -67,6 +67,45 @@ impl Drop for WorkspaceConnection {
     }
 }
 
+#[cfg(test)]
+mod native_file_scope_tests {
+    #[tokio::test]
+    async fn missing_group_rejects_native_files_before_network_or_directory_creation() {
+        assert!(crate::session_crypto::paired_file_session_key().is_none(),"Fixture must not inherit a paired user identity");
+        let destination=std::env::temp_dir().join(format!("weavelo-unpaired-file-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        assert!(!destination.exists());
+        let error=super::WorkspaceConnection::connect("127.0.0.1:9".parse().unwrap(),destination.clone()).await.err().expect("Unpaired native file connection must fail");
+        assert!(error.contains("authenticated device group"));
+        assert!(!destination.exists());
+    }
+
+    #[tokio::test]
+    async fn media_only_connection_does_not_start_file_workers_even_when_peer_offers_files() {
+        use crate::net::{UdpMultiplexer,MultiplexedPacket};
+        use protocol::{ControlMessage,session::SessionCommand};
+        assert!(crate::session_crypto::load_session_psk().is_none(),"Fixture must not inherit a user key");
+        let server=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();
+        let target=server.local_addr().unwrap();let(sender,receiver)=server.split();
+        let answer=tokio::spawn(async move {
+            loop {
+                if let MultiplexedPacket::Control(ControlMessage::Session(command),addr)=receiver.recv().await.unwrap() {
+                    if let SessionCommand::Open{connection_id,version}=*command {
+                        sender.send_control(&ControlMessage::Session(Box::new(SessionCommand::Opened{
+                            connection_id,version,max_subscriptions:8,files:true,clipboard:false,window_capture:false,
+                        })),addr).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        });
+        let (connection,mut events)=tokio::time::timeout(std::time::Duration::from_secs(3),super::WorkspaceConnection::connect_media(target)).await.unwrap().unwrap();
+        assert!(!connection.files_available);
+        assert!(connection.file_commands.is_closed());
+        assert!(matches!(events.files.try_recv(),Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+        drop(connection);answer.await.unwrap();
+    }
+}
+
 impl WorkspaceConnection {
     /// Authenticated connection health is independent of screen dirtiness.
     /// An unchanged desktop is allowed to stop producing new image frames.
@@ -79,6 +118,9 @@ impl WorkspaceConnection {
         target: SocketAddr,
         receive_dir: std::path::PathBuf,
     ) -> Result<(Self, WorkspaceEvents), String> {
+        if crate::session_crypto::paired_file_session_key().is_none() {
+            return Err("Native file sessions require an authenticated device group".into());
+        }
         Self::connect_inner(target, Some(receive_dir)).await
     }
 

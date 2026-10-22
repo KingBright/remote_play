@@ -297,6 +297,28 @@ pub fn load_session_psk() -> Option<Vec<u8>> {
         .or_else(|| PAIRED_PSK.read().unwrap().clone())
 }
 
+/// File sessions use the paired profile, never a conflicting ambient key.
+pub fn paired_file_session_key() -> Option<Vec<u8>> {
+    let paired=PAIRED_PSK.read().unwrap().clone();
+    let selected=load_session_psk();
+    if matches_paired_file_key(paired.as_deref(),selected.as_deref()) {paired} else {None}
+}
+fn matches_paired_file_key(paired:Option<&[u8]>,selected:Option<&[u8]>)->bool {
+    paired.is_some_and(|key|!key.is_empty()) && paired==selected
+}
+#[cfg(test)]
+mod native_file_scope_tests {
+    #[test]
+    fn ambient_key_cannot_authorize_files_without_the_current_paired_group() {
+        use super::matches_paired_file_key as allowed;
+        assert!(!allowed(None,Some(b"old group")));
+        assert!(!allowed(Some(b"new group"),Some(b"old group")));
+        assert!(!allowed(Some(b"new group"),None));
+        assert!(allowed(Some(b"new group"),Some(b"new group")));
+        assert!(!allowed(Some(b""),Some(b"")));
+    }
+}
+
 pub fn require_session_auth() -> bool {
     load_session_psk().is_some()
         || std::env::var("WEAVELO_REQUIRE_AUTH")

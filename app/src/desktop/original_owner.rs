@@ -265,10 +265,9 @@ pub(crate) struct ViewSnapshot {
 }
 impl OriginalOwner {
     pub fn new(backend: Arc<UnifiedServiceOwner>) -> Arc<Self> {
-        let prefs = std::fs::read(super::prefs_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice::<super::Preferences>(&b).ok())
-            .unwrap_or_default();
+        // Retain legacy receive_dir in the migrated JSON, but never adopt its
+        // shared destination for a new independent instance.
+        let prefs = super::Preferences::default();
         let (updates, _) = tokio::sync::watch::channel(0);
         Arc::new(Self {
             #[cfg(any(unix, windows))]
@@ -606,6 +605,10 @@ impl OriginalOwner {
             options.fps,
             options.bitrate_kbps,
         )?;
+        let configuration=crate::UnifiedRuntimeConfig::from_env()?;
+        let allow_files=self.native_file_transfer_enabled(&configuration)
+            && remote_core::session_crypto::paired_file_session_key().is_some();
+        if !video && !allow_files {return Err("File transfers require the existing enabled preference and an authenticated group".into());}
         let initial_settings = StreamSettingsValues {
             width: options.width, height: options.height,
             fps: options.fps, bitrate_kbps: options.bitrate_kbps,
@@ -725,7 +728,11 @@ impl OriginalOwner {
         let mut connected = None;
         for (route, endpoint) in routes {
             let connect = async {
-                let (conn,mut events)=WorkspaceConnection::connect(endpoint,receive_dir.clone()).await?;
+                let (conn,mut events)=if allow_files {
+                    let profile=remote_core::mesh::default_app_private_mesh_dir();
+                    let receive_dir=remote_core::desktop_storage::receive_directory_at(&profile,Some(&receive_dir))?;
+                    WorkspaceConnection::connect(endpoint,receive_dir).await?
+                } else {WorkspaceConnection::connect_media(endpoint).await?};
                 if let Some(proof)=&receive_claim {
                     crate::desktop::directed_send::claim(&conn,&mut events,proof).await?;
                 }
@@ -1322,6 +1329,10 @@ impl OriginalOwner {
         self.pool.lock().unwrap().receive_dir.clone()
     }
     pub fn set_file_receive_dir(&self, path: PathBuf) {
+        let path=match remote_core::desktop_storage::receive_directory_at(&remote_core::mesh::default_app_private_mesh_dir(),Some(&path)) {
+            Ok(path)=>path,
+            Err(error)=>{self.pool.lock().unwrap().message=format!("Receive directory unchanged: {error}");return;}
+        };
         let mut p = self.pool.lock().unwrap();
         p.receive_dir = path.clone();
         for e in &mut p.sessions {
@@ -1424,7 +1435,8 @@ impl OriginalOwner {
         scope: ShareScope,
         paths: Vec<PathBuf>,
     ) {
-        if scope != remote_core::shared_files::current_share_scope() {
+        if scope.is_none() || scope != remote_core::shared_files::current_share_scope()
+            || !crate::UnifiedRuntimeConfig::from_env().is_ok_and(|c|self.native_file_transfer_enabled(&c)) {
             return;
         }
         let mut p = self.pool.lock().unwrap();

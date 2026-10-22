@@ -2,7 +2,7 @@ use remote_core::mesh::default_app_private_mesh_dir;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const PREFERENCES_FILE_NAME: &str = "preferences.json";
@@ -112,18 +112,11 @@ pub struct UserPreferences {
 
 impl UserPreferences {
     pub fn default_preferences_dir() -> PathBuf {
-        let mesh_dir = default_app_private_mesh_dir();
-        if let Some(parent) = mesh_dir.parent() {
-            parent.to_path_buf()
-        } else {
-            mesh_dir
-        }
+        default_app_private_mesh_dir()
     }
-
     pub fn default_path() -> PathBuf {
         #[cfg(test)]
         {
-            // Runtime-owner tests use this API too: never write the user's real preferences.
             static TEST_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
             TEST_DIR
                 .get_or_init(|| tempfile::tempdir().expect("test preferences directory"))
@@ -135,86 +128,200 @@ impl UserPreferences {
             Self::default_preferences_dir().join(PREFERENCES_FILE_NAME)
         }
     }
-
+    fn ensure_default() -> io::Result<PathBuf> {
+        #[cfg(test)]
+        {
+            Ok(Self::default_path())
+        }
+        #[cfg(not(test))]
+        {
+            Self::initialize_profile(&Self::default_preferences_dir())
+        }
+    }
+    /// Snapshot the old document once, under the new instance's lock. Never
+    /// open a legacy lock for writing, rewrite its document, or follow links.
+    pub(crate) fn initialize_profile(profile: &Path) -> io::Result<PathBuf> {
+        remote_core::desktop_storage::prepare_profile(profile)?;
+        let path = profile.join(PREFERENCES_FILE_NAME);
+        let _lock = Self::lock_file(&path)?;
+        if let Some(mut current) = remote_core::desktop_storage::open_regular(&path, true)? {
+            let mut bytes = Vec::new();
+            current.read_to_end(&mut bytes)?;
+            Self::parse(&bytes)?;
+            return Ok(path);
+        }
+        let legacy = profile.parent().map(|p| p.join(PREFERENCES_FILE_NAME));
+        let bytes = if let Some(mut source) = legacy
+            .as_ref()
+            .map(|p| remote_core::desktop_storage::open_regular(p, false))
+            .transpose()?
+            .flatten()
+        {
+            let mut bytes = Vec::new();
+            source.read_to_end(&mut bytes)?;
+            Self::parse(&bytes)?;
+            bytes
+        } else {
+            // A fresh independent instance never enables receiving by accident.
+            let mut prefs = Self::default();
+            prefs.side_services.file_transfer = false;
+            serde_json::to_vec_pretty(&prefs).map_err(io::Error::other)?
+        };
+        Self::write_document(&path, &bytes, true)?;
+        Ok(path)
+    }
     pub fn load_or_default() -> Self {
-        match Self::read_or_default(&Self::default_path()) {
-            Ok(preferences) => preferences,
-            Err(err) => {
-                eprintln!("Failed to load preferences; using defaults for this session: {err}");
-                Self::default()
+        match Self::ensure_default().and_then(|p| Self::read_or_default(&p)) {
+            Ok(prefs) => prefs,
+            Err(error) => {
+                eprintln!("Preferences unavailable; file transfers remain disabled: {error}");
+                let mut prefs = Self::default();
+                prefs.side_services.file_transfer = false;
+                prefs
             }
         }
     }
-
     pub fn load_from_path(path: &Path) -> Option<Self> {
-        let data = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        Self::read_document(path).ok().flatten().map(|(_, p)| p)
     }
-
     pub fn save(&self) -> io::Result<()> {
-        self.save_to_path(&Self::default_path())
+        self.save_to_path(&Self::ensure_default()?)
     }
-
     pub fn save_to_path(&self, path: &Path) -> io::Result<()> {
         let _lock = Self::lock_file(path)?;
-        self.write_atomic(path)
-    }
-
-    /// Serialize the entire read/modify/replace operation, including other app processes.
-    /// Invalid or unreadable existing preferences must never be replaced with defaults.
-    pub fn update(change: impl FnOnce(&mut Self)) -> io::Result<()> {
-        Self::update_at_path(&Self::default_path(), change)
-    }
-
-    fn update_at_path(path: &Path, change: impl FnOnce(&mut Self)) -> io::Result<()> {
-        let _lock = Self::lock_file(path)?;
-        let mut preferences = Self::read_or_default(path)?;
-        let previous = preferences.clone();
-        change(&mut preferences);
-        if preferences != previous {
-            preferences.write_atomic(path)?;
+        let existing = Self::read_document(path)?;
+        let (mut raw, before) = existing
+            .clone()
+            .unwrap_or((serde_json::json!({}), Self::default()));
+        let before = serde_json::to_value(before).map_err(io::Error::other)?;
+        let after = serde_json::to_value(self).map_err(io::Error::other)?;
+        if existing.is_none() {
+            raw = after.clone();
+        } else {
+            Self::merge_changes(&mut raw, &before, &after);
+        }
+        if existing.is_none() || before != after {
+            Self::write_document(
+                path,
+                &serde_json::to_vec_pretty(&raw).map_err(io::Error::other)?,
+                false,
+            )?;
         }
         Ok(())
     }
-
-    fn read_or_default(path: &Path) -> io::Result<Self> {
-        match fs::read(path) {
-            Ok(data) => serde_json::from_slice(&data)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(err) => Err(err),
+    /// The stable sibling lock covers read, change and atomic replacement.
+    /// Merge only changed typed fields into the original document so unknown
+    /// nested fields survive, including fields older readers do not model.
+    pub fn update(change: impl FnOnce(&mut Self)) -> io::Result<()> {
+        Self::update_at_path(&Self::ensure_default()?, change)
+    }
+    fn update_at_path(path: &Path, change: impl FnOnce(&mut Self)) -> io::Result<()> {
+        let _lock = Self::lock_file(path)?;
+        let (mut raw, mut prefs) =
+            Self::read_document(path)?.unwrap_or_else(|| (serde_json::json!({}), Self::default()));
+        let before = serde_json::to_value(&prefs).map_err(io::Error::other)?;
+        change(&mut prefs);
+        let after = serde_json::to_value(&prefs).map_err(io::Error::other)?;
+        if before != after {
+            Self::merge_changes(&mut raw, &before, &after);
+            Self::write_document(
+                path,
+                &serde_json::to_vec_pretty(&raw).map_err(io::Error::other)?,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+    fn merge_changes(
+        raw: &mut serde_json::Value,
+        before: &serde_json::Value,
+        after: &serde_json::Value,
+    ) {
+        if before == after {
+            return;
+        }
+        if let (Some(old), Some(new)) = (before.as_object(), after.as_object()) {
+            if !raw.is_object() {
+                *raw = serde_json::json!({});
+            }
+            let target = raw.as_object_mut().unwrap();
+            for (key, previous) in old {
+                match new.get(key) {
+                    Some(next) if next != previous => Self::merge_changes(
+                        target.entry(key.clone()).or_insert(serde_json::Value::Null),
+                        previous,
+                        next,
+                    ),
+                    None => {
+                        target.remove(key);
+                    }
+                    _ => {}
+                }
+            }
+            for (key, value) in new {
+                if !old.contains_key(key) {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        } else {
+            *raw = after.clone();
         }
     }
-
+    fn parse(bytes: &[u8]) -> io::Result<(serde_json::Value, Self)> {
+        Ok((
+            serde_json::from_slice(bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+            serde_json::from_slice(bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        ))
+    }
+    fn read_document(path: &Path) -> io::Result<Option<(serde_json::Value, Self)>> {
+        let Some(mut file) = remote_core::desktop_storage::open_regular(path, false)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Self::parse(&bytes).map(Some)
+    }
+    fn read_or_default(path: &Path) -> io::Result<Self> {
+        Ok(Self::read_document(path)?
+            .map(|(_, p)| p)
+            .unwrap_or_default())
+    }
     fn parent_dir(path: &Path) -> &Path {
         path.parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+            .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
     }
-
     fn lock_file(path: &Path) -> io::Result<fs::File> {
-        fs::create_dir_all(Self::parent_dir(path))?;
-        // A stable sibling lock survives replacement of the preferences file itself.
-        let mut lock_path = path.as_os_str().to_os_string();
-        lock_path.push(".lock");
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(PathBuf::from(lock_path))?;
-        lock.lock()?;
-        Ok(lock)
+        let mut lock = path.as_os_str().to_os_string();
+        lock.push(".lock");
+        remote_core::desktop_storage::lock_file(&PathBuf::from(lock))
     }
-
-    fn write_atomic(&self, path: &Path) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        // Unique, same-filesystem temporary file; persist replaces atomically on Windows too.
-        let mut temp = tempfile::NamedTempFile::new_in(Self::parent_dir(path))?;
-        temp.write_all(json.as_bytes())?;
-        temp.as_file().sync_all()?;
-        temp.persist(path).map_err(|err| err.error)?;
+    fn write_document(path: &Path, bytes: &[u8], new_only: bool) -> io::Result<()> {
+        let before = remote_core::desktop_storage::regular_file(path, false)?;
+        if new_only && before.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Scoped preferences appeared; existing file retained",
+            ));
+        }
+        let mut temporary = tempfile::NamedTempFile::new_in(Self::parent_dir(path))?;
+        if let Some(metadata) = before {
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+        }
+        temporary.write_all(bytes)?;
+        temporary.as_file().sync_all()?;
+        remote_core::desktop_storage::regular_file(path, false)?;
+        if new_only {
+            temporary.persist_noclobber(path).map_err(|e| e.error)?;
+        } else {
+            temporary.persist(path).map_err(|e| e.error)?;
+        }
+        #[cfg(unix)]
+        fs::File::open(Self::parent_dir(path))?.sync_all()?;
         Ok(())
     }
 }
@@ -345,5 +452,169 @@ mod tests {
         fs::write(&path, json).unwrap();
         UserPreferences::update_at_path(&path, |prefs| prefs.stream.fps = 60).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), json);
+    }
+
+    fn legacy_fixture(base: &Path) -> PathBuf {
+        let parent = base.join("Weavelo");
+        remote_core::desktop_storage::prepare_profile(&parent).unwrap();
+        let bytes=br#"{"stream":{"bitrate_kbps":50000,"future_codec":{"keep":true}},"side_services":{"file_transfer":false,"future_rule":{"scope":"keep"}},"receive_dir":"/old/retained/directory","user_note":{"text":"preserve all fields"}}"#;
+        fs::write(parent.join(PREFERENCES_FILE_NAME), bytes).unwrap();
+        parent
+    }
+    #[test]
+    fn profile_snapshot_preserves_disabled_setting_and_all_nested_user_fields() {
+        let f = tempfile::tempdir().unwrap();
+        let parent = legacy_fixture(f.path());
+        let legacy = parent.join(PREFERENCES_FILE_NAME);
+        let original = fs::read(&legacy).unwrap();
+        let metadata = legacy.metadata().unwrap();
+        let path = UserPreferences::initialize_profile(&parent.join("Desktop")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(
+            !UserPreferences::load_from_path(&path)
+                .unwrap()
+                .side_services
+                .file_transfer
+        );
+        UserPreferences::update_at_path(&path, |p| p.stream.fps = 90).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["stream"]["future_codec"]["keep"], true);
+        assert_eq!(value["side_services"]["future_rule"]["scope"], "keep");
+        assert_eq!(value["receive_dir"], "/old/retained/directory");
+        assert_eq!(value["user_note"]["text"], "preserve all fields");
+        assert_eq!(fs::read(&legacy).unwrap(), original);
+        assert_eq!(
+            legacy.metadata().unwrap().permissions(),
+            metadata.permissions()
+        );
+    }
+    #[test]
+    fn independent_profiles_snapshot_once_and_do_not_follow_parent_changes() {
+        let f = tempfile::tempdir().unwrap();
+        let parent = legacy_fixture(f.path());
+        let a = UserPreferences::initialize_profile(&parent.join("Desktop-a")).unwrap();
+        let b = UserPreferences::initialize_profile(&parent.join("Desktop-b")).unwrap();
+        let old_b = fs::read(&b).unwrap();
+        fs::write(
+            parent.join(PREFERENCES_FILE_NAME),
+            br#"{"side_services":{"file_transfer":true},"user_note":"new parent value"}"#,
+        )
+        .unwrap();
+        UserPreferences::update_at_path(&a, |p| p.ui.scale_mode = "fill".into()).unwrap();
+        UserPreferences::initialize_profile(a.parent().unwrap()).unwrap();
+        assert!(
+            !UserPreferences::load_from_path(&a)
+                .unwrap()
+                .side_services
+                .file_transfer
+        );
+        assert_eq!(fs::read(b).unwrap(), old_b);
+        assert!(
+            UserPreferences::load_from_path(&parent.join(PREFERENCES_FILE_NAME))
+                .unwrap()
+                .side_services
+                .file_transfer
+        );
+    }
+    #[test]
+    fn missing_or_invalid_migration_cannot_enable_receiving_or_replace_user_data() {
+        let f = tempfile::tempdir().unwrap();
+        let profile = f.path().join("Desktop");
+        let path = UserPreferences::initialize_profile(&profile).unwrap();
+        assert!(
+            !UserPreferences::load_from_path(&path)
+                .unwrap()
+                .side_services
+                .file_transfer
+        );
+        fs::write(&path, b"invalid scoped document").unwrap();
+        assert!(UserPreferences::initialize_profile(&profile).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"invalid scoped document");
+        let other = f.path().join("Other");
+        fs::write(
+            f.path().join(PREFERENCES_FILE_NAME),
+            b"invalid legacy document",
+        )
+        .unwrap();
+        assert!(UserPreferences::initialize_profile(&other).is_err());
+        assert!(!other.join(PREFERENCES_FILE_NAME).exists());
+        assert_eq!(
+            fs::read(f.path().join(PREFERENCES_FILE_NAME)).unwrap(),
+            b"invalid legacy document"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn scoped_migration_refuses_linked_entries_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+        let f = tempfile::tempdir().unwrap();
+        let parent = legacy_fixture(f.path());
+        let profile = parent.join("Desktop");
+        let original = fs::read(parent.join(PREFERENCES_FILE_NAME)).unwrap();
+        remote_core::desktop_storage::prepare_profile(&profile).unwrap();
+        symlink(
+            parent.join(PREFERENCES_FILE_NAME),
+            profile.join(PREFERENCES_FILE_NAME),
+        )
+        .unwrap();
+        assert!(UserPreferences::initialize_profile(&profile).is_err());
+        assert!(profile.join(PREFERENCES_FILE_NAME).is_symlink());
+        assert_eq!(
+            fs::read(parent.join(PREFERENCES_FILE_NAME)).unwrap(),
+            original
+        );
+    }
+    #[test]
+    #[ignore = "subprocess worker; invoked only with an owned temporary fixture path"]
+    fn scoped_preference_update_worker() {
+        let Some(path) = std::env::var_os("WEAVELO_PREFS_TEST_CHILD") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        for _ in 0..20 {
+            UserPreferences::update_at_path(&path, |p| p.stream.bitrate_kbps += 1).unwrap();
+        }
+    }
+    #[test]
+    fn two_process_updates_are_serialized_and_leave_other_instances_and_legacy_unchanged() {
+        let f = tempfile::tempdir().unwrap();
+        let parent = legacy_fixture(f.path());
+        let a = UserPreferences::initialize_profile(&parent.join("Desktop-a")).unwrap();
+        let b = UserPreferences::initialize_profile(&parent.join("Desktop-b")).unwrap();
+        let old_b = fs::read(&b).unwrap();
+        let old_parent = fs::read(parent.join(PREFERENCES_FILE_NAME)).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut children = Vec::new();
+        for _ in 0..2 {
+            children.push(
+                std::process::Command::new(&executable)
+                    .args([
+                        "--exact",
+                        "preferences::tests::scoped_preference_update_worker",
+                        "--ignored",
+                    ])
+                    .env("WEAVELO_PREFS_TEST_CHILD", &a)
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert_eq!(
+            UserPreferences::load_from_path(&a)
+                .unwrap()
+                .stream
+                .bitrate_kbps,
+            50040
+        );
+        assert_eq!(fs::read(b).unwrap(), old_b);
+        assert_eq!(
+            fs::read(parent.join(PREFERENCES_FILE_NAME)).unwrap(),
+            old_parent
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(a).unwrap()).unwrap();
+        assert_eq!(value["stream"]["future_codec"]["keep"], true);
+        assert_eq!(value["side_services"]["file_transfer"], false);
     }
 }

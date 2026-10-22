@@ -60,10 +60,8 @@ pub(super) async fn run(config: ConnectionServicesConfig) -> Result<(), String> 
             });
             event_rx = forward_rx;
             let _file_clipboard_enabled = env_flag_enabled("WEAVELO_FILE_CLIPBOARD");
-            let receive_dir = env_path_or_temp(
-                "WEAVELO_FILE_RECEIVE_DIR",
-                "weavelo-host-received-files",
-            );
+            let receive_dir = remote_core::desktop_storage::receive_directory()
+                .map_err(|error| format!("Independent file receive directory unavailable: {error}"))?;
             let runtime_cancel_rx = cancel_rx.resubscribe();
             let runtime_task = tasks.spawn(async move {
                 if let Err(err) = run_file_transfer_runtime(

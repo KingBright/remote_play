@@ -395,6 +395,21 @@ fn pending_closed_count(closed: &HashMap<SocketAddr, ClosedReceipt>) -> usize {
         .count()
 }
 
+// File channels never inherit the plaintext compatibility mode. The existing
+// handshake establishes group-key possession; addresses and device names alone
+// are not authorization. Recheck the scope on ingress, including before tick.
+fn file_session_authorized(
+    established_key: Option<&[u8]>, current_key: Option<&[u8]>,
+    authenticated_session: Option<&([u8;16],[u8;16],Instant)>,
+) -> bool {
+    established_key.is_some_and(|key| !key.is_empty())
+        && established_key==current_key && authenticated_session.is_some()
+}
+fn file_services_requested(config:&HostServiceConfig)->bool {
+    config.enable_file_transfer || env_flag_enabled("WEAVELO_FILE_CLIPBOARD")
+        || std::env::var_os("WEAVELO_HOST_SEND_FILE").is_some()
+}
+
 // Challenge issuance and Finish commit share the same native ownership gate.
 fn authentication_admission_error(
     addr: SocketAddr,
@@ -1967,7 +1982,8 @@ async fn run_host_service_inner(
                     }
                     MultiplexedPacket::ClockReply(..)=>{}
                     MultiplexedPacket::Control(message, addr) => {
-                        if require_auth && !authenticated.contains_key(&addr) {
+                        if (require_auth && !authenticated.contains_key(&addr))
+                            || (file_services_requested(&config) && !file_session_authorized(psk.as_deref(),remote_core::session_crypto::paired_file_session_key().as_deref(),authenticated.get(&addr))) {
                             let _ = input_owner.during_control(&injector,udp_sender.send_control(&ControlMessage::SessionReject { reason: "authenticate before opening a connection".into() }, addr)).await;
                             continue;
                         }
@@ -2200,6 +2216,8 @@ async fn run_host_service_inner(
                         if input_owner.owner.is_some_and(|(addr, id)| !peers.get(&addr).is_some_and(|p| p.can_input(id))) { let _ = input_owner.release(&injector).await; }
                     }
                     MultiplexedPacket::Data(envelope, addr) | MultiplexedPacket::DataWithTiming(envelope, _, addr) => {
+                        if matches!(envelope.header.kind,ContentKind::FileManifest|ContentKind::FileChunk|ContentKind::FileControl)
+                            && !file_session_authorized(psk.as_deref(),remote_core::session_crypto::paired_file_session_key().as_deref(),authenticated.get(&addr)) {continue;}
                         let Some(peer) = peers.get_mut(&addr) else { continue; };
                         peer.last_seen = Instant::now();
                         let target = match envelope.header.kind {
@@ -2985,6 +3003,36 @@ mod failure_admission_tests {
         let finish=accept_session_message(Some(key),&client.message(key),addr,sender,peers,closing,closed,authenticated,handshakes)?;
         let crypto=client.receive(key,&finish,remote_core::session_auth::AuthTime::now()).map_err(|e|e.to_string())?.ok_or("missing Finish")?;
         Ok(crypto.session_id())
+    }
+
+
+    #[tokio::test]
+    async fn file_authorization_uses_real_group_handshake_and_rejects_other_group() {
+        use remote_core::session_auth::{AuthTime,ClientHandshake,ServerHandshake};
+        let key=b"synthetic-file-group";let other=b"synthetic-other-file-group";
+        let mux=UdpMultiplexer::bind("127.0.0.1:0").await.unwrap();let(sender,_)=mux.split();
+        let addr="127.0.0.1:45127".parse().unwrap();
+        let peers=HashMap::new();let closing=HashMap::new();let mut closed=HashMap::new();
+        let mut authenticated=HashMap::new();let mut handshakes=ServerHandshake::default();
+        assert!(!file_session_authorized(None,None,None));
+        let wrong=ClientHandshake::new(AuthTime::now());
+        assert!(accept_session_message(Some(key),&wrong.message(other),addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).is_err());
+        assert!(authenticated.is_empty());assert!(!file_session_authorized(Some(key),Some(key),authenticated.get(&addr)));
+        let mut accepted=ClientHandshake::new(AuthTime::now());
+        fixture_authenticate(key,&mut accepted,addr,&sender,&peers,&closing,&mut closed,&mut authenticated,&mut handshakes).unwrap();
+        assert!(file_session_authorized(Some(key),Some(key),authenticated.get(&addr)));
+        assert!(!file_session_authorized(Some(key),Some(other),authenticated.get(&addr)));
+        assert!(!file_session_authorized(Some(key),None,authenticated.get(&addr)));
+        authenticated.clear();
+        assert!(!file_session_authorized(Some(key),Some(key),authenticated.get(&addr)));
+    }
+    #[test]
+    fn file_authorization_does_not_treat_address_or_plaintext_compatibility_as_consent() {
+        let mut config=HostServiceConfig {bind_addr:"127.0.0.1:0".parse().unwrap(),stats:Statistics::new(),enable_clipboard_sync:false,enable_file_transfer:true,enable_talkback:false};
+        assert!(file_services_requested(&config));
+        assert!(!file_session_authorized(None,None,Some(&([1;16],[2;16],Instant::now()))));
+        config.enable_file_transfer=false;
+        assert!(!file_session_authorized(Some(b"group"),Some(b"group"),None));
     }
 
     #[tokio::test]

@@ -185,7 +185,10 @@ pub(crate) fn dispatch(
         return Err("Invalid file request ID".into());
     }
     if matches!(&action, Action::Peers) {
+        let configuration = crate::UnifiedRuntimeConfig::from_env()?;
         return Ok(serde_json::json!({"ok":true,"generation":generation,
+            "file_transfer_preference_enabled":owner.native_file_transfer_enabled(&configuration),
+            "paired_file_scope_present":remote_core::session_crypto::paired_file_session_key().is_some(),
             "devices":owner.snapshot().devices.iter().map(|d|serde_json::json!({"device_id":d.device_id,"display_name":d.display_name,"online":d.online})).collect::<Vec<_>>(),
             "receive_dir":owner.receive_dir()}));
     }
@@ -344,7 +347,7 @@ async fn send(
     }
 }
 pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Value, Error> {
-    use super::directed_receive::{exchange, Request};
+    use super::directed_receive::{Request, exchange};
     let directory = crate::private_ipc::gui_directory(profile)?;
     let status = exchange(&directory, &Request::Status)?;
     if status["executable_sha256"] != crate::background_service::executable_hash()? {
@@ -453,11 +456,13 @@ mod tests {
         {
             std::os::unix::fs::symlink(&gui, &selected).unwrap();
             assert!(directory(&gui).is_err());
-            assert!(selected
-                .symlink_metadata()
-                .unwrap()
-                .file_type()
-                .is_symlink());
+            assert!(
+                selected
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
         }
     }
 

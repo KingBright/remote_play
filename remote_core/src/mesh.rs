@@ -762,7 +762,7 @@ fn profile_uid() -> u32 {
     // Read the actual effective identity, never an overridable UID/HOME variable.
     unsafe { libc::geteuid() }
 }
-fn check_profile_path(path: &Path) -> Result<(), MeshStoreError> {
+pub(crate) fn check_profile_path(path: &Path) -> Result<(), MeshStoreError> {
     if path
         .components()
         .any(|part| matches!(part, std::path::Component::ParentDir))
@@ -928,7 +928,7 @@ fn read_private_file(path: &Path) -> Result<Option<String>, MeshStoreError> {
         .map_err(|source| MeshStoreError::io(path.to_path_buf(), source))?;
     Ok(Some(text))
 }
-fn create_private_dir(path: &Path) -> Result<(), MeshStoreError> {
+pub(crate) fn create_private_dir(path: &Path) -> Result<(), MeshStoreError> {
     validate_private_dir(path)?;
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);

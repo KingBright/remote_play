@@ -51,10 +51,7 @@ impl Default for Preferences {
 }
 
 fn default_receive_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Downloads/Weavelo")
+    remote_core::mesh::default_app_private_mesh_dir().join("Received Files")
 }
 
 fn prefs_path() -> PathBuf {
