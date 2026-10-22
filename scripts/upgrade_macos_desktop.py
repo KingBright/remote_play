@@ -6,7 +6,7 @@ The retained client, profile, launch policy and permissions are never migrated.
 An interrupted transaction stays inspectable; apply never replays it.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 import ctypes
 import fcntl
 import hashlib
@@ -285,6 +285,17 @@ class NativeControl:
                 'runtime_membership_preserved': True}
 
 
+@contextmanager
+def process_exit_watch(pid):
+    # kqueue has close(), but does not implement Python's context protocol.
+    with closing(select.kqueue()) as watch:
+        event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        watch.control([event], 0, 0)
+        yield watch
+
+
 def normal_gui_quit(pid, executable):
     # A kernel exit watch is registered before the normal AppKit quit request.
     # No AppleScript, input events, forced termination or permission repair.
@@ -296,11 +307,7 @@ def normal_gui_quit(pid, executable):
         buf = ctypes.create_string_buffer(4096)
         return os.fsdecode(buf.value) if lib.proc_pidpath(pid, buf, len(buf)) > 0 else None
     require(path() == str(executable), 'GUI process identity changed before quit')
-    with select.kqueue() as watch:
-        event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
-                              flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                              fflags=select.KQ_NOTE_EXIT)
-        watch.control([event], 0, 0)
+    with process_exit_watch(pid) as watch:
         require(path() == str(executable), 'GUI process identity changed before quit watch')
         ctypes.CDLL('/System/Library/Frameworks/AppKit.framework/AppKit')
         objc = ctypes.CDLL('/usr/lib/libobjc.A.dylib')

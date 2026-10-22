@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -273,6 +274,33 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(staged.read_bytes(),b'user-changed-staged-image')
         self.assertEqual(upgrade.gate.hash_file(journal),digest)
         self.assertEqual(self.calls,['before'])
+
+
+class NativeExitWatchTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform=='darwin','native kernel exit watcher')
+    def test_native_kqueue_registers_and_closes_on_actual_child_exit(self):
+        child=subprocess.Popen([sys.executable,'-c','import sys;sys.stdin.buffer.read()'],
+                               stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        try:
+            with upgrade.process_exit_watch(child.pid) as watch:
+                descriptor=watch.fileno()
+                child.stdin.close()
+                events=watch.control(None,1,10)
+                self.assertEqual([event.ident for event in events],[child.pid])
+                self.assertEqual(child.wait(timeout=5),0)
+            with self.assertRaises(OSError):os.fstat(descriptor)
+        finally:
+            if child.poll() is None:
+                child.stdin.close()
+                child.wait(timeout=5)
+
+    @unittest.skipUnless(sys.platform=='darwin','native kernel exit watcher')
+    def test_native_kqueue_closes_if_action_raises(self):
+        with self.assertRaisesRegex(RuntimeError,'pre-quit failure'):
+            with upgrade.process_exit_watch(os.getpid()) as watch:
+                descriptor=watch.fileno()
+                raise RuntimeError('pre-quit failure')
+        with self.assertRaises(OSError):os.fstat(descriptor)
 
 
 if __name__=='__main__':unittest.main()
