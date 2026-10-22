@@ -271,7 +271,7 @@ async fn send(
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
         .await;
-    if !owner.file_transfer_enabled() {
+    if !owner.native_file_transfer_enabled(&crate::UnifiedRuntimeConfig::from_env()?) {
         return Err("File transfers are disabled in the existing product settings".into());
     }
     if scope != remote_core::shared_files::current_share_scope() {
@@ -459,6 +459,29 @@ mod tests {
                 .file_type()
                 .is_symlink());
         }
+    }
+
+    #[tokio::test]
+    async fn attached_frontend_uses_effective_preference_without_a_legacy_file_owner() {
+        let (_tx, rx) = tokio::sync::watch::channel(Default::default());
+        let backend = Arc::new(
+            crate::UnifiedServiceOwner::from_background_snapshot(rx)
+                .await
+                .unwrap(),
+        );
+        assert!(!backend.file_transfer_enabled());
+        let owner = OriginalOwner::new(backend);
+        let mut configuration = crate::UnifiedRuntimeConfig::app_defaults();
+        assert!(owner.native_file_transfer_enabled(&configuration));
+        configuration.enable_file_transfer = false;
+        assert!(!owner.native_file_transfer_enabled(&configuration));
+        let standalone = OriginalOwner::new(Arc::new(
+            crate::UnifiedServiceOwner::start(crate::UnifiedServiceOwnerConfig::default())
+                .await
+                .unwrap(),
+        ));
+        configuration.enable_file_transfer = true;
+        assert!(!standalone.native_file_transfer_enabled(&configuration));
     }
 
     #[test]

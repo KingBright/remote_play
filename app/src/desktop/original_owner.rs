@@ -1244,6 +1244,17 @@ impl OriginalOwner {
     pub fn file_transfer_enabled(&self) -> bool {
         self.backend.file_transfer_enabled()
     }
+    pub(crate) fn native_file_transfer_enabled(&self, configuration: &crate::UnifiedRuntimeConfig) -> bool {
+        // An attached frontend owns outgoing native sessions, not the legacy
+        // side-service controller. Its absence is not a user preference.
+        // Keep the effective persisted/environment preference and the original
+        // peer connection's files_available check; never create another owner.
+        #[cfg(any(unix, windows))]
+        if self.backend.frontend_epoch().is_some() {
+            return configuration.enable_file_transfer;
+        }
+        self.backend.file_transfer_enabled()
+    }
     pub fn set_file_transfer_enabled(&self, enabled: bool) -> bool {
         self.backend.set_file_transfer_enabled(enabled)
     }
