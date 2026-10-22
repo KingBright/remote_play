@@ -104,6 +104,41 @@ class ReleaseHookTests(unittest.TestCase):
         with hook.producer('macos') as (fd, _), patch.dict(os.environ, {hook.LOCK_ENV: str(fd)}):
             with self.assertRaises(hook.Refusal): hook.check_lock('android-native')
 
+    def test_inherited_case_alias_keeps_original_authority_spelling(self):
+        alias = self.root.with_name(self.root.name.upper())
+        if not alias.exists() or not alias.samefile(self.root):
+            self.skipTest('Native case-insensitive filesystem fixture')
+        with hook.producer('macos') as (fd, state), patch.dict(os.environ, {hook.LOCK_ENV: str(fd)}):
+            with patch.object(hook, 'ROOT', alias):
+                inherited_fd, inherited_state = hook.check_lock('macos')
+                self.assertEqual(inherited_fd, fd)
+                self.assertEqual(inherited_state, state)
+                self.assertEqual(hook.ROOT, self.root)
+
+    def test_inherited_other_directory_keeps_scope_closed(self):
+        other = self.root / 'other'
+        other.mkdir()
+        with hook.producer('macos') as (fd, state), patch.dict(os.environ, {hook.LOCK_ENV: str(fd)}):
+            altered = dict(state, project=str(other))
+            hook.write_state(fd, altered)
+            try:
+                with self.assertRaisesRegex(hook.Refusal, 'Wrong producer lock project'):
+                    hook.check_lock('macos')
+                self.assertEqual(hook.ROOT, self.root)
+            finally:
+                hook.write_state(fd, state)
+
+    def test_inherited_symlink_project_rejected(self):
+        alias = self.root / 'alias'
+        alias.symlink_to(self.root, target_is_directory=True)
+        with hook.producer('macos') as (fd, state), patch.dict(os.environ, {hook.LOCK_ENV: str(fd)}):
+            hook.write_state(fd, dict(state, project=str(alias)))
+            try:
+                with self.assertRaisesRegex(hook.Refusal, 'Wrong producer lock project'):
+                    hook.check_lock('macos')
+            finally:
+                hook.write_state(fd, state)
+
     def test_failed_preflight_never_starts_child(self):
         with patch.object(hook, 'public', side_effect=hook.Refusal('identity')), patch.object(hook.subprocess, 'Popen') as child:
             with self.assertRaises(hook.Refusal): hook.run('android-release', [])

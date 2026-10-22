@@ -122,6 +122,7 @@ def android_workspace():
 
 
 def check_lock(kind):
+    global ROOT
     require(LOCK_ENV in os.environ, 'Use the formal release script: its producer lock is required')
     fd = int(os.environ[LOCK_ENV]); path = ROOT / '.rust-storage/release-producer.lock'
     info = os.fstat(fd)
@@ -131,11 +132,19 @@ def check_lock(kind):
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     require(info.st_size <= 65536, 'Producer lock metadata exceeds bound')
     state = json.loads(os.pread(fd, 65536, 0))
-    require(state['project'] == str(ROOT) and (state['kind'] == kind or
-            (state['kind'] == 'android-release' and kind == 'android-native')), 'Wrong producer lock scope')
+    recorded_root = Path(state['project'])
+    # Case-insensitive volumes may spell the same checkout differently in an
+    # imported child. Keep the verified producer's existing authority spelling;
+    # never accept another directory or a symlink as a project alias.
+    require(recorded_root.is_absolute() and recorded_root == recorded_root.resolve(strict=True)
+            and str(recorded_root).casefold() == str(ROOT).casefold()
+            and recorded_root.samefile(ROOT), 'Wrong producer lock project')
+    require(state['kind'] == kind or
+            (state['kind'] == 'android-release' and kind == 'android-native'), 'Wrong producer lock scope')
     require(state.get('android_upgrade_candidate', False) == android_upgrade_mode(),
             'Inherited Android output mode differs from producer lock')
     require(state.get('transition') == transition_config(kind), 'Inherited transition environment differs from producer lock')
+    ROOT = recorded_root
     return fd, state
 
 
