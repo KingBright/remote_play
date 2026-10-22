@@ -1,5 +1,15 @@
 # NAS Relay Deployment
 
+**Retained deployment versus new instance:** the read-only NAS observation on
+2026-10-22 found `remote-play-relay.service`, executable
+`/opt/remote-play-relay/remote-play-relay`, serving the public route below on
+`127.0.0.1:39491`. The `weavelo-relay.service` and executable paths in this
+directory are source templates, not evidence that a separate branded instance
+has been deployed. Applying the current template alongside the retained service
+would collide on port 39491. Do not stop or replace the retained service to apply
+it. The independent instance needs its own approved public hostname and loopback
+port first. See [the verified instance map and pending plan](../../docs/testing/WEAVELO-RELAY-INSTANCE-MAP.md).
+
 Weavelo uses a WebSocket relay on the Synology NAS so the existing Caddy listener on external port `8443` can serve both HTTP applications and Weavelo. Direct LAN and Weavelo P2P routes remain preferred; this relay is the final restricted-network fallback.
 
 ## Public Route
@@ -7,8 +17,10 @@ Weavelo uses a WebSocket relay on the Synology NAS so the existing Caddy listene
 - DNS: `relay.hackerlife.fun` is a DNS-only CNAME to `www.hackerlife.fun`.
 - Public endpoint: `wss://relay.hackerlife.fun:8443/v1/relay`.
 - Caddy upstream: `127.0.0.1:39491`.
-- Service binary: `/opt/weavelo-relay/weavelo-relay`.
-- Service unit: `/etc/systemd/system/weavelo-relay.service`.
+- Retained running binary: `/opt/remote-play-relay/remote-play-relay`.
+- Retained running unit: `/etc/systemd/system/remote-play-relay.service`.
+- New source template binary: `/opt/weavelo-relay/weavelo-relay`.
+- New source template unit: `/etc/systemd/system/weavelo-relay.service`.
 
 The relay namespace is derived locally with HMAC-SHA256 from the paired device group's network name, network secret, and channel name. The group secret is never sent to or stored on the relay.
 
