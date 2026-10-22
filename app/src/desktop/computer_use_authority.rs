@@ -11,7 +11,6 @@ type Error = &'static str;
 mod tests;
 
 pub(crate) struct Authority {
-    launch: Option<PathBuf>,
     directory: PathBuf,
     generation: String,
     gui_hash: String,
@@ -36,12 +35,13 @@ impl Caller {
         peer.is_some_and(|pid| pid == self.worker.pid || pid == self.agent.pid)
     }
 }
-fn authority_digest(root: &[u8], worker: &[u8]) -> String {
+fn authority_digest(locator: &[u8], root: &[u8], worker: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
-    hash.update((root.len() as u64).to_be_bytes());
-    hash.update(root);
-    hash.update(worker);
+    for bytes in [locator, root, worker] {
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    }
     format!("{:x}", hash.finalize())
 }
 fn owned(path: &Path, maximum: usize) -> Result<Vec<u8>, Error> {
@@ -163,27 +163,33 @@ fn process(_pid: i32) -> Result<Process, Error> {
 }
 impl Authority {
     pub fn new(directory: &Path, generation: &str, gui_hash: &str) -> Self {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Locator {
-            desktop_launch: PathBuf,
-        }
-        let launch = owned(&directory.join("octendra-authority.json"), 4096)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Locator>(&b).ok())
-            .map(|l| l.desktop_launch)
-            .filter(|p| {
-                p.is_absolute() && p.file_name().is_some_and(|n| n == "desktop-launch.json")
-            });
         Self {
-            launch,
             directory: directory.to_owned(),
             generation: generation.into(),
             gui_hash: gui_hash.into(),
         }
     }
+    fn launch(&self) -> Result<(PathBuf, Vec<u8>), Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Locator {
+            desktop_launch: PathBuf,
+        }
+        // Approval normally follows GUI/source selection. Re-read only this
+        // existing private locator, never a path supplied by an IPC request.
+        // Its bytes also fence the lease, so retargeting cannot reuse a frame.
+        let bytes = owned(&self.directory.join("octendra-authority.json"), 4096)
+            .map_err(|_| "octendra_authority_not_configured")?;
+        let locator: Locator = serde_json::from_slice(&bytes)
+            .map_err(|_| "octendra_authority_not_configured")?;
+        let path = locator.desktop_launch;
+        if !path.is_absolute() || !path.file_name().is_some_and(|n| n == "desktop-launch.json") {
+            return Err("octendra_authority_not_configured");
+        }
+        Ok((path, bytes))
+    }
     pub fn configured(&self) -> bool {
-        cfg!(target_os = "macos") && self.launch.is_some()
+        cfg!(target_os = "macos") && self.launch().is_ok()
     }
     pub fn verify(
         &self,
@@ -191,11 +197,8 @@ impl Authority {
         peer: Option<i32>,
         saved: Option<&Caller>,
     ) -> Result<Caller, Error> {
-        let path = self
-            .launch
-            .as_ref()
-            .ok_or("octendra_authority_not_configured")?;
-        let root_bytes = owned(path, 16384)?;
+        let (path, locator_bytes) = self.launch()?;
+        let root_bytes = owned(&path, 16384)?;
         let root: Value = serde_json::from_slice(&root_bytes).map_err(|_| "authority_invalid")?;
         let (actor, lease_id) = call.identity();
         let worker_path = path
@@ -205,7 +208,7 @@ impl Authority {
         let worker_bytes = owned(&worker_path, 16384)?;
         let worker: Value =
             serde_json::from_slice(&worker_bytes).map_err(|_| "task_authority_invalid")?;
-        let authority_digest = authority_digest(&root_bytes, &worker_bytes);
+        let authority_digest = authority_digest(&locator_bytes, &root_bytes, &worker_bytes);
         let expires_at_ms = worker["expires_at_ms"]
             .as_u64()
             .ok_or("task_authority_invalid")?;

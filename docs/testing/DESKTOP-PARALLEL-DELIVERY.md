@@ -59,6 +59,23 @@ authority or change OS permissions. There is no additional legacy rollback
 engineering. Native capture/input acceptance requires the signed independent app,
 its own existing authorization and an explicitly selected temporary test window.
 
+## Approval after the GUI has started
+
+The existing private `gui-state/octendra-authority.json` locator may be prepared
+by the already authorized Octendra setup flow after the GUI starts and the user
+selects a remote source. The running GUI re-reads that same locator for bridge
+availability and each request; no GUI restart or generation change is needed.
+No IPC client can select its authority path, and no approval file is created by
+this read path. Original private directory/file modes, owner/task/executor and
+remote device/source/connection checks, executable/process hashes, frame age and
+single-action receipts remain required. Merely creating a locator grants no access.
+
+Locator bytes join the existing launch/worker records in the lease fingerprint.
+At computer-use request verification, changing its target invalidates an existing
+lease even if the new approval files have identical bytes. Removing or making the
+locator non-private makes the next computer-use call fail; observed revocation
+retires the lease through the existing dispatcher. Status availability is not a grant.
+
 ## Focused verification
 
 `python3 -B -m unittest scripts.tests.test_desktop_parallel_delivery` checks old

@@ -115,18 +115,80 @@ fn control_requires_both_existing_grants_and_explicit_remote_mac_key_space() {
 }
 
 #[test]
-fn authority_fingerprint_pins_both_exact_existing_records() {
+fn authority_fingerprint_pins_locator_and_both_exact_existing_records() {
     assert_eq!(
-        authority_digest(b"root", b"worker"),
-        authority_digest(b"root", b"worker")
+        authority_digest(b"locator", b"root", b"worker"),
+        authority_digest(b"locator", b"root", b"worker")
     );
     assert_ne!(
-        authority_digest(b"root", b"worker"),
-        authority_digest(b"root2", b"worker")
+        authority_digest(b"locator", b"root", b"worker"),
+        authority_digest(b"locator", b"root2", b"worker")
     );
     assert_ne!(
-        authority_digest(b"root", b"worker"),
-        authority_digest(b"root", b"worker2")
+        authority_digest(b"locator", b"root", b"worker"),
+        authority_digest(b"locator", b"root", b"worker2")
     );
-    assert_ne!(authority_digest(b"ab", b"c"), authority_digest(b"a", b"bc"));
+    assert_ne!(authority_digest(b"one", b"root", b"worker"), authority_digest(b"two", b"root", b"worker"));
+    assert_ne!(authority_digest(b"a", b"b", b"cd"), authority_digest(b"a", b"bc", b"d"));
+}
+
+fn private_locator(directory: &Path, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let file = directory.join("octendra-authority.json");
+    std::fs::write(&file, serde_json::to_vec(&json!({"desktop_launch":path})).unwrap()).unwrap();
+    std::fs::set_permissions(file,std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn locator_approved_after_gui_start_is_seen_without_restarting_the_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Authority::new(dir.path(), "unchanged-generation", &"c".repeat(64));
+    assert!(authority.launch().is_err());
+    let target = dir.path().join("desktop-launch.json");
+    private_locator(dir.path(), &target);
+    assert_eq!(authority.launch().unwrap().0,target);
+    assert_eq!(authority.configured(),cfg!(target_os="macos"));
+    // A locator selects existing authority, but never grants it: no launch
+    // approval/worker/process proof exists in this private filesystem fixture.
+    assert!(authority.verify(&fixture().3,None,None).is_err());
+    std::fs::remove_file(dir.path().join("octendra-authority.json")).unwrap();
+    assert!(authority.launch().is_err());
+    assert!(!authority.configured());
+}
+
+#[test]
+fn locator_retargeting_changes_a_live_authority_fingerprint_even_for_identical_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Authority::new(dir.path(), "unchanged-generation", &"c".repeat(64));
+    let first = dir.path().join("first/desktop-launch.json");
+    private_locator(dir.path(), &first);
+    let (path,bytes) = authority.launch().unwrap();
+    assert_eq!(path,first);
+    let old = authority_digest(&bytes,b"same-root",b"same-worker");
+    let second = dir.path().join("second/desktop-launch.json");
+    private_locator(dir.path(), &second);
+    let (path,bytes) = authority.launch().unwrap();
+    assert_eq!(path,second);
+    assert_ne!(old,authority_digest(&bytes,b"same-root",b"same-worker"));
+}
+
+#[test]
+fn late_locator_keeps_private_file_schema_and_no_follow_checks() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Authority::new(dir.path(), "1-2", &"c".repeat(64));
+    let path = dir.path().join("octendra-authority.json");
+    private_locator(dir.path(), &dir.path().join("desktop-launch.json"));
+    std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(authority.launch().is_err());
+    std::fs::remove_file(&path).unwrap();
+    let elsewhere = dir.path().join("fixture-target");
+    std::fs::write(&elsewhere,b"{}").unwrap();
+    std::os::unix::fs::symlink(&elsewhere,&path).unwrap();
+    assert!(authority.launch().is_err());
+    std::fs::remove_file(&path).unwrap();
+    private_locator(dir.path(), Path::new("relative/desktop-launch.json"));
+    assert!(authority.launch().is_err());
+    private_locator(dir.path(), &dir.path().join("another.json"));
+    assert!(authority.launch().is_err());
 }
