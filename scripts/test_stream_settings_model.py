@@ -107,7 +107,8 @@ def validation_command(cargo, target, mode):
         return [cargo, "check", *shared, "-p", "weavelo_app", *PLATFORM_CHECKS[mode]]
     if mode in SESSION_CLOCK_TESTS:
         package, test_filter = SESSION_CLOCK_TESTS[mode]
-        features = {"pairing-image": ["--features", "pairing-image"],
+        features = {"native-file-cli": ["--no-default-features", "--features", "gpui-restoration"],
+                    "pairing-image": ["--features", "pairing-image"],
                     "bridge-invitation": ["--features", "android"], "bridge-network": ["--features", "android"]}.get(mode, [])
         return [cargo, "test", *shared, "-p", package, "--lib", *features,
                 test_filter, "--", "--nocapture", *(["--ignored", "--test-threads=1"] if mode == "computer-use-process" else [])]

@@ -133,7 +133,8 @@ class ServiceContractEntryTests(unittest.TestCase):
             if mode == 'computer-use-process':
                 continue  # Explicit reviewed-identity producer, checked separately below.
             with self.subTest(mode=mode):
-                features = {'pairing-image': ['--features', 'pairing-image'],
+                features = {'native-file-cli': ['--no-default-features', '--features', 'gpui-restoration'],
+                            'pairing-image': ['--features', 'pairing-image'],
                             'bridge-invitation': ['--features', 'android'], 'bridge-network': ['--features', 'android']}.get(mode, [])
                 native = (['--profile','release','--target','aarch64-apple-darwin','-j','2']
                           if mode == 'desktop-identity' and runner.sys.platform == 'darwin' else [])

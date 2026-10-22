@@ -271,7 +271,7 @@ async fn send(
         .unwrap()
         .identified_snapshots()
         .into_iter()
-        .map(|(_, id, _)| id)
+        .filter_map(|(direction, id, _)| (direction == TransferDirection::Outgoing).then_some(id))
         .collect::<Vec<_>>();
     if digest(&record.path)? != (record.sha256.clone(), record.bytes) {
         return Err("Source changed before queuing".into());
