@@ -1,12 +1,13 @@
 # Weavelo relay instance map — 2026-10-22
 
-This is a bounded read-only observation, not a deployment or pairing receipt.
-No service, client, profile, identity, permission or network setting was changed.
-No invitation, group capability or secret-derived digest was exported.
+The original retained-service and client sections below are historical read-only
+observations. The independent NAS server delivery section records the subsequent
+authorized deployment. No client profile, device identity or group was changed;
+no invitation, group capability or secret-derived digest was exported.
 
-## Deployed relay
+## Retained relay — original observation
 
-The existing authorized `home-nas` route reports:
+Before the independent deployment, the authorized `home-nas` route reported:
 
 | Item | Actual observation |
 | --- | --- |
@@ -33,7 +34,43 @@ The NAS reads finished successfully with exit 0:
 `01a16372-cbea-7be1-a493-0440c36b223c` (retained unit/binary/listeners).
 They are independent read-only operations, not a replay of any prior transaction.
 
-## Client bindings
+## Independent NAS server — verified 2026-10-22 15:05:54 UTC
+
+The user approved the separate endpoint, service and new Desktop group at
+13:23 UTC. This delivery completes only the NAS server portion; no desktop
+client, retained profile, device identity or group was changed.
+
+| Item | Verified delivery |
+| --- | --- |
+| Source | Primary `main` commit `2e940229b612668cfd86f599d32a6a519bb620d8`, pushed and independently read back |
+| Build | Linux x86_64 static musl release, original producer exited 0; ELF has no dynamic interpreter |
+| Binary SHA-256 | `ada2d94e3e029edb1ec0379f5dd3d5cbbfc044882b67c1722dceda94f7c63a85` |
+| New service | `weavelo-relay.service`, enabled, active/running, PID 774 |
+| Executable | `/opt/weavelo-relay/weavelo-relay` → `/volume1/@entware-opt/weavelo-relay/weavelo-relay` |
+| Listener | Loopback `127.0.0.1:39493`; logging disabled and bounded connection/group/queue limits |
+| DNS | `weavelo.hackerlife.fun` CNAME → `www.hackerlife.fun`, DNS only |
+| Public endpoint | `wss://weavelo.hackerlife.fun:8443/v1/relay` |
+| Actual acceptance | Studio system DNS, normal TLS verification, WebSocket 101/Accept and masked Ping/Pong passed; unmatched `/download/` returns 404 |
+| Retained channel | PID 11384, unit and binary hashes unchanged; old public health remains 200; all preexisting Caddy configuration preserved |
+| Device acceptance | No group joined and no device screen/input/discovery/transfer acceptance performed |
+
+The existing shared Cargo cache and release-only lifecycle were retained.
+43 lifecycle fixtures and 26 relay transport tests passed; these are fresh
+suite results, not additional distinct device acceptance cases. The Linux
+binary is an unsigned server artifact, not a signed desktop package.
+
+Original build receipts are `dist/weavelo-relay-linux-x86_64.build.json`,
+`.rust-storage/validation-logs/relay-transport-_dx03dhx.jsonl` and
+`.rust-storage/validation-logs/nas-relay-linux-build-imt2mpya.jsonl`.
+Public transport evidence is
+`.rust-storage/validation-logs/weavelo-nas-relay-public-transport-current.json`.
+The NAS deployment journal is `/opt/weavelo-relay/deploy-state.json`.
+DNS credentials stayed on the NAS; no credential transfer, Origin Rule,
+WAF/BIC exception or HO5 DNS change was performed. The preexisting Caddyfile
+and live-config differences were preserved; no old file was replayed over
+the live configuration.
+
+## Client bindings — original observation
 
 | Device | Retained binding | Independent Desktop profile |
 | --- | --- | --- |
@@ -77,20 +114,19 @@ yet exist. No current server-side group registry was available to establish that
 group isolation is the only blocker. The wire marker and client keepalives alone
 do not constitute full compatibility or real device-to-device acceptance.
 
-## Concrete next scope requiring confirmation
+## Approved scope and remaining device acceptance
 
-The independent delivery can use the existing authorized NAS, without replacing
-its retained service:
+The user approved this concrete separate endpoint and new Desktop group at
+2026-10-22 13:23 UTC. Steps 1–2 are complete as recorded above. Device work in
+steps 3–5 remains with the original project owner; the retained service and
+profiles stay intact:
 
-1. Approve a dedicated Weavelo public hostname. The concrete proposal is
-   `weavelo.hackerlife.fun:8443`, path `/v1/relay`; it is not selected, provisioned
-   or known available by this observation. This is separate from Octendra's host.
-2. Install the verified new relay artifact as
-   `/opt/weavelo-relay/weavelo-relay`, unit `weavelo-relay.service`, using a
-   separate loopback port, proposed `127.0.0.1:39493` (recheck before apply).
-   Add only the approved hostname's DNS/TLS/reverse-proxy mapping. Preserve
-   `relay.hackerlife.fun`, port 39491 and the old unit unchanged. NAS receives
-   artifacts only; it does not build source.
+1. Completed: provision `weavelo.hackerlife.fun:8443`, path `/v1/relay`,
+   separately from Octendra's host, with its DNS/TLS/reverse-proxy mapping.
+2. Completed: install the verified artifact at
+   `/opt/weavelo-relay/weavelo-relay`, unit `weavelo-relay.service`, on
+   `127.0.0.1:39493`. The old `relay.hackerlife.fun`, port 39491 and unit were
+   preserved. NAS received the artifact only; it did not build source.
 3. Configure only the independent clients' new launchers/profiles with
    `WEAVELO_RELAY=1` and
    `WEAVELO_RELAY_SERVER_ADDR=wss://<approved-host>:8443/v1/relay`.
@@ -105,9 +141,9 @@ its retained service:
    the separately authorized temporary-window computer-use session. Connection
    101, namespace equality or synthetic relay traffic cannot replace this.
 
-Steps 1–4 introduce a new persistent endpoint/group and need confirmation of
-that concrete scope. Signing, native package and platform execution restrictions
-remain separate dependencies; this observation does not waive them. No new
-client was installed and no real device discovery, transfer or input success is
-claimed. Source `96eaad4` remains distinct from the older prepared macOS package
-(`f3708dd`) and the native Windows/Linux binaries (`dd66581`).
+The endpoint/group scope is already approved; do not ask for the same approval
+again. Signing, native package and platform execution restrictions remain separate
+dependencies and are not waived. This NAS delivery installed no client and claims
+no real device discovery, transfer or input success. Historical client source
+`96eaad4` and prepared packages (`f3708dd` macOS; `dd66581` Windows/Linux) above
+are distinct from this server artifact, built from `2e94022`.
