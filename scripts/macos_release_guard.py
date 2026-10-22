@@ -165,7 +165,10 @@ def archive_workspace(owned: Path | None):
     if owned is None:
         # Standalone read-only verification keeps its existing temporary lifetime.
         with tempfile.TemporaryDirectory(prefix='rp-release-check-') as directory:
-            yield Path(directory)
+            # Canonicalize our newly created OS temporary root before extraction
+            # (macOS /var is an alias of /private/var). Artifact/link checks below
+            # still reject links supplied by callers or archive entries.
+            yield Path(directory).resolve(strict=True)
         return
     owned = Path(owned)
     if (not owned.is_dir() or any(path.is_symlink() for path in [owned, *owned.parents]) or

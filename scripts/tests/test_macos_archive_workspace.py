@@ -1,5 +1,6 @@
 """Tiny archive fixtures only: no real product, authority, signing, or installation."""
 import os
+import contextlib
 from pathlib import Path
 import subprocess
 import sys
@@ -47,6 +48,22 @@ class ArchiveWorkspaceTests(unittest.TestCase):
                 self.assertTrue(report['signature_verified'])
             self.assertFalse(app.exists())
         self.assertTrue(self.archive.is_file())
+
+    def test_os_temporary_root_alias_does_not_reach_binary_identity_gate(self):
+        physical = self.root / 'os-created-temporary-root'
+        physical.mkdir()
+        alias = self.root / 'os-temporary-alias'
+        alias.symlink_to(physical, target_is_directory=True)
+        @contextlib.contextmanager
+        def os_temporary(**kwargs):
+            yield str(alias)
+        with patch.object(guard.tempfile, 'TemporaryDirectory', os_temporary), \
+                patch.object(guard, 'verify_app', return_value=dict(self.report)):
+            with guard.verified_archive(self.archive, self.policy) as (app, _):
+                binary = app / 'Contents/MacOS/weavelo'
+                self.assertEqual(app.parent, physical)
+                guard.identity_gate.regular(binary)
+                self.assertEqual(binary.read_bytes(), b'tiny fixture')
 
     def test_verification_failure_removes_only_its_new_child(self):
         sibling = self.aux / 'Weavelo.app'; sibling.mkdir()
