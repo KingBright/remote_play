@@ -94,6 +94,9 @@ def validation_command(cargo, target, mode):
         return [cargo, "run", *shared, "-p", "remote_core", "--example", "synthetic_pairing_qr"]
     if mode == "pairing-join":
         return [cargo, "test", *shared, "-p", "remote_core", "--features", "pairing-image", "--test", "pairing_join", "--", "--nocapture"]
+    if mode == "nas-relay-linux-build":
+        return [cargo, "zigbuild", *shared, "--release", "-p", "remote_core",
+                "--example", "tcp_relay_server", "--target", "x86_64-unknown-linux-musl", "-j", "2"]
     if mode == "lifecycle-linux-native-build":
         return [cargo, "build", *shared, "-p", "weavelo_app", "--bin", "weavelo",
                 "--target", LINUX_TARGET, "--no-default-features",
@@ -212,7 +215,7 @@ def validation_environment(mode):
 
 
 def requires_workspace_source_guard(mode):
-    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("pairing-fixture", "pairing-join", "lifecycle-linux-native-build") or mode.startswith("media-lifecycle") or
+    return (mode in SESSION_CLOCK_TESTS or mode in PLATFORM_CHECKS or mode in ("pairing-fixture", "pairing-join", "lifecycle-linux-native-build", "nas-relay-linux-build") or mode.startswith("media-lifecycle") or
             mode in ("service-contract", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status"))
 
 
@@ -457,7 +460,7 @@ def main():
     parser.add_argument("--lifecycle-authority", type=Path)
     parser.add_argument("--lifecycle-binding", type=Path)
     parser.add_argument("--lifecycle-helper", type=Path)
-    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "pairing-fixture", "pairing-join", "lifecycle-linux-native-build", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
+    parser.add_argument("--mode", choices=("stream-settings", "service-contract", "pairing-fixture", "pairing-join", "lifecycle-linux-native-build", "linux-x11-check", "media-lifecycle", "media-lifecycle-check", "media-lifecycle-boundaries", "media-acceptance-build", "session-confirmation", "host-control", "source-catalog", "input-loss-build", "input-loss-tests", "gui-input-status", "nas-relay-linux-build", *SESSION_CLOCK_TESTS, *PLATFORM_CHECKS),
                         default="stream-settings")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

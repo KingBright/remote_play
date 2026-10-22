@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let bind_addr = env_socket_addr(
         "WEAVELO_RELAY_BIND_ADDR",
-        SocketAddr::from(([127, 0, 0, 1], 39491)),
+        SocketAddr::from(([127, 0, 0, 1], 39493)),
     )?;
     let config = TcpRelayServerConfig::new(bind_addr)
         .with_event_logging(env_flag_or("WEAVELO_RELAY_LOG", false))

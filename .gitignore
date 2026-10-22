@@ -1,4 +1,6 @@
 /target/
+# Fixed independent NAS relay current output; shared compilation cache stays external.
+/dist/
 *.log
 /.agents/
 /android/app/src/main/jniLibs/
