@@ -320,6 +320,14 @@ impl TransferCenterState {
         self.child_progress.retain(|child| child.group_id.is_some_and(|id| self.entries.iter().any(|e| matches!(e.key, TransferKey::Group { direction, group_id } if direction == child.direction && group_id == id))));
     }
 
+    /// Stable identities remain available after completion for native request receipts.
+    pub fn identified_snapshots(&self) -> Vec<(TransferDirection, u64, TransferEntrySnapshot)> {
+        self.entries.iter().filter_map(|entry| match entry.key {
+            TransferKey::Transfer { direction, transfer_id } => Some((direction, transfer_id, entry.snapshot.clone())),
+            TransferKey::Group { .. } => None,
+        }).collect()
+    }
+
     pub fn snapshots(&self) -> Vec<TransferEntrySnapshot> {
         let mut entries = self.entries.clone();
         entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_seq));
@@ -550,6 +558,17 @@ mod tests {
     use super::*;
     use protocol::FileTransferGroup;
     use std::path::PathBuf;
+
+    #[test]
+    fn native_identity_is_retained_after_completion() {
+        let mut state=TransferCenterState::default();
+        state.apply_event(&FileTransferEvent::OutgoingStarted{transfer_id:19,file_object_id:20,group:None,name:"payload.bin".into(),size_bytes:4,total_chunks:1});
+        state.apply_event(&FileTransferEvent::OutgoingCompleted{transfer_id:19,file_object_id:20,group:None});
+        let entries=state.identified_snapshots();
+        assert_eq!(entries.len(),1);
+        assert_eq!((entries[0].0,entries[0].1),(TransferDirection::Outgoing,19));
+        assert_eq!(entries[0].2.status,TransferStatus::Completed);
+    }
 
     #[test]
     fn receiver_confirmed_delivery_completes_the_send() {

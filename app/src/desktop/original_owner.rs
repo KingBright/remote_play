@@ -1395,6 +1395,18 @@ impl OriginalOwner {
         }
     }
 
+    pub(crate) fn cli_file_connection(
+        &self, key: &str, scope: ShareScope,
+    ) -> Result<(Weak<WorkspaceConnection>, Arc<Mutex<client::TransferCenterState>>), Error> {
+        if scope != remote_core::shared_files::current_share_scope() {
+            return Err("Device network changed before sending files".into());
+        }
+        let p = self.pool.lock().unwrap();
+        let session = &p.sessions.iter().find(|e| e.session.key == key && e.session.connected
+            && e.session.conn.files_available).ok_or("Original file connection is unavailable")?.session;
+        Ok((Arc::downgrade(&session.conn), session.transfers.clone()))
+    }
+
     pub fn send_files_to(
         &self,
         target: &Weak<WorkspaceConnection>,

@@ -46,6 +46,8 @@ class ServiceContractEntryTests(unittest.TestCase):
         'relay-transport': ('remote_core', 'relay::tests'),
         'discovery-observation': ('remote_core', 'discovery::tests'),
         'desktop-network': ('weavelo_app', 'network_diagnostics::tests'),
+        'native-file-cli': ('weavelo_app', 'desktop::file_cli::tests'),
+        'native-file-identities': ('client', 'transfer_center::tests'),
         'computer-use': ('weavelo_app', 'computer_use'),
         'computer-use-process': ('weavelo_app', 'computer_use_process_'),
         'computer-use-input': ('weavelo_app', 'desktop::model::static_input_tests'),

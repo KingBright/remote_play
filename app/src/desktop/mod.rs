@@ -15,6 +15,8 @@ pub(crate) mod local_share;
 pub(crate) mod instance;
 #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
 pub(crate) mod directed_receive;
+#[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
+pub(crate) mod file_cli;
 #[cfg(feature = "gpui-restoration")]
 pub(crate) mod directed_send;
 pub(crate) mod model;

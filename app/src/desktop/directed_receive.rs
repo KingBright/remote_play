@@ -25,6 +25,12 @@ mod computer_use_transport_tests;
 pub(crate) enum Request {
     Status,
     NetworkDiagnostics,
+    File {
+        generation: String,
+        request_id: String,
+        deadline_ms: u64,
+        action: super::file_cli::Action,
+    },
     ComputerUse {
         generation: String,
         request_id: String,
@@ -204,6 +210,8 @@ impl Adapter {
         let now_ms=projected.map_or(now_ms,|value|now_ms.max(value));
         match request {
             Request::Status | Request::NetworkDiagnostics => Ok(()),
+            Request::File {generation,request_id,deadline_ms,..} =>
+                valid_request(&self.generation,generation,request_id,*deadline_ms,now_ms),
             Request::ComputerUse {generation,request_id,deadline_ms,call} => {
                 valid_request(&self.generation,generation,request_id,*deadline_ms,now_ms)?;
                 if !call.valid() {return Err("Invalid computer-use request");}

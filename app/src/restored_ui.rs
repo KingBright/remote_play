@@ -651,6 +651,18 @@ impl RestoredDashboard {
                 let _ = command.reply.send(serde_json::json!({"ok":false,"error":error}).into()); continue;
             }
             let generation = adapter.generation.clone();
+            if let Request::File {generation,request_id,action,..}=command.request {
+                let profile=self._instance.as_ref().and_then(|i|i.state_directory().parent()).map(|p|p.to_path_buf());
+                let owner=self.owner.clone();
+                tokio::task::spawn_blocking(move || {
+                    if command.reply.is_closed() {return;}
+                    let result=profile.ok_or_else(||"Original GUI profile is unavailable".to_string())
+                        .and_then(|profile|crate::desktop::file_cli::dispatch(owner,&profile,&generation,&request_id,action).map_err(|e|e.to_string()));
+                    let body=result.unwrap_or_else(|error|serde_json::json!({"ok":false,"error":error}));
+                    let _=command.reply.send(body.into());
+                });
+                continue;
+            }
             if let Request::ComputerUse {call,..}=command.request {
                 let dispatcher=adapter.computer_use.clone();
                 let owner=self.owner.clone();
@@ -664,7 +676,7 @@ impl RestoredDashboard {
             }
             let mut newly_accepted = false;
             let response = match command.request {
-                Request::ComputerUse {..} => unreachable!(),
+                Request::ComputerUse {..} | Request::File {..} => unreachable!(),
                 Request::NetworkDiagnostics => serde_json::json!({
                     "ok":true, "generation":generation, "pid":std::process::id(),
                     "executable_sha256":adapter.executable_sha256,

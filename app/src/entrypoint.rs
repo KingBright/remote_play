@@ -80,6 +80,19 @@ fn handle_maintenance_command() -> Result<bool, Box<dyn Error + Send + Sync>> {
         return Ok(false);
     };
 
+    if command.starts_with("--file-") {
+        #[cfg(all(any(unix, windows), feature = "gpui-restoration"))]
+        {
+            let config = weavelo_app::UnifiedRuntimeConfig::from_env()?;
+            let arguments = std::iter::once(command).chain(args).collect::<Vec<_>>();
+            let result = crate::desktop::file_cli::command(&config.mesh_dir, &arguments)?;
+            println!("{}", serde_json::to_string(&result)?);
+            return Ok(true);
+        }
+        #[cfg(not(all(any(unix, windows), feature = "gpui-restoration")))]
+        return Err("Native original-GUI file control is unavailable on this platform".into());
+    }
+
     if command.starts_with("--pairing-") {
         #[cfg(any(unix, windows))]
         {
