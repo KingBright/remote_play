@@ -153,9 +153,22 @@ fn save(path: &Path, record: &Record) -> Result<(), Error> {
     fs::File::open(path.parent().ok_or("Missing receipt directory")?)?.sync_all()?;
     Ok(())
 }
-fn directory(profile: &Path) -> Result<PathBuf, Error> {
-    let dir = crate::private_ipc::gui_directory(profile)?.join("file-requests");
-    crate::background_service::private_directory(&dir)?;
+fn directory(gui_directory: &Path) -> Result<PathBuf, Error> {
+    crate::private_ipc::private_directory(gui_directory)?;
+    let dir = gui_directory.join("file-requests");
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Existing paths are validated, never chmodded or followed through a link.
+    crate::private_ipc::private_directory(&dir)?;
     Ok(dir)
 }
 fn response(record: &Record) -> Result<serde_json::Value, Error> {
@@ -331,7 +344,7 @@ async fn send(
     }
 }
 pub(crate) fn command(profile: &Path, args: &[String]) -> Result<serde_json::Value, Error> {
-    use super::directed_receive::{Request, exchange};
+    use super::directed_receive::{exchange, Request};
     let directory = crate::private_ipc::gui_directory(profile)?;
     let status = exchange(&directory, &Request::Status)?;
     if status["executable_sha256"] != crate::background_service::executable_hash()? {
@@ -428,6 +441,26 @@ mod tests {
             assert!(digest(&link).is_err());
         }
     }
+    #[test]
+    fn receipt_directory_initializes_once_and_rejects_an_existing_link() {
+        let fixture = tempfile::tempdir().unwrap();
+        let gui = fs::canonicalize(fixture.path()).unwrap();
+        let selected = directory(&gui).unwrap();
+        assert_eq!(directory(&gui).unwrap(), selected);
+        crate::private_ipc::private_directory(&selected).unwrap();
+        fs::remove_dir(&selected).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&gui, &selected).unwrap();
+            assert!(directory(&gui).is_err());
+            assert!(selected
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+
     #[test]
     fn incomplete_reservation_is_not_silently_replaced() {
         let d = tempfile::tempdir().unwrap();

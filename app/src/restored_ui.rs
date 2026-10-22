@@ -652,7 +652,7 @@ impl RestoredDashboard {
             }
             let generation = adapter.generation.clone();
             if let Request::File {generation,request_id,action,..}=command.request {
-                let profile=self._instance.as_ref().and_then(|i|i.state_directory().parent()).map(|p|p.to_path_buf());
+                let profile=self._instance.as_ref().map(|i|i.state_directory().to_path_buf());
                 let owner=self.owner.clone();
                 tokio::task::spawn_blocking(move || {
                     if command.reply.is_closed() {return;}
