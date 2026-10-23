@@ -255,20 +255,51 @@ fn response(record: &Record) -> Result<serde_json::Value, Error> {
 }
 pub(crate) fn dispatch(
     owner: Arc<OriginalOwner>,
-    profile: &Path,
+    control_directory: &Path,
     generation: &str,
     id: &str,
     action: Action,
 ) -> Result<serde_json::Value, Error> {
+    let configuration = crate::UnifiedRuntimeConfig::from_env()?;
+    dispatch_scoped(
+        owner,
+        control_directory,
+        &configuration,
+        generation,
+        id,
+        action,
+    )
+}
+fn settings_profile<'a>(
+    control_directory: &Path,
+    configured_profile: &'a Path,
+) -> Result<&'a Path, Error> {
+    if control_directory != configured_profile
+        && control_directory != configured_profile.join("gui-state")
+    {
+        return Err("GUI control directory differs from the configured instance profile".into());
+    }
+    crate::private_ipc::private_directory(configured_profile)?;
+    crate::private_ipc::private_directory(control_directory)?;
+    Ok(configured_profile)
+}
+fn dispatch_scoped(
+    owner: Arc<OriginalOwner>,
+    control_directory: &Path,
+    configuration: &crate::UnifiedRuntimeConfig,
+    generation: &str,
+    id: &str,
+    action: Action,
+) -> Result<serde_json::Value, Error> {
+    let profile = settings_profile(control_directory, &configuration.mesh_dir)?;
     if !valid_id(id) {
         return Err("Invalid file request ID".into());
     }
     if matches!(&action, Action::Peers) {
-        let configuration = crate::UnifiedRuntimeConfig::from_env()?;
         let (version, enabled) =
             crate::preferences::UserPreferences::file_transfer_setting(profile)?;
         return Ok(serde_json::json!({"ok":true,"generation":generation,
-            "preferences_sha256":version,"stored_file_transfer_enabled":enabled,"group_scope":group_scope(),
+            "preferences_path":profile.join("preferences.json"),"preferences_sha256":version,"stored_file_transfer_enabled":enabled,"group_scope":group_scope(),
             "file_transfer_preference_enabled":owner.native_file_transfer_enabled(&configuration),
             "paired_file_scope_present":remote_core::session_crypto::paired_file_session_key().is_some(),
             "devices":owner.snapshot().devices.iter().map(|d|serde_json::json!({"device_id":d.device_id,"display_name":d.display_name,"online":d.online})).collect::<Vec<_>>(),
@@ -300,7 +331,7 @@ pub(crate) fn dispatch(
             "file_transfer_enabled":actual,"group_scope":group_scope(),
             "restart_new_instance_to_apply_host_setting":true}));
     }
-    let path = directory(profile)?.join(format!("{id}.json"));
+    let path = directory(control_directory)?.join(format!("{id}.json"));
     let _request_lock = remote_core::desktop_storage::lock_file(&path.with_extension("lock"))?;
     match action {
         Action::Status | Action::Resume => {
@@ -661,6 +692,84 @@ mod tests {
             .is_ok()
         );
     }
+    #[tokio::test]
+    async fn gui_control_directory_keeps_settings_in_profile_and_preserves_original_receipts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(fixture.path()).unwrap().join("Weavelo");
+        remote_core::desktop_storage::prepare_profile(&base).unwrap();
+        let legacy = base.join("preferences.json");
+        fs::write(
+            &legacy,
+            br#"{"side_services":{"file_transfer":false},"user_note":{"keep":true}}"#,
+        )
+        .unwrap();
+        let legacy_bytes = fs::read(&legacy).unwrap();
+        let profile = base.join("Desktop");
+        remote_core::desktop_storage::prepare_profile(&profile).unwrap();
+        let control = profile.join("gui-state");
+        remote_core::desktop_storage::prepare_profile(&control).unwrap();
+        let mut configuration = crate::UnifiedRuntimeConfig::app_defaults();
+        configuration.mesh_dir = profile.clone();
+        let (_tx, rx) = tokio::sync::watch::channel(Default::default());
+        let backend = Arc::new(
+            crate::UnifiedServiceOwner::from_background_snapshot(rx)
+                .await
+                .unwrap(),
+        );
+        let owner = OriginalOwner::new(backend);
+        let peers = dispatch_scoped(
+            owner.clone(),
+            &control,
+            &configuration,
+            "gui-1",
+            "query-1",
+            Action::Peers,
+        )
+        .unwrap();
+        assert_eq!(peers["stored_file_transfer_enabled"], false);
+        assert_eq!(
+            peers["preferences_path"],
+            serde_json::json!(profile.join("preferences.json"))
+        );
+        assert!(
+            !control.join("preferences.json").exists(),
+            "IPC state is not a preferences profile"
+        );
+        let scoped = settings_profile(&control, &configuration.mesh_dir).unwrap();
+        let version = peers["preferences_sha256"].as_str().unwrap();
+        crate::preferences::UserPreferences::set_file_transfer(scoped, version, true).unwrap();
+        assert!(
+            crate::preferences::UserPreferences::load_from_path(&profile.join("preferences.json"))
+                .unwrap()
+                .side_services
+                .file_transfer
+        );
+        assert_eq!(fs::read(&legacy).unwrap(), legacy_bytes);
+        let receipt_path = directory(&control).unwrap().join("send-1.json");
+        let receipt = sample(base.join("payload"));
+        assert!(reserve(&receipt_path, &receipt).unwrap());
+        let status = dispatch_scoped(
+            owner,
+            &control,
+            &configuration,
+            "gui-1",
+            "send-1",
+            Action::Status,
+        )
+        .unwrap();
+        assert_eq!(status["file_request"]["request_id"], "send-1");
+        assert_eq!(read(&receipt_path).unwrap(), receipt);
+        assert!(
+            !profile.join("file-requests").exists(),
+            "Original receipt location must remain unchanged"
+        );
+        assert!(
+            settings_profile(&profile, &profile).is_ok(),
+            "Standalone GUI uses the same settings root"
+        );
+        assert!(settings_profile(&base, &profile).is_err());
+    }
+
     #[test]
     fn incomplete_reservation_is_not_silently_replaced() {
         let d = tempfile::tempdir().unwrap();
