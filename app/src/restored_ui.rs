@@ -2188,6 +2188,7 @@ impl Render for RestoredDashboard {
                     &snapshot.devices,
                     &role,
                     self.mesh_pairing_snapshot.clone(),
+                    &self.device_name_editor,
                     self.pairing_image_import.is_pending(),
                     self.active_tab,
                     &self.device_list_state,
@@ -3169,6 +3170,7 @@ fn slide_over_management_drawer(
     devices: &[AppDevice],
     role: &RoleState,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    device_name_editor: &remote_core::device_name::NameEditor,
     pairing_image_pending: bool,
     active_tab: DrawerTab,
     device_list_state: &DeviceListState,
@@ -3294,6 +3296,7 @@ fn slide_over_management_drawer(
                     DrawerTab::Devices => drawer_devices_tab(
                         devices,
                         role,
+                        mesh_pairing_snapshot.as_ref().map(|snapshot| snapshot.display_name.clone()),
                         device_list_state,
                         #[cfg(any(unix, windows))] receive_label,
                         #[cfg(any(unix, windows))] send_label,
@@ -3304,7 +3307,7 @@ fn slide_over_management_drawer(
                     )
                     .into_any_element(),
                     DrawerTab::DeviceGroup => {
-                        drawer_device_group_tab(mesh_pairing_snapshot, pairing_image_pending, cx).into_any_element()
+                        drawer_device_group_tab(mesh_pairing_snapshot, pairing_image_pending, device_name_editor, cx).into_any_element()
                     }
                     DrawerTab::Files => file_transfer_panel(owner.clone(), cx).into_any_element(),
                     DrawerTab::Security => {
@@ -3356,7 +3359,7 @@ fn drawer_tab_button(
 }
 
 fn drawer_devices_tab(
-    devices: &[AppDevice], role: &RoleState, state: &DeviceListState,
+    devices: &[AppDevice], role: &RoleState, local_name: Option<String>, state: &DeviceListState,
     #[cfg(any(unix, windows))] receive_label: Option<String>,
     #[cfg(any(unix, windows))] send_label: Option<String>,
     #[cfg(target_os = "linux")] local_share_state: &crate::desktop::local_share::State,
@@ -3366,9 +3369,6 @@ fn drawer_devices_tab(
     let view = cx.weak_entity();
     let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
-    let entity = cx.entity();
-    let local_name = entity.read(cx).mesh_pairing_snapshot.as_ref()
-        .map(|snapshot| snapshot.display_name.clone());
     let content = div().flex().flex_col().gap_3().when_some(local_name, |content, name| {
         content.child(div().flex().items_center().justify_between().gap_2()
             .child(div().min_w_0().flex_1().truncate().text_size(px(11.0))
@@ -3674,12 +3674,13 @@ impl RestoredDashboard {
 fn drawer_device_group_tab(
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
     pairing_image_pending: bool,
+    device_name_editor: &remote_core::device_name::NameEditor,
     cx: &mut Context<RestoredDashboard>,
 ) -> Div {
     let mut content = div().flex().flex_col().gap_3();
 
     if let Some(snapshot) = mesh_pairing_snapshot {
-        content = content.child(device_name_controls(cx))
+        content = content.child(device_name_controls(device_name_editor.clone(), cx))
             .child(mesh_pairing_card(snapshot, pairing_image_pending, cx));
     }
 
@@ -4693,9 +4694,7 @@ fn telemetry_hud_metrics_list(host_stats: Option<&UiHostStats>, theme: &Theme) -
     }
 }
 
-fn device_name_controls(cx: &mut Context<RestoredDashboard>) -> Div {
-    let entity = cx.entity();
-    let editor = entity.read(cx).device_name_editor.clone();
+fn device_name_controls(editor: remote_core::device_name::NameEditor, cx: &mut Context<RestoredDashboard>) -> Div {
     let theme = cx.theme().clone();
     let edit_view = cx.weak_entity();
     let submit_view = cx.weak_entity();
@@ -4741,7 +4740,7 @@ fn mesh_pairing_card(snapshot: MeshPairingSnapshot, image_pending: bool, cx: &mu
     let message_color = status_color(message_tone, cx);
     let restart_text = snapshot
         .restart_required
-        .then_some("Restart Weavelo to activate this group.");
+        .then_some("Restart Weavelo to apply these changes.");
     let copy_view = cx.weak_entity();
     let join_view = cx.weak_entity();
     let create_view = cx.weak_entity();
