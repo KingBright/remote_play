@@ -41,6 +41,9 @@ class ServiceContractEntryTests(unittest.TestCase):
         'clock-display': ('weavelo_app', 'telemetry_display::tests'),
         'clock-renderer': ('client', 'render_timing::tests'),
         'mesh-profile': ('remote_core', 'mesh::tests'),
+        'device-name': ('remote_core', 'device_name::tests'),
+        'device-name-pairing': ('client', 'mesh_pairing::tests'),
+        'device-name-runtime': ('weavelo_app', 'runtime_reload_rebuilds_discovery_from_saved_device_group'),
         'desktop-identity': ('remote_core', 'desktop_identity::tests'),
         'relay-bootstrap': ('remote_core', 'relay::tests::websocket_tls_bootstraps_without_ambient_provider'),
         'relay-transport': ('remote_core', 'relay::tests'),
@@ -410,12 +413,19 @@ class ServiceContractEntryTests(unittest.TestCase):
         for mode, elapsed, expected, deadline in (
             ('platform-macos-check', 1801, 0, 7200),
             ('platform-macos-check', 7201, 124, 7200),
+            ('device-name-pairing', 1801, 0, 7200),
+            ('device-name-pairing', 7201, 124, 7200),
+            ('device-name-runtime', 1801, 0, 7200),
+            ('device-name-runtime', 7201, 124, 7200),
+            ('device-name', 1801, 124, 1800),
             ('clock-host-auth', 1801, 124, 1800),
         ):
             with self.subTest(mode=mode, elapsed=elapsed):
                 code, receipt = self.run_fake_validation(
                     mode=mode, elapsed=elapsed, expected_build_timeout=deadline,
-                    output=b'Checking native dependencies\n')
+                    output=(b'running 1 test\ntest fixture ... ok\n'
+                            if mode in ('device-name-pairing', 'device-name-runtime', 'device-name')
+                            else b'Checking native dependencies\n'))
                 self.assertEqual(code, expected)
                 self.assertEqual(receipt['reason'], 'completed' if expected == 0 else 'build_deadline')
                 self.assertTrue(receipt['owned_group_absent'])

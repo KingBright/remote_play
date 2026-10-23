@@ -3281,6 +3281,25 @@ mod tests {
         assert_eq!(discovery.announcement.display_name, "Reload Device");
         assert_eq!(discovery.announcement.control_port, 8123);
 
+        drop(guard);
+        for name in ["梁的 Studio".to_string(), remote_core::device_name::host_name()] {
+            let before = pairing.snapshot();
+            let renamed = pairing.rename_device(&before.display_name, &name);
+            assert_eq!(renamed.message_kind, MeshPairingMessageKind::Success);
+            assert_eq!(renamed.device_id, before.device_id);
+            assert_eq!(renamed.invite_code, before.invite_code);
+            reload_unified_runtime_components(
+                Arc::new(Mutex::new(UnifiedAppRuntime::default())),
+                None, None, Some(discovery_state.clone()),
+                Arc::new(network_diagnostics::NetworkDiagnostics::default()), &config,
+            ).await.unwrap();
+            let current = discovery_state.runtime.lock().unwrap();
+            let announcement = &current.as_ref().unwrap().announcement;
+            assert_eq!(announcement.display_name, name);
+            assert_eq!(announcement.device_id, before.device_id);
+            assert_eq!(announcement.network_name, before.network_name);
+        }
+
         let _ = std::fs::remove_dir_all(mesh_dir);
     }
 

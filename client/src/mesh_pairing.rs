@@ -289,6 +289,18 @@ mod tests {
         let remote = MeshConfig::generate("cube");
         assert_eq!(reloaded.join_from_invite_code(&remote.invite_code()).display_name, "Studio");
         assert_eq!(reloaded.create_new_group().display_name, "Studio");
+        let (reset_tx, mut reset_rx) = mpsc::unbounded_channel();
+        let reset_control = MeshPairingControl::load_or_create(&root, "Ignored fallback").unwrap()
+            .with_mesh_reload_tx(reset_tx);
+        let before_default = reset_control.snapshot();
+        let host = remote_core::device_name::host_name();
+        let restored = reset_control.rename_device(&before_default.display_name, &host);
+        assert_eq!(restored.message_kind, MeshPairingMessageKind::Success);
+        assert_eq!(restored.device_id, before_default.device_id);
+        assert_eq!(restored.invite_code, before_default.invite_code);
+        reset_rx.try_recv().unwrap();
+        assert_eq!(MeshPairingControl::load_or_create(&root, "Ignored fallback").unwrap()
+            .snapshot().display_name, host);
         let _ = fs::remove_dir_all(root);
     }
 

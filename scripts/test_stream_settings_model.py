@@ -17,8 +17,9 @@ import time
 RESERVE = 4 * 1024**3
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
 BUILD_TIMEOUT_SECONDS = 1800
-# Native GPUI dependencies can exceed the ordinary focused-test build window.
-# Keep this fixed and bounded; other modes and test execution retain their limits.
+# Native GPUI dependencies, including the client's pairing tests and runtime
+# reload tests, can exceed the ordinary focused-test build window. Keep this
+# fixed and bounded; other modes and test execution retain their limits.
 MACOS_CHECK_BUILD_TIMEOUT_SECONDS = 7200
 TEST_TIMEOUT_SECONDS = 120
 OBSERVATION_TIMEOUT_SECONDS = 60
@@ -46,6 +47,9 @@ SESSION_CLOCK_TESTS = {
     "clock-display": ("weavelo_app", "telemetry_display::tests"),
     "clock-renderer": ("client", "render_timing::tests"),
     "mesh-profile": ("remote_core", "mesh::tests"),
+    "device-name": ("remote_core", "device_name::tests"),
+    "device-name-pairing": ("client", "mesh_pairing::tests"),
+    "device-name-runtime": ("weavelo_app", "runtime_reload_rebuilds_discovery_from_saved_device_group"),
     "desktop-identity": ("remote_core", "desktop_identity::tests"),
     "relay-bootstrap": ("remote_core", "relay::tests::websocket_tls_bootstraps_without_ambient_provider"),
     "relay-transport": ("remote_core", "relay::tests"),
@@ -347,7 +351,8 @@ def private_validation_log(root, mode):
 
 def execute_guarded_command(command, root, target, env, observation, sources, hashes, mode):
     build_timeout = (MACOS_CHECK_BUILD_TIMEOUT_SECONDS
-                     if mode in ("platform-macos-check", "computer-use-process") else BUILD_TIMEOUT_SECONDS)
+                     if mode in ("platform-macos-check", "computer-use-process",
+                                 "device-name-pairing", "device-name-runtime") else BUILD_TIMEOUT_SECONDS)
     with private_validation_log(root, mode) as (log_path, log, receipt_path, receipt):
         print(f"Live private log: {log_path}", flush=True)
         print(f"Validation receipt: {receipt_path}", flush=True)

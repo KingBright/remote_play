@@ -364,6 +364,7 @@ struct RestoredDashboard {
     viewer_media_status: UnifiedViewerMediaStatus,
     mesh_pairing: Option<MeshPairingControl>,
     mesh_pairing_snapshot: Option<MeshPairingSnapshot>,
+    device_name_editor: remote_core::device_name::NameEditor,
     pairing_image_import: remote_core::pairing_image::PairingImageImport,
     pointer_input: PointerInputTracker,
     input_focus: FocusHandle,
@@ -426,6 +427,8 @@ impl RestoredDashboard {
         exit_group.owners.lock().unwrap().push(Arc::downgrade(&owner));
         let mesh_pairing = runtime.mesh_pairing.clone();
         let mesh_pairing_snapshot = mesh_pairing.as_ref().map(MeshPairingControl::snapshot);
+        let device_name_editor = remote_core::device_name::NameEditor::new(
+            mesh_pairing_snapshot.as_ref().map(|snapshot| snapshot.display_name.clone()).unwrap_or_default());
         let prefs = crate::preferences::UserPreferences::load_or_default();
         let viewer_media_status = runtime.viewer_media_status.clone();
         let scale_mode = if prefs.ui.scale_mode == "fill" {
@@ -471,6 +474,7 @@ impl RestoredDashboard {
             viewer_media_status,
             mesh_pairing,
             mesh_pairing_snapshot,
+            device_name_editor,
             pairing_image_import: Default::default(),
             pointer_input: PointerInputTracker::default(),
             input_focus: cx.focus_handle(),
@@ -744,6 +748,42 @@ impl RestoredDashboard {
             return Duration::from_millis(150);
         }
         Duration::from_millis(100)
+    }
+
+    fn save_device_name(&mut self, use_default: bool, cx: &mut Context<Self>) {
+        #[cfg(any(unix, windows))]
+        if self.directed_send.as_ref().is_some_and(|send| !send.is_finished()) {
+            self.pairing_image_status("Finish the file transfer before changing this device name.",
+                MeshPairingMessageKind::Warning);
+            cx.notify();
+            return;
+        }
+        if !self.owner.can_change_network() {
+            self.pairing_image_status("Disconnect current sessions before changing this device name.",
+                MeshPairingMessageKind::Warning);
+            cx.notify();
+            return;
+        }
+        if use_default {
+            self.device_name_editor.use_default(&remote_core::device_name::host_name());
+        }
+        let Some(name) = self.device_name_editor.pending_name() else { cx.notify(); return; };
+        let Some(control) = &self.mesh_pairing else { return; };
+        let snapshot = control.rename_device(self.device_name_editor.expected(), &name);
+        if snapshot.message_kind == MeshPairingMessageKind::Success {
+            self.device_name_editor.accept(snapshot.display_name.clone());
+        }
+        self.mesh_pairing_snapshot = Some(snapshot);
+        cx.notify();
+    }
+
+    fn cancel_device_name_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(control) = &self.mesh_pairing {
+            let snapshot = control.snapshot();
+            self.device_name_editor.accept(snapshot.display_name.clone());
+            self.mesh_pairing_snapshot = Some(snapshot);
+        }
+        cx.notify();
     }
 
     fn copy_mesh_invite_code(&mut self, cx: &mut Context<Self>) {
@@ -3326,7 +3366,21 @@ fn drawer_devices_tab(
     let view = cx.weak_entity();
     let recovery_view = view.clone();
     let model = crate::desktop::device_list::DeviceListModel { devices, role };
-    let content = div().flex().flex_col().gap_3();
+    let entity = cx.entity();
+    let local_name = entity.read(cx).mesh_pairing_snapshot.as_ref()
+        .map(|snapshot| snapshot.display_name.clone());
+    let content = div().flex().flex_col().gap_3().when_some(local_name, |content, name| {
+        content.child(div().flex().items_center().justify_between().gap_2()
+            .child(div().min_w_0().flex_1().truncate().text_size(px(11.0))
+                .child(format!("This device: {name}")))
+            .child(command_button("edit-this-device-name", ActionVariantKind::Neutral, cx)
+                .h(px(26.0)).px_2().text_size(px(10.0)).child("Edit name")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.cancel_device_name_edit(cx);
+                    this.active_tab = DrawerTab::DeviceGroup;
+                    cx.notify();
+                }))))
+    });
     #[cfg(any(unix, windows))]
     let content = if let Some(label) = receive_label {
         let stop = cx.weak_entity();
@@ -3625,7 +3679,8 @@ fn drawer_device_group_tab(
     let mut content = div().flex().flex_col().gap_3();
 
     if let Some(snapshot) = mesh_pairing_snapshot {
-        content = content.child(mesh_pairing_card(snapshot, pairing_image_pending, cx));
+        content = content.child(device_name_controls(cx))
+            .child(mesh_pairing_card(snapshot, pairing_image_pending, cx));
     }
 
     content
@@ -4636,6 +4691,48 @@ fn telemetry_hud_metrics_list(host_stats: Option<&UiHostStats>, theme: &Theme) -
             .text_color(theme.content.tertiary)
             .child("Waiting for telemetry...")
     }
+}
+
+fn device_name_controls(cx: &mut Context<RestoredDashboard>) -> Div {
+    let entity = cx.entity();
+    let editor = entity.read(cx).device_name_editor.clone();
+    let theme = cx.theme().clone();
+    let edit_view = cx.weak_entity();
+    let submit_view = cx.weak_entity();
+    div().flex().flex_col().gap_2()
+        .child(div().text_size(px(11.0)).font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.content.primary).child("This device name"))
+        .child(component::text_input("this-device-name")
+            .content(editor.draft().to_owned()).placeholder("Device name")
+            .max_length(128).height(px(32.0).into())
+            .on_change(move |text, _, cx| {
+                let _ = edit_view.update(cx, |this, cx| {
+                    this.device_name_editor.edit(text.to_string());
+                    cx.notify();
+                });
+            })
+            .on_submit(move |text, _, cx| {
+                let _ = submit_view.update(cx, |this, cx| {
+                    this.device_name_editor.edit(text.to_string());
+                    this.save_device_name(false, cx);
+                });
+            }))
+        .when_some(editor.validation_error(), |this, error| {
+            this.child(div().text_size(px(10.0)).text_color(color_accent_amber()).child(error))
+        })
+        .child(div().flex().gap_2()
+            .child(command_button("save-device-name", ActionVariantKind::Primary, cx)
+                .h(px(28.0)).px_2().text_size(px(10.0))
+                .disabled(editor.pending_name().is_none()).child("Save name")
+                .on_click(cx.listener(|this, _, _, cx| this.save_device_name(false, cx))))
+            .child(command_button("default-device-name", ActionVariantKind::Neutral, cx)
+                .h(px(28.0)).px_2().text_size(px(10.0)).child("Use host name")
+                .on_click(cx.listener(|this, _, _, cx| this.save_device_name(true, cx))))
+            .child(command_button("cancel-device-name", ActionVariantKind::Neutral, cx)
+                .h(px(28.0)).px_2().text_size(px(10.0)).child("Cancel")
+                .on_click(cx.listener(|this, _, _, cx| this.cancel_device_name_edit(cx)))))
+        .child(div().text_size(px(10.0)).text_color(theme.content.tertiary)
+            .child("Visible to your paired devices. Use host name restores this computer’s current device name."))
 }
 
 fn mesh_pairing_card(snapshot: MeshPairingSnapshot, image_pending: bool, cx: &mut Context<RestoredDashboard>) -> Div {
