@@ -560,7 +560,11 @@ def collect_release_references(root, paths, controls=(), protocol=()):
     for pid, identity in after.items():
         if pid in controls:
             continue
-        if not commands.get(pid) or before.get(pid) != identity:
+        previous = before.get(pid, {})
+        # comm is a mutable display label (for example Linux kworker names).
+        # It is not the process identity that binds this argument snapshot.
+        if not commands.get(pid) or any(previous.get(k) != identity[k]
+                for k in ("pid", "parent", "uid", "start")):
             reasons.add("process-command-identity-unconfirmed")
             continue
         if any(path in commands[pid] for path, _ in watched):

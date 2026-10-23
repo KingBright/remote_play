@@ -87,6 +87,22 @@ class ScopedLinuxReleaseTests(unittest.TestCase):
                 activity.vendor_unit_link(link, target, SimpleNamespace(st_uid=1000))
             query.assert_not_called()
 
+    def test_mutable_comm_label_is_not_process_identity(self):
+        before = self.process.replace("sleep", "kworker/0:2-events")
+        after = before.replace("-events", "-mm_percpu_wq")
+        report, _ = self.collect([before, "10 [kworker/0:2-events]\n", after])
+        self.assertEqual(report["state"], "idle")
+
+    def test_process_start_owner_and_parent_changes_still_refuse(self):
+        for after in (
+            self.process.replace("12:00:00", "12:00:01"),
+            self.process.replace("10 1 1000", "10 1 0"),
+            self.process.replace("10 1 1000", "10 2 1000"),
+        ):
+            with self.subTest(after=after):
+                report, _ = self.collect([self.process, self.commands, after])
+                self.assertEqual(report["state"], "unknown")
+
     def test_absent_paths_need_no_global_descriptor_or_map_query(self):
         report, query = self.collect([self.process, self.commands, self.process])
         self.assertEqual(report["state"], "idle")
