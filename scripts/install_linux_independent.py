@@ -119,11 +119,23 @@ def launcher(home):
             + 'exec '+shlex.quote(str(p['app']/'weavelo'))+' "$@"\n').encode()
 
 
+def service_for_home(home, template):
+    # systemd %h may use a lexical alias of the canonical installer home.
+    # The private API compares the configured profile exactly; match the launcher.
+    value = 'WEAVELO_DEVICE_GROUP_DIR=' + str(paths(home)['profile'])
+    require(not any(c in value for c in ('\n', '\r', '\0')), 'Invalid service profile')
+    escaped = value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%')
+    text = template.decode('utf-8')
+    original = 'Environment=WEAVELO_DEVICE_GROUP_DIR=%h/.config/weavelo/desktop'
+    require(text.splitlines().count(original) == 1, 'Unexpected service profile template')
+    return text.replace(original, 'Environment="' + escaped + '"', 1).encode()
+
+
 def payloads(home, archive):
     p = paths(home)
     with zipfile.ZipFile(archive) as source:
         icon = source.read('Weavelo/assets/icon.svg')
-        service = source.read('Weavelo/deploy/linux/weavelo-desktop.service')
+        service = service_for_home(home, source.read('Weavelo/deploy/linux/weavelo-desktop.service'))
     entry = ('[Desktop Entry]\nType=Application\nName=Weavelo\nExec="'+str(p['launcher'])+'"\n'
         'Icon=fun.hackerlife.weavelo.desktop\nStartupWMClass=fun.hackerlife.weavelo.desktop\n'
         'Terminal=false\nCategories=Network;RemoteAccess;\n').encode()

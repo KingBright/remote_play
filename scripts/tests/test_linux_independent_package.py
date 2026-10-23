@@ -132,6 +132,23 @@ class IndependentLinuxTests(unittest.TestCase):
         self.assertIn(b'WEAVELO_RELAY=0',selected['service'].read_bytes())
         with self.assertRaisesRegex(ValueError,'collision'):install.apply(reviewed,install.plan_sha(reviewed))
 
+    def test_installed_service_and_launcher_share_the_canonical_profile(self):
+        rendered=install.payloads(self.home,self.zip)['service'][0].decode()
+        expected='Environment="WEAVELO_DEVICE_GROUP_DIR='+str(install.paths(self.home)['profile'])+'"'
+        self.assertIn(expected,rendered.splitlines())
+        self.assertNotIn('Environment=WEAVELO_DEVICE_GROUP_DIR=%h/.config/weavelo/desktop',rendered)
+        self.assertIn(str(install.paths(self.home)['profile']),install.launcher(self.home).decode())
+        self.plan()  # Rendering never rewrites the sealed original package.
+
+    def test_service_profile_retains_home_and_template_rejections(self):
+        with zipfile.ZipFile(self.zip) as source:
+            template=source.read('Weavelo/deploy/linux/weavelo-desktop.service')
+        for invalid in (self.root/'space % and "quote"', self.root/'invalid\nhome'):
+            with self.subTest(home=str(invalid)), self.assertRaisesRegex(ValueError,'Unsupported home path'):
+                install.service_for_home(invalid,template)
+        with self.assertRaisesRegex(ValueError,'Unexpected service profile'):
+            install.service_for_home(self.home,template+template)
+
     def test_wrong_plan_digest_never_writes(self):
         reviewed=self.plan()
         with self.assertRaisesRegex(ValueError,'plan SHA256'):install.apply(reviewed,'0'*64)
