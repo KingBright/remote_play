@@ -61,6 +61,32 @@ class ScopedLinuxReleaseTests(unittest.TestCase):
             report = activity.launch_reference_scan(self.paths)
         self.assertEqual(report["hits"], [str(unit)])
 
+    def test_vendor_unit_alias_needs_same_package_and_safe_root_ownership(self):
+        from types import SimpleNamespace
+        import stat
+        link = Path("/usr/lib/systemd/system/dracut-cmdline.service")
+        target = Path("/usr/lib/dracut/modules.d/example/dracut-cmdline.service")
+        info = SimpleNamespace(st_uid=0)
+        def metadata(path):
+            return SimpleNamespace(st_uid=0, st_mode=(
+                stat.S_IFREG | 0o644 if path == target else stat.S_IFDIR | 0o755))
+        with patch.object(Path, "lstat", metadata), \
+             patch.object(activity, "_reference_query", side_effect=["dracut-1.x86_64\n"]*2):
+            activity.vendor_unit_link(link, target, info)
+        with patch.object(Path, "lstat", metadata), \
+             patch.object(activity, "_reference_query", side_effect=["one\n", "two\n"]):
+            with self.assertRaisesRegex(activity.ObservationError, "package differs"):
+                activity.vendor_unit_link(link, target, info)
+        with patch.object(Path, "lstat", return_value=SimpleNamespace(st_uid=0, st_mode=0o100666)), \
+             patch.object(activity, "_reference_query") as query:
+            with self.assertRaises(activity.ObservationError):
+                activity.vendor_unit_link(link, target, info)
+            query.assert_not_called()
+        with patch.object(activity, "_reference_query") as query:
+            with self.assertRaises(activity.ObservationError):
+                activity.vendor_unit_link(link, target, SimpleNamespace(st_uid=1000))
+            query.assert_not_called()
+
     def test_absent_paths_need_no_global_descriptor_or_map_query(self):
         report, query = self.collect([self.process, self.commands, self.process])
         self.assertEqual(report["state"], "idle")

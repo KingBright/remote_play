@@ -396,6 +396,34 @@ def same_file_identity(before, after):
     return all(getattr(before, key) == getattr(after, key) for key in keys)
 
 
+
+def vendor_unit_link(link, target, info):
+    """Only root-owned systemd aliases and targets owned by the same RPM."""
+    import stat
+    from pathlib import Path
+    if info.st_uid != 0 or not str(link).startswith("/usr/lib/systemd/"):
+        raise ObservationError("launch link outside reviewed search paths")
+    if target.suffix not in {".service", ".socket", ".target", ".timer", ".path",
+                             ".mount", ".automount", ".slice", ".scope", ".conf"}:
+        raise ObservationError("vendor launch link is not a unit")
+    for part in (target, *target.parents):
+        state = part.lstat()
+        if (state.st_uid != 0 or state.st_mode & 0o022 or
+                (part == target and not stat.S_ISREG(state.st_mode)) or
+                (part != target and not stat.S_ISDIR(state.st_mode))):
+            raise ObservationError("vendor launch link ownership or mode is unsafe")
+    packages = []
+    for path in (link, target):
+        text = _reference_query(["/usr/bin/rpm", "-qf", "--queryformat",
+                                 "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n", str(path)])
+        package = text.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.+:%~^-]+", package):
+            raise ObservationError("vendor launch package ownership is unconfirmed")
+        packages.append(package)
+    if packages[0] != packages[1]:
+        raise ObservationError("vendor launch link package differs from target")
+
+
 def launch_reference_scan(paths):
     """Static systemd/XDG references; preserve original root-only warnings."""
     from pathlib import Path
@@ -450,7 +478,7 @@ def launch_reference_scan(paths):
                     if str(target) == "/dev/null":  # systemd mask
                         continue
                     if not any(target == p or p in target.parents for p in allowed):
-                        raise ObservationError("launch link outside reviewed search paths")
+                        vendor_unit_link(item, target, info)
                 try:
                     current = target.stat()
                     if not stat.S_ISREG(current.st_mode):
