@@ -50,6 +50,17 @@ class ScopedLinuxReleaseTests(unittest.TestCase):
         with self.assertRaises(activity.ObservationError):
             list(activity._launch_values('ExecStart="/unterminated\n'))
 
+    @unittest.skipUnless(os.name == "posix", "systemd search-root aliases use POSIX paths")
+    def test_systemd_reported_search_root_alias_is_canonicalized_and_scanned(self):
+        units = self.root / "units"; units.mkdir()
+        alias = self.root / "unit-alias"
+        alias.symlink_to(units, target_is_directory=True)
+        unit = units / "reference.service"
+        unit.write_text("[Service]\nExecStart=" + str(self.release) + "\n")
+        with patch.object(activity, "_launch_roots", return_value=[str(alias)]):
+            report = activity.launch_reference_scan(self.paths)
+        self.assertEqual(report["hits"], [str(unit)])
+
     def test_absent_paths_need_no_global_descriptor_or_map_query(self):
         report, query = self.collect([self.process, self.commands, self.process])
         self.assertEqual(report["state"], "idle")

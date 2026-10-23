@@ -423,8 +423,11 @@ def launch_reference_scan(paths):
             if folder.is_symlink():
                 raise ObservationError("dangling launch search path")
             continue
-        if not folder.is_dir() or folder.is_symlink():
-            raise ObservationError("linked or invalid launch search directory")
+        source_root = folder
+        root_identity = source_root.lstat()
+        folder = source_root.resolve()
+        if not folder.is_dir():
+            raise ObservationError("invalid launch search directory")
         def visit(directory, depth):
             nonlocal count, byte_count
             if depth > 16:
@@ -486,6 +489,9 @@ def launch_reference_scan(paths):
                     if any(any(root in p for root, _ in watched) for p in candidates):
                         hits.append(str(item))
         visit(folder, 0)
+        if (not same_file_identity(root_identity, source_root.lstat()) or
+                source_root.resolve() != folder):
+            raise ObservationError("launch search directory changed")
     return {"hits": sorted(set(hits)), "warnings": warnings,
             "configurations": len(seen), "search_roots": len(roots)}
 
