@@ -85,7 +85,7 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
                               RELEASE_SHA256=install.sha((scripts/"rust_release.py").read_bytes()))
 
     def test_plan_is_read_only_and_pins_original_authority(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             home, scripts, baseline, activity = self.fixture(tmp)
             with self.pins(scripts):
                 plan, payload = install.plan(home, baseline, activity, install.sha(activity.read_bytes()))
@@ -95,7 +95,7 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
             self.assertEqual(len(payload), 2)
 
     def test_install_changes_only_two_missing_trusted_source_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             home, scripts, baseline, activity = self.fixture(tmp)
             old = {p: p.read_bytes() for p in scripts.iterdir()}
             @contextmanager
@@ -114,7 +114,7 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
                 self.assertEqual(Path(p).stat().st_mode & 0o777, 0o600)
 
     def test_unknown_existing_adapter_or_changed_source_is_preserved(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             home, scripts, baseline, activity = self.fixture(tmp)
             target = home/".codex/skills/clean-mac-storage/scripts/managed_release_retention.py"
             target.parent.mkdir(parents=True); target.write_text("user-content\n")
@@ -123,14 +123,14 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
             self.assertEqual(target.read_text(), "user-content\n")
 
     def test_no_replace_install_race_preserves_existing_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             target = Path(tmp).resolve()/"target.py";target.write_bytes(b"other-writer")
             with self.assertRaises(FileExistsError):
                 install._write_new(target, b"ours")
             self.assertEqual(target.read_bytes(), b"other-writer")
 
     def test_symlink_and_writable_source_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             root = Path(tmp).resolve();source = root/"source";source.write_text("x")
             alias = root/"alias";alias.symlink_to(source)
             with self.assertRaises(RuntimeError):
@@ -140,8 +140,36 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
                 install.ordinary(source)
 
     def test_changed_plan_is_refused_before_install(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             home, scripts, baseline, activity = self.fixture(tmp)
-            with self.pins(scripts), self.assertRaises(RuntimeError):
+            with self.pins(scripts), self.assertRaisesRegex(RuntimeError, "reviewed installation plan changed"):
                 install.apply(home, baseline, activity, install.sha(activity.read_bytes()), "0"*64, home)
             self.assertFalse((home/".codex/skills/clean-mac-storage").exists())
+
+    def test_writable_ancestor_remains_rejected(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            root = Path(tmp).resolve()
+            parent = root/"shared"
+            parent.mkdir(mode=0o700)
+            source = parent/"source.py"
+            source.write_bytes(b"reviewed")
+            parent.chmod(0o777)
+            with self.assertRaisesRegex(RuntimeError, "unsafe source/helper owner or mode"):
+                install.ordinary(source)
+
+    def test_actual_pinned_backend_changes_only_linux_dispatch(self):
+        baseline = Path(__file__).resolve().parents[1] / "maintenance/release_backend/managed_release_retention.py"
+        raw = baseline.read_bytes()
+        self.assertEqual(install.sha(raw), install.BASELINE_SHA256)
+        changed = install.patch_backend(raw).decode()
+        self.assertEqual(changed.replace(install.LOADER, "").replace(install.DISPATCH, ""), raw.decode())
+        original = ast.parse(raw)
+        modified = ast.parse(changed)
+        original_functions = {n.name: n for n in original.body if isinstance(n, ast.FunctionDef)}
+        changed_functions = {n.name: n for n in modified.body if isinstance(n, ast.FunctionDef)}
+        self.assertEqual(set(changed_functions) - set(original_functions), {"linux_release_activity"})
+        for name, node in original_functions.items():
+            candidate = copy.deepcopy(changed_functions[name])
+            if name == "assert_idle":
+                candidate.body = candidate.body[1:]
+            self.assertEqual(ast.dump(node), ast.dump(candidate), name)

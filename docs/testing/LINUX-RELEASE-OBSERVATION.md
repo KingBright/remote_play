@@ -28,7 +28,7 @@ There is no snapshot-file option, environment override, or imported idle receipt
 `install_linux_release_adapter.py` requires the independently pinned original
 backend source (SHA256
 `175566a4e71592c8b6a37fbbac7ed0f75d8030207f608ec6681e730f6b876aa4`)
-and the reviewed new activity-source hash. It verifies the existing HO5 helper
+and the reviewed new activity-source hash. The exact unchanged baseline is\ntracked at `scripts/maintenance/release_backend/managed_release_retention.py`\nso normal Git delivery preserves its bytes without copying rendered tool output.\nPass that path to `--baseline`; it is a source dependency, not another authority\nor a directly supported cleanup entry. It verifies the existing HO5 helper
 and release-module hashes and produces an exact installation plan. Apply also
 requires that plan hash and holds the original project producer/global locks.
 Only two source files are installed into the original trusted backend directory.
