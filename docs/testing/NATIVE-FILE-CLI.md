@@ -30,9 +30,10 @@ The new desktop instance snapshots the complete old parent preferences document
 once into `Desktop/preferences.json`, under its own stable file lock. The parent
 document is read only. Later parent changes never flow into an existing instance.
 Atomic updates merge only changed fields so unknown nested user settings survive.
-Missing or invalid migration input cannot silently enable receiving; the existing
-Book `side_services.file_transfer=false` remains false. No setting is enabled by
-migration or by the acceptance scripts.
+Fresh profiles use the product defaults. Existing false values are preserved by
+migration, and invalid documents fail closed. The scoped setting can be changed
+explicitly through the normal private GUI business endpoint; the parent is never
+written.
 
 Both passive-host and GUI file receivers use `Desktop/Received Files` by default.
 A passive-host `WEAVELO_FILE_RECEIVE_DIR` override and a GUI destination choice must
@@ -48,4 +49,34 @@ session table. A display name or claimed device ID is not authorization. Group
 key rotation revokes the existing session scope; no file protocol is replaced.
 When the local file setting is false, GUI media connections use the existing
 media-only path and do not start a file receiver. Explicit receiving consent is
-still required before enabling Book; do not override its setting for a test.
+required before changing an existing disabled choice. The user has approved
+enabling the new Book instance for the authorized desktop group.
+
+## Numbered receiving, setting changes and recovery
+
+With the default no-overwrite policy, the receiver atomically publishes the
+requested filename or `name (1).ext`, `name (2).ext`, etc. Existing files are
+retained even when several receives finish concurrently. A partial file is never
+published as a completed file. The sender waits for the receiver's acknowledgement
+after checksum verification, file sync and directory sync. Native reliable
+delivery retries lost manifests, chunks and acknowledgements with the same
+object identity; the receiver's current-session completion cache prevents another
+numbered copy when the final acknowledgement is lost.
+
+`--file-peers-json` also reports the current scoped preferences SHA-256, stored
+file flag and paired-group scope digest (never the group secret). To change only
+the new instance, use
+`--file-set-enabled true --expected-preferences-sha256 SHA256 --expected-group-scope SHA256 --confirm-change`.
+This is a version-checked update under the existing private preference lock and
+preserves unknown user fields. A stale version or changed group is refused.
+Restart only the new instance normally to apply the passive host's setting.
+
+`--file-resume REQUEST_ID --confirm-resume` uses the original receipt and source
+binding. Only a verified `failed_before_send` with zero bytes and no connection
+or transfer ID can be admitted again. An existing native transfer is queried
+without issuing another send; its normal reliable worker handles chunk retries.
+Completed requests return the original receipt. A queued transfer with lost
+connection/generation or an unknown result requires receiver verification; it is
+never blindly replayed, and restart-spanning partial-file resume is not claimed.
+Changing the request ID to bypass this boundary can create duplicates and is not
+a recovery procedure.

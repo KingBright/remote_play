@@ -1324,7 +1324,8 @@ impl InboundFileTransfers {
             return Ok(());
         };
 
-        let publish_path = group_publish_path(&self.receive_dir, &group.relative_path)?;
+        let publish_path =
+            received_group_publish_path(&self.receive_dir, &group.relative_path, &path)?;
         let entry = self
             .incoming_groups
             .entry(group.group_id)
@@ -1575,6 +1576,21 @@ async fn cleanup_empty_parent_dirs(
     Ok(())
 }
 
+fn received_group_publish_path(
+    receive_dir: &Path,
+    relative_path: &str,
+    actual: &Path,
+) -> Result<PathBuf, FileTransferError> {
+    let original = group_publish_path(receive_dir, relative_path)?;
+    // Top-level files may have been numbered; publish the materialized path,
+    // never an existing namesake. Directory-group roots remain the same.
+    Ok(if Path::new(relative_path).components().count() == 1 {
+        actual.to_path_buf()
+    } else {
+        original
+    })
+}
+
 fn group_publish_path(
     receive_dir: &Path,
     relative_path: &str,
@@ -1643,6 +1659,25 @@ mod tests {
             },
             payload: vec![sequence_number as u8; 64],
         }
+    }
+
+    #[test]
+    fn numbered_group_file_publishes_actual_path_and_keeps_directory_roots() {
+        let root = Path::new("/received");
+        assert_eq!(
+            received_group_publish_path(root, "a.txt", Path::new("/received/a (1).txt")).unwrap(),
+            PathBuf::from("/received/a (1).txt")
+        );
+        assert_eq!(
+            received_group_publish_path(
+                root,
+                "Project/a.txt",
+                Path::new("/received/Project/a (1).txt")
+            )
+            .unwrap(),
+            PathBuf::from("/received/Project")
+        );
+        assert!(received_group_publish_path(root, "../escape", Path::new("/escape")).is_err());
     }
 
     #[test]
@@ -1721,6 +1756,12 @@ mod tests {
             .await
             .expect("source file should be written");
 
+        tokio::fs::create_dir_all(&receive_dir).await.unwrap();
+        let retained = receive_dir.join("runtime.bin");
+        tokio::fs::write(&retained, b"original file must survive retry")
+            .await
+            .unwrap();
+
         let source_mux = UdpMultiplexer::bind("127.0.0.1:0")
             .await
             .expect("source bind should succeed");
@@ -1776,10 +1817,7 @@ mod tests {
                 chunk_payload_len: 4096,
                 receive_dir: receive_dir.clone(),
                 active: target_active.clone(),
-                receive_policy: FileReceivePolicy {
-                    allow_overwrite: true,
-                    ..FileReceivePolicy::default()
-                },
+                receive_policy: FileReceivePolicy::default(),
                 ..FileTransferRuntimeConfig::default()
             },
         ));
@@ -1792,7 +1830,7 @@ mod tests {
                         && !lost_final_ack
                         && matches!(
                             control_from_envelope(&envelope),
-                            Ok(FileTransferControl::ChunkAccepted { chunk_index: 2, .. })
+                            Ok(FileTransferControl::ChunkAccepted { chunk_index: 8, .. })
                         )
                     {
                         lost_final_ack = true;
@@ -1901,6 +1939,16 @@ mod tests {
             .await
             .expect("received file should read");
         assert_eq!(received_bytes, bytes);
+        assert_eq!(received_path, receive_dir.join("runtime (1).bin"));
+        assert_eq!(
+            tokio::fs::read(&retained).await.unwrap(),
+            b"original file must survive retry"
+        );
+        assert_eq!(
+            std::fs::read_dir(&receive_dir).unwrap().count(),
+            2,
+            "Lost final acknowledgement and duplicate data must not create another numbered copy"
+        );
 
         let _ = cancel_tx.send(());
         udp_router.abort();

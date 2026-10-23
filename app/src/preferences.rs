@@ -162,13 +162,70 @@ impl UserPreferences {
             Self::parse(&bytes)?;
             bytes
         } else {
-            // A fresh independent instance never enables receiving by accident.
-            let mut prefs = Self::default();
-            prefs.side_services.file_transfer = false;
-            serde_json::to_vec_pretty(&prefs).map_err(io::Error::other)?
+            // Preserve product defaults for a fresh profile. Existing legacy
+            // choices are copied exactly above; invalid documents fail closed.
+            serde_json::to_vec_pretty(&Self::default()).map_err(io::Error::other)?
         };
         Self::write_document(&path, &bytes, true)?;
         Ok(path)
+    }
+    pub(crate) fn file_transfer_setting(profile: &Path) -> io::Result<(String, bool)> {
+        let path = Self::initialize_profile(profile)?;
+        let _lock = Self::lock_file(&path)?;
+        Self::file_transfer_setting_at(&path)
+    }
+    fn file_transfer_setting_at(path: &Path) -> io::Result<(String, bool)> {
+        use sha2::{Digest, Sha256};
+        let mut file = remote_core::desktop_storage::open_regular(path, true)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Scoped preferences missing"))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let (_, prefs) = Self::parse(&bytes)?;
+        Ok((
+            format!("{:x}", Sha256::digest(&bytes)),
+            prefs.side_services.file_transfer,
+        ))
+    }
+    pub(crate) fn set_file_transfer(
+        profile: &Path,
+        expected: &str,
+        enabled: bool,
+    ) -> io::Result<(String, bool)> {
+        let path = Self::initialize_profile(profile)?;
+        let _lock = Self::lock_file(&path)?;
+        Self::set_file_transfer_at(&path, expected, enabled)
+    }
+    fn set_file_transfer_at(
+        path: &Path,
+        expected: &str,
+        enabled: bool,
+    ) -> io::Result<(String, bool)> {
+        let (version, previous) = Self::file_transfer_setting_at(path)?;
+        if version != expected {
+            return Err(io::Error::other(
+                "Preferences version changed; read current settings before retrying",
+            ));
+        }
+        if previous != enabled {
+            let (mut raw, _) = Self::read_document(path)?
+                .ok_or_else(|| io::Error::other("Preferences missing"))?;
+            let object = raw
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("Preferences must be an object"))?;
+            let side = object
+                .entry("side_services")
+                .or_insert_with(|| serde_json::json!({}));
+            let side = side
+                .as_object_mut()
+                .ok_or_else(|| io::Error::other("Invalid side services"))?;
+            side.insert("file_transfer".into(), enabled.into());
+            Self::write_document(
+                path,
+                &serde_json::to_vec_pretty(&raw).map_err(io::Error::other)?,
+                false,
+            )?;
+        }
+        Self::file_transfer_setting_at(path)
     }
     pub fn load_or_default() -> Self {
         match Self::ensure_default().and_then(|p| Self::read_or_default(&p)) {
@@ -454,6 +511,36 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), json);
     }
 
+    #[test]
+    fn explicit_file_setting_cas_preserves_legacy_and_unknown_fields() {
+        let f = tempfile::tempdir().unwrap();
+        let parent = legacy_fixture(f.path());
+        let legacy = parent.join(PREFERENCES_FILE_NAME);
+        let before = fs::read(&legacy).unwrap();
+        let profile = parent.join("Desktop");
+        let (version, enabled) = UserPreferences::file_transfer_setting(&profile).unwrap();
+        assert!(!enabled);
+        let (next, enabled) = UserPreferences::set_file_transfer(&profile, &version, true).unwrap();
+        assert!(enabled);
+        assert_ne!(next, version);
+        assert!(UserPreferences::set_file_transfer(&profile, &version, false).is_err());
+        let path = profile.join(PREFERENCES_FILE_NAME);
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            UserPreferences::set_file_transfer(&profile, &next, true).unwrap(),
+            (next, true)
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "An identical setting is a no-op"
+        );
+        let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(raw["side_services"]["future_rule"]["scope"], "keep");
+        assert_eq!(raw["stream"]["future_codec"]["keep"], true);
+        assert_eq!(fs::read(&legacy).unwrap(), before);
+    }
+
     fn legacy_fixture(base: &Path) -> PathBuf {
         let parent = base.join("Weavelo");
         remote_core::desktop_storage::prepare_profile(&parent).unwrap();
@@ -517,12 +604,12 @@ mod tests {
         );
     }
     #[test]
-    fn missing_or_invalid_migration_cannot_enable_receiving_or_replace_user_data() {
+    fn fresh_profile_uses_product_defaults_but_invalid_migration_never_replaces_user_data() {
         let f = tempfile::tempdir().unwrap();
         let profile = f.path().join("Desktop");
         let path = UserPreferences::initialize_profile(&profile).unwrap();
         assert!(
-            !UserPreferences::load_from_path(&path)
+            UserPreferences::load_from_path(&path)
                 .unwrap()
                 .side_services
                 .file_transfer

@@ -549,6 +549,47 @@ impl Drop for PartialFileCleanup {
     }
 }
 
+fn numbered_destination(path: &Path, number: u32) -> PathBuf {
+    if number == 0 {
+        return path.to_path_buf();
+    }
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    path.with_file_name(format!("{stem} ({number}){extension}"))
+}
+
+async fn publish_without_overwrite(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let source = CString::new(source.as_os_str().as_bytes()).map_err(io::Error::other)?;
+        let target = CString::new(target.as_os_str().as_bytes()).map_err(io::Error::other)?;
+        // Android app-data SELinux forbids hard links. Keep atomic no-replace.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        tokio::fs::hard_link(source, target).await?;
+        tokio::fs::remove_file(source).await?;
+    }
+    Ok(())
+}
+
 impl IncomingFileTransfer {
     pub async fn start(
         manifest: FileTransferManifest,
@@ -580,11 +621,6 @@ impl IncomingFileTransfer {
                     Err(error) => return Err(error.into()),
                 }
             }
-        }
-        if !policy.allow_overwrite && tokio::fs::try_exists(&path).await? {
-            return Err(
-                io::Error::new(io::ErrorKind::AlreadyExists, "destination already exists").into(),
-            );
         }
         let temporary_path =
             path.with_file_name(format!(".weavelo-{:016x}.part", rand::random::<u64>()));
@@ -683,35 +719,28 @@ impl IncomingFileTransfer {
         if self.allow_overwrite {
             tokio::fs::rename(&self.temporary_path, &self.path).await?;
         } else {
-            #[cfg(target_os = "android")]
-            {
-                use std::{ffi::CString, os::unix::ffi::OsStrExt};
-                let source = CString::new(self.temporary_path.as_os_str().as_bytes())
-                    .map_err(|_| FileTransferError::InvalidFileName)?;
-                let target = CString::new(self.path.as_os_str().as_bytes())
-                    .map_err(|_| FileTransferError::InvalidFileName)?;
-                // Android SELinux forbids app-data hard links. renameat2 preserves
-                // the same atomic no-overwrite contract without needing one.
-                let result = unsafe {
-                    libc::syscall(
-                        libc::SYS_renameat2,
-                        libc::AT_FDCWD,
-                        source.as_ptr(),
-                        libc::AT_FDCWD,
-                        target.as_ptr(),
-                        libc::RENAME_NOREPLACE,
-                    )
-                };
-                if result != 0 {
-                    return Err(io::Error::last_os_error().into());
+            let requested = self.path.clone();
+            // The no-replace operation allocates the name. An existence check
+            // would race concurrent receives and must never authorize overwrite.
+            let mut published = false;
+            for number in 0..100_000 {
+                let candidate = numbered_destination(&requested, number);
+                match publish_without_overwrite(&self.temporary_path, &candidate).await {
+                    Ok(()) => {
+                        self.path = candidate;
+                        published = true;
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(error.into()),
                 }
             }
-            #[cfg(not(target_os = "android"))]
-            {
-                // Same-directory hard link publishes atomically without overwriting a
-                // destination created since start(). Never expose a partial final file.
-                tokio::fs::hard_link(&self.temporary_path, &self.path).await?;
-                tokio::fs::remove_file(&self.temporary_path).await?;
+            if !published {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Receive filename allocation limit reached; existing files retained",
+                )
+                .into());
             }
         }
         #[cfg(unix)]
@@ -940,6 +969,85 @@ mod tests {
             .as_nanos();
         let counter = TEMP_DIR_COUNTER.fetch_add(1, Relaxed);
         std::env::temp_dir().join(format!("{prefix}-{nanos}-{counter}"))
+    }
+
+    #[test]
+    fn numbered_names_preserve_extensions_and_unicode() {
+        assert_eq!(
+            numbered_destination(Path::new("/recv/名字.tar.gz"), 2),
+            Path::new("/recv/名字.tar (2).gz")
+        );
+        assert_eq!(
+            numbered_destination(Path::new("/recv/README"), 1),
+            Path::new("/recv/README (1)")
+        );
+        assert_eq!(
+            numbered_destination(Path::new("/recv/.env"), 1),
+            Path::new("/recv/.env (1)")
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_receive_numbers_existing_names_and_concurrent_publishers() {
+        let base = unique_temp_dir("weavelo-scoped-numbered");
+        let target =
+            crate::desktop_storage::receive_directory_at(&base.join("Desktop"), None).unwrap();
+        let source = base.join("payload.bin");
+        let data = b"new native transfer bytes";
+        tokio::fs::write(&source, data).await.unwrap();
+        let destination = target.join("payload.bin");
+        tokio::fs::write(&destination, b"original retained bytes")
+            .await
+            .unwrap();
+        assert!(!FileReceivePolicy::default().allow_overwrite);
+        let mut receivers = Vec::new();
+        for _ in 0..8 {
+            let mut reader = FileTransferReader::from_path(
+                &source,
+                transfer_spec(4096),
+                None,
+                FileTransferPolicy::default(),
+            )
+            .await
+            .unwrap();
+            let mut incoming = IncomingFileTransfer::start(
+                reader.manifest().clone(),
+                &target,
+                FileReceivePolicy::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(envelope) = reader.next_envelope().await.unwrap() {
+                if envelope.header.kind == ContentKind::FileChunk {
+                    incoming.push_chunk(envelope).await.unwrap();
+                }
+            }
+            receivers.push(tokio::spawn(async move {
+                incoming.finish().await.unwrap().path
+            }));
+        }
+        let mut actual = std::collections::HashSet::new();
+        for receiver in receivers {
+            let path = receiver.await.unwrap();
+            assert!(
+                actual.insert(path.clone()),
+                "Concurrent receives must use different names"
+            );
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), data);
+        }
+        for number in 1..=8 {
+            assert!(actual.contains(&numbered_destination(&destination, number)));
+        }
+        assert_eq!(
+            tokio::fs::read(&destination).await.unwrap(),
+            b"original retained bytes"
+        );
+        assert_eq!(
+            std::fs::read_dir(&target).unwrap().count(),
+            9,
+            "No partial files remain"
+        );
+        tokio::fs::remove_dir_all(base).await.unwrap();
     }
 
     #[tokio::test]

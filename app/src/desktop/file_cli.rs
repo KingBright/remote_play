@@ -22,6 +22,12 @@ pub(crate) enum Action {
         sha256: String,
     },
     Status,
+    Resume,
+    SetEnabled {
+        enabled: bool,
+        expected_preferences_sha256: String,
+        expected_group_scope: String,
+    },
     Peers,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,6 +47,80 @@ struct Record {
     transferred_bytes: u64,
     detail: String,
     remote_content_verified: bool,
+    #[serde(default)]
+    group_scope: Option<String>,
+    #[serde(default)]
+    resumed_attempts: u32,
+}
+fn group_scope() -> Option<String> {
+    remote_core::session_crypto::paired_file_session_key()
+        .map(|key| format!("{:x}", Sha256::digest(key)))
+}
+fn safe_to_restart(record: &Record) -> bool {
+    record.terminal
+        && record.state == "failed_before_send"
+        && record.connection_id.is_none()
+        && record.transfer_id.is_none()
+        && record.transferred_bytes == 0
+}
+fn refresh(owner: &OriginalOwner, generation: &str, record: &mut Record) {
+    // A late confirmation may update the original identity only. No connection
+    // is opened and no new file command is issued by a query or resume.
+    if record.generation != generation || record.group_scope != group_scope() {
+        return;
+    }
+    let Some(id) = record.transfer_id else {
+        return;
+    };
+    let Ok((connection, transfers)) = owner.cli_file_connection(
+        &record.target,
+        remote_core::shared_files::current_share_scope(),
+    ) else {
+        return;
+    };
+    if connection.upgrade().map(|c| c.id) != record.connection_id {
+        return;
+    }
+    let values = transfers.lock().unwrap().identified_snapshots();
+    if let Some((_, _, snapshot)) = values.iter().find(|(direction, selected, s)| {
+        *direction == TransferDirection::Outgoing
+            && *selected == id
+            && s.total_bytes == record.bytes
+            && record.path.file_name().and_then(|s| s.to_str()) == Some(s.label.as_str())
+    }) {
+        record.transferred_bytes = snapshot.transferred_bytes;
+        record.state = match snapshot.status {
+            TransferStatus::Running => "sending",
+            TransferStatus::Completed => "completed",
+            TransferStatus::Cancelled => "cancelled",
+            TransferStatus::Error => "error",
+        }
+        .into();
+        record.terminal = snapshot.status != TransferStatus::Running;
+        record.detail = snapshot.detail.clone();
+    }
+}
+fn launch(owner: Arc<OriginalOwner>, path: PathBuf, mut record: Record) {
+    let scope = remote_core::shared_files::current_share_scope();
+    tokio::spawn(async move {
+        if let Err(error) = send(&owner, &path, &mut record, scope).await {
+            record.state = if record.connection_id.is_some() {
+                "not_confirmed"
+            } else {
+                "failed_before_send"
+            }
+            .into();
+            record.terminal = true;
+            record.detail = error.to_string();
+            let _ = save(&path, &record);
+        }
+    });
+}
+fn valid_sha(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -137,7 +217,6 @@ fn reserve(path: &Path, record: &Record) -> Result<bool, Error> {
 fn save(path: &Path, record: &Record) -> Result<(), Error> {
     let previous = read(path)?;
     if previous.request_id != record.request_id
-        || previous.generation != record.generation
         || previous.target != record.target
         || previous.path != record.path
         || previous.sha256 != record.sha256
@@ -186,18 +265,85 @@ pub(crate) fn dispatch(
     }
     if matches!(&action, Action::Peers) {
         let configuration = crate::UnifiedRuntimeConfig::from_env()?;
+        let (version, enabled) =
+            crate::preferences::UserPreferences::file_transfer_setting(profile)?;
         return Ok(serde_json::json!({"ok":true,"generation":generation,
+            "preferences_sha256":version,"stored_file_transfer_enabled":enabled,"group_scope":group_scope(),
             "file_transfer_preference_enabled":owner.native_file_transfer_enabled(&configuration),
             "paired_file_scope_present":remote_core::session_crypto::paired_file_session_key().is_some(),
             "devices":owner.snapshot().devices.iter().map(|d|serde_json::json!({"device_id":d.device_id,"display_name":d.display_name,"online":d.online})).collect::<Vec<_>>(),
             "receive_dir":owner.receive_dir()}));
     }
+    if let Action::SetEnabled {
+        enabled,
+        expected_preferences_sha256,
+        expected_group_scope,
+    } = &action
+    {
+        if !valid_sha(expected_preferences_sha256)
+            || !valid_sha(expected_group_scope)
+            || group_scope().as_ref() != Some(expected_group_scope)
+        {
+            return Err(
+                "Expected current paired group and preferences version are required".into(),
+            );
+        }
+        if *enabled {
+            remote_core::desktop_storage::receive_directory_at(profile, None)?;
+        }
+        let (version, actual) = crate::preferences::UserPreferences::set_file_transfer(
+            profile,
+            expected_preferences_sha256,
+            *enabled,
+        )?;
+        return Ok(serde_json::json!({"ok":true,"preferences_sha256":version,
+            "file_transfer_enabled":actual,"group_scope":group_scope(),
+            "restart_new_instance_to_apply_host_setting":true}));
+    }
     let path = directory(profile)?.join(format!("{id}.json"));
+    let _request_lock = remote_core::desktop_storage::lock_file(&path.with_extension("lock"))?;
     match action {
-        Action::Status => {
-            let record = read(&path)?;
+        Action::Status | Action::Resume => {
+            let mut record = read(&path)?;
+            let before = record.clone();
+            refresh(&owner, generation, &mut record);
+            if before != record {
+                save(&path, &record)?;
+            }
+            if matches!(action, Action::Resume) && safe_to_restart(&record) {
+                if !owner.native_file_transfer_enabled(&crate::UnifiedRuntimeConfig::from_env()?)
+                    || group_scope().is_none()
+                {
+                    return Err("Enable files in the paired new instance before resuming".into());
+                }
+                if digest(&record.path)? != (record.sha256.clone(), record.bytes) {
+                    return Err("Original source changed; original request retained".into());
+                }
+                record.generation = generation.into();
+                record.group_scope = group_scope();
+                record.resumed_attempts = record
+                    .resumed_attempts
+                    .checked_add(1)
+                    .ok_or("Resume limit reached")?;
+                record.state = "accepted".into();
+                record.terminal = false;
+                record.detail =
+                    "Explicit resume of verified zero-admission failure; same request binding"
+                        .into();
+                save(&path, &record)?;
+                let reply = response(&record)?;
+                launch(owner, path, record);
+                return Ok(reply);
+            }
             let mut result = response(&record)?;
             result["owner_generation_current"] = serde_json::json!(record.generation == generation);
+            result["resume_policy"] = serde_json::json!(if record.state == "completed" {
+                "already_completed_no_send"
+            } else if !record.terminal {
+                "observe_original_native_retries_no_new_send"
+            } else {
+                "verify_receiver_before_any_new_send"
+            });
             Ok(result)
         }
         Action::Send {
@@ -236,6 +382,8 @@ pub(crate) fn dispatch(
                     "Reserved before any connection or send; query this ID if the reply is lost"
                         .into(),
                 remote_content_verified: false,
+                group_scope: group_scope(),
+                resumed_attempts: 0,
             };
             if !reserve(&path, &record)? {
                 return response(&read(&path)?);
@@ -243,24 +391,10 @@ pub(crate) fn dispatch(
             // The reservation survives a disconnected caller or GUI restart. It
             // is never deleted or automatically replayed, including after failure.
             let reply = response(&record)?;
-            let scope = remote_core::shared_files::current_share_scope();
-            tokio::spawn(async move {
-                let mut record = record;
-                if let Err(error) = send(&owner, &path, &mut record, scope).await {
-                    record.state = if record.connection_id.is_some() {
-                        "not_confirmed"
-                    } else {
-                        "failed_before_send"
-                    }
-                    .into();
-                    record.terminal = true;
-                    record.detail = error.to_string();
-                    let _ = save(&path, &record);
-                }
-            });
+            launch(owner, path, record);
             Ok(reply)
         }
-        Action::Peers => unreachable!(),
+        Action::Peers | Action::SetEnabled { .. } => unreachable!(),
     }
 }
 async fn send(
@@ -277,8 +411,11 @@ async fn send(
     if !owner.native_file_transfer_enabled(&crate::UnifiedRuntimeConfig::from_env()?) {
         return Err("File transfers are disabled in the existing product settings".into());
     }
-    if scope != remote_core::shared_files::current_share_scope() {
-        return Err("Device network changed after reservation".into());
+    if scope != remote_core::shared_files::current_share_scope()
+        || record.group_scope.is_none()
+        || record.group_scope != group_scope()
+    {
+        return Err("Device group changed after reservation".into());
     }
     owner.connect_silent_files(&record.target).await?;
     let (connection, transfers) = owner.cli_file_connection(&record.target, scope)?;
@@ -380,8 +517,12 @@ fn parse(args: &[String]) -> Result<(String, Action), Error> {
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice(){
         ["--file-peers-json"]=>Ok((format!("peers-{}",crate::unix_now_ms()),Action::Peers)),
         ["--file-status",id] if valid_id(id)=>Ok(((*id).into(),Action::Status)),
+        ["--file-resume",id,"--confirm-resume"] if valid_id(id)=>Ok(((*id).into(),Action::Resume)),
+        ["--file-set-enabled",enabled,"--expected-preferences-sha256",version,"--expected-group-scope",scope,"--confirm-change"]
+            if matches!(*enabled,"true"|"false") && valid_sha(version) && valid_sha(scope)
+            =>Ok((format!("setting-{}",crate::unix_now_ms()),Action::SetEnabled{enabled:*enabled=="true",expected_preferences_sha256:(*version).into(),expected_group_scope:(*scope).into()})),
         ["--file-send",target,path,"--sha256",sha,"--request-id",id,"--confirm-send"] if valid_id(id)=>Ok(((*id).into(),Action::Send{target:(*target).into(),path:PathBuf::from(path),sha256:(*sha).into()})),
-        _=>Err("Usage: --file-peers-json | --file-status REQUEST_ID | --file-send TARGET_DEVICE_ID ABSOLUTE_SOURCE --sha256 SHA256 --request-id REQUEST_ID --confirm-send".into())
+        _=>Err("Usage: --file-peers-json | --file-status REQUEST_ID | --file-resume REQUEST_ID --confirm-resume | --file-set-enabled true|false --expected-preferences-sha256 SHA256 --expected-group-scope SHA256 --confirm-change | --file-send TARGET_DEVICE_ID ABSOLUTE_SOURCE --sha256 SHA256 --request-id REQUEST_ID --confirm-send".into())
     }
 }
 #[cfg(test)]
@@ -403,6 +544,8 @@ mod tests {
             transferred_bytes: 0,
             detail: String::new(),
             remote_content_verified: false,
+            group_scope: Some("paired-scope".into()),
+            resumed_attempts: 0,
         }
     }
     #[test]
@@ -489,6 +632,35 @@ mod tests {
         assert!(!standalone.native_file_transfer_enabled(&configuration));
     }
 
+    #[test]
+    fn resume_refuses_unknown_admission_and_preserves_completed_receipts() {
+        let mut r = sample(PathBuf::from("/payload"));
+        r.terminal = true;
+        r.state = "failed_before_send".into();
+        assert!(safe_to_restart(&r));
+        r.connection_id = Some(7);
+        assert!(!safe_to_restart(&r));
+        r.connection_id = None;
+        r.transfer_id = Some(9);
+        assert!(!safe_to_restart(&r));
+        r.transfer_id = None;
+        r.transferred_bytes = 1;
+        assert!(!safe_to_restart(&r));
+        r.transferred_bytes = 0;
+        r.state = "not_confirmed".into();
+        assert!(!safe_to_restart(&r));
+        r.state = "completed".into();
+        assert!(!safe_to_restart(&r));
+        assert!(parse(&["--file-resume".into(), "send-1".into()]).is_err());
+        assert!(
+            parse(&[
+                "--file-resume".into(),
+                "send-1".into(),
+                "--confirm-resume".into()
+            ])
+            .is_ok()
+        );
+    }
     #[test]
     fn incomplete_reservation_is_not_silently_replaced() {
         let d = tempfile::tempdir().unwrap();
