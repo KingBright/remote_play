@@ -121,6 +121,25 @@ fn run_original_dashboard(
     }
     Ok(())
 }
+/// Refresh the local label from the owner's cached observation without IPC or
+/// pairing writes. Leave frontend-owned messages and prompts intact.
+fn refresh_pairing_state(
+    control: Option<&MeshPairingControl>,
+    cached: &mut Option<MeshPairingSnapshot>,
+    editor: &mut remote_core::device_name::NameEditor,
+) {
+    if let Some(control) = control {
+        let observed = control.snapshot();
+        editor.observe_saved(&observed.display_name);
+        if let Some(current) = cached.as_mut() {
+            // Pairing-image errors and prompts belong to this frontend.
+            current.display_name = observed.display_name;
+        } else {
+            *cached = Some(observed);
+        }
+    }
+}
+
 fn open_restored_window(
     runtime: Arc<UnifiedRuntimeHandle>,
     instance: Option<Instance>,
@@ -211,6 +230,8 @@ fn open_restored_window(
                     view.window_visible = view.window_handle.update(cx, |_, window, _| window.is_window_visible()).ok().flatten();
                     view.sync_media_pause();
                     view.owner.poll();
+                    refresh_pairing_state(view.mesh_pairing.as_ref(),
+                        &mut view.mesh_pairing_snapshot, &mut view.device_name_editor);
                     owned_gui_stage(2);
                     if view.acceptance_tick(cx) {
                         return Duration::from_secs(1);
@@ -5417,6 +5438,94 @@ mod input_tests {
         should_reveal_toolbar,
     };
     use crate::HostStats;
+
+    struct ObservedPairing(std::sync::Mutex<super::MeshPairingSnapshot>);
+
+    impl client::MeshPairingBackend for ObservedPairing {
+        fn snapshot(&self) -> super::MeshPairingSnapshot { self.0.lock().unwrap().clone() }
+        fn create_new_group(&self) -> super::MeshPairingSnapshot { panic!("refresh must be read-only") }
+        fn join_from_invite_code(&self, _: &str) -> super::MeshPairingSnapshot { panic!("refresh must be read-only") }
+        fn request_runtime_reload(&self, _: String) -> super::MeshPairingSnapshot { panic!("refresh must be read-only") }
+        fn rename_device(&self, _: &str, _: &str) -> super::MeshPairingSnapshot { panic!("refresh must be read-only") }
+    }
+
+    fn observed_pairing_fixture() -> std::sync::Arc<ObservedPairing> {
+        std::sync::Arc::new(ObservedPairing(std::sync::Mutex::new(super::MeshPairingSnapshot {
+            network_name: "Synthetic desktop group".into(),
+            device_id: "synthetic-studio-device".into(),
+            display_name: "Old test name".into(),
+            invite_code: "non-valid synthetic invitation".into(),
+            config_dir: std::path::PathBuf::from("synthetic-profile"),
+            message: "Ready".into(),
+            message_kind: super::MeshPairingMessageKind::Neutral,
+            restart_required: false,
+        })))
+    }
+
+    #[test]
+    fn pairing_refresh_updates_devices_and_pristine_editor_after_external_rename() {
+        let backend = observed_pairing_fixture();
+        let control = super::MeshPairingControl::from_backend(backend.clone());
+        let mut cached = Some(control.snapshot());
+        let mut editor = remote_core::device_name::NameEditor::new("Old test name");
+        for name in ["MacStudio·外部改名", "MacStudio.local"] {
+            let observed = {
+                let mut state = backend.0.lock().unwrap();
+                state.display_name = name.into();
+                state.clone()
+            };
+            assert_ne!(cached.as_ref().unwrap().display_name, name);
+            super::refresh_pairing_state(Some(&control), &mut cached, &mut editor);
+            // Full equality also preserves device/group identity, invitation and profile.
+            assert_eq!(cached.as_ref(), Some(&observed));
+            assert_eq!(editor.draft(), name);
+            assert_eq!(editor.expected(), name);
+            assert!(editor.pending_name().is_none());
+        }
+    }
+
+    #[test]
+    fn pairing_refresh_keeps_local_draft_and_old_save_baseline_while_updating_devices() {
+        let backend = observed_pairing_fixture();
+        let control = super::MeshPairingControl::from_backend(backend.clone());
+        let mut cached = Some(control.snapshot());
+        let mut editor = remote_core::device_name::NameEditor::new("Old test name");
+        editor.edit("My unsaved name");
+        backend.0.lock().unwrap().display_name = "Owner's current name".into();
+        super::refresh_pairing_state(Some(&control), &mut cached, &mut editor);
+        assert_eq!(cached.unwrap().display_name, "Owner's current name");
+        assert_eq!(editor.draft(), "My unsaved name");
+        assert_eq!(editor.expected(), "Old test name");
+        assert_eq!(editor.pending_name().as_deref(), Some("My unsaved name"));
+    }
+
+    #[test]
+    fn pairing_refresh_preserves_frontend_messages_and_membership() {
+        let backend = observed_pairing_fixture();
+        let control = super::MeshPairingControl::from_backend(backend.clone());
+        let mut expected = control.snapshot();
+        expected.message = "Invitation image could not be read".into();
+        expected.message_kind = super::MeshPairingMessageKind::Error;
+        let mut cached = Some(expected.clone());
+        let mut editor = remote_core::device_name::NameEditor::new("Old test name");
+        backend.0.lock().unwrap().display_name = "MacStudio.local".into();
+        expected.display_name = "MacStudio.local".into();
+        super::refresh_pairing_state(Some(&control), &mut cached, &mut editor);
+        assert_eq!(cached.as_ref(), Some(&expected));
+        assert_eq!(editor.draft(), "MacStudio.local");
+    }
+
+    #[test]
+    fn pairing_refresh_without_an_owner_preserves_the_existing_view() {
+        let control = super::MeshPairingControl::from_backend(observed_pairing_fixture());
+        let mut cached = Some(control.snapshot());
+        let before = cached.clone();
+        let mut editor = remote_core::device_name::NameEditor::new("Old test name");
+        editor.edit("Unsaved");
+        super::refresh_pairing_state(None, &mut cached, &mut editor);
+        assert_eq!(cached, before);
+        assert_eq!(editor.draft(), "Unsaved");
+    }
 
     #[tokio::test]
     async fn full_exit_collects_both_windows_and_refuses_one_missing_remote_receipt() {

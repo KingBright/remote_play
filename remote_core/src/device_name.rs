@@ -47,12 +47,53 @@ impl NameEditor {
         valid_name(&self.draft).is_none().then_some(
             "Use 1–128 UTF-8 bytes, without line breaks or control characters.")
     }
+    /// Follow owner updates only while the user has no unsaved edit. Keep a
+    /// dirty edit's original CAS baseline so an external rename cannot be overwritten.
+    pub fn observe_saved(&mut self, saved: &str) {
+        if self.draft == self.expected && self.expected != saved {
+            self.accept(saved);
+        }
+    }
     pub fn accept(&mut self, saved: impl Into<String>) { *self = Self::new(saved); }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_observations_refresh_pristine_names_including_restore_default() {
+        let mut editor = NameEditor::new("Old test name");
+        for observed in ["MacStudio·外部改名", "MacStudio.local"] {
+            editor.observe_saved(observed);
+            assert_eq!(editor.expected(), observed);
+            assert_eq!(editor.draft(), observed);
+            assert!(editor.pending_name().is_none());
+        }
+    }
+
+    #[test]
+    fn owner_observations_preserve_unsaved_input_and_its_cas_baseline() {
+        let invalid = "界".repeat(43);
+        for draft in ["My unsaved name", "  ", invalid.as_str()] {
+            let mut editor = NameEditor::new("Studio");
+            editor.edit(draft);
+            editor.observe_saved("Externally renamed Studio");
+            assert_eq!(editor.expected(), "Studio");
+            assert_eq!(editor.draft(), draft);
+        }
+    }
+
+    #[test]
+    fn abandoning_a_draft_allows_the_next_owner_observation_to_refresh() {
+        let mut editor = NameEditor::new("Studio");
+        editor.edit("Unsaved");
+        editor.observe_saved("Current owner name");
+        editor.edit("Studio");
+        editor.observe_saved("Current owner name");
+        assert_eq!(editor.draft(), "Current owner name");
+        assert!(editor.pending_name().is_none());
+    }
 
     #[test]
     fn editor_keeps_drafts_local_and_trims_only_when_saving() {
