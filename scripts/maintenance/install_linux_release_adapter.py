@@ -84,7 +84,7 @@ def patch_backend(raw):
     return changed.encode()
 
 
-def plan(home, baseline, activity, activity_sha):
+def plan(home, baseline, activity, activity_sha, expected_installed_activity=None):
     home = Path(home).resolve(strict=True)
     scripts = home / ".codex/skills/rust-project-lifecycle/scripts"
     helper = scripts / "rust_storage.py"
@@ -100,17 +100,25 @@ def plan(home, baseline, activity, activity_sha):
     for target, raw in payload.items():
         ordinary(target, required=False)
         if target.exists():
-            if pinned(target, sha(raw)) != raw:
+            actual = target.read_bytes()
+            if actual == raw:
+                state[str(target)] = "already-matching"
+            elif target == companion and expected_installed_activity is not None:
+                pinned(target, expected_installed_activity)
+                state[str(target)] = "replace-pinned-activity"
+            else:
                 raise RuntimeError("existing trusted adapter differs")
-            state[str(target)] = "already-matching"
         else:
+            if target == companion and expected_installed_activity is not None:
+                raise RuntimeError("expected installed activity is missing")
             state[str(target)] = "absent"
     body = {"schema": 1, "kind": "original-linux-release-adapter-install",
             "helper": str(helper), "helper_sha256": HELPER_SHA256,
             "release_module_sha256": RELEASE_SHA256,
             "original_backend_sha256": BASELINE_SHA256,
             "files": {str(p): sha(raw) for p, raw in payload.items()},
-            "before": state, "authority_changed": False, "storage_cleaned": False,
+            "before": state, "expected_installed_activity_sha256": expected_installed_activity,
+            "authority_changed": False, "storage_cleaned": False,
             "application_changed": False, "observation_granted": False}
     body["plan_sha256"] = sha(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
     return body, payload
@@ -131,6 +139,26 @@ def _write_new(path, raw):
     pending.unlink()  # Only this exact source file's verified installation link.
 
 
+
+def _replace_activity(path, raw, expected):
+    """CAS update of this one owned source module; original locks are held."""
+    path = ordinary(path)
+    before = path.lstat()
+    pinned(path, expected)
+    pending = path.with_name("." + path.name + ".linux-install-pending")
+    fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 stat.S_IMODE(before.st_mode))
+    os.fchmod(fd, stat.S_IMODE(before.st_mode))
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+    if sha(pending.read_bytes()) != sha(raw):
+        raise RuntimeError("activity staging changed; preserve for recovery")
+    if path.lstat() != before or sha(path.read_bytes()) != expected:
+        raise RuntimeError("installed activity changed; preserve both files")
+    os.replace(pending, path)
+    pinned(path, sha(raw))
+
+
 @contextlib.contextmanager
 def original_locks(repo, helper_path):
     spec = importlib.util.spec_from_file_location("linux_install_original_storage", helper_path)
@@ -145,15 +173,18 @@ def original_locks(repo, helper_path):
         os.close(fd)
 
 
-def apply(home, baseline, activity, activity_sha, expected_plan, repo):
-    before, _ = plan(home, baseline, activity, activity_sha)
+def apply(home, baseline, activity, activity_sha, expected_plan, repo, expected_installed_activity=None):
+    before, _ = plan(home, baseline, activity, activity_sha, expected_installed_activity)
     if before["plan_sha256"] != expected_plan:
         raise RuntimeError("reviewed installation plan changed")
     with original_locks(repo, before["helper"]):
-        current, payload = plan(home, baseline, activity, activity_sha)
+        current, payload = plan(home, baseline, activity, activity_sha, expected_installed_activity)
         if current != before:
             raise RuntimeError("installation state changed under original locks")
         for path, raw in payload.items():
+            if before["before"][str(path)] == "replace-pinned-activity":
+                _replace_activity(path, raw, expected_installed_activity)
+                continue
             if path.exists():
                 continue
             path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -162,7 +193,7 @@ def apply(home, baseline, activity, activity_sha, expected_plan, repo):
         for path, raw in payload.items():
             pinned(path, sha(raw))
     return dict(before, installed=True, applied_paths=[p for p, value in before["before"].items()
-                                                     if value == "absent"],
+                                                     if value in {"absent", "replace-pinned-activity"}],
                 release_or_application_started=False)
 
 
@@ -171,18 +202,21 @@ def main():
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--activity-sha256", required=True)
     parser.add_argument("--expected-plan-sha256")
+    parser.add_argument("--expected-installed-activity-sha256",
+                        help="CAS update only the existing owned observer module; never grant observation")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if not sys.platform.startswith("linux"):
         raise RuntimeError("installation is native Linux only")
     repo = Path(__file__).resolve().parents[2]
     activity = Path(__file__).with_name("linux_release_activity.py")
-    result, _ = plan(Path.home(), args.baseline, activity, args.activity_sha256)
+    result, _ = plan(Path.home(), args.baseline, activity, args.activity_sha256,
+                     args.expected_installed_activity_sha256)
     if args.apply:
         if not args.expected_plan_sha256:
             raise RuntimeError("independent reviewed plan pin required")
         result = apply(Path.home(), args.baseline, activity, args.activity_sha256,
-                       args.expected_plan_sha256, repo)
+                       args.expected_plan_sha256, repo, args.expected_installed_activity_sha256)
     print(json.dumps(result, sort_keys=True, indent=2))
 
 

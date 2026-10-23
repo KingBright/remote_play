@@ -113,6 +113,59 @@ class LinuxReleaseAdapterInstallTests(unittest.TestCase):
                 self.assertEqual(Path(p).stat().st_nlink, 1)
                 self.assertEqual(Path(p).stat().st_mode & 0o777, 0o600)
 
+    def test_pinned_activity_update_keeps_backend_helper_release_and_mode(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            home, scripts, baseline, activity = self.fixture(tmp)
+            @contextmanager
+            def locks(*args):
+                yield
+            with self.pins(scripts), patch.object(install, "original_locks", locks):
+                first, _ = install.plan(home, baseline, activity, install.sha(activity.read_bytes()))
+                install.apply(home, baseline, activity, install.sha(activity.read_bytes()),
+                              first["plan_sha256"], home)
+                target = home/".codex/skills/clean-mac-storage/scripts/linux_release_activity.py"
+                backend = target.with_name("managed_release_retention.py")
+                preserved = {p: p.read_bytes() for p in (*scripts.iterdir(), backend)}
+                old_pin = install.sha(target.read_bytes())
+                target.chmod(0o640)
+                activity.write_text("class ObservationError(RuntimeError):pass\n# reviewed update\n")
+                new_pin = install.sha(activity.read_bytes())
+                reviewed, _ = install.plan(home, baseline, activity, new_pin, old_pin)
+                self.assertEqual(reviewed["before"][str(target)], "replace-pinned-activity")
+                result = install.apply(home, baseline, activity, new_pin,
+                                       reviewed["plan_sha256"], home, old_pin)
+                self.assertEqual(result["applied_paths"], [str(target)])
+                self.assertEqual(target.read_bytes(), activity.read_bytes())
+                self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+                self.assertFalse(result["observation_granted"])
+                again, _ = install.plan(home, baseline, activity, new_pin, old_pin)
+                self.assertEqual(again["before"][str(target)], "already-matching")
+                for path, raw in preserved.items():
+                    self.assertEqual(path.read_bytes(), raw)
+
+    def test_wrong_installed_pin_cannot_replace_unknown_activity(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            home, scripts, baseline, activity = self.fixture(tmp)
+            target = home/".codex/skills/clean-mac-storage/scripts/linux_release_activity.py"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"user-source\n")
+            with self.pins(scripts), self.assertRaisesRegex(RuntimeError, "pin changed"):
+                install.plan(home, baseline, activity, install.sha(activity.read_bytes()), "0"*64)
+            self.assertEqual(target.read_bytes(), b"user-source\n")
+
+    def test_activity_update_never_overwrites_unknown_pending_or_drift(self):
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
+            target = Path(tmp).resolve()/"activity.py"; target.write_bytes(b"old")
+            pending = target.with_name("." + target.name + ".linux-install-pending")
+            pending.write_bytes(b"other-transaction")
+            with self.assertRaises(FileExistsError):
+                install._replace_activity(target, b"new", install.sha(b"old"))
+            self.assertEqual(target.read_bytes(), b"old")
+            self.assertEqual(pending.read_bytes(), b"other-transaction")
+            with self.assertRaisesRegex(RuntimeError, "pin changed"):
+                install._replace_activity(target, b"new", install.sha(b"stale"))
+            self.assertEqual(target.read_bytes(), b"old")
+
     def test_unknown_existing_adapter_or_changed_source_is_preserved(self):
         with tempfile.TemporaryDirectory(dir=Path.home()) as tmp:
             home, scripts, baseline, activity = self.fixture(tmp)

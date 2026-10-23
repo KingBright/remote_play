@@ -1,7 +1,7 @@
 """Linux release activity policy and metadata-only collector.
 
-No /proc reads, lsof, command arguments, privilege changes, or receipt import.
-Missing reference providers are unknown, never evidence of an idle release.
+No direct /proc reads, privilege changes, or receipt import. Scoped OS queries
+keep command arguments local; denied or incomplete references never mean idle.
 """
 import datetime
 import os
@@ -299,6 +299,290 @@ def collect_metadata(root, paths, controls=(), protocol=()):
     return classify(before, after, {}, launch, paths, root, controls, protocol)
 
 
+
+# Production release queries mirror the original fixed-path checks. The strict
+# per-process dossier above remains a fixture classifier, not a release contract.
+PS_ARGUMENTS = ("/bin/ps", "-eo", "pid=,args=")
+LSOF = "/usr/bin/lsof"
+SYSTEMD_ANALYZE = "/usr/bin/systemd-analyze"
+
+
+def _reference_query(command, *, empty_code=False):
+    """Fixed internal OS queries; never return raw diagnostics to the caller."""
+    env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+    for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS", "XDG_DATA_HOME",
+                "XDG_DATA_DIRS", "XDG_RUNTIME_DIR", "SYSTEMD_UNIT_PATH"):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    try:
+        with subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+                errors="strict", close_fds=True, env=env) as query:
+            try:
+                output, error = query.communicate(timeout=20)
+            except subprocess.TimeoutExpired as failure:
+                query.kill(); query.communicate()
+                raise ObservationError("release reference query timed out") from failure
+            if (query.returncode not in ((0, 1) if empty_code else (0,)) or
+                    error.strip() or len(output.encode()) > MAX_BYTES or
+                    (query.returncode == 1 and output)):
+                raise ObservationError("release reference query incomplete")
+            if tuple(command) == PS_COMMAND:
+                own = parse_processes(output).get(query.pid)
+                if (own is None or own["parent"] != os.getpid() or
+                        own["uid"] != os.getuid() or own["comm"] != "ps"):
+                    raise ObservationError("metadata query identity unconfirmed")
+                output = "\n".join(line for line in output.splitlines()
+                                  if int(line.split(None, 1)[0]) != query.pid) + "\n"
+            return output
+    except (OSError, UnicodeError, subprocess.SubprocessError) as error:
+        raise ObservationError("release reference query unavailable") from error
+
+
+def _command_rows(text):
+    rows = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if not parts or not parts[0].isdecimal() or int(parts[0]) in rows:
+            raise ObservationError("invalid process command coverage")
+        pid = natural(int(parts[0]))
+        rows[pid] = parts[1] if len(parts) == 2 else ""
+    if not rows or len(rows) > MAX_PROCESSES:
+        raise ObservationError("empty or unbounded process command coverage")
+    return rows
+
+
+def _launch_roots(user):
+    command = [SYSTEMD_ANALYZE]
+    if user:
+        command.append("--user")
+    command.append("unit-paths")
+    text = _reference_query(command)
+    result = []
+    for line in text.splitlines():
+        canonical_path(line)
+        if line not in result:
+            result.append(line)
+    if not result or len(result) > 64:
+        raise ObservationError("systemd launch search path coverage unavailable")
+    return result
+
+
+def _launch_values(text):
+    import shlex
+    # Interpret quoting/specifiers as data, never execute a unit or desktop entry.
+    text = text.replace("\\\n", "")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";", "[")) or "=" not in line:
+            continue
+        value = line.split("=", 1)[1]
+        value = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), value)
+        try:
+            yield from shlex.split(value)
+        except ValueError as error:
+            raise ObservationError("ambiguous launch configuration quoting") from error
+
+
+def launch_reference_scan(paths):
+    """Static systemd/XDG references; preserve original root-only warnings."""
+    from pathlib import Path
+    import pwd
+    import stat
+    home = str(Path.home().resolve())
+    uid = os.getuid()
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "/run/user/" + str(uid))
+    user_name = pwd.getpwuid(uid).pw_name
+    roots = [(p, False, False) for p in _launch_roots(True)]
+    roots += [(p, True, False) for p in _launch_roots(False)]
+    config = os.environ.get("XDG_CONFIG_HOME", home + "/.config")
+    configs = os.environ.get("XDG_CONFIG_DIRS", "/etc/xdg").split(":")
+    roots += [(config + "/autostart", False, True)]
+    roots += [(p + "/autostart", True, True) for p in configs]
+    watched = _watched(paths)
+    allowed = [Path(canonical_path(p)).resolve() for p, _, _ in roots]
+    warnings, hits, count, byte_count = [], [], 0, 0
+    suffixes = {".service", ".socket", ".target", ".timer", ".path",
+                ".mount", ".automount", ".slice", ".scope", ".conf"}
+    seen = set()
+    for raw, system, desktop in roots:
+        folder = Path(canonical_path(raw))
+        if not folder.exists():
+            if folder.is_symlink():
+                raise ObservationError("dangling launch search path")
+            continue
+        if not folder.is_dir() or folder.is_symlink():
+            raise ObservationError("linked or invalid launch search directory")
+        def visit(directory, depth):
+            nonlocal count, byte_count
+            if depth > 16:
+                raise ObservationError("launch directory depth exceeded")
+            for item in sorted(directory.iterdir()):
+                info = item.lstat()
+                if stat.S_ISDIR(info.st_mode):
+                    if not desktop:
+                        visit(item, depth + 1)
+                    continue
+                if (desktop and item.suffix != ".desktop") or (
+                        not desktop and item.suffix not in suffixes):
+                    continue
+                count += 1
+                if count > 20000:
+                    raise ObservationError("launch inventory bound exceeded")
+                target = item
+                if stat.S_ISLNK(info.st_mode):
+                    target = item.resolve()
+                    if str(target) == "/dev/null":  # systemd mask
+                        continue
+                    if not any(target == p or p in target.parents for p in allowed):
+                        raise ObservationError("launch link outside reviewed search paths")
+                try:
+                    current = target.stat()
+                    if not stat.S_ISREG(current.st_mode):
+                        raise ObservationError("nonregular launch configuration")
+                    key = (current.st_dev, current.st_ino)
+                    if key in seen:
+                        continue
+                    with target.open("rb") as stream:
+                        data = stream.read(MAX_BYTES + 1)
+                    if current != target.stat() or info != item.lstat():
+                        raise ObservationError("launch configuration changed")
+                except PermissionError as error:
+                    if (not system or not stat.S_ISREG(info.st_mode) or
+                            info.st_uid != 0 or info != item.lstat()):
+                        raise ObservationError("launch configuration permission denied") from error
+                    warnings.append({"path": str(item),
+                        "reason": "unreadable-root-owned-global-launch-config",
+                        "inspection_complete": False})
+                    continue
+                seen.add(key); byte_count += len(data)
+                if len(data) > MAX_BYTES or byte_count > 32 * MAX_BYTES:
+                    raise ObservationError("launch configuration bound exceeded")
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeError as error:
+                    raise ObservationError("launch text unavailable") from error
+                values = list(_launch_values(text))
+                for value in values:
+                    for token, replacement in (("%h", home), ("%t", runtime),
+                                                ("%u", user_name), ("%U", str(uid))):
+                        value = value.replace(token, replacement)
+                    candidates = [value]
+                    absolute = value.split("=", 1)[-1].lstrip("-@:+!")
+                    if absolute.startswith("/"):
+                        candidates.append(str(Path(absolute).resolve()))
+                    if any(any(root in p for root, _ in watched) for p in candidates):
+                        hits.append(str(item))
+        visit(folder, 0)
+    return {"hits": sorted(set(hits)), "warnings": warnings,
+            "configurations": len(seen), "search_roots": len(roots)}
+
+
+def _compiler_paths(raw):
+    """Only PID and path facts; sockets/anonymous objects cannot be Cargo locks."""
+    rows, pid = {}, None
+    if raw and not raw.endswith(("\0", "\0\n")):
+        raise ObservationError("truncated compiler reference query")
+    for field in raw.split("\0"):
+        field = field.lstrip("\n")
+        if not field:
+            continue
+        if field.startswith("p") and field[1:].isdecimal():
+            pid = natural(int(field[1:])); rows.setdefault(pid, [])
+        elif field.startswith("n") and pid is not None:
+            if field[1:].startswith("/"):
+                rows[pid].append(canonical_path(field[1:]))
+        else:
+            raise ObservationError("invalid compiler reference response")
+    return rows
+
+
+def collect_release_references(root, paths, controls=(), protocol=()):
+    """Original command/compiler/scoped-FD/launch checks, no global map dossier.
+
+    OS queries run locally; command arguments are neither returned nor persisted.
+    A denied scoped lsof query is a refusal, never negative reference evidence.
+    """
+    from pathlib import Path
+    root = canonical_path(root)
+    watched = _watched(paths)
+    before = parse_processes(_reference_query(PS_COMMAND))
+    commands = _command_rows(_reference_query(PS_ARGUMENTS))
+    after = parse_processes(_reference_query(PS_COMMAND))
+    reasons, busy = set(), set()
+    controls = set(controls) | {os.getpid()}
+    for pid, identity in after.items():
+        if pid in controls:
+            continue
+        if not commands.get(pid) or before.get(pid) != identity:
+            reasons.add("process-command-identity-unconfirmed")
+            continue
+        if any(path in commands[pid] for path, _ in watched):
+            busy.add(pid); reasons.add("process-references-release")
+    # Only compiler candidates need project attribution. Unrelated processes
+    # never need an exe/cwd/map/open-descriptor dossier.
+    candidates = {p: row for p, row in after.items()
+                  if PurePosixPath(row["comm"]).name in COMPILERS}
+    if candidates:
+        raw = _reference_query([LSOF, "-nP", "-a", "-p",
+            ",".join(map(str, sorted(candidates))), "-F0pn"], empty_code=True)
+        refs = _compiler_paths(raw)
+        settled = parse_processes(_reference_query(PS_COMMAND))
+        states = {}
+        def compiler(pid, visited):
+            if pid in states:
+                return states[pid]
+            if (pid in visited or pid not in refs or
+                    candidates[pid] != settled.get(pid)):
+                result = "unknown"
+            elif any(p == root or p.startswith(root + "/") for p in refs[pid]):
+                result = "busy"
+            elif any(p.endswith("/.cargo-lock") for p in refs[pid]):
+                result = "elsewhere"
+            elif candidates[pid]["parent"] in candidates:
+                result = compiler(candidates[pid]["parent"], visited | {pid})
+            else:
+                result = "unknown"
+            states[pid] = result
+            return result
+        for pid in candidates:
+            state = compiler(pid, set())
+            if state == "busy":
+                busy.add(pid); reasons.add("project-compiler-active")
+            elif state == "unknown":
+                reasons.add("compiler-attribution-unknown")
+    proof = {_protocol_key(p) for p in protocol}
+    if len(proof) != len(protocol):
+        raise ObservationError("duplicate protocol proof")
+    required, seen = set(), set()
+    for name, directory in watched:
+        path = Path(name)
+        if not path.exists():
+            if path.is_symlink():
+                raise ObservationError("dangling watched release path")
+            continue
+        if path.is_symlink() or path.is_dir() != directory:
+            raise ObservationError("watched release path changed kind")
+        required.update(key for key in proof if _matches(key[4], ((name, directory),)))
+        command = [LSOF, "-nP", "-F0pfDin"]
+        command += ["+D", name] if directory else ["--", name]
+        raw = _reference_query(command, empty_code=True)
+        for row in parse_open_files(raw) if raw else []:
+            if not _matches(row["path"], ((name, directory),)):
+                raise ObservationError("open-file query escaped release scope")
+            if row["fd"].isdecimal() and _protocol_key(row) in proof:
+                seen.add(_protocol_key(row))
+            else:
+                busy.add(row["pid"]); reasons.add("release-has-open-files")
+    if required != seen:
+        reasons.add("protocol-lock-coverage-incomplete")
+    launch = launch_reference_scan(paths)
+    if launch["hits"]:
+        reasons.add("launch-references-release")
+    state = ("busy" if busy or launch["hits"] else "unknown" if reasons else "idle")
+    return {"state": state, "reasons": sorted(reasons), "busy_pids": sorted(busy),
+            "process_count": len(after), "warnings": launch["warnings"]}
+
 def assert_idle(root, paths, verified_control_pids=(), *, verified_protocol_locks=(),
                 protocol_validator=None):
     if protocol_validator is None:
@@ -310,9 +594,9 @@ def assert_idle(root, paths, verified_control_pids=(), *, verified_protocol_lock
     # The original proof includes private stat snapshots; only exact key fields
     # enter classification, and the original validator checks them again.
     protocol = [{k: row[k] for k in ("pid", "fd", "device", "inode", "path")} for row in protocol]
-    result = collect_metadata(str(root), watched, verified_control_pids, protocol)
+    result = collect_release_references(str(root), watched, verified_control_pids, protocol)
     protocol_validator(root, verified_protocol_locks, snapshots)
     if result["state"] != "idle":
         raise ObservationError("Linux release observation " + result["state"] + ": " +
                                ",".join(result["reasons"]))
-    return []
+    return result.get("warnings", [])

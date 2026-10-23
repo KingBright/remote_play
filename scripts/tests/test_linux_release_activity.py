@@ -266,7 +266,7 @@ class LinuxReleaseObservationTests(unittest.TestCase):
             activity.assert_idle(Path("/project"), [Path("/project/package")])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
-            with patch.object(activity, "collect_metadata", return_value={"state": "idle"}) as collect:
+            with patch.object(activity, "collect_release_references", return_value={"state": "idle"}) as collect:
                 from unittest.mock import Mock
                 validator = Mock(return_value={})
                 self.assertEqual(activity.assert_idle(root, [root / "new"], protocol_validator=validator), [])
