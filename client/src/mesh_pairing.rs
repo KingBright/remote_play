@@ -31,6 +31,7 @@ pub trait MeshPairingBackend: Send + Sync {
     fn create_new_group(&self) -> MeshPairingSnapshot;
     fn join_from_invite_code(&self, code: &str) -> MeshPairingSnapshot;
     fn request_runtime_reload(&self, message: String) -> MeshPairingSnapshot;
+    fn rename_device(&self, expected_name: &str, name: &str) -> MeshPairingSnapshot;
 }
 
 #[derive(Clone)]
@@ -86,9 +87,26 @@ impl MeshPairingControl {
         self.snapshot.lock().unwrap().clone()
     }
 
+    pub fn rename_device(&self, expected_name: &str, name: &str) -> MeshPairingSnapshot {
+        if let Some(backend) = &self.delegate { return backend.rename_device(expected_name, name); }
+        let store = AppPrivateMeshConfigStore::new(&self.config_dir);
+        match store.rename_display_name(expected_name, name) {
+            Ok(config) => {
+                let (message, restart_required) = self.request_mesh_reload_after_save(
+                    "Device name updated.".into(), true);
+                let updated = snapshot_from_config(&config, self.config_dir.clone(),
+                    message, MeshPairingMessageKind::Success, restart_required);
+                *self.snapshot.lock().unwrap() = updated.clone();
+                updated
+            }
+            Err(_) => self.update_message("Device name was not changed; read current state first.",
+                MeshPairingMessageKind::Error, false),
+        }
+    }
+
     pub fn create_new_group(&self) -> MeshPairingSnapshot {
         if let Some(backend) = &self.delegate { return backend.create_new_group(); }
-        let config = MeshConfig::generate(&self.display_name);
+        let config = MeshConfig::generate(self.snapshot().display_name);
         self.save_and_update(
             config,
             "Created a new device group. Share the new code with the other device.",
@@ -250,6 +268,29 @@ mod tests {
     use super::*;
     use remote_core::mesh::MeshConfig;
     use std::fs;
+
+    #[test]
+    fn renamed_device_reloads_without_changing_identity_invitation_or_custom_name() {
+        let root = temp_dir("rename");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let control = MeshPairingControl::load_or_create(&root, "Weavelo").unwrap()
+            .with_mesh_reload_tx(tx);
+        let before = control.snapshot();
+        let changed = control.rename_device("Weavelo", "Studio");
+        assert_eq!(changed.message_kind, MeshPairingMessageKind::Success);
+        assert_eq!(changed.device_id, before.device_id);
+        assert_eq!(changed.invite_code, before.invite_code);
+        rx.try_recv().unwrap();
+        assert_eq!(control.rename_device("Weavelo", "Wrong").message_kind,
+            MeshPairingMessageKind::Error);
+        assert!(rx.try_recv().is_err());
+        let reloaded = MeshPairingControl::load_or_create(&root, "Other hostname").unwrap();
+        assert_eq!(reloaded.snapshot().display_name, "Studio");
+        let remote = MeshConfig::generate("cube");
+        assert_eq!(reloaded.join_from_invite_code(&remote.invite_code()).display_name, "Studio");
+        assert_eq!(reloaded.create_new_group().display_name, "Studio");
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn load_or_create_persists_invite_code() {

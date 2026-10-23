@@ -552,6 +552,24 @@ impl<S: MeshSecretStore> AppPrivateMeshConfigStore<S> {
         self.save(&config)?;
         Ok(config)
     }
+    /// Explicit owner-side name change. Existing labels (including the product
+    /// name) are never guessed to be defaults. Only public metadata is replaced;
+    /// membership, node identity and the credential file remain untouched.
+    pub fn rename_display_name(&self, expected: &str, name: &str) -> Result<MeshConfig, MeshStoreError> {
+        let name = crate::device_name::valid_name(name).ok_or_else(||
+            MeshStoreError::InvalidMetadata("invalid device display name".into()))?;
+        let mut config = self.load()?.ok_or_else(||
+            MeshStoreError::InvalidMetadata("device configuration is missing".into()))?;
+        if config.display_name != expected {
+            return Err(MeshStoreError::InvalidMetadata("device name changed; read current state first".into()));
+        }
+        if config.display_name != name {
+            config.display_name = name;
+            write_private_file(&self.config_path, encode_mesh_config_metadata(&config).as_bytes())?;
+        }
+        Ok(config)
+    }
+
     /// Validate an invitation without writing it. Membership changes never replace
     /// this installation's identity. The boolean reports whether a save/reload is needed.
     pub fn prepare_join(
@@ -1041,7 +1059,7 @@ fn sanitized_display_name(display_name: impl Into<String>) -> String {
     let value = display_name.into();
     let value = value.trim();
     if value.is_empty() {
-        "Weavelo Device".to_string()
+        crate::device_name::host_name()
     } else {
         value.to_string()
     }
@@ -1136,6 +1154,34 @@ mod tests {
                 assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
             }
         }
+    }
+
+    #[test]
+    fn explicit_name_change_preserves_membership_and_custom_names_on_reload() {
+        let temp = TempTree::new("device-name");
+        let store = AppPrivateMeshConfigStore::new(&temp.root);
+        let before = store.load_or_generate("Weavelo").unwrap();
+        let after = store.rename_display_name("Weavelo", "Studio").unwrap();
+        let mut expected = before.clone();
+        expected.display_name = "Studio".into();
+        assert_eq!(after, expected);
+        assert_eq!(store.load_or_generate("Another host").unwrap(), expected);
+        assert!(store.rename_display_name("Weavelo", "wrong").is_err());
+        assert!(store.rename_display_name("Studio", "line\nfeed").is_err());
+        assert_eq!(store.load().unwrap().unwrap(), expected);
+        let custom = store.rename_display_name("Studio", "Weavelo").unwrap();
+        assert_eq!(store.load_or_generate("Host fallback").unwrap(), custom);
+    }
+
+    #[test]
+    fn missing_default_name_uses_host_label_without_reusing_device_identity() {
+        let first = MeshConfig::generate("");
+        let second = MeshConfig::generate("   ");
+        assert_eq!(first.display_name, crate::device_name::host_name());
+        assert_eq!(second.display_name, first.display_name);
+        assert_ne!(first.node_id, second.node_id);
+        first.validate().unwrap();
+        second.validate().unwrap();
     }
 
     #[test]

@@ -5,12 +5,24 @@ executable, protocol, version, capability-negotiation and session-idle checks as
 the GUI. It does not start another owner, edit profile files, approve media
 permissions, or bypass a required confirmation.
 
-* `--pairing-status-json` returns public metadata fingerprints only.
+* `--pairing-status-json` returns public metadata fingerprints and the local device name.
+* `--pairing-set-name NAME --expected-name CURRENT --confirm-change` updates
+  only the current device label through the existing idle owner and refreshes
+  discovery/relay announcements. A changed current label is rejected before
+  writing; device ID, group credentials and authorization remain unchanged.
 * `--pairing-create-group --confirm-change` performs the existing new-group action.
 * `--pairing-join-stdin --confirm-change` consumes one invitation from a private
   inherited pipe and performs the existing invitation join.
 * `--pairing-export-invite-pipe N` writes the existing invitation to a separately
   inherited anonymous pipe: N is a file descriptor on Unix or a HANDLE on Windows.
+
+Fresh device labels use the readable local hostname, independently of the product
+brand. Existing saved labels, including a deliberate custom name of Weavelo, are
+preserved on startup and reconnect. Old metadata has no label-origin marker, so
+it is never bulk-migrated by matching the product name. Correct a known generated
+placeholder only through the explicit name command after checking its current
+identity and label. Peer announcements and the original device list retain the
+remote device's name; a local update cannot rename another device.
 
 The invitation is never accepted in argv or environment variables. Console/file
 input and ordinary stdout/stderr output are rejected. The caller must close the

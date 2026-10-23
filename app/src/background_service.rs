@@ -23,7 +23,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(12);
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Request { Shutdown { generation: String, executable_sha256: String }, Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, NetworkDiagnostics { generation: String, executable_sha256: String }, Snapshot, CreateGroup, JoinGroup(String), Reload(String), InspectConnection { connection_id:u32 } }
+enum Request { Shutdown { generation: String, executable_sha256: String }, Negotiate { generation: String, executable_sha256: String, offer: Offer }, Delivery { generation:String, executable_sha256:String, intent:host::directed_delivery::LocalIntent }, NetworkDiagnostics { generation: String, executable_sha256: String }, Snapshot, CreateGroup, JoinGroup(String), RenameDevice { expected_name: String, name: String }, Reload(String), InspectConnection { connection_id:u32 } }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -215,6 +215,7 @@ fn answer(mut request: Request, runtime: &UnifiedRuntimeHandle, generation: Stri
         Request::Snapshot => pairing.snapshot(),
         Request::CreateGroup => pairing.create_new_group(),
         Request::JoinGroup(code) => pairing.join_from_invite_code(&code),
+        Request::RenameDevice { expected_name, name } => pairing.rename_device(&expected_name, &name),
         Request::Reload(message) => pairing.request_runtime_reload(message),
         Request::Shutdown{..}|Request::Negotiate{..}|Request::InspectConnection{..}|Request::Delivery{..}|Request::NetworkDiagnostics{..}=>unreachable!(),
     };
@@ -446,6 +447,7 @@ impl MeshPairingBackend for Client {
     fn create_new_group(&self) -> MeshPairingSnapshot { self.pairing_command(Request::CreateGroup) }
     fn join_from_invite_code(&self, code: &str) -> MeshPairingSnapshot { self.pairing_command(Request::JoinGroup(code.into())) }
     fn request_runtime_reload(&self, message: String) -> MeshPairingSnapshot { self.pairing_command(Request::Reload(message)) }
+    fn rename_device(&self, expected_name: &str, name: &str) -> MeshPairingSnapshot { self.pairing_command(Request::RenameDevice { expected_name: expected_name.into(), name: name.into() }) }
 }
 
 /// Explicit service mode owns the same lock as legacy standalone/headless.

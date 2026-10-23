@@ -205,6 +205,25 @@ mod tests {
     }
 
     #[test]
+    fn names_remain_distinct_and_follow_peer_updates_without_changing_device_identity() {
+        let mut devices = [
+            device("studio-id", DiscoveryScope::Lan, true),
+            device("cube-id", DiscoveryScope::Relay, true),
+        ];
+        devices[0].display_name = "梁的 Studio".into();
+        devices[1].display_name = "cube".into();
+        let first = DeviceListViewModel::project(&devices, &RoleState::Idle, DeviceFilterKind::All);
+        assert_eq!(first.rows[0].display_name, "梁的 Studio");
+        assert_eq!(first.rows[1].display_name, "cube");
+        devices[1].online = false;
+        devices[1].display_name = "Office cube".into();
+        let reconnect = DeviceListViewModel::project(&devices, &RoleState::Idle, DeviceFilterKind::All);
+        assert_eq!(reconnect.rows[1].device_id, first.rows[1].device_id);
+        assert_eq!(reconnect.rows[1].display_name, "Office cube");
+        assert_eq!(reconnect.rows[0].display_name, first.rows[0].display_name);
+    }
+
+    #[test]
     fn projection_keeps_device_and_connection_status_separate_from_the_adapter() {
         let devices = [
             device("a", DiscoveryScope::Lan, true),

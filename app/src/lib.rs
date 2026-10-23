@@ -840,7 +840,7 @@ pub struct UnifiedRuntimeConfig {
 impl UnifiedRuntimeConfig {
     pub fn app_defaults() -> Self {
         Self {
-            display_name: "Weavelo".to_string(),
+            display_name: remote_core::device_name::host_name(),
             mesh_dir: default_app_private_mesh_dir(),
             host_bind_addr: SocketAddr::from(([0, 0, 0, 0], remote_core::desktop_identity::identity().control_port)),
             client_bind_addr: SocketAddr::from(([0, 0, 0, 0], 0)),

@@ -16,12 +16,13 @@ use std::{
 const LIMIT: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
     Status,
     Create,
     Export(usize),
     Join,
+    Rename { expected: String, name: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,7 @@ pub(crate) struct Report {
     accepted: bool,
     network_name_sha256: String,
     device_id_sha256: String,
+    display_name: String,
     restart_required: bool,
     last_message_kind: &'static str,
     runtime_registration_verified: bool,
@@ -71,6 +73,7 @@ fn report(snapshot: &MeshPairingSnapshot, operation: &'static str) -> Report {
         accepted: true,
         network_name_sha256: public_metadata_fingerprint(&snapshot.network_name),
         device_id_sha256: public_metadata_fingerprint(&snapshot.device_id),
+        display_name: snapshot.display_name.clone(),
         restart_required: snapshot.restart_required,
         last_message_kind: match snapshot.message_kind {
             MeshPairingMessageKind::Neutral => "neutral",
@@ -91,6 +94,9 @@ fn parse(args: &[String]) -> Result<Command, PairingCliError> {
         .as_slice()
     {
         ["--pairing-status-json"] => Ok(Command::Status),
+        ["--pairing-set-name", name, "--expected-name", expected, "--confirm-change"]
+            if remote_core::device_name::valid_name(name).is_some() =>
+            Ok(Command::Rename { expected: expected.to_string(), name: name.trim().to_string() }),
         ["--pairing-create-group", "--confirm-change"] => Ok(Command::Create),
         ["--pairing-join-stdin", "--confirm-change"] => Ok(Command::Join),
         ["--pairing-create-group"] | ["--pairing-join-stdin"] => {
@@ -151,16 +157,17 @@ fn run_business(
     input: Option<File>,
     output: Option<File>,
 ) -> Result<Report, PairingCliError> {
-    let snapshot = match command {
+    let snapshot = match &command {
         Command::Status | Command::Export(_) => backend.snapshot(),
         Command::Create => backend.create_new_group(),
+        Command::Rename { expected, name } => backend.rename_device(expected, name),
         Command::Join => {
             let input = input.ok_or(PairingCliError::UnsafePipe)?;
             let invitation = read_private_input(input)?;
             backend.join_from_invite_code(invitation.expose_secret())
         }
     };
-    if matches!(command, Command::Create | Command::Join)
+    if matches!(command, Command::Create | Command::Join | Command::Rename { .. })
         && snapshot.message_kind != MeshPairingMessageKind::Success
     {
         // Never return backend message text: an input/parser error may quote secrets.
@@ -170,6 +177,7 @@ fn run_business(
         Command::Status => "status",
         Command::Create => "create-group",
         Command::Join => "join-group",
+        Command::Rename { .. } => "rename-device",
         Command::Export(_) => "export-invitation",
     };
     let mut result = report(&snapshot, operation);
@@ -339,6 +347,7 @@ mod tests {
         fn join_from_invite_code(&self, _: &str) -> MeshPairingSnapshot {
             self.create_new_group()
         }
+        fn rename_device(&self, _: &str, _: &str) -> MeshPairingSnapshot { self.create_new_group() }
         fn request_runtime_reload(&self, _: String) -> MeshPairingSnapshot {
             panic!("No alternate reload path");
         }
@@ -366,6 +375,16 @@ mod tests {
             Ok(Command::Create)
         );
     }
+    #[test]
+    fn rename_requires_exact_arguments_confirmation_and_owner_business_service() {
+        assert!(parse(&arguments(&["--pairing-set-name", "Studio", "--expected-name", "Weavelo"])).is_err());
+        assert!(parse(&arguments(&["--pairing-set-name", "bad\nname", "--expected-name", "Weavelo", "--confirm-change"])).is_err());
+        let selected = parse(&arguments(&["--pairing-set-name", "Studio", "--expected-name", "Weavelo", "--confirm-change"])).unwrap();
+        let backend = Backend { calls: AtomicUsize::new(0), fail: false };
+        assert_eq!(run_business(selected, &backend, None, None).unwrap().operation, "rename-device");
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn public_report_and_errors_never_serialize_invitation_or_backend_text() {
         let result = report(&fixture(), "status");
