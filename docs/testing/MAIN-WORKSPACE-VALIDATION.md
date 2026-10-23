@@ -86,3 +86,48 @@ validation. Linux native libraries and a suitable cross sysroot may still be
 needed; do not substitute macOS libraries or suppress their detection to force
 success. A successful check compiles test code but does not execute Linux tests
 or establish native GUI/input acceptance.
+
+## Native Linux SDK binding (HO5)
+
+Native Linux product builds use `scripts/build_identity_gate.py` with the
+existing primary checkout and `target`; a successful Rust-only test is not a
+native-video build. Before creating the `configuration`, verify and bind both
+`WEAVELO_VERIFIED_FFMPEG_INCLUDE` and any required `LIBRARY_PATH`. Keep those
+same values for `prepare` and `build`. The gate includes both in
+`environment_sha256` and rejects changes before entering the build producer.
+Do not reuse an unbound configuration or add headers after preparing identity.
+
+On HO5, the already verified FFmpeg 8.1.2 development headers are at
+`/var/home/liang/workspace/.rp-linux-native-20261003/deps/ffmpeg-8.1.2`.
+This directory is a dependency SDK, not an alternate source/build entry.
+Its existing archive `../ffmpeg-8.1.2.tar.xz` has SHA-256
+`464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`.
+The header pins are:
+
+| Header below the SDK root | SHA-256 |
+| --- | --- |
+| `libavcodec/avcodec.h` | `909f5c2fe7caf26601c39cd96acbc6f58f49ec5a78914d2e5b524a3fc2571afc` |
+| `libavcodec/version.h` | `61f149cce5f51d2005e584565d2051f11176d6e5d025c97bb0c5dabfb8291ac2` |
+| `libavcodec/version_major.h` | `b70daf8ad1fbf8c6d1658b79a223119b7a788c9637e4fb6446e98ba8114bdd58` |
+| `libavutil/version.h` | `1de4a0ee20c75f04603ec1799faf9f4e650f790674e2f5ed2fdb1ab735cca75b` |
+
+The existing Opus library used by this native build is
+`target/x86_64-unknown-linux-gnu/release/build/audiopus_sys-f3c8cd9f658fe3b4/out/lib64/libopus.a`,
+SHA-256 `221ab15de9950ce275dd4cfb339be0b56bbc31457092d55ae0f38a537c4b27de`.
+Use its verified absolute parent directory as `LIBRARY_PATH`; do not guess
+another Cargo build directory if this file changes or disappears. Revalidate
+the SDK and library before preparing new build identity. No dependency download,
+new target, global environment change, or system development package is implied.
+
+The 2026-10-23 HO5 build of `26a9c0c` used these bindings with the existing
+compiler and cache. An inherited `RUST_LOG` was removed from the build child
+only, because the original gate rejects unrecorded Rust overrides; it was not
+added to a global configuration or silently accepted by the gate.
+
+The native receipt executes the exact compiled ELF through
+`--product-info-json`. It proves compiled identity and native features,
+not installation, GUI interaction, device discovery or file transfer.
+Formal Linux packaging still uses `scripts/package_linux_desktop.sh` and
+the original release authority. Missing process/open-file/launch-reference
+coverage remains `unknown`, even when the final archive does not yet exist;
+it must not be replaced with a raw ZIP or a direct cache-binary installation.

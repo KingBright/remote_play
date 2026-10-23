@@ -47,6 +47,36 @@ class BuildIdentityGateTests(unittest.TestCase):
                         'compiler_binary_sha256': gate.hash_file(self.binary),
                         'product_info': self.info, 'build_identity': self.identity}
 
+    def test_native_linux_sdk_paths_are_part_of_the_prepared_environment(self):
+        sdk = {'WEAVELO_VERIFIED_FFMPEG_INCLUDE': '/verified/ffmpeg-8.1.2',
+               'LIBRARY_PATH': '/existing/opus/lib64'}
+        with patch.dict(os.environ, sdk, clear=True):
+            self.assertEqual(gate.build_environment(), sdk)
+            self.assertEqual(gate.environment_digest(), gate.digest(gate.canonical(sdk)))
+
+    def test_changed_or_missing_linux_sdk_binding_stops_before_the_producer(self):
+        sdk = {'WEAVELO_VERIFIED_FFMPEG_INCLUDE': '/verified/ffmpeg-8.1.2',
+               'LIBRARY_PATH': '/existing/opus/lib64'}
+        with patch.dict(os.environ, sdk, clear=True):
+            config = dict(self.config, environment_sha256=gate.environment_digest())
+        expected = gate.identity(self.source, config)
+        for key in sdk:
+            for replacement in (None, sdk[key] + '-changed'):
+                changed = dict(sdk)
+                if replacement is None:
+                    del changed[key]
+                else:
+                    changed[key] = replacement
+                with self.subTest(key=key, replacement=replacement), \
+                     patch.dict(os.environ, changed, clear=True), \
+                     patch.object(gate, 'toolchain_digest', return_value='a' * 64), \
+                     patch.object(gate, 'shared_target') as storage, \
+                     patch.object(gate, 'BuildInputs') as producer:
+                    with self.assertRaisesRegex(gate.IdentityRejected, 'Build environment changed'):
+                        gate.observed_build(self.repo, expected)
+                    storage.assert_not_called()
+                    producer.assert_not_called()
+
     def test_linux_build_reuses_observed_project_cache_without_creating_mac_cache(self):
         import check_artifact_lifecycle as lifecycle
         target = self.repo / 'target'; target.mkdir()
