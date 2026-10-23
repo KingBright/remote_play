@@ -189,7 +189,10 @@ fn validate_acl(path: &Path) -> io::Result<()> {
         if sid != own && sid != "S-1-5-18" && sid != "S-1-5-32-544" {
             return Err(denied(&format!(
                 "Profile grants another principal access; nothing changed (path={}, sid={}, mask=0x{:08x}, ace_flags=0x{:02x}; principal name not established)",
-                path.display(), sid, allowed.Mask, header.AceFlags,
+                path.display(),
+                sid,
+                allowed.Mask,
+                header.AceFlags,
             )));
         }
     }
@@ -369,6 +372,29 @@ impl Read for Client {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.file.read(buf) {
+                // std::fs::File normalizes an empty PIPE_NOWAIT read to Ok(0).
+                // A connected empty pipe is not EOF; preserve the exchange deadline.
+                Ok(0) if !buf.is_empty() => {
+                    let mut available = 0;
+                    if unsafe {
+                        PeekNamedPipe(
+                            self.file.as_raw_handle(),
+                            std::ptr::null_mut(),
+                            0,
+                            std::ptr::null_mut(),
+                            &mut available,
+                            std::ptr::null_mut(),
+                        )
+                    } == 0
+                    {
+                        let error = io::Error::last_os_error();
+                        if matches!(error.raw_os_error(), Some(109 | 232 | 233)) {
+                            return Ok(0); // Broken/closing/disconnected pipe.
+                        }
+                        return Err(error);
+                    }
+                    self.wait()?;
+                }
                 Err(e) if e.raw_os_error() == Some(232) => self.wait()?,
                 other => return other,
             }
@@ -396,9 +422,50 @@ pub fn remove_endpoint(_path: &Path) {}
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct PrivateTestDirectory {
+        _root: tempfile::TempDir,
+        path: std::path::PathBuf,
+    }
+    impl PrivateTestDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+    fn private_test_directory() -> PrivateTestDirectory {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("private");
+        let sid = current().unwrap().sid;
+        let sddl = format!("O:{sid}D:P(A;OICI;FA;;;{sid})")
+            .encode_utf16()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = std::ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let _owned = Local(descriptor);
+        let attrs = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        // This new fixture is private at creation. Existing ACLs stay intact.
+        assert_ne!(unsafe { CreateDirectoryW(wide(&path).as_ptr(), &attrs) }, 0);
+        private_directory(&path).unwrap();
+        PrivateTestDirectory { _root: root, path }
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn named_pipe_keeps_exclusive_name_and_authenticates_both_peers() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_test_directory();
         let mut listener = Listener::bind(directory.path(), "test.sock").unwrap();
         assert!(Listener::bind(directory.path(), "test.sock").is_err());
         for _ in 0..2 {
@@ -422,8 +489,31 @@ mod tests {
         assert!(Listener::bind(directory.path(), "test.sock").is_ok());
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_read_waits_for_delayed_reply_and_peer_close_is_eof() {
+        let directory = private_test_directory();
+        let mut listener = Listener::bind(directory.path(), "delayed.sock").unwrap();
+        let path = directory.path().to_owned();
+        let (consumed, received) = tokio::sync::oneshot::channel();
+        let client = tokio::task::spawn_blocking(move || {
+            let mut pipe = connect(&path, "delayed.sock", Duration::from_secs(2)).unwrap();
+            assert_eq!(std::io::Read::read(&mut pipe, &mut []).unwrap(), 0);
+            let mut bytes = [0; 4];
+            std::io::Read::read_exact(&mut pipe, &mut bytes).unwrap();
+            assert_eq!(&bytes, b"pong");
+            consumed.send(()).unwrap();
+            assert_eq!(std::io::Read::read(&mut pipe, &mut [0]).unwrap(), 0);
+        });
+        let mut pipe = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        pipe.write_all(b"pong").await.unwrap();
+        received.await.unwrap();
+        drop(pipe);
+        client.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn occupied_pipe_never_means_absent_and_silent_peer_is_bounded() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = private_test_directory();
         let mut listener = Listener::bind(directory.path(), "silent.sock").unwrap();
         assert!(!absent(directory.path(), "silent.sock").unwrap());
         let path = directory.path().to_owned();
