@@ -28,6 +28,28 @@ class ScopedLinuxReleaseTests(unittest.TestCase):
                 str(self.root), self.paths, controls, protocol)
         return report, query
 
+    def test_read_access_time_is_not_content_or_owner_identity(self):
+        from types import SimpleNamespace
+        fields = dict(st_dev=1, st_ino=2, st_mode=0o100600, st_uid=1000,
+                      st_gid=1000, st_nlink=1, st_size=42,
+                      st_mtime_ns=200, st_ctime_ns=300, st_atime_ns=100)
+        first = SimpleNamespace(**fields)
+        accessed = SimpleNamespace(**dict(fields, st_atime_ns=999))
+        self.assertTrue(activity.same_file_identity(first, accessed))
+        for key in ("st_ino", "st_mode", "st_uid", "st_gid", "st_size",
+                    "st_mtime_ns", "st_ctime_ns", "st_nlink", "st_dev"):
+            with self.subTest(key=key):
+                changed = SimpleNamespace(**dict(fields, **{key: fields[key] + 1}))
+                self.assertFalse(activity.same_file_identity(first, changed))
+
+    def test_description_apostrophe_is_literal_but_ambiguous_exec_is_unknown(self):
+        values = list(activity._launch_values(
+            "Description=User's service\nExecStart=/bin/true\n"))
+        self.assertIn("User's service", values)
+        self.assertIn("/bin/true", values)
+        with self.assertRaises(activity.ObservationError):
+            list(activity._launch_values('ExecStart="/unterminated\n'))
+
     def test_absent_paths_need_no_global_descriptor_or_map_query(self):
         report, query = self.collect([self.process, self.commands, self.process])
         self.assertEqual(report["state"], "idle")

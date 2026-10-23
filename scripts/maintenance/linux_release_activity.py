@@ -376,12 +376,24 @@ def _launch_values(text):
         line = line.strip()
         if not line or line.startswith(("#", ";", "[")) or "=" not in line:
             continue
-        value = line.split("=", 1)[1]
+        name, value = line.split("=", 1)
         value = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m[1], 16)), value)
+        yield value
+        if not (name.startswith("Exec") or name in {"Environment", "EnvironmentFile"} or
+                name.endswith(("Path", "Paths", "Directory", "Directories"))):
+            continue  # Descriptions are literal text, not shell argument syntax.
         try:
             yield from shlex.split(value)
         except ValueError as error:
             raise ObservationError("ambiguous launch configuration quoting") from error
+
+
+
+def same_file_identity(before, after):
+    # Reading may update atime; it is not content/ownership identity.
+    keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+            "st_size", "st_mtime_ns", "st_ctime_ns")
+    return all(getattr(before, key) == getattr(after, key) for key in keys)
 
 
 def launch_reference_scan(paths):
@@ -445,11 +457,11 @@ def launch_reference_scan(paths):
                         continue
                     with target.open("rb") as stream:
                         data = stream.read(MAX_BYTES + 1)
-                    if current != target.stat() or info != item.lstat():
+                    if not same_file_identity(current, target.stat()) or not same_file_identity(info, item.lstat()):
                         raise ObservationError("launch configuration changed")
                 except PermissionError as error:
                     if (not system or not stat.S_ISREG(info.st_mode) or
-                            info.st_uid != 0 or info != item.lstat()):
+                            info.st_uid != 0 or not same_file_identity(info, item.lstat())):
                         raise ObservationError("launch configuration permission denied") from error
                     warnings.append({"path": str(item),
                         "reason": "unreadable-root-owned-global-launch-config",

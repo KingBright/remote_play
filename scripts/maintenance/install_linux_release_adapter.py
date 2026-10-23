@@ -140,6 +140,14 @@ def _write_new(path, raw):
 
 
 
+
+def same_file_identity(before, after):
+    # Reading may update atime; it is not content/ownership identity.
+    keys = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+            "st_size", "st_mtime_ns", "st_ctime_ns")
+    return all(getattr(before, key) == getattr(after, key) for key in keys)
+
+
 def _replace_activity(path, raw, expected):
     """CAS update of this one owned source module; original locks are held."""
     path = ordinary(path)
@@ -153,7 +161,7 @@ def _replace_activity(path, raw, expected):
         stream.write(raw); stream.flush(); os.fsync(stream.fileno())
     if sha(pending.read_bytes()) != sha(raw):
         raise RuntimeError("activity staging changed; preserve for recovery")
-    if path.lstat() != before or sha(path.read_bytes()) != expected:
+    if not same_file_identity(path.lstat(), before) or sha(path.read_bytes()) != expected:
         raise RuntimeError("installed activity changed; preserve both files")
     os.replace(pending, path)
     pinned(path, sha(raw))
