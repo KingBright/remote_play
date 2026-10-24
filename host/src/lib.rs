@@ -45,7 +45,7 @@ pub use linux_portal::{
         PickerSources, PortalCallError, PortalCaptureLease, PortalInputError,
         PreparedPortalCapture, SelectedPortalSource, request_local_portal_capture,
         request_local_portal_control_capture, request_local_portal_capture_restorable,
-        PortalSessionRestore, request_registered_portal_control_capture,
+        PortalSessionRestore, request_registered_portal_control_capture, request_registered_portal_window_capture,
         with_portal_stage_receipts,
     },
 };

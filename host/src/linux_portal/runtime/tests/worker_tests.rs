@@ -4,7 +4,7 @@ struct Registry(Arc<Calls>);
 #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
 impl Registry {
     fn register(&self, app_id: String, options: Values, #[zbus(header)] header: Header<'_>) {
-        assert_eq!(app_id, "io.github.KingBright.RemoteHosts.DesktopWorker");
+        assert!(registered_worker_identity(&app_id, false) || registered_worker_identity(&app_id, true));
         assert!(options.is_empty());
         assert_eq!(self.0.count("create"), 0);
         *self.0.registry_sender.lock().unwrap() = Some(header.sender().unwrap().as_str().into());
@@ -159,4 +159,41 @@ async fn worker_owned_close_failure_and_timeout_are_unconfirmed() {
         );
         assert!(capture.close_owned().await.is_err());
     }
+}
+
+#[tokio::test]
+async fn observer_registers_same_connection_selects_one_window_without_devices() {
+    let fixture = Fixture::new(Behavior::EarlyResponse, 2).await;
+    fixture.service.object_server().at(DESKTOP_PATH, Registry(fixture.calls.clone())).await.unwrap();
+    let (_tx, rx) = watch::channel(false);
+    let mut lease = registered_on_connection_mode(
+        fixture.client.clone(), "fun.hackerlife.octendra.desktop-worker", "x11:2a",
+        rx, fixture.timeouts(), true,
+    ).await.unwrap();
+    assert_eq!(lease.selected_source().kind, SourceKind::Window);
+    assert!(!lease.input_available());
+    assert_eq!(fixture.calls.count("devices"), 0);
+    assert_eq!(fixture.calls.events.lock().unwrap()[0], "register");
+    let sender = fixture.calls.registry_sender.lock().unwrap().clone().unwrap();
+    assert_eq!(&sender, fixture.client.unique_name().unwrap().as_str());
+    assert!(fixture.calls.requests.lock().unwrap().iter().all(|(_, s)| s == &sender));
+    assert!(lease.close().await);
+}
+#[tokio::test]
+async fn observer_rejects_monitor_result_and_control_identity_before_capture() {
+    let fixture = Fixture::new(Behavior::EarlyResponse, 1).await;
+    fixture.service.object_server().at(DESKTOP_PATH, Registry(fixture.calls.clone())).await.unwrap();
+    let (_tx, rx) = watch::channel(false);
+    assert!(matches!(registered_on_connection_mode(
+        fixture.client.clone(), "io.github.KingBright.RemoteHosts.DesktopWorker", "x11:2a",
+        rx, fixture.timeouts(), true,
+    ).await, Err(PortalCallError::Parent)));
+    assert_eq!(fixture.calls.count("register"), 0);
+    let (_tx, rx) = watch::channel(false);
+    assert!(matches!(registered_on_connection_mode(
+        fixture.client.clone(), "fun.hackerlife.octendra.desktop-worker", "x11:2a",
+        rx, fixture.timeouts(), true,
+    ).await, Err(PortalCallError::InvalidSource)));
+    assert_eq!(fixture.calls.count("devices"), 0);
+    assert_eq!(fixture.calls.count("open_remote"), 0);
 }

@@ -924,20 +924,41 @@ pub async fn request_local_portal_capture_restorable(
 ) -> Result<PortalCaptureLease> {
     request_local_capture_mode(parent_identifier, sources, cancel, control_input, true, restoration).await
 }
-/// A dedicated desktop worker uses exactly this registered, nonpersistent path.
-/// The app ID must correspond to its installed desktop-file basename. It is not
-/// a binary authentication primitive; its caller still needs RH authorization.
+/// Fixed worker identities, one registered connection and no persistence.
+/// Registration names the app; the caller still enforces executable authority.
 pub async fn request_registered_portal_control_capture(
     app_id: &str,
     parent_identifier: &str,
     cancel: watch::Receiver<bool>,
 ) -> Result<PortalCaptureLease> {
-    if app_id != "io.github.KingBright.RemoteHosts.DesktopWorker" {
+    registered_worker_capture(app_id, parent_identifier, cancel, false).await
+}
+
+/// The Octendra observer can select one window but can never request input.
+pub async fn request_registered_portal_window_capture(
+    app_id: &str,
+    parent_identifier: &str,
+    cancel: watch::Receiver<bool>,
+) -> Result<PortalCaptureLease> {
+    registered_worker_capture(app_id, parent_identifier, cancel, true).await
+}
+fn registered_worker_identity(app_id: &str, observe_window: bool) -> bool {
+    app_id == if observe_window {
+        "fun.hackerlife.octendra.desktop-worker"
+    } else {
+        "io.github.KingBright.RemoteHosts.DesktopWorker"
+    }
+}
+async fn registered_worker_capture(
+    app_id: &str,
+    parent_identifier: &str,
+    cancel: watch::Receiver<bool>,
+    observe_window: bool,
+) -> Result<PortalCaptureLease> {
+    if !registered_worker_identity(app_id, observe_window) {
         return Err(PortalCallError::Parent);
     }
-    if *cancel.borrow() {
-        return Err(PortalCallError::Cancelled);
-    }
+    if *cancel.borrow() { return Err(PortalCallError::Cancelled); }
     let timeouts = Timeouts::default();
     let connection = tokio::time::timeout(
         timeouts.operation,
@@ -949,9 +970,12 @@ pub async fn request_registered_portal_control_capture(
     .await
     .map_err(|_| PortalCallError::Timeout)?
     .map_err(|_| PortalCallError::Transport)?;
-    registered_on_connection(connection, app_id, parent_identifier, cancel, timeouts).await
+    if observe_window {
+        registered_on_connection_mode(connection, app_id, parent_identifier, cancel, timeouts, true).await
+    } else {
+        registered_on_connection(connection, app_id, parent_identifier, cancel, timeouts).await
+    }
 }
-
 async fn registered_on_connection(
     connection: Connection,
     app_id: &str,
@@ -959,45 +983,35 @@ async fn registered_on_connection(
     cancel: watch::Receiver<bool>,
     timeouts: Timeouts,
 ) -> Result<PortalCaptureLease> {
-    if app_id != "io.github.KingBright.RemoteHosts.DesktopWorker" || *cancel.borrow() {
+    registered_on_connection_mode(connection, app_id, parent_identifier, cancel, timeouts, false).await
+}
+async fn registered_on_connection_mode(
+    connection: Connection,
+    app_id: &str,
+    parent_identifier: &str,
+    cancel: watch::Receiver<bool>,
+    timeouts: Timeouts,
+    observe_window: bool,
+) -> Result<PortalCaptureLease> {
+    if !registered_worker_identity(app_id, observe_window) || *cancel.borrow() {
         return Err(PortalCallError::Parent);
     }
     let bus = proxy(&connection, DBUS, DBUS_PATH, DBUS).await?;
-    let destination: String = bus
-        .call("GetNameOwner", &(DESKTOP,))
-        .await
+    let destination: String = bus.call("GetNameOwner", &(DESKTOP,)).await
         .map_err(|_| PortalCallError::Transport)?;
-    // First portal method on this exact connection. Do not use a second
-    // connection for capture/control; the registration would not follow it.
-    // Raw method avoids Proxy's eager Properties.GetAll before registration.
-    let reply = tokio::time::timeout(
-        timeouts.operation,
-        connection.call_method(
-            Some(destination.as_str()),
-            DESKTOP_PATH,
-            Some("org.freedesktop.host.portal.Registry"),
-            "Register",
-            &(app_id, HashMap::<&str, Value<'_>>::new()),
-        ),
-    )
-    .await
-    .map_err(|_| PortalCallError::Timeout)?
-    .map_err(|_| PortalCallError::Transport)?;
-    reply
-        .body()
-        .deserialize::<()>()
-        .map_err(|_| PortalCallError::Response)?;
+    // Register before any Portal method, using this same private connection.
+    let reply = tokio::time::timeout(timeouts.operation, connection.call_method(
+        Some(destination.as_str()), DESKTOP_PATH,
+        Some("org.freedesktop.host.portal.Registry"), "Register",
+        &(app_id, HashMap::<&str, Value<'_>>::new()),
+    )).await.map_err(|_| PortalCallError::Timeout)?
+        .map_err(|_| PortalCallError::Transport)?;
+    reply.body().deserialize::<()>().map_err(|_| PortalCallError::Response)?;
     select_with_restoration_policy(
-        connection,
-        parent_identifier,
-        PickerSources::Monitor,
-        cancel,
-        timeouts,
-        true,
-        (false, None),
-        Some(destination),
-    )
-    .await
+        connection, parent_identifier,
+        if observe_window { PickerSources::Window } else { PickerSources::Monitor },
+        cancel, timeouts, !observe_window, (false, None), Some(destination),
+    ).await
 }
 
 async fn request_local_capture(
